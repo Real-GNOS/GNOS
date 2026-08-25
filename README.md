@@ -4,10 +4,14 @@
   <img src="assets/gnos-icon.png" alt="GNOS" width="200">
 </p>
 
+<p align="center">
+  <a href="https://github.com/Real-GNOS/GNOS">GitHub: Real-GNOS/GNOS</a>
+</p>
+
 > 🚀 **这是你见过迄今为止最强的小学生开发的操作系统** —— 由一位**五年级小学生**独立开发。
 > x86_64 真内核：SMP 多核 + EEVDF 现代调度器 + Linux ABI + 网络栈 + Wayland 桌面。
 
-GNOS 是一个面向 x86_64 的教学型操作系统。它用约 2.6 万行自研代码实现了一个
+GNOS 是一个面向 x86_64 的教学型操作系统。它用约 5.8 万行自研代码实现了一个
 尽可能贴近 Linux 的用户态 ABI，使得 **musl、BusyBox 1.38、GNU Bash 5.3 和
 GNU coreutils 9.9 这些真实的第三方用户软件可以直接在其上运行**——不靠兼容层、
 不靠模拟，靠的是内核本身。
@@ -18,7 +22,7 @@ GNU coreutils 9.9 这些真实的第三方用户软件可以直接在其上运�
 ## 设计哲学
 
 - **Linux/x86-64 syscall ABI 是唯一契约**：系统调用编号、寄存器约定、错误码
-  （负 errno）均对齐 Linux（见 `src/shared/sysnum.h`，当前 150 个调用）。内核与
+  （负 errno）均对齐 Linux（见 `src/shared/sysnum.h`，当前 175 个调用）。内核与
   用户态共享这一份头文件，二者不会漂移。
 - **真货优先**：与其自造玩具用户态，不如把内核做对，让成熟的第三方用户栈直接
   跑起来。Bash 的 `bash_cv_termcap_lib=gnutermcap`、coreutils 的
@@ -40,12 +44,13 @@ GNU coreutils 9.9 这些真实的第三方用户软件可以直接在其上运�
 | `c79795d` | tmpfs、procfs、ext2 符号链接/rename、信号、OpenRC 脚手架 |
 | `860a584` | gfx/fbdev 帧缓冲（/dev/fb0 可 mmap）、子系统注册表、内核堆、ACPI、coldplug、fstab、pread/pwrite |
 | `53a2495` | coreutils 支持 + 系统调用补齐（约 660 行） |
+| `4f801ea` | tty 增加 ioctl（TCGETS/TCSETS*/TIOCGWINSZ/…），init 登录 shell 切换为交互式 bash |
 
 ## 架构
 
 **引导**（`src/bootloader/`）：Limine 协议（BIOS 与 UEFI 双模式）；内核为
 `-static-pie` ELF，被 Limine 重定位进高半区（`0xFFFFFFFF80000000` 附近）；
-根文件系统是 64 MiB ext2 内存盘（initrd），内核直接在内存中挂载读写。
+根文件系统是 256 MiB ext2 内存盘（initrd），内核直接在内存中挂载读写。
 
 **内核**（`src/kernel/`）：
 
@@ -53,20 +58,20 @@ GNU coreutils 9.9 这些真实的第三方用户软件可以直接在其上运�
 |--------|------|
 | 内存 | PMM 物理帧、VMM 4 级页表、HHDM 直接映射、kheap（边界标签分配，启动时定长） |
 | 架构 | GDT/IDT/ISR/中断、syscall 入口（Linux ABI）、TSC/定时器 |
-| 进程 | fork/exec/wait、每进程独立页表、抢占式用户态调度、信号 |
-| TTY | termios 行规程（`src/kernel/tty.c`） |
+| 进程 | fork/exec/wait、每进程独立页表、抢占式用户态调度、信号、线程（CLONE_VM/futex） |
+| TTY | termios 行规程（`src/kernel/tty.c`）、ioctl（TCGETS/TCSETS*/TIOCGWINSZ/…） |
 | 文件系统 | VFS（挂载表 + fstab）+ tmpfs + procfs + ext2（符号链接/rename）+ fat |
-| 图形 | fbcon 文本控制台、gfx、fbdev（Linux 风格 `/dev/fb0`，支持 mmap） |
-| 网络 | e1000 驱动 + 自研 tcp/sock 协议栈（`tcp.c`/`sock.c`/`net.c`） |
+| 图形 | fbcon 文本控制台、gfx、fbdev（Linux 风格 `/dev/fb0`，支持 mmap）、DRM 驱动目录（`drm/`，legacy + ported） |
+| 网络 | e1000 驱动 + 自研 tcp/sock 协议栈（`tcp.c`/`sock.c`/`net.c`）+ AF_UNIX 套接字（`unix.c`） |
 | 声音 | HDA 与 AC97 |
-| 其他 | ACPI、PCI、子系统注册表（`subsys.c`）、coldplug |
+| 其他 | ACPI、PCI、子系统注册表（`subsys.c`）、coldplug、ptrace、epoll、timerfd/signalfd/anonfd |
 
 **用户态**（`src/user/` + 镜像）：
 
-- `ulib`：自研最小库 + 15 个工具（shell、cat、ls、touch、rm、tac、tail、count、mkdir、mount…），固定加载地址 `0x400000`
-- musl 1.2.5 静态程序 9 个（hello、ttytest、sigtest、readlinetest、fstest、mounttest、mount、fbtest、coldplug）
+- `ulib`：自研最小库 + 13 个工具（init、shell、count、ls、cat、tail、tac、rm、mkdir、touch、scan、dbgcat、envtest），固定加载地址 `0x400000`
+- musl 1.2.5 静态程序 16 个（hello、mount、coldplug、chvt、getty、login、installer、ttytest、thrtest、drmtest、ptracetest、insmod、rmmod、evtest、eventest、socktest）+ 动态链接 `dynhello`（ET_DYN + ld-musl，验证 loader 的 PIE/AT_* 链路）
 - BusyBox 1.38（含 sh/ash 多调用调度）
-- **GNU Bash 5.3**（musl 静态、`-no-pie`、禁用 bash-malloc）
+- **GNU Bash 5.3**（musl 静态、`-no-pie`、禁用 bash-malloc，登录 shell 交互模式）
 - **GNU coreutils 9.9**（配 `linux-stub` 头 + musl-gcc，全量装进 `/usr/bin`）
 - OpenRC 体系（`/etc/rc`、启停脚本接线），`/etc` 有 passwd、group、hosts、nsswitch.conf、resolv.conf、fstab、services 等一整套
 
@@ -77,7 +82,7 @@ GNOS/
 ├── src/
 │   ├── bootloader/      # Limine 引导相关
 │   ├── init/            # 内核入口与链接脚本
-│   ├── kernel/          # 内核本体（约 2 万行）
+│   ├── kernel/          # 内核本体（约 5 万行）
 │   ├── shared/          # 内核/用户共享契约：sysnum.h（syscall 编号）
 │   ├── user/            # ulib 程序、crt0、rc 脚本
 │   ├── include/         # limine.h（引用自 Unixed-Kernel，Apache 2.0）
@@ -111,14 +116,17 @@ QEMU 配置：512 MiB 内存、e1000 网卡（user 网络）、音频设备（HD
 
 ## 现状与限制
 
-- 单核：无 SMP；内核协作式、用户态抢占式，无锁。
-- 用户程序固定加载地址 `0x400000`，loader 只接受 ET_EXEC（因此 musl 程序一律
-  `-no-pie`）；每进程独立页表，地址永不冲突。
-- 根文件系统是内存盘（ext2），尚无真实块设备根文件系统支持。
-- 无 GUI 窗口系统：图形一侧只有 fbcon/fbdev；`/dev/fb0` 为最后写入者胜。
-- 150 个系统调用已覆盖 musl/Bash/coreutils/BusyBox 的实际使用路径，但不是
-  完整的 Linux 面（如缺少线程、完整的网络 syscall 深度等）。
-- 教学定位：无安全边界、无多用户隔离。
+- SMP 多核：Limine SMP 协议，最多 16 核；运行队列由自旋锁保护，其余共享状态
+  走大内核锁（BKL）。
+- 用户程序固定加载地址 `0x400000`；loader 同时接受 ET_EXEC 与 ET_DYN（PIE +
+  ld-musl 动态链接，`dynhello` 佐证）；每进程独立页表，地址永不冲突。
+- 根文件系统默认是内存盘（ext2，256 MiB）；`installer` 可将系统安装到真实块设备
+  （ata 磁盘引导）。
+- 图形：fbcon/fbdev 之外已有 DRM 驱动与 Wayland 桌面栈（`startxfce` 拉起 labwc
+  合成器 + Xfce），`/dev/fb0` 仍为最后写入者胜。
+- 175 个系统调用已覆盖 musl（含 pthread）/Bash/coreutils/BusyBox 的实际使用路径，
+  但不是完整的 Linux 面（如部分网络 syscall 深度等）。
+- 教学定位：无完整安全边界、无多用户隔离。
 
 ## 许可
 
