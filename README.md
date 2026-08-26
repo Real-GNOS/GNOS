@@ -59,12 +59,12 @@ GNU coreutils 9.9 这些真实的第三方用户软件可以直接在其上运�
 | 内存 | PMM 物理帧、VMM 4 级页表、HHDM 直接映射、kheap（边界标签分配，启动时定长） |
 | 架构 | GDT/IDT/ISR/中断、syscall 入口（Linux ABI）、TSC/定时器 |
 | 进程 | fork/exec/wait、每进程独立页表、抢占式用户态调度、信号、线程（CLONE_VM/futex） |
-| TTY | termios 行规程（`src/kernel/tty.c`）、ioctl（TCGETS/TCSETS*/TIOCGWINSZ/…） |
+| TTY | termios 行规程（`src/kernel/core/tty.c`）、ioctl（TCGETS/TCSETS*/TIOCGWINSZ/…） |
 | 文件系统 | VFS（挂载表 + fstab）+ tmpfs + procfs + ext2（符号链接/rename）+ fat |
-| 图形 | fbcon 文本控制台、gfx、fbdev（Linux 风格 `/dev/fb0`，支持 mmap）、DRM 驱动目录（`drm/`，legacy + ported） |
-| 网络 | e1000 驱动 + 自研 tcp/sock 协议栈（`tcp.c`/`sock.c`/`net.c`）+ AF_UNIX 套接字（`unix.c`） |
+| 图形 | fbcon 文本控制台、gfx、fbdev（Linux 风格 `/dev/fb0`，支持 mmap）、DRM 驱动目录（`driver/drm/`，legacy + ported） |
+| 网络 | e1000 驱动 + 自研 tcp/sock 协议栈（`core/tcp.c`/`core/sock.c`/`core/net.c`）+ AF_UNIX 套接字（`unix.c`） |
 | 声音 | HDA 与 AC97 |
-| 其他 | ACPI、PCI、子系统注册表（`subsys.c`）、coldplug、ptrace、epoll、timerfd/signalfd/anonfd |
+| 其他 | ACPI、PCI、子系统注册表（`core/subsys.c`）、coldplug、ptrace、epoll、timerfd/signalfd/anonfd |
 
 **用户态**（`src/user/` + 镜像）：
 
