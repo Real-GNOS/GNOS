@@ -17,8 +17,8 @@ alias l='ls -CF'
 
 # A reminder of what this account can and cannot do -- printed once, on the
 # first interactive shell of the session.
-if [ -z "$GNOS_GREETED" ]; then
-    export GNOS_GREETED=1
+if [ -z "$AEOS_GREETED" ]; then
+    export AEOS_GREETED=1
     echo "You are $(id -un) (uid $(id -u)).  /root and /etc/shadow are not yours."
     echo "Switch terminals with Ctrl+Alt+F1 .. F6; log in as root there for admin."
 fi

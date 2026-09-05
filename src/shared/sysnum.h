@@ -83,6 +83,27 @@
 #define SYS_uname        63
 #define SYS_umask        95
 /*
+ * System V IPC (sem/msg/shm).  x86-64 numbers, matching musl's
+ * arch/x86_64/bits/syscall.h.in: semget/semop/semctl live at 64-66,
+ * shmget/shmat/shmctl at 29-31, shmdt at 67, msgget/msgsnd/msgrcv/msgctl
+ * at 68-71 and semtimedop at 220.  ftok needs no syscall: musl builds the
+ * key from stat(2) itself.  The sem_* and shm_* syscalls are also what
+ * musl's POSIX adaptors ultimately rest on where they use the kernel
+ * objects rather than /dev/shm files.
+ */
+#define SYS_shmget        29
+#define SYS_shmat         30
+#define SYS_shmctl        31
+#define SYS_semget        64
+#define SYS_semop         65
+#define SYS_semctl        66
+#define SYS_shmdt         67
+#define SYS_msgget        68
+#define SYS_msgsnd        69
+#define SYS_msgrcv        70
+#define SYS_msgctl        71
+#define SYS_semtimedop   220
+/*
  * gethostname is NOT a Linux system call -- glibc and musl both synthesise it
  * from uname(2).  It used to sit at 100, which on Linux/x86-64 is times(2):
  * bash's `time` builtin and every libc clock() call issue 100 and hand the
@@ -283,6 +304,7 @@ typedef struct {
 #define PROT_WRITE   0x2
 #define PROT_EXEC    0x4
 #define MAP_PRIVATE  0x02
+#define MAP_SHARED   0x01
 #define MAP_FIXED    0x10
 #define MAP_ANONYMOUS 0x20
 

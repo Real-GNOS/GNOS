@@ -25,6 +25,7 @@
 #include "timer.h"
 #include "vfs.h"
 #include "proc.h"
+#include "cgroup.h"
 #include "subsys.h"
 #include "module.h"
 
@@ -199,7 +200,7 @@ static void gen_meminfo(sbuf_t *s)
 
 static void gen_version(sbuf_t *s)
 {
-    sb_str(s, "GNOS version 0.1 (x86_64)\n");
+    sb_str(s, "AEOS version 0.1 (x86_64)\n");
 }
 
 static void gen_cmdline(sbuf_t *s)
@@ -312,6 +313,44 @@ static void gen_modules(sbuf_t *s)
         sb_char(s, line[i]);
 }
 
+/* /proc/cgroups: Linux's inventory of controllers and the hierarchy each
+ * one is attached to.  GNOS has the single unified (v2) hierarchy, so every
+ * controller reports hierarchy 1. */
+static void gen_cgroups(sbuf_t *s)
+{
+    static const char *const names[CG_NCTRLS] = { "cpu", "pids", "memory" };
+    int n = cg_count();
+
+    sb_str(s, "#subsys_name\thierarchy\tnum_cgroups\tenabled\n");
+    for (int i = 0; i < CG_NCTRLS; i++) {
+        sb_str(s, names[i]);
+        sb_char(s, '\t');
+        sb_dec(s, 1, 0);
+        sb_char(s, '\t');
+        sb_dec(s, (uint64_t)n, 0);
+        sb_char(s, '\t');
+        sb_dec(s, 1, 0);
+        sb_char(s, '\n');
+    }
+}
+
+/* /proc/self/cgroup (and every /proc/<pid>/cgroup): one line per hierarchy
+ * in Linux's "hierarchy-ID:path" layout; v2 is always hierarchy 0. */
+static void self_cgroup_line(sbuf_t *s, proc_t *p)
+{
+    char line[GNUOS_PATH_MAX + 8];
+    int len = cg_proc_cgroup_line(p, line, (int)sizeof(line));
+    if (len < 0)
+        return;
+    for (int i = 0; i < len; i++)
+        sb_char(s, line[i]);
+}
+
+static void gen_self_cgroup(sbuf_t *s)
+{
+    self_cgroup_line(s, proc_current());
+}
+
 /* ---- the file table ---------------------------------------------------- */
 typedef void (*proc_gen_t)(sbuf_t *s);
 
@@ -334,6 +373,8 @@ static const procfile_t g_files[] = {
     { "/proc/devices",      gen_devices       },
     { "/proc/subsystems",   gen_subsystems    },
     { "/proc/modules",      gen_modules        },
+    { "/proc/cgroups",      gen_cgroups       },
+    { "/proc/self/cgroup",  gen_self_cgroup   },
 };
 #define NFILES ((int)(sizeof(g_files) / sizeof(g_files[0])))
 
@@ -469,16 +510,30 @@ static int procfs_fd_resolve(const char *path, vfs_node_t *out)
 }
 
 /* ---- read -------------------------------------------------------------- */
+/* /proc/<pid>/cgroup nodes carry the pid in priv with the low bit set
+ * (pid << 1 | 1); every real table entry points at static data, whose
+ * kernel addresses never have the low bit set, so the two cannot collide. */
+#define PIDPRIV(pid) ((void *)(uintptr_t)(((uint64_t)(pid) << 1) | 1))
+static int priv_pid(const void *priv)
+{
+    return (int)((uintptr_t)priv >> 1);
+}
+
 static int32_t procfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     static char scratch[PROC_BUF];
-
-    const procfile_t *f = (const procfile_t *)n->priv;
-    if (!f)
-        return -E_INVAL;
-
     sbuf_t s = { scratch, PROC_BUF, 0 };
-    f->gen(&s);
+
+    if ((uintptr_t)n->priv & 1) {
+        proc_t *p = proc_by_pid(priv_pid(n->priv));
+        if (p)
+            self_cgroup_line(&s, p);
+    } else {
+        const procfile_t *f = (const procfile_t *)n->priv;
+        if (!f)
+            return -E_INVAL;
+        f->gen(&s);
+    }
 
     uint32_t size = (s.pos < PROC_BUF) ? s.pos : PROC_BUF;
     if (off >= size)
@@ -505,6 +560,31 @@ static int32_t procdir_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
 static const vfs_ops_t g_procdir_ops = { .read = procdir_read, .write = NULL };
 
 /* ---- lookup ------------------------------------------------------------ */
+/* Parse "/proc/<pid>[/cgroup]" into *pid.  Returns 0 when the path is a
+ * numeric pid dir (optionally with the cgroup file below it), with *rest
+ * pointing at what follows the pid ("", "/cgroup" or "/cgroup/..."), or a
+ * negative errno when the path is not pid-shaped at all. */
+static int pid_path_parse(const char *path, int *pid, const char **rest)
+{
+    if (!path || strncmp(path, "/proc/", 6) != 0)
+        return -E_INVAL;
+    const char *p = path + 6;
+    if (*p < '0' || *p > '9')
+        return -E_NOENT;            /* not pid-shaped */
+    uint64_t v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (uint64_t)(*p - '0');
+        if (v > (1u << 22))
+            return -E_NOENT;        /* absurd pid: give up quietly */
+        p++;
+    }
+    if (!proc_by_pid((int)v))
+        return -E_NOENT;
+    *pid = (int)v;
+    *rest = p;
+    return 0;
+}
+
 /* The last component of a path, which is what a directory entry is named. */
 static const char *basename_of(const char *path)
 {
@@ -540,6 +620,35 @@ int procfs_resolve(const char *path, vfs_node_t *out)
         int r = procfs_fd_resolve(path, out);
         if (r >= 0 || r != -E_NOENT)
             return r;
+    }
+
+    /* Numeric pid directories: "/proc/<pid>" names the directory and
+     * "/proc/<pid>/cgroup" the one per-process cgroup file.  Anything else
+     * below a pid dir (Linux has many files there) is not present here. */
+    {
+        int pid;
+        const char *rest;
+        int r = pid_path_parse(path, &pid, &rest);
+        if (r == 0) {
+            memset(out, 0, sizeof(*out));
+            if (rest[0] == 0) {
+                strncpy(out->name, path + 6, VFS_NAME_MAX - 1);
+                out->kind = VFS_DIR;
+                out->ops  = &g_procdir_ops;
+                return 0;
+            }
+            if (strcmp(rest, "/cgroup") == 0) {
+                strncpy(out->name, "cgroup", VFS_NAME_MAX - 1);
+                out->kind = VFS_FILE;
+                out->ops  = &g_proc_ops;
+                out->priv = PIDPRIV(pid);
+                out->size = 0;
+                return 0;
+            }
+            return -E_NOENT;
+        }
+        if (r != -E_NOENT)
+            return r;               /* not "/proc" shaped at all */
     }
 
     for (int i = 0; i < NFILES; i++) {
@@ -591,10 +700,18 @@ static int is_child_of(const char *dir, const char *path)
 
 int procfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *type)
 {
+    /* A directory is either one of the well-known table dirs or a numeric
+     * pid dir (which resolves only while the process exists). */
     int is_dir = 0;
     for (int i = 0; i < NDIRS; i++)
         if (strcmp(dirpath, g_dirs[i]) == 0)
             is_dir = 1;
+    if (!is_dir) {
+        int pid;
+        const char *rest;
+        if (pid_path_parse(dirpath, &pid, &rest) == 0 && rest[0] == 0)
+            is_dir = 1;
+    }
     if (!is_dir)
         return -E_NOTDIR;
 
@@ -667,6 +784,55 @@ int procfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *typ
                 }
             }
         }
+    }
+
+    /* A numeric pid dir lists the one per-process cgroup file. */
+    {
+        int pid;
+        const char *rest;
+        if (pid_path_parse(dirpath, &pid, &rest) == 0 && rest[0] == 0) {
+            if (index == n++) {
+                strncpy(name, "cgroup", VFS_NAME_MAX - 1);
+                *type = DT_REG;
+                return 0;
+            }
+            return -E_NOENT;
+        }
+    }
+
+    /* The top of /proc appends one directory per live process, in ascending
+     * pid order, after the static entries. */
+    if (strcmp(dirpath, "/proc") == 0 && index >= n) {
+        uint32_t k = index - n;         /* k-th live pid (ascending) */
+        int last = 0;
+        int best = -1;
+        for (;;) {
+            best = -1;
+            for (int i = 0; i < proc_capacity(); i++) {
+                proc_t *q = proc_at(i);
+                if (!q || q->state == PROC_UNUSED)
+                    continue;
+                if (q->pid > last && (best == -1 || q->pid < best))
+                    best = q->pid;
+            }
+            if (best == -1)
+                return -E_NOENT;
+            if (k-- == 0)
+                break;
+            last = best;
+        }
+        char tmp[12];
+        int  m = 0;
+        int  v = best;
+        do {
+            tmp[m++] = (char)('0' + v % 10);
+            v /= 10;
+        } while (v);
+        for (int w = 0; w < m; w++)
+            name[w] = tmp[m - 1 - w];
+        name[m] = 0;
+        *type = DT_DIR;
+        return 0;
     }
 
     return -E_NOENT;

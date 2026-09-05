@@ -63,4 +63,30 @@ void tmpfs_retain(const vfs_node_t *n);
  * open time; ftruncate can move the real size afterwards). */
 uint64_t tmpfs_file_size(const vfs_node_t *n);
 
+/*
+ * Frame-backed (MAP_SHARED) mapping support, the kernel half of POSIX
+ * shared memory and named semaphores: musl's shm_open/sem_open open a file
+ * under /dev/shm and mmap it MAP_SHARED, and every process that maps the
+ * file must see the *same* physical frames.  The first shared mapping turns
+ * the node's payload into a node-owned frame array (seeded from the arena
+ * bytes written so far); later mappers map those same frames, and the
+ * frames outlive any single address space (they are only freed when the
+ * node itself goes away).  Mappings hold a mapper reference on the node so
+ * unlink + last-close cannot free a file that is still mapped.
+ */
+struct tmpfs_node;              /* opaque outside tmpfs.c */
+
+/* The node's frame count; 0 while it is still arena-backed. */
+uint32_t tmpfs_node_shm_pages(struct tmpfs_node *n);
+/* Physical frame backing page `idx` (idx < shm_pages). */
+uint64_t tmpfs_node_shm_frame(struct tmpfs_node *n, uint32_t idx);
+/* Turn the node frame-backed: allocate zeroed frames covering `bytes` and
+ * copy any arena payload in.  Returns 0 or a negative errno. */
+int      tmpfs_node_shm_start(struct tmpfs_node *n, uint64_t bytes);
+/* Reference counting: +1 per address space mapping the node, -1 when a
+ * mapping goes away (munmap or address-space teardown).  Dropping the last
+ * mapper may free a node that was unlinked and had its last fd closed. */
+void     tmpfs_node_shm_addmapper(struct tmpfs_node *n);
+void     tmpfs_node_shm_putmapper(struct tmpfs_node *n);
+
 #endif

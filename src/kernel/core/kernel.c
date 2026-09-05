@@ -29,6 +29,7 @@
 #include "fbcon.h"
 #include "debugcon.h"
 #include "vfs.h"
+#include "cgroup.h"
 #include "panic.h"
 #include "gdt.h"
 #include "idt.h"
@@ -311,6 +312,12 @@ void kernel_entry(void)
     /* ---- processes ----------------------------------------------------- */
     proc_init();
     timer_init(SCHED_HZ);
+
+    /* The cgroup v2 hierarchy is rooted here, and the canonical mount point
+     * is provided up front the way Linux does -- any user space that wants
+     * a controller merely writes its control files instead of mounting. */
+    cgroup_init();
+    vfs_mount_cgroupfs("/sys/fs/cgroup");
 
     kheap_self_test();
     gfx_self_test();

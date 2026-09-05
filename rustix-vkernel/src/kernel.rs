@@ -183,6 +183,7 @@ impl Kernel {
                 self.write_line("帮助: help uname pwd whoami services ps apps ls cat exec execve exec-bg fork clone wait wait4 kill sigdemo futexdemo waitqdemo timerdemo sleep nice chrt taskset rebalance touch mkfile mkdir clear ipc ifconfig route ping shutdown");
                 self.write_line("编辑: edit <path>, vi <path>, nano <path>");
                 self.write_line("应用: hello game echo calc settings video-player audio-player");
+                self.write_line("嵌入式: /bin/curl /bin/bash /bin/fwtest /bin/fastfetch /bin/ls /bin/cat /bin/head /bin/wc /bin/true");
             }
             "uname" => {
                 self.write_line(crate::arch::uname());
@@ -402,6 +403,11 @@ impl Kernel {
     fn exec_path(&mut self, path: &str, argv: &[&str], background: bool) {
         self.log_ipc(self.shell_pid, "proc", RequestKind::ProcExec, Some(path));
 
+        if crate::kernel::scheduler::is_embedded_binary(path) {
+            self.exec_embedded_binary(path, argv, background);
+            return;
+        }
+
         if !self.vfs.path_exists(path) {
             let mut line = InlineString::<96>::new();
             let _ = write!(&mut line, "error: {}: no such executable", path);
@@ -466,6 +472,74 @@ impl Kernel {
             let mut line = InlineString::<96>::new();
             let _ = write!(&mut line, "program exited with status {}", reaped.status);
             self.write_line(line.as_str());
+        }
+    }
+
+    fn exec_embedded_binary(&mut self, path: &str, argv: &[&str], background: bool) {
+        let static_path: &'static str = match path {
+            "/bin/bash" => "/bin/bash",
+            "/bin/curl" => "/bin/curl",
+            "/bin/fwtest" => "/bin/fwtest",
+            "/bin/fastfetch" => "/bin/fastfetch",
+            "/bin/ls" => "/bin/ls",
+            "/bin/cat" => "/bin/cat",
+            "/bin/cp" => "/bin/cp",
+            "/bin/head" => "/bin/head",
+            "/bin/wc" => "/bin/wc",
+            "/bin/true" => "/bin/true",
+            _ => {
+                let mut line = InlineString::<96>::new();
+                let _ = write!(&mut line, "error: {}: embedded binary not supported", path);
+                self.write_line(line.as_str());
+                return;
+            }
+        };
+        let pid = match self.spawn_task(Some(self.shell_pid), static_path, TaskKind::User) {
+            Ok(pid) => pid,
+            Err(err) => {
+                self.write_line(err);
+                return;
+            }
+        };
+        self.set_state(pid, TaskState::Running);
+        match crate::kernel::scheduler::exec_embedded(pid, static_path, argv) {
+            Ok(()) => {}
+            Err(error) => {
+                let mut line = InlineString::<96>::new();
+                let _ = write!(&mut line, "error: {}: {}", path, error);
+                self.write_line(line.as_str());
+                return;
+            }
+        }
+        if background {
+            let mut line = InlineString::<96>::new();
+            let _ = write!(&mut line, "[{}] embedded launched; run `wait {}`", pid, pid);
+            self.write_line(line.as_str());
+            return;
+        }
+        let deadline = crate::arch::monotonic_time_ns() + 30_000_000_000;
+        loop {
+            match self.tasks.wait(self.shell_pid, Some(pid)) {
+                Ok(result) => {
+                    if result.status != 0 {
+                        let mut line = InlineString::<96>::new();
+                        let _ = write!(
+                            &mut line,
+                            "program exited with status {}",
+                            result.status
+                        );
+                        self.write_line(line.as_str());
+                    }
+                    break;
+                }
+                Err(_) => {
+                    if crate::arch::monotonic_time_ns() >= deadline {
+                        self.write_line("error: child timed out after 30s");
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+            }
         }
     }
 

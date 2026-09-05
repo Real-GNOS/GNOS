@@ -489,6 +489,7 @@ fn kernel_main(protocol: u64, information: u64) -> ! {
         #[cfg(not(feature = "compat-monitor"))]
         match crate::kernel::scheduler::initialize() {
             Ok(()) => {
+                crate::net::init();
                 let mut scheduler = crate::kernel::scheduler::summary();
                 for _ in 0..100_000_000usize {
                     scheduler = crate::kernel::scheduler::summary();

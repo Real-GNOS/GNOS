@@ -1,14 +1,14 @@
 /*
- * bootloader.c — gnos UEFI bootloader (x86-64, gnu-efi). (GPLv2)
+ * bootloader.c — AEOS UEFI bootloader (x86-64, gnu-efi). (GPLv2)
  *
  * Responsibilities:
- *   1. Find the volume we were loaded from and read \gnos\GNOSKr.elf
- *      (the 64-bit kernel) and \gnos\initrd.img (a FAT image holding
+ *   1. Find the volume we were loaded from and read \aeos\AEOSKr.elf
+ *      (the 64-bit kernel) and \aeos\initrd.img (a FAT image holding
  *      init.elf) into memory.
- *   2. Parse GNOSKr.elf and copy its PT_LOAD segments to their (identity
+ *   2. Parse AEOSKr.elf and copy its PT_LOAD segments to their (identity
  *      mapped) load addresses; record the entry point.
  *   3. Capture a GOP framebuffer and a copy of the UEFI memory map into a
- *      bootinfo structure at GNUCOS_BOOTINFO_ADDR.
+ *      bootinfo structure at AEOS_BOOTINFO_ADDR.
  *   4. Build identity page tables + a 64-bit GDT, enable long-mode paging
  *      (UEFI is already in long mode), call ExitBootServices(), and jump
  *      to the kernel entry with RDI = bootinfo address.
@@ -270,12 +270,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     EFI_FILE  *f = NULL;
     VOID      *buf = NULL;
     UINTN      len = 0;
-    bootinfo_t *bi = (bootinfo_t *)GNUCOS_BOOTINFO_ADDR;
+    bootinfo_t *bi = (bootinfo_t *)AEOS_BOOTINFO_ADDR;
     uint64_t   entry;
 
     InitializeLib(image, st);
     BTRACE("initlib");
-    Print(L"gnos bootloader 0.1 (GPLv2)\r\n");
+    Print(L"aeos bootloader 0.1 (GPLv2)\r\n");
 
     EFI_PHYSICAL_ADDRESS cr3 = setup_identity_paging(st);
     if (!cr3) {
@@ -296,19 +296,19 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* 1. load the kernel */
     BTRACE("openkern");
-    if (EFI_ERROR(open_file(image, st, L"\\gnos\\GNOSKr.elf", &f))) {
-        Print(L"failed to open \\gnos\\GNOSKr.elf\r\n");
+    if (EFI_ERROR(open_file(image, st, L"\\aeos\\AEOSKr.elf", &f))) {
+        Print(L"failed to open \\aeos\\AEOSKr.elf\r\n");
         return EFI_LOAD_ERROR;
     }
     buf = read_file(st, f, &len);
     if (!buf) {
-        Print(L"failed to read GNOSKr.elf\r\n");
+        Print(L"failed to read AEOSKr.elf\r\n");
         return EFI_LOAD_ERROR;
     }
-    Print(L"loading GNOSKr.elf\r\n");
+    Print(L"loading AEOSKr.elf\r\n");
     entry = map_kernel(st, buf, len);
     if (!entry) {
-        Print(L"GNOSKr.elf has no usable entry\r\n");
+        Print(L"AEOSKr.elf has no usable entry\r\n");
         return EFI_LOAD_ERROR;
     }
     bi->kernel_entry = entry;
@@ -317,7 +317,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* 2. load the initrd (FAT image containing init.elf) */
     {
         EFI_FILE *f2 = NULL;
-        if (!EFI_ERROR(open_file(image, st, L"\\gnos\\initrd.img", &f2))) {
+        if (!EFI_ERROR(open_file(image, st, L"\\aeos\\initrd.img", &f2))) {
             VOID *ibuf; UINTN ilen;
             ibuf = read_file(st, f2, &ilen);
             if (ibuf) {
@@ -326,7 +326,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
                 Print(L"initrd loaded\r\n");
             }
         } else {
-            Print(L"warning: \\gnos\\initrd.img not found\r\n");
+            Print(L"warning: \\aeos\\initrd.img not found\r\n");
         }
     }
 
@@ -339,7 +339,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         VOID *map = AllocatePool(msize);
         if (map) {
             st->BootServices->GetMemoryMap(&msize, map, &key, &dsize, &dver);
-            bi->mmap_addr      = GNUCOS_BOOTINFO_ADDR + sizeof(bootinfo_t);
+            bi->mmap_addr      = AEOS_BOOTINFO_ADDR + sizeof(bootinfo_t);
             bi->mmap_size      = msize;
             bi->mmap_desc_size = dsize;
             bi->mmap_ver       = dver;

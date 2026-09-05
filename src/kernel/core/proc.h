@@ -59,6 +59,8 @@ typedef enum {
     WAIT_SLEEP,                     /* nanosleep: waiting only on the clock */
     WAIT_FUTEX,                     /* futex wait: keyed by (as, futex_addr) */
     WAIT_DRM,                       /* DRM wait_queue (vblank/commit/event) */
+    WAIT_CGROUP,                    /* cpu.max quota exhausted: parked until the period rolls over */
+    WAIT_IPC,                       /* System V IPC (semop/msg send/recv) */
 } wait_reason_t;
 
 /* Signal numbers, wait() flags and the rest of the user-visible constants
@@ -109,8 +111,14 @@ typedef struct proc {
      * The futex word this process sleeps on while blocked in WAIT_FUTEX,
      * paired with `as`: two address spaces waiting on the same virtual
      * address (different physical pages!) must never confuse each other.
+     * A futex on a *shared* page (a POSIX named-semaphore word in a
+     * MAP_SHARED tmpfs mapping, say) crosses address spaces, so it is
+     * keyed by the physical address of the word instead: futex_shared
+     * selects the rule and futex_key carries the physical address.
      */
     uint64_t      futex_addr;
+    uint64_t      futex_key;      /* phys address when futex_shared */
+    int           futex_shared;   /* word sits on a shared page */
     int           pgid;             /* process group: the unit of job control */
     /*
      * Session id.  A session is a collection of process groups that share a
@@ -232,6 +240,22 @@ typedef struct proc {
     int           on_cpu;         /* core this process runs on, or -1    */
     int           rsvd;
 
+    /* ---- cgroup membership -------------------------------------------
+     * Leaf cgroup slot in the v2 hierarchy (cgroup.h), or -1 while the
+     * process is unattached (allocated but not yet entered anywhere).
+     * `sched_weight` is the cached hierarchical effective weight of that
+     * cgroup in CG_NICE0 units: the scheduler's charge hook scales every
+     * vruntime advance by it, so a heavier cgroup consumes virtual time
+     * more slowly and is picked more often (CFS-style weighted fairness).
+     * Both fields are read/written under g_proc_lock.
+     *
+     * `cg_park_next` chains processes that were runnable when their cgroup
+     * hit its cpu.max quota: they are parked as WAIT_CGROUP until the
+     * period rolls over.  pid-based link, -1 = end. */
+    int           cg;             /* leaf cgroup slot, -1 = unattached */
+    uint32_t      sched_weight;   /* hierarchical effective weight, CG_NICE0 base */
+    int           cg_park_next;   /* pid link on the throttled cgroup's park list */
+
     /*
      * The current directory, stored as a normalised absolute path rather than
      * as a pinned inode.  A path costs a string compare on every relative
@@ -305,6 +329,11 @@ void    proc_init(void);
 proc_t *proc_current(void);
 proc_t *proc_by_pid(int pid);
 
+/* Whole-table access for the cgroup module (membership scans, weight
+ * refresh): the process table is a fixed array and its size is constant. */
+int     proc_capacity(void);
+proc_t *proc_at(int i);
+
 /* Build PID 1 from an executable in the filesystem and make it runnable. */
 int  proc_spawn_init(const char *path);
 
@@ -356,6 +385,14 @@ void sched_start(void) __attribute__((noreturn));
 void sched_yield(void);
 void sched_tick(void);
 void sched_block(wait_reason_t why);
+/* The scheduler's run-queue spin lock, exported so the cgroup module can
+ * protect its own tree and counters with the very same lock the charge
+ * hooks run under (see cgroup.h).  These are the only external users. */
+void sched_lock(void);
+void sched_unlock(void);
+/* Make p runnable (fresh slice at the queue's virtual clock), or park it
+ * when its cgroup is throttled.  Caller holds g_proc_lock (sched_lock). */
+void sched_enqueue(proc_t *p);
 /* Same, but the caller has already disabled interrupts and wants them left
  * that way -- the only race-free way for a driver to test "is there data?"
  * and go to sleep if there is not. */

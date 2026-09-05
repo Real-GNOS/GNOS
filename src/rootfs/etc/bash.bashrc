@@ -1,13 +1,13 @@
-# /etc/bash.bashrc — system-wide interactive bash settings for GNOS.
+# /etc/bash.bashrc — system-wide interactive bash settings for AEOS.
 #
 # Sourced from /root/.bashrc (and, on a multi-user setup, from every user's
 # own ~/.bashrc).  Kept deliberately small: this is a single-user OS and the
 # interesting per-user stuff lives in /root/.bashrc.
 
 # A friendly banner the first time an interactive shell starts.
-if [ -z "$GNOS_BASH_WELCOMED" ]; then
-    export GNOS_BASH_WELCOMED=1
-    echo "GNOS — interactive bash ready ($(uname -s) $(uname -r) on $(uname -m))"
+if [ -z "$AEOS_BASH_WELCOMED" ]; then
+    export AEOS_BASH_WELCOMED=1
+    echo "AEOS — interactive bash ready ($(uname -s) $(uname -r) on $(uname -m))"
 fi
 
 # Make Ctrl-D not log anyone out instantly, and give the line editor a sensible
@@ -16,7 +16,7 @@ export INPUTRC=
 
 # ---- the desktop (labwc) ------------------------------------------------
 # A bare `labwc` at the prompt must come up the same way the boot-time rc run
-# does.  GNOS has no seatd/logind, so real libseat needs its noop backend
+# does.  AEOS has no seatd/logind, so real libseat needs its noop backend
 # (without this the seatd socket connect fails and noop is never tried);
 # xkb, the runtime socket dir and the WLR pins all mirror /etc/rc.
 export LIBSEAT_BACKEND=noop

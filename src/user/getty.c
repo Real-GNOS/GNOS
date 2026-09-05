@@ -40,7 +40,7 @@ static void print_issue(const char *tty)
     if (!f)
         return;
 
-    char host[64] = "gnos";
+    char host[64] = "aeos";
     FILE *h = fopen("/etc/hostname", "r");
     if (h) {
         if (fgets(host, sizeof host, h)) {

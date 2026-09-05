@@ -186,7 +186,10 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int is_write)
         uint64_t frame = pmm_alloc_zeroed();
         if (!frame)
             return 0;
-        return vmm_map(as, cr2 & ~0xFFFULL, frame, vf);
+        int ok = vmm_map(as, cr2 & ~0xFFFULL, frame, vf);
+        if (ok)
+            as->pages++;    /* lazy fault backed a resident page */
+        return ok;
     }
     return 0;
 }

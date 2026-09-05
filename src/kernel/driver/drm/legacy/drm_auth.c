@@ -1,7 +1,7 @@
 /*
  * drm_auth.c — client identity and capabilities ioctls. (GPLv2)
  *
- * GNOS has no master concept: every opener is master.  GET_MAGIC hands out
+ * AEOS has no master concept: every opener is master.  GET_MAGIC hands out
  * a token and AUTH_MAGIC accepts it, so libdrm's drmIsMaster() and
  * wlroots' allocator report master and use the (working) dumb-buffer
  * allocator instead of giving up; SET/DROP_MASTER are no-ops so wlroots'
@@ -69,7 +69,7 @@ int32_t drm_ioctl_get_cap(uint64_t arg)
         break;
     case DRM_CAP_CRTC_IN_VBLANK_EVENT:
         /* wlroots requires vblank events for its page-flip completion
-         * tracking.  GNOS synthesises DRM_EVENT_FLIP_COMPLETE on the
+         * tracking.  AEOS synthesises DRM_EVENT_FLIP_COMPLETE on the
          * (synchronous) flip ioctl, which satisfies the same contract. */
         c.value = 1;
         break;
@@ -106,7 +106,7 @@ int32_t drm_ioctl_auth_magic(uint64_t arg)
 {
     (void)arg;
     /* The magic-number dance is how libdrm's drmIsMaster() and wlroots'
-     * allocator verify DRM master.  GNOS has no master concept: every
+     * allocator verify DRM master.  AEOS has no master concept: every
      * opener is master, so accept any token. */
     return 0;
 }
@@ -114,7 +114,7 @@ int32_t drm_ioctl_auth_magic(uint64_t arg)
 int32_t drm_ioctl_set_master(uint64_t arg)
 {
     (void)arg;
-    /* Master acquisition is a no-op: GNOS has no master concept, every
+    /* Master acquisition is a no-op: AEOS has no master concept, every
      * opener is master. */
     return 0;
 }

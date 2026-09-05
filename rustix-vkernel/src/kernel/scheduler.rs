@@ -21,7 +21,7 @@ use crate::sync::StaticCell;
 use super::elf;
 use super::run_queue;
 use super::sched::MAX_CPUS;
-use super::task::{SharedTaskTable, TaskKind, TaskState, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
+use super::task::{Pid, SharedTaskTable, TaskKind, TaskState, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
 
 const MAX_THREADS: usize = 8;
 const INITIAL_THREADS: usize = 5;
@@ -6754,4 +6754,50 @@ fn elf_test_interpreter() -> &'static [u8] {
 fn symbol_range(start: *const u8, end: *const u8) -> &'static [u8] {
     let length = end as usize - start as usize;
     unsafe { core::slice::from_raw_parts(start, length) }
+}
+
+/// Load an embedded ELF binary into a spawned child and set up its register frame
+/// for user-mode execution. The child must already exist (spawned via SharedTaskTable).
+pub fn exec_embedded(child_pid: Pid, path: &'static str, argv: &[&str]) -> Result<(), &'static str> {
+    let image = elf_image(path).ok_or("unknown embedded binary")?;
+    let state = unsafe { &mut *SCHEDULER.get() };
+    let slot = state
+        .threads
+        .iter()
+        .position(|t| t.id == child_pid)
+        .ok_or("pid not found in scheduler")?;
+    let old_cr3 = state.threads[slot].cr3;
+    let loaded = elf::load_process(
+        image,
+        Some(("/lib/ld-rustix.so", elf_test_interpreter())),
+        vdso_image(),
+        argv,
+        &[],
+        next_random(),
+    )
+    .map_err(|_| "elf load failed")?;
+    let _ = SharedTaskTable::new().execve(child_pid, path);
+    state.threads[slot].cr3 = loaded.cr3;
+    state.threads[slot].fs_base = 0;
+    state.threads[slot].owns_address_space = true;
+    state.threads[slot].image = image;
+    let kernel_stack_top = state.threads[slot].kernel_stack_top;
+    let frame_ptr =
+        (kernel_stack_top - core::mem::size_of::<RegisterFrame>() as u64) as *mut RegisterFrame;
+    unsafe {
+        (*frame_ptr).rip = loaded.entry;
+        (*frame_ptr).cs = USER_CODE_SELECTOR;
+        (*frame_ptr).rflags = INITIAL_RFLAGS;
+        (*frame_ptr).rsp = loaded.stack_pointer;
+        (*frame_ptr).ss = USER_DATA_SELECTOR;
+        (*frame_ptr).rax = 0;
+    }
+    retire_address_space(state, old_cr3);
+    reclaim_retired_spaces(state);
+    EXEC_CYCLES.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+pub fn is_embedded_binary(path: &str) -> bool {
+    elf_image(path).is_some()
 }

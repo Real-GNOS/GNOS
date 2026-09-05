@@ -16,6 +16,8 @@
 #include <stdint.h>
 
 #include "proc.h"
+#include "cgroup.h"
+#include "sysvipc.h"
 #include "signal.h"
 #include "ptrace.h"
 #include "vmm.h"
@@ -86,12 +88,49 @@ static spinlock_t g_proc_lock;
 static proc_t    *g_rq[MAX_PROCS];
 static unsigned   g_rq_size;
 
-/* The global virtual clock, in ticks.  Advances by the time a process
- * actually runs; an idle CPU advances nothing. */
+/*
+ * Virtual time is kept in fixed-point units of 1/1024 scheduler tick so
+ * that cgroup-weighted accounting (a task's vruntime advance is scaled by
+ * its cgroup's effective weight) never rounds a small step to zero -- a
+ * 256x-heavy task must still see its deadline expire eventually, or it
+ * would never yield.  The heap key, the deadlines and the slice are all in
+ * these units; only `used` real ticks are converted at the charge sites.
+ */
+#define VIRT_SHIFT     10
+#define VIRT_UNIT      (1ULL << VIRT_SHIFT)
+
+/* The global virtual clock, in VIRT_UNITs.  Advances by the time a process
+ * actually runs; an idle CPU advances nothing.  It anchors brand-new tasks
+ * when the queue is empty; otherwise they join at the queue's minimum
+ * vruntime so a lagging heavyweight cgroup cannot starve fresh tasks. */
 static uint64_t g_vtime;
 
-/* Default slice in ticks (SCHED_HZ = 100, so 50 ms per pick). */
+/* Default slice in ticks (SCHED_HZ = 100, so 50 ms per pick), converted to
+ * virtual-time units everywhere below. */
 #define EEVDF_SLICE_TICKS 5
+
+/* Virtual-time advance for `used` real ticks at effective weight `w`
+ * (CG_NICE0 == 1024 is one default task): dvr = used * 2^20 / w. */
+static uint64_t virt_delta(uint64_t used, uint32_t w)
+{
+    if (w == 0)
+        w = 1;
+    return (used << (VIRT_SHIFT + 10)) / w;
+}
+
+/* The queue's current minimum vruntime: where a fresh task should join so
+ * that it neither inherits a gift nor starves behind a lagging cgroup.
+ * Caller holds g_proc_lock. */
+static uint64_t rq_min_vruntime(void)
+{
+    if (!g_rq_size)
+        return g_vtime;
+    uint64_t m = g_rq[0]->vruntime;
+    for (unsigned i = 1; i < g_rq_size; i++)
+        if (g_rq[i]->vruntime < m)
+            m = g_rq[i]->vruntime;
+    return m;
+}
 
 /* spawn_init/fork/clone all finish a fresh process the same way; the
  * SIGCONT/SIGKILL paths enqueue too (enqueue_fresh under g_proc_lock). */
@@ -110,6 +149,16 @@ proc_t *proc_by_pid(int pid)
         if (g_procs[i].state != PROC_UNUSED && g_procs[i].pid == pid)
             return &g_procs[i];
     return NULL;
+}
+
+int proc_capacity(void)
+{
+    return MAX_PROCS;
+}
+
+proc_t *proc_at(int i)
+{
+    return (i >= 0 && i < MAX_PROCS) ? &g_procs[i] : NULL;
 }
 
 /* One clean FPU/SSE state, captured once at boot (see fpu_init_once) and
@@ -136,7 +185,7 @@ static proc_t *proc_alloc(void)
         p->rq_index     = -1;
         p->bkl_held     = 0;
         p->on_cpu       = -1;
-        p->slice        = EEVDF_SLICE_TICKS;
+        p->slice        = EEVDF_SLICE_TICKS * VIRT_UNIT;
         for (int f = 0; f < PROC_MAX_FD; f++)
             p->fds[f] = -1;
         /* Per-process memory bookkeeping musl expects the kernel to keep.
@@ -163,6 +212,13 @@ static proc_t *proc_alloc(void)
         /* Hand the new process the one clean FPU/SSE state captured at boot,
          * so it starts with the default MXCSR and zeroed XMM registers. */
         memcpy(p->fpu, g_fpu_init, sizeof(p->fpu));
+        /* Unattached until fork/clone/init/kthread enter it somewhere: the
+         * cgroup counters only count tasks that have been entered.  The
+         * state is still PROC_UNUSED, so no membership scan can see it
+         * before the enter happens. */
+        p->cg            = -1;
+        p->sched_weight  = CG_NICE0;
+        p->cg_park_next  = -1;
         return p;
     }
     return NULL;
@@ -654,6 +710,13 @@ int proc_spawn_init(const char *path)
     regs_t f;
     make_user_frame(&f, entry, sp);
     p->saved_rsp = build_startup_stack(p, &f);
+    /* PID 1 lives in the root cgroup. */
+    if (cg_attach_new(p, CG_ROOT) < 0) {
+        vmm_destroy(p->as);
+        p->as = NULL;
+        p->state = PROC_UNUSED;
+        return -E_AGAIN;
+    }
     proc_make_runnable(p);
 
     dbg_puts("PROC: init is pid ");
@@ -732,6 +795,12 @@ proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg)
     regs[5] = 0;                            /* rbp */
     p->saved_rsp = sp;
 
+    /* Kernel threads belong to the root cgroup. */
+    if (cg_attach_new(p, CG_ROOT) < 0) {
+        kfree(b);
+        p->state = PROC_UNUSED;
+        return NULL;
+    }
     proc_make_runnable(p);
     return p;
 }
@@ -814,6 +883,15 @@ int proc_fork(regs_t *r)
     if (!child->as) {
         child->state = PROC_UNUSED;
         return -E_NOMEM;
+    }
+
+    /* The child is born into its parent's cgroup; the pids controller may
+     * refuse (fork then fails with EAGAIN, exactly as on Linux). */
+    if (cg_attach_new(child, parent->cg) < 0) {
+        vmm_put(child->as);
+        child->as = NULL;
+        child->state = PROC_UNUSED;
+        return -E_AGAIN;
     }
 
     child->ppid        = parent->pid;
@@ -908,6 +986,15 @@ int proc_clone(regs_t *r)
     if (!child->as) {
         child->state = PROC_UNUSED;
         return -E_NOMEM;
+    }
+
+    /* The child is born into its parent's cgroup; the pids controller may
+     * refuse (clone then fails with EAGAIN, exactly as on Linux). */
+    if (cg_attach_new(child, parent->cg) < 0) {
+        vmm_put(child->as);
+        child->as = NULL;
+        child->state = PROC_UNUSED;
+        return -E_AGAIN;
     }
 
     child->ppid        = parent->pid;
@@ -1184,6 +1271,12 @@ int proc_execve(const char *path, char *const argv[], char *const envp[],
     if (p->pid != p->tgid)
         p->pid = p->tgid;
 
+    /* Shared-memory segments attached in the old image are detached while
+     * p->as still names that image (the detach unmaps inside it); the
+     * address space swap below then hands the old space to the dying
+     * threads.  SEM_UNDO adjustments are kept across exec, as on Linux. */
+    sysv_exec_reset(p);
+
     /* Past this point the old image is gone and there is no way back. */
     addrspace_t *old = p->as;
     p->as = as;
@@ -1273,6 +1366,16 @@ int proc_execve(const char *path, char *const argv[], char *const envp[],
  */
 static void proc_teardown(proc_t *p, int self)
 {
+    /* Leave the cgroup: the pids controller stops counting the task the
+     * moment it stops being schedulable.  (A zombie is reaped later but is
+     * no longer a living task either way.) */
+    cg_detach(p);
+
+    /* System V IPC bookkeeping: roll back SEM_UNDO adjustments and detach
+     * shared-memory segments while p->as still names the address space the
+     * segments are mapped into (vmm_put below may destroy it). */
+    sysv_exit(p);
+
     for (int i = 0; i < PROC_MAX_FD; i++) {
         if (p->fds[i] >= 0) {
             vfs_file_unref(p->fds[i]);
@@ -1413,11 +1516,21 @@ void proc_exit_group(int status)
  */
 int proc_wake_futex(addrspace_t *as, uint64_t addr)
 {
+    /* Wake waiters by the same rule they slept under: a word on a shared
+     * page (POSIX named semaphore) matches on physical address, so a wake
+     * in one address space finds waiters parked in others that map the
+     * same frame. */
+    int shared = as ? vmm_page_shared(as, addr) : 0;
+    uint64_t key = shared ? vmm_resolve(as, addr) : 0;
     int n = 0;
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *q = &g_procs[i];
-        if (q->state == PROC_BLOCKED && q->wait_reason == WAIT_FUTEX &&
-            q->as == as && q->futex_addr == addr) {
+        if (q->state != PROC_BLOCKED || q->wait_reason != WAIT_FUTEX)
+            continue;
+        int match = shared ? (q->futex_shared && q->futex_key == key)
+                           : (!q->futex_shared && q->as == as &&
+                              q->futex_addr == addr);
+        if (match) {
             sched_wake(q);
             n++;
         }
@@ -1851,7 +1964,11 @@ static void rq_remove(proc_t *p)
 
 /* Put a process on the run queue with a fresh slice.  Caller holds
  * g_proc_lock.  EEVDF: a waking, continued or brand-new task's lag is
- * reset -- it enters as if newly runnable at the current virtual time. */
+ * reset -- it enters as if newly runnable, placed at the queue's minimum
+ * vruntime (see rq_min_vruntime).  A task whose cgroup is throttled is
+ * parked instead (WAIT_CGROUP); the cpu.max period rollover releases it.
+ * This is the single choke point every wake/enqueue path funnels through,
+ * which is what keeps throttled tasks off the queue. */
 static void enqueue_fresh(proc_t *p)
 {
 #ifdef SYSTRACE
@@ -1862,8 +1979,12 @@ static void enqueue_fresh(proc_t *p)
         dbg_puts("\n");
     }
 #endif
-    p->vruntime = g_vtime;
-    p->deadline = g_vtime + p->slice;
+    if (cg_chain_throttled(p)) {
+        cg_park(p);
+        return;
+    }
+    p->vruntime = rq_min_vruntime();
+    p->deadline = p->vruntime + p->slice;
     p->state    = PROC_READY;
     if (p->rq_index < 0)
         rq_push(p);
@@ -1876,6 +1997,33 @@ static void proc_make_runnable(proc_t *p)
     spin_lock_irq(&g_proc_lock);
     enqueue_fresh(p);
     spin_unlock_irq(&g_proc_lock);
+}
+
+/* ---- cgroup-facing scheduler exports ------------------------------------
+ * The cgroup module keeps its own tree and counters under g_proc_lock (see
+ * cgroup.h), so it needs the lock exported, plus a runnable-maker that
+ * honours the cpu.max throttle: a task whose cgroup quota is exhausted is
+ * parked as WAIT_CGROUP instead of joining the queue, and the period
+ * rollover (cg_tick_refresh) releases it later.  All three assume the
+ * caller either holds g_proc_lock (sched_enqueue) or wants it taken
+ * (sched_lock/sched_unlock). */
+void sched_lock(void)
+{
+    spin_lock_irq(&g_proc_lock);
+}
+
+void sched_unlock(void)
+{
+    spin_unlock_irq(&g_proc_lock);
+}
+
+void sched_enqueue(proc_t *p)
+{
+    if (cg_chain_throttled(p)) {
+        cg_park(p);
+        return;
+    }
+    enqueue_fresh(p);
 }
 
 /*
@@ -1899,12 +2047,15 @@ static int schedule(void)
 
     /* Account the outgoing task's CPU time.  Virtual time only advances
      * while a process actually runs; the idle context (prev == NULL)
-     * contributes nothing. */
+     * contributes nothing.  The vruntime step is scaled by the task's
+     * cgroup weight (a heavier cgroup's tasks age slower, so they are
+     * picked more often), and the real ticks are also charged to the
+     * cgroup's cpu.max budget. */
     if (prev) {
         uint64_t now  = timer_ticks();
         uint64_t used = now - prev->last_run_tick;
-        prev->vruntime += used;
-        g_vtime        += used;
+        prev->vruntime += virt_delta(used, prev->sched_weight);
+        g_vtime        += used * VIRT_UNIT;
         prev->last_run_tick = now;
         if (prev->state == PROC_RUNNING) {
             prev->state = PROC_READY;
@@ -1913,7 +2064,12 @@ static int schedule(void)
              * keeps it, so the remainder is owed to the task (EEVDF). */
             if (prev->vruntime >= prev->deadline)
                 prev->deadline = prev->vruntime + prev->slice;
-            rq_push(prev);
+            /* Quota exhausted?  Park the task instead of returning it to
+             * the queue; the cpu.max period rollover releases it. */
+            if (cg_charge_runtime(prev, used) || cg_chain_throttled(prev))
+                cg_park(prev);
+            else
+                rq_push(prev);
         }
     }
 
@@ -2039,12 +2195,18 @@ void sched_tick(void)
 
     spin_lock_irq(&g_proc_lock);
     uint64_t now  = timer_ticks();
-    cur->vruntime += now - cur->last_run_tick;
-    g_vtime       += now - cur->last_run_tick;
+    uint64_t used = now - cur->last_run_tick;
+    cur->vruntime += virt_delta(used, cur->sched_weight);
+    g_vtime       += used * VIRT_UNIT;
     cur->last_run_tick = now;
+    /* Real CPU time is charged to the cgroup's cpu.max budget; the moment
+     * the quota runs out the running task must give the CPU back so it can
+     * be parked. */
+    int throttled = cg_charge_runtime(cur, used);
     proc_t *head  = rq_peek();
-    int preempt   = (cur->vruntime >= cur->deadline) ||    /* slice gone */
-                    (head && head->deadline < cur->deadline); /* owed task */
+    int preempt   = throttled ||                                  /* quota gone */
+                    (cur->vruntime >= cur->deadline) ||           /* slice gone */
+                    (head && head->deadline < cur->deadline);     /* owed task */
     spin_unlock_irq(&g_proc_lock);
 
     if (preempt) {
@@ -2132,6 +2294,13 @@ void sched_expire_timeouts(void)
         }
     }
 #endif
+    /* cpu.max quota periods roll over here -- on every tick of every core,
+     * ring 0 included -- so throttled tasks are released even when the
+     * machine is idle and no user-mode tick ever fires. */
+    spin_lock_irq(&g_proc_lock);
+    cg_tick_refresh();
+    spin_unlock_irq(&g_proc_lock);
+
     uint64_t now = timer_ticks();
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *p = &g_procs[i];

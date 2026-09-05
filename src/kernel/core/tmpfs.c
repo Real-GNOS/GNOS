@@ -16,6 +16,8 @@
 #include "vfs.h"
 #include "sysnum.h"
 #include "kstring.h"
+#include "heap.h"
+#include "pmm.h"
 
 /* Forward declaration: fill_vfs() references these before their definitions
  * below. */
@@ -36,6 +38,14 @@ struct tmpfs_node {
     uint32_t         ino;
     uint8_t         *data;          /* file payload (into g_arena) */
     uint32_t         datacap;       /* allocated payload capacity */
+    /* Frame-backed payload (POSIX shm / MAP_SHARED): when shm is non-NULL
+     * the file's bytes live in node-owned frames that every mapping of the
+     * file shares, instead of in g_arena.  shm_mappers counts the address
+     * spaces currently mapping the node; a node is only freed once that is
+     * zero too, so unlink + last-close cannot free a still-mapped file. */
+    uint64_t        *shm;
+    uint32_t         shm_npages;
+    uint32_t         shm_mappers;
     char            *target;        /* symlink target (into g_arena) */
     struct tmpfs_node *parent;
     struct tmpfs_node *children;     /* linked list of children */
@@ -88,9 +98,111 @@ static struct tmpfs_node *node_alloc(void)
 
 static void node_free(struct tmpfs_node *n)
 {
+    /* A frame-backed node owns physical frames; they must be returned
+     * before the pool slot is reusable. */
+    if (n->shm) {
+        for (uint32_t i = 0; i < n->shm_npages; i++)
+            pmm_free(n->shm[i]);
+        kfree(n->shm);
+        n->shm = NULL;
+        n->shm_npages = 0;
+    }
     int idx = (int)(n - g_pool);
     if (idx >= 0 && idx < MAX_TMPFS_NODES)
         g_free_stack[g_free_sp++] = idx;
+}
+
+/* Free a node when its last reference is gone.  Callers arrange that refs,
+ * unlinked and shm_mappers have all reached their final values. */
+static void node_release_check(struct tmpfs_node *n)
+{
+    if (n->refs == 0 && n->unlinked && n->shm_mappers == 0)
+        node_free(n);
+}
+
+/* ---- frame-backed payload (POSIX shm / MAP_SHARED) -------------------- */
+uint32_t tmpfs_node_shm_pages(struct tmpfs_node *n)
+{
+    return (n && n->kind == VFS_FILE) ? n->shm_npages : 0;
+}
+
+uint64_t tmpfs_node_shm_frame(struct tmpfs_node *n, uint32_t idx)
+{
+    if (!n || !n->shm || idx >= n->shm_npages)
+        return 0;
+    return n->shm[idx];
+}
+
+/* Make sure the frame array covers `bytes`; grows by whole pages and
+ * zero-fills the fresh tail.  Returns 0 or a negative errno. */
+static int shm_grow(struct tmpfs_node *n, uint64_t bytes)
+{
+    uint32_t need = (uint32_t)((bytes + PAGE_SIZE - 1) >> 12);
+    if (need <= n->shm_npages)
+        return 0;
+    uint64_t *nf = kmalloc(sizeof(uint64_t) * need);
+    if (!nf)
+        return -E_NOMEM;
+    for (uint32_t i = 0; i < need; i++) {
+        uint64_t f = pmm_alloc_zeroed();
+        if (!f) {
+            while (i > 0)
+                pmm_free(nf[--i]);
+            kfree(nf);
+            return -E_NOMEM;
+        }
+        nf[i] = f;
+    }
+    if (n->shm) {
+        memcpy(nf, n->shm, sizeof(uint64_t) * n->shm_npages);
+        kfree(n->shm);
+    }
+    n->shm = nf;
+    n->shm_npages = need;
+    return 0;
+}
+
+int tmpfs_node_shm_start(struct tmpfs_node *n, uint64_t bytes)
+{
+    if (!n || n->kind != VFS_FILE)
+        return -E_INVAL;
+    if (bytes == 0)
+        bytes = PAGE_SIZE;
+    if (bytes > n->shm_npages * (uint64_t)PAGE_SIZE) {
+        int r = shm_grow(n, bytes);
+        if (r < 0)
+            return r;
+    }
+    /* Seed the frames with anything written through the arena before the
+     * file became frame-backed (a semaphore's ftruncate + prefill). */
+    if (n->data && n->size) {
+        uint64_t remain = n->size;
+        uint32_t idx = 0;
+        while (remain && idx < n->shm_npages) {
+            uint32_t chunk = remain < PAGE_SIZE ? (uint32_t)remain
+                                                : (uint32_t)PAGE_SIZE;
+            memcpy(pmm_virt(n->shm[idx]), n->data + (uint64_t)idx * PAGE_SIZE,
+                   chunk);
+            remain -= chunk;
+            idx++;
+        }
+    }
+    return 0;
+}
+
+void tmpfs_node_shm_addmapper(struct tmpfs_node *n)
+{
+    if (n)
+        n->shm_mappers++;
+}
+
+void tmpfs_node_shm_putmapper(struct tmpfs_node *n)
+{
+    if (!n)
+        return;
+    if (n->shm_mappers > 0)
+        n->shm_mappers--;
+    node_release_check(n);
 }
 
 static uint8_t *arena_alloc(uint32_t n)
@@ -230,6 +342,52 @@ tmpfs_t *tmpfs_create(void)
 }
 
 /* ---- read / write (file nodes) --------------------------------------- */
+/* Bytes of a frame-backed node are read straight from its frames; an
+ * arena-backed node reads from the arena as before. */
+static void node_bytes_in(struct tmpfs_node *node, uint64_t off, void *buf,
+                          uint32_t len)
+{
+    if (node->shm) {
+        uint64_t pos = off;
+        uint8_t *dst = (uint8_t *)buf;
+        while (len) {
+            uint32_t idx = (uint32_t)(pos >> 12);
+            uint32_t inpage = (uint32_t)(pos & (PAGE_SIZE - 1));
+            uint32_t chunk = PAGE_SIZE - inpage;
+            if (chunk > len)
+                chunk = len;
+            memcpy(dst, (uint8_t *)pmm_virt(node->shm[idx]) + inpage, chunk);
+            pos += chunk;
+            dst += chunk;
+            len -= chunk;
+        }
+    } else if (len && node->data) {
+        memcpy(buf, node->data + off, len);
+    }
+}
+
+static void node_bytes_out(struct tmpfs_node *node, uint64_t off,
+                           const void *buf, uint32_t len)
+{
+    if (node->shm) {
+        uint64_t pos = off;
+        const uint8_t *src = (const uint8_t *)buf;
+        while (len) {
+            uint32_t idx = (uint32_t)(pos >> 12);
+            uint32_t inpage = (uint32_t)(pos & (PAGE_SIZE - 1));
+            uint32_t chunk = PAGE_SIZE - inpage;
+            if (chunk > len)
+                chunk = len;
+            memcpy((uint8_t *)pmm_virt(node->shm[idx]) + inpage, src, chunk);
+            pos += chunk;
+            src += chunk;
+            len -= chunk;
+        }
+    } else if (len) {
+        memcpy(node->data + off, buf, len);
+    }
+}
+
 int tmpfs_read(struct vfs_node *n, uint64_t off, void *buf, uint32_t len)
 {
     struct tmpfs_node *node = (struct tmpfs_node *)n->priv;
@@ -240,8 +398,8 @@ int tmpfs_read(struct vfs_node *n, uint64_t off, void *buf, uint32_t len)
         return 0;
     uint64_t remain = sz - off;
     uint32_t tocopy = (remain < len) ? (uint32_t)remain : len;
-    if (tocopy && node->data)
-        memcpy(buf, node->data + off, tocopy);
+    if (tocopy)
+        node_bytes_in(node, off, buf, tocopy);
     return (int32_t)tocopy;
 }
 
@@ -251,19 +409,31 @@ int tmpfs_write(struct vfs_node *n, uint64_t off, const void *buf, uint32_t len)
     if (!node || node->kind != VFS_FILE)
         return -E_INVAL;
     uint64_t end = off + len;
-    if (end > node->datacap) {
-        uint32_t newcap = (uint32_t)end;
-        newcap = (newcap + 4095u) & ~(uint32_t)4095u;
-        uint8_t *nd = arena_alloc(newcap);
-        if (!nd)
-            return -E_NOSPC;
-        if (node->data && node->size)
-            memcpy(nd, node->data, (uint32_t)node->size);
-        node->data    = nd;
-        node->datacap = newcap;
+
+    if (node->shm) {
+        /* Frame-backed: grow the frame array to cover the write. */
+        if (end > node->shm_npages * (uint64_t)PAGE_SIZE) {
+            int r = shm_grow(node, end);
+            if (r < 0)
+                return r;
+        }
+        if (len)
+            node_bytes_out(node, off, buf, len);
+    } else {
+        if (end > node->datacap) {
+            uint32_t newcap = (uint32_t)end;
+            newcap = (newcap + 4095u) & ~(uint32_t)4095u;
+            uint8_t *nd = arena_alloc(newcap);
+            if (!nd)
+                return -E_NOSPC;
+            if (node->data && node->size)
+                memcpy(nd, node->data, (uint32_t)node->size);
+            node->data    = nd;
+            node->datacap = newcap;
+        }
+        if (len)
+            memcpy(node->data + off, buf, len);
     }
-    if (len)
-        memcpy(node->data + off, buf, len);
     if (end > node->size)
         node->size = end;
     return (int32_t)len;
@@ -302,7 +472,7 @@ static void tmpfs_node_release(vfs_node_t *n)
     if (!t)
         return;
     if (--t->refs == 0 && t->unlinked)
-        node_free(t);
+        node_release_check(t);   /* still held by mappers? defer the free */
 }
 
 /* Does this resolved node name a tmpfs file?  (fchmod/ftruncate by fd need
@@ -468,11 +638,12 @@ int tmpfs_unlink(tmpfs_t *fs, const char *rel)
     detach(parent, n);
     /* POSIX: an unlinked file lives until the last fd referencing it closes
      * (that is what makes shm_open + unlink + ftruncate work).  The tree
-     * ref drops now; the file refs drop when their fds close. */
+     * ref drops now; the file refs drop when their fds close.  A file that
+     * is still mapped anywhere is kept alive by its mapper references, so
+     * the free is deferred until the last mapper goes away too. */
+    n->unlinked = 1;
     if (--n->refs == 0)
-        node_free(n);
-    else
-        n->unlinked = 1;
+        node_release_check(n);
     return 0;
 }
 
@@ -571,6 +742,25 @@ int tmpfs_node_setsize(struct tmpfs_node *n, uint64_t len)
         return -E_ISDIR;
     if (n->kind != VFS_FILE)
         return -E_INVAL;
+
+    if (n->shm) {
+        /* Frame-backed: grow the frame array to cover the new size; bytes
+         * past the old size are already zero (fresh frames are zeroed, and
+         * a shrink leaves the tail frames untouched for a later regrow). */
+        if (len > n->shm_npages * (uint64_t)PAGE_SIZE) {
+            int r = shm_grow(n, len);
+            if (r < 0)
+                return r;
+        }
+        if (len > n->size) {
+            /* zero the tail inside the last covered frame region that was
+             * never part of size */
+            uint8_t *base = (uint8_t *)pmm_virt(n->shm[0]);
+            memset(base + n->size, 0, (size_t)(len - n->size));
+        }
+        n->size = len;
+        return 0;
+    }
 
     if (len > n->datacap) {
         uint32_t newcap = ((uint32_t)len + 4095u) & ~(uint32_t)4095u;

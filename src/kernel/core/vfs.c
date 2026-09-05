@@ -23,9 +23,11 @@
 #include <stdint.h>
 
 #include "vfs.h"
+#include "cgroup.h"
 #include "ext2.h"
 #include "proc.h"
 #include "procfs.h"
+#include "debugfs.h"
 #include "tmpfs.h"
 #include "sock.h"
 #include "unix.h"
@@ -406,17 +408,21 @@ static vfs_node_t *dev_lookup(const char *name)
 }
 
 /* ---- mount table ------------------------------------------------------
- * A mount is a tmpfs instance attached at an absolute path.  Resolution,
- * readdir and the modifying VFS calls consult this table (longest prefix
- * wins) before falling through to the ext2 root or the /proc overlay, exactly
- * the way the VFS already special-cases /proc.  There is no generic
- * filesystem registry: tmpfs is the only mountable type, which is all a boot
- * needs (OpenRC wants tmpfs on /run, /tmp, /dev/shm, ...).
+ * A mount is a filesystem instance attached at an absolute path.  Two
+ * kinds exist: a tmpfs instance (its own in-memory tree) and the shared
+ * cgroup v2 hierarchy (one global tree, mountable at several paths).
+ * Resolution, readdir and the modifying VFS calls consult this table
+ * (longest prefix wins) before falling through to the ext2 root or the
+ * /proc overlay, exactly the way the VFS already special-cases /proc.
+ * There is no generic filesystem registry beyond these two types.
  */
 #define MAX_MOUNTS 8
+#define MT_TMPFS   1
+#define MT_CGROUP  2
 struct mount_entry {
     char     mnt[GNUOS_PATH_MAX];
-    tmpfs_t *fs;
+    int      type;
+    tmpfs_t *fs;            /* MT_TMPFS payload; NULL for MT_CGROUP */
 } g_mounts[MAX_MOUNTS];
 int g_mount_count = 0;
 
@@ -429,6 +435,8 @@ static tmpfs_t *vfs_route_tmpfs(const char *abs, char *rel)
     tmpfs_t *best = NULL;
     int      bestlen = -1;
     for (int i = 0; i < g_mount_count; i++) {
+        if (g_mounts[i].type != MT_TMPFS)
+            continue;
         const char *m = g_mounts[i].mnt;
         int ml = (int)strlen(m);
         if (strcmp(abs, m) == 0) {
@@ -443,6 +451,29 @@ static tmpfs_t *vfs_route_tmpfs(const char *abs, char *rel)
     return best;
 }
 
+/* Is `abs` under a cgroup mount?  Same longest-prefix rule as
+ * vfs_route_tmpfs; writes the path relative to that mount's root into
+ * `rel`.  Returns 1 (with rel filled) or 0. */
+static int vfs_route_cgroup(const char *abs, char *rel)
+{
+    int bestlen = -1;
+    for (int i = 0; i < g_mount_count; i++) {
+        if (g_mounts[i].type != MT_CGROUP)
+            continue;
+        const char *m = g_mounts[i].mnt;
+        int ml = (int)strlen(m);
+        if (strcmp(abs, m) == 0) {
+            if (ml > bestlen) { bestlen = ml;
+                                 rel[0] = '/'; rel[1] = 0; }
+        } else if (strncmp(abs, m, ml) == 0 && abs[ml] == '/') {
+            if (ml > bestlen) { bestlen = ml;
+                                 strncpy(rel, abs + ml, GNUOS_PATH_MAX - 1);
+                                 rel[GNUOS_PATH_MAX - 1] = 0; }
+        }
+    }
+    return bestlen >= 0;
+}
+
 int vfs_mount_tmpfs(const char *path)
 {
     if (g_mount_count >= MAX_MOUNTS)
@@ -455,7 +486,23 @@ int vfs_mount_tmpfs(const char *path)
         return -E_NOSPC;
     strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
     g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
+    g_mounts[g_mount_count].type = MT_TMPFS;
     g_mounts[g_mount_count].fs = fs;
+    g_mount_count++;
+    return 0;
+}
+
+int vfs_mount_cgroupfs(const char *path)
+{
+    if (g_mount_count >= MAX_MOUNTS)
+        return -E_NFILE;
+    for (int i = 0; i < g_mount_count; i++)
+        if (strcmp(g_mounts[i].mnt, path) == 0)
+            return -E_EXIST;
+    strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
+    g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
+    g_mounts[g_mount_count].type = MT_CGROUP;
+    g_mounts[g_mount_count].fs = NULL;
     g_mount_count++;
     return 0;
 }
@@ -510,6 +557,18 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     int pr = procfs_resolve(path, out);
     if (pr != -E_INVAL)
         return pr;
+
+    /* /debug is a read-only developer pseudo-filesystem, exactly like /proc
+     * but aimed at kernel developers rather than user space. */
+    int dr = debugfs_resolve(path, out);
+    if (dr != -E_INVAL)
+        return dr;
+
+    /* A cgroup mount (the shared v2 hierarchy) is resolved against its own
+     * tree, the same way a tmpfs mount shadows the ext2 image at its root. */
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(path, crel))
+        return cgfs_resolve(crel, out);
 
     /* A mounted tmpfs shadows the ext2 image at its mount point, exactly as
      * /proc shadows the empty /proc directory the image carries. */
@@ -650,6 +709,56 @@ static int64_t proc_getdents64(vfs_file_t *f, void *buf, uint32_t len)
     return (int64_t)off;
 }
 
+/* The /debug half of getdents64: enumerated by index from the generated
+ * table, same contract as proc_getdents64. */
+static int64_t debugfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
+{
+    uint8_t *p   = (uint8_t *)buf;
+    uint64_t off = 0;
+
+    for (;;) {
+        char    name[VFS_NAME_MAX];
+        uint8_t dt;
+        if (debugfs_readdir(f->path, (uint32_t)f->pos, name, &dt) < 0)
+            break;
+
+        uint32_t rec = emit_dirent(p, off, len, f->pos + 1, name, dt);
+        if (!rec)
+            break;
+        off += rec;
+        f->pos++;
+    }
+
+    return (int64_t)off;
+}
+
+/* The cgroupfs half of getdents64: enumerate the v2 hierarchy from the
+ * directory's path, same contract as the other two. */
+static int64_t cgroupfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
+{
+    char    crel[GNUOS_PATH_MAX];
+    if (!vfs_route_cgroup(f->path, crel))
+        return -E_NOENT;
+
+    uint8_t *p   = (uint8_t *)buf;
+    uint64_t off = 0;
+
+    for (;;) {
+        char    name[VFS_NAME_MAX];
+        uint8_t dt;
+        if (cgfs_readdir(crel, (uint32_t)f->pos, name, &dt) < 0)
+            break;
+
+        uint32_t rec = emit_dirent(p, off, len, f->pos + 1, name, dt);
+        if (!rec)
+            break;
+        off += rec;
+        f->pos++;
+    }
+
+    return (int64_t)off;
+}
+
 /* The tmpfs half of getdents64: enumerate the in-memory tree by index, the
  * same contract proc_getdents64 uses. */
 static int64_t tmpfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
@@ -698,6 +807,16 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
     if (strncmp(f->path, "/proc", 5) == 0 &&
         (f->path[5] == '\0' || f->path[5] == '/'))
         return proc_getdents64(f, buf, len);
+
+    /* /debug is enumerated the same way: by index from the generated table. */
+    if (strncmp(f->path, "/debug", 6) == 0 &&
+        (f->path[6] == '\0' || f->path[6] == '/'))
+        return debugfs_getdents64(f, buf, len);
+
+    /* A cgroup mount is enumerated against the shared v2 hierarchy. */
+    char cgrel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(f->path, cgrel))
+        return cgroupfs_getdents64(f, buf, len);
 
     /* A tmpfs mount is enumerated the same way: by index from its tree. */
     char mrel[GNUOS_PATH_MAX];
@@ -830,6 +949,11 @@ int vfs_unlink(const char *path)
     int g = may_mutate_dir(path, path);
     if (g < 0)
         return g;
+    /* cgroupfs files cannot be unlinked; the control files are part of the
+     * hierarchy's shape, not directory entries. */
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(path, crel))
+        return -E_PERM;
     char rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
@@ -852,6 +976,9 @@ int vfs_rmdir(const char *path)
     int g = may_mutate_dir(path, path);
     if (g < 0)
         return g;
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(path, crel))
+        return cgfs_rmdir(crel);
     char rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
@@ -873,6 +1000,9 @@ int vfs_mkdir(const char *path)
     int g = may_mutate_dir(path, NULL);
     if (g < 0)
         return g;
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(path, crel))
+        return cgfs_mkdir(crel);
     char rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
@@ -890,6 +1020,9 @@ int vfs_symlink(const char *target, const char *path)
     int g = may_mutate_dir(path, NULL);
     if (g < 0)
         return g;
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(path, crel))
+        return -E_PERM;             /* cgroupfs has no symlinks */
     char rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
@@ -905,6 +1038,9 @@ int vfs_link(const char *oldpath, const char *newpath)
     int g = may_mutate_dir(newpath, NULL);
     if (g < 0)
         return g;
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(oldpath, crel) || vfs_route_cgroup(newpath, crel))
+        return -E_PERM;             /* cgroupfs has no hard links */
     char rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(newpath, rel);
     if (fs)
@@ -973,6 +1109,11 @@ int vfs_rename(const char *src, const char *dst)
 {
     if (strncmp(src, "/dev/", 5) == 0 || strncmp(dst, "/dev/", 5) == 0)
         return -E_PERM;
+    /* cgroup names are fixed by the hierarchy; rename is refused (Linux
+     * answers EPERM here too). */
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(src, crel) || vfs_route_cgroup(dst, crel))
+        return -E_PERM;
 
     /* A rename removes a name from one directory and adds one to another, so
      * both parents have to allow it. */
@@ -1010,6 +1151,11 @@ int vfs_truncate(const char *path, uint64_t len)
      * shared-memory file must reach the tmpfs routing below. */
     if (strncmp(path, "/dev/", 5) == 0 && strncmp(path, "/dev/shm/", 9) != 0)
         return -E_INVAL;
+
+    /* Control files have no size to truncate. */
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(path, crel))
+        return -E_PERM;
 
     char rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
@@ -1053,6 +1199,11 @@ int vfs_file_open(const char *path, int flags)
     int r = resolve(path, &node, 1);
 
     if (r == -E_NOENT && (flags & O_CREAT)) {
+        /* Nothing may be created on a cgroup mount: the files are part of
+         * the hierarchy, not directory entries. */
+        char crel[GNUOS_PATH_MAX];
+        if (vfs_route_cgroup(path, crel))
+            return -E_PERM;
         char rel[GNUOS_PATH_MAX];
         tmpfs_t *fs = vfs_route_tmpfs(path, rel);
         if (fs) {
@@ -1163,6 +1314,10 @@ void vfs_file_setfl(int h, int nonblock)
 
 int vfs_chmod(const char *path, uint32_t mode)
 {
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(path, crel))
+        return -E_PERM;         /* cgroupfs modes are fixed */
+
     char rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
@@ -1190,6 +1345,10 @@ int vfs_chmod(const char *path, uint32_t mode)
  */
 int vfs_chown(const char *path, uint32_t uid, uint32_t gid, int follow)
 {
+    char crel[GNUOS_PATH_MAX];
+    if (vfs_route_cgroup(path, crel))
+        return -E_PERM;         /* cgroupfs keeps no owners */
+
     char rel[GNUOS_PATH_MAX];
     if (vfs_route_tmpfs(path, rel))
         return 0;          /* tmpfs keeps no owner; accept and forget */

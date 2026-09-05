@@ -1,4 +1,4 @@
-GNOS — a 64-bit teaching kernel, written from nothing.
+AEOS — a 64-bit teaching kernel, written from nothing.
 
 Terminal \l.  Switch with Ctrl+Alt+F1 .. Ctrl+Alt+F6, or `chvt N`.
 Accounts: root / root, elaina / elaina.

@@ -1,5 +1,5 @@
 /*
- * shell.c — GNOS shell: job control, pipelines and redirection. (GPLv2)
+ * shell.c — AEOS shell: job control, pipelines and redirection. (GPLv2)
  *
  * Started by init as a child process, and owning the terminal from the
  * moment init hands it over with tcsetpgrp().
@@ -884,7 +884,7 @@ int main(int argc, char **argv)
         sys_dup2(fd, 0);
         sys_close(fd);
     } else {
-        print("GNOS shell, pid ");
+        print("AEOS shell, pid ");
         printn(getpid());
         print(" pgid ");
         printn(shell_pgid);
@@ -902,7 +902,7 @@ int main(int argc, char **argv)
         reap_jobs();
 
         if (interactive)
-            print("gnos$ ");
+            print("aeos$ ");
 
         long n = read_line(line, (int)sizeof(line));
         if (n < 0) {                        /* Ctrl-D / end of script */

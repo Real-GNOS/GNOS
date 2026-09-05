@@ -98,10 +98,10 @@ typedef struct {
 
 static evdev_q_t  g_kbd_q, g_mouse_q;
 static evdev_dev_t g_kbd_dev = { .q = &g_kbd_q,
-                                 .name = "GNOS i8042 keyboard",
+                                 .name = "AEOS i8042 keyboard",
                                  .vendor = 0x0001, .product = 0x0001 };
 static evdev_dev_t g_mouse_dev = { .q = &g_mouse_q,
-                                   .name = "GNOS i8042 mouse",
+                                   .name = "AEOS i8042 mouse",
                                    .vendor = 0x0002, .product = 0x0002 };
 
 static void evdev_push(evdev_dev_t *d, uint16_t type, uint16_t code,

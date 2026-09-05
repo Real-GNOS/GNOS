@@ -12,10 +12,19 @@
 
 #include <stdint.h>
 
+/* MAP_SHARED tmpfs file mappings hold a reference on the backing node (see
+ * the addrspace_t.shared list below); only the pointer is stored here. */
+struct tmpfs_node;
+
 #define VM_READ   0x0
 #define VM_WRITE  0x1
 #define VM_USER   0x2
 #define VM_EXEC   0x4
+/* The page belongs to a SysV shared-memory segment: the physical frame is
+ * owned by the segment, not by this address space, so unmap/teardown must
+ * clear the PTE without freeing the frame.  Marks the PTE with the x86
+ * "available" bit (bit 9) and the as->mmaps record with this flag. */
+#define VM_EXTSHM 0x8
 
 /* Where a user process is laid out.
  *
@@ -72,6 +81,15 @@ typedef struct addrspace {
     int      refs;
 
     /*
+     * Resident user pages in this address space (counted at every map and
+     * unmap of a lower-half frame; shared spaces count their pages once).
+     * The cgroup memory controller sums this over member processes; the
+     * counter is a plain aligned u32 update (atomic on x86-64), good
+     * enough for statistics read under the scheduler lock.
+     */
+    uint32_t pages;
+
+    /*
      * Anonymous/file mappings handed out in this address space, shared by
      * every thread that runs on it (clone(CLONE_VM) shares the page tables
      * and these records).  Keeping them here -- not per-proc -- means a
@@ -87,6 +105,17 @@ typedef struct addrspace {
      */
     struct { uint64_t base; uint64_t size; unsigned flags; } mmaps[128];
     int      nmmaps;
+
+    /*
+     * MAP_SHARED tmpfs file mappings (POSIX shared memory / named
+     * semaphores): each entry names the frame-backed tmpfs file whose
+     * frames are mapped at [base, base+size), so address-space teardown
+     * can drop the file's mapper reference (which is what eventually frees
+     * an unlinked file).  Managed by the mmap syscall path; vmm_destroy
+     * walks it after the page tables are gone.
+     */
+    struct { struct tmpfs_node *node; uint64_t base; uint64_t size; } shared[16];
+    uint32_t nshared;
 } addrspace_t;
 
 /* Record the kernel's own PML4 so new address spaces can inherit its upper
@@ -122,6 +151,12 @@ int vmm_alloc_range(addrspace_t *as, uint64_t vaddr, uint64_t size,
 
 /* Physical address backing `vaddr`, or 0 if unmapped. */
 uint64_t vmm_resolve(addrspace_t *as, uint64_t vaddr);
+
+/* Is the page at vaddr mapped with the "shared" marker bit (a SysV shared
+ * memory or MAP_SHARED tmpfs page)?  Used to pick the futex keying rule:
+ * words on shared pages must wake across address spaces by physical
+ * address. */
+int vmm_page_shared(addrspace_t *as, uint64_t vaddr);
 
 /*
  * Kernel-address-space helpers for the module loader.  The kernel's own

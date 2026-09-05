@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "vmm.h"
+#include "tmpfs.h"
 #include "pmm.h"
 #include "panic.h"
 #include "kstring.h"
@@ -17,6 +18,7 @@
 #define PTE_PWT  0x008   /* write-through */
 #define PTE_PCD  0x010   /* cache-disable (set => uncacheable) */
 #define PTE_PS   0x080
+#define PTE_AVL  (1ULL << 9)   /* available-to-software: SysV shm marker */
 #define PTE_NX   (1ULL << 63)
 #define PTE_ADDR 0x000FFFFFFFFFF000ULL
 
@@ -216,6 +218,11 @@ int vmm_map(addrspace_t *as, uint64_t vaddr, uint64_t paddr, unsigned flags)
     if (!pte)
         return 0;
     *pte = (paddr & PTE_ADDR) | pte_flags(flags);
+    /* A SysV shared-memory page marks the PTE with the available bit so
+     * unmap and address-space teardown clear it without freeing the frame
+     * (the segment owns the frame; see VM_EXTSHM). */
+    if (flags & VM_EXTSHM)
+        *pte |= PTE_AVL;
     return 1;
 }
 
@@ -267,6 +274,14 @@ uint64_t vmm_resolve(addrspace_t *as, uint64_t vaddr)
     if (!pte || !(*pte & PTE_P))
         return 0;
     return (*pte & PTE_ADDR) + (vaddr & 0xFFF);
+}
+
+int vmm_page_shared(addrspace_t *as, uint64_t vaddr)
+{
+    if (!as)
+        return 0;
+    uint64_t *pte = walk(as, vaddr & ~0xFFFULL, 0, 0);
+    return (pte && (*pte & PTE_P) && (*pte & PTE_AVL)) ? 1 : 0;
 }
 
 /* ---- kernel-address-space helpers (used by the module loader) ---------- */
@@ -405,7 +420,13 @@ int vmm_unmap(addrspace_t *as, uint64_t vaddr, uint64_t size)
         uint64_t *pte = walk(as, va, 0, 0);
         if (!pte || !(*pte & PTE_P))
             continue;                   /* nothing mapped here */
-        pmm_free(*pte & PTE_ADDR);
+        /* A SysV shm page is owned by its segment, not this address space:
+         * clear the PTE but keep the frame (the segment frees it). */
+        if (!(*pte & PTE_AVL)) {
+            pmm_free(*pte & PTE_ADDR);
+            if (as->pages > 0)
+                as->pages--;    /* resident-page accounting (cgroup memory) */
+        }
         *pte = 0;
     }
     /* Drop stale TLB entries for the range, but only if this is the address
@@ -436,6 +457,8 @@ int vmm_alloc_range(addrspace_t *as, uint64_t vaddr, uint64_t size,
             pmm_free(frame);
             return 0;
         }
+        as->pages++;        /* resident-page accounting for the cgroup
+                             * memory controller */
     }
     return 1;
 }
@@ -480,10 +503,13 @@ static void free_level(uint64_t table_phys, int level)
         if (!(t[i] & PTE_P))
             continue;
         uint64_t child = t[i] & PTE_ADDR;
-        if (level > 1)
+        if (level > 1) {
             free_level(child, level - 1);
-        else
+        } else if (!(t[i] & PTE_AVL)) {
+            /* A SysV shm frame belongs to its segment, not this address
+             * space: drop the PTE without freeing the frame. */
             pmm_free(child);
+        }
         t[i] = 0;
     }
     if (level < 4)
@@ -497,6 +523,14 @@ void vmm_destroy(addrspace_t *as)
 
     free_level(as->pml4_phys, 4);
     pmm_free(as->pml4_phys);
+    as->pages = 0;              /* every resident page just went away */
+
+    /* Release MAP_SHARED tmpfs file mappings after the page tables that
+     * pointed at their frames are gone: each drops a mapper reference on
+     * the backing node, which is what finally frees an unlinked file. */
+    for (uint32_t i = 0; i < as->nshared; i++)
+        tmpfs_node_shm_putmapper(as->shared[i].node);
+    as->nshared = 0;
 
     for (int i = 0; i < MAX_ADDRSPACES; i++) {
         if (&g_spaces[i] == as) {
@@ -558,6 +592,7 @@ static int clone_level(addrspace_t *dst, uint64_t src_table, int level,
             pmm_free(frame);
             return 0;
         }
+        dst->pages++;           /* fork copied one more resident page */
     }
     return 1;
 }
