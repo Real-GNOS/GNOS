@@ -390,6 +390,12 @@ autoinstall:
 
 alpine: autoinstall
 
+# The initrd depends on the staging directory so `make autoinstall` followed
+# by a plain `make` re-folds the staged packages into the image; a fresh
+# checkout without autoinstall still gets an (empty) directory to depend on.
+$(ALPINE_ROOT):
+	mkdir -p $(ALPINE_ROOT)
+
 # ---- Alpine minirootfs base system (like Unixed-Kernel) -------------------
 # Downloads Alpine minirootfs, installs a curated package set via apk in a
 # bwrap/chroot sandbox, and populates build/alpine-rootfs/.  The initrd rule
@@ -594,7 +600,7 @@ $(BUILD)/dynhello.elf: src/user/dynhello.c $(MUSL_GCC)
 # kernel driver knows how to rewrite.
 $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
            $(CC_BIN) $(KRNL) $(FF_BIN) $(KMODS) $(CURL_BIN) $(NANO_BIN) \
-           src/user/rc | $(BUILD)
+           $(ALPINE_ROOT) src/user/rc | $(BUILD)
 	rm -rf $(BUILD)/initrd-root
 	mkdir -p $(BUILD)/initrd-root
 	# ---- FHS skeleton (empty dirs are harmless placeholders for now) ----

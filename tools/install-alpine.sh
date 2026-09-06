@@ -83,10 +83,11 @@ have_pkg() { # name -> 0/1
 }
 
 # Strip a version operator off a dependency token, keep only real packages
-# (ignore so:/pc:/cmd: virtuals, which need the full provides graph).
+# (ignore so:/pc:/cmd: virtuals and /path-style providers such as /bin/sh,
+# which need the full provides graph).
 bare_name() {
     case "$1" in
-        so:*|pc:*|cmd:*) return 1 ;;
+        so:*|pc:*|cmd:*|/*) return 1 ;;
         *) n=${1%%[<>=!]*}; n=${n%%:*}; [ -n "$n" ] || return 1
            printf '%s' "$n"; return 0 ;;
     esac
