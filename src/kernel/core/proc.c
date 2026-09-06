@@ -18,6 +18,7 @@
 #include "proc.h"
 #include "cgroup.h"
 #include "sysvipc.h"
+#include "seccomp.h"
 #include "signal.h"
 #include "ptrace.h"
 #include "vmm.h"
@@ -1366,6 +1367,9 @@ int proc_execve(const char *path, char *const argv[], char *const envp[],
  */
 static void proc_teardown(proc_t *p, int self)
 {
+    /* Free the seccomp-BPF filter, if any. */
+    seccomp_free(p);
+
     /* Leave the cgroup: the pids controller stops counting the task the
      * moment it stops being schedulable.  (A zombie is reaped later but is
      * no longer a living task either way.) */

@@ -42,6 +42,7 @@
 #include "input.h"
 #include "unix.h"
 #include "sysvipc.h"
+#include "seccomp.h"
 
 /* reboot(169) command codes; the Linux ABI as musl's reboot() passes them. */
 #define LINUX_REBOOT_CMD_RESTART    0x01234567
@@ -4060,6 +4061,25 @@ void syscall_handler(regs_t *r)
         nr = r->rax;                  /* whatever the tracer left in RAX */
     }
 
+    /* ---- seccomp-BPF filter check ------------------------------------
+     * If this process has a seccomp filter, run it before dispatching the
+     * syscall.  The filter may deny the call (returning -errno, killing
+     * the process, or delivering SIGSYS). */
+    if (p && p->secc_mode != SECCOMP_MODE_DISABLED) {
+        int sc = seccomp_check(p, (int)nr, a1, a2, a3, r->r10, r->r8, r->r9);
+        if (sc != 0) {
+            if (sc == -E_KILLED) {
+                /* Kill the process.  proc_exit with signal 31 (SIGSYS). */
+                p->term_sig = 31;
+                proc_exit(p);
+                return;
+            }
+            ret = sc;
+            r->rax = (uint64_t)ret;
+            goto done;
+        }
+    }
+
     switch (nr) {
     case SYS_read:
         if (!user_ptr_ok(a2, a3)) { ret = -E_INVAL; break; }
@@ -4905,6 +4925,27 @@ void syscall_handler(regs_t *r)
         ret = sys_arch_prctl(a1, a2);
         break;
 
+    case SYS_prctl:
+        /* Linux prctl(2) numbers: a1 = option, a2 = arg2, a3 = arg3,
+         * a4 = arg4, a5 = arg5.  We handle the seccomp-related options
+         * here; everything else returns -ENOSYS. */
+        switch ((int)a1) {
+        case PR_SET_NO_NEW_PRIVS:
+        case PR_GET_NO_NEW_PRIVS:
+        case PR_SET_SECCOMP:
+        case PR_GET_SECCOMP:
+            ret = seccomp_prctl(p, (int)a1, a2);
+            break;
+        default:
+            ret = -E_NOSYS;
+            break;
+        }
+        break;
+
+    case SYS_seccomp:
+        ret = sys_seccomp(a1, a2, a3);
+        break;
+
     case SYS_set_tid_address:
         ret = sys_set_tid_address(a1);
         break;
@@ -5068,6 +5109,7 @@ void syscall_handler(regs_t *r)
         dbg_puts("\n");
     }
 #endif
+done:
     r->rax = (uint64_t)ret;
 
     /* Ring buffer of the last few syscalls, for the fault dumper: when a

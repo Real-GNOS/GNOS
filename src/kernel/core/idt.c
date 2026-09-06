@@ -18,6 +18,7 @@
 #include "debugcon.h"
 #include "smp.h"
 #include "lapic.h"
+#include "cgroup.h"
 
 struct idt_entry {
     uint16_t off_lo;
@@ -187,8 +188,18 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int is_write)
         if (!frame)
             return 0;
         int ok = vmm_map(as, cr2 & ~0xFFFULL, frame, vf);
-        if (ok)
+        if (ok) {
             as->pages++;    /* lazy fault backed a resident page */
+            /* Charge the page to the cgroup hierarchy; if the cgroup has
+             * exceeded memory.max the allocation is rejected and the page
+             * is immediately freed.  The BKL is already held by isr_dispatch
+             * so cg_mem_charge sees a consistent mem_bytes snapshot. */
+            if (as->cg >= 0 && cg_mem_charge(as->cg, PAGE_SIZE) < 0) {
+                /* vmm_unmap frees the frame AND decrements as->pages */
+                vmm_unmap(as, cr2 & ~0xFFFULL, PAGE_SIZE);
+                return 0;
+            }
+        }
         return ok;
     }
     return 0;

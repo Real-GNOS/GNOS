@@ -22,11 +22,14 @@
  *     hierarchical share that the scheduler turns into proportional CPU
  *     time, and cpu.max is a quota/period cap enforced by throttling.
  *     See task #4 for how the EEVDF charge hook consumes it.
- *   - the memory controller reports resident bytes of member address
- *     spaces (memory.current/memory.stat).  memory.max is stored but not
- *     enforced: the kernel has no reclaim path to fall back on, so an
- *     enforced limit would be an OOM without a parachute.  The knob exists
- *     so a tool can read back what it wrote.
+ *   - the memory controller tracks resident bytes of member address spaces
+ *     through hierarchical charge/uncharge hooks in the VMM: every page
+ *     allocated for a cgroup member is charged up the ancestor chain, and
+ *     every page freed is discharged.  memory.max is enforced at charge
+ *     time -- an allocation that would push any ancestor past its limit is
+ *     refused with -ENOMEM.  memory.current reads the per-cgroup counter
+ *     directly (no proc-table scan).  memory.stat reports the anon/file
+ *     breakdown maintained alongside the byte counter.
  *
  * Locking: all cgroup state lives under the scheduler's run-queue lock
  * (g_proc_lock, taken through sched_lock()/sched_unlock()).  The scheduler
@@ -70,8 +73,12 @@ typedef struct cgroup {
     int      nprocs;          /* direct member tasks */
     int      pids_max;        /* subtree task cap; -1 = unlimited */
 
-    /* ---- memory (accounting only, see the file header) ---------------- */
+    /* ---- memory (real accounting with hierarchical charging) ---------- */
     uint64_t mem_max;         /* bytes; ~0ULL = unlimited */
+    uint64_t mem_bytes;       /* directly charged bytes (this cgroup only;
+                               * subtree total = sum of all descendants) */
+    uint64_t mem_anon;        /* anonymous pages charged (for memory.stat) */
+    uint64_t mem_file;        /* file-backed pages charged (for memory.stat) */
 
     /* Tasks parked (WAIT_CGROUP) until this cgroup's period rolls over.
      * pid-based singly linked list through proc_t.cg_park_next. */
@@ -357,6 +364,10 @@ int cg_attach_new(proc_t *p, int cg)
         p->cg = cg;
         p->sched_weight = eff_weight(cg);
         g_cgs[cg].nprocs++;
+        /* Propagate the cgroup to the address space so the VMM memory
+         * controller can charge page allocations against the right tree. */
+        if (p->as)
+            p->as->cg = cg;
         r = 0;
     }
     sched_unlock();
@@ -429,6 +440,9 @@ static int move_tgid_locked(int pid, int cg)
             g_cgs[cg].nprocs++;
         }
         q->sched_weight = eff_weight(cg);
+        /* Propagate the new cgroup to shared address spaces. */
+        if (q->as)
+            q->as->cg = cg;
     }
     return 0;
 }
@@ -614,58 +628,61 @@ int cg_charge_runtime(proc_t *p, uint64_t used)
 }
 
 /* ------------------------------------------------------------------ */
-/* memory controller                                                  */
+/* memory controller: hierarchical charge / discharge with enforcement */
 /* ------------------------------------------------------------------ */
 
-/* Resident bytes of the distinct address spaces owned by the member tasks
- * of cg and its descendants (a CLONE_VM thread group shares one address
- * space, which must only be counted once).  Caller holds the sched lock. */
-static uint64_t subtree_memory(int cg)
+/* Check whether charging `bytes` to the subtree rooted at `cg` would push
+ * any ancestor (including cg itself) past its memory.max.  Returns 0 when
+ * the charge is allowed, -ENOMEM when it is not.  The check walks the
+ * ancestor chain and reads the current mem_bytes at each level; since the
+ * BKL is held and the kernel is single-CPU, no concurrent charge can slip
+ * in between the check and the actual write in cg_mem_charge(). */
+static int mem_limit_check(int cg, uint64_t bytes)
 {
-    uint64_t bytes = 0;
-    for (int k = 0; k < proc_capacity(); k++) {
-        proc_t *q = proc_at(k);
-        if (q->state == PROC_UNUSED || q->cg < 0)
-            continue;
-        /* member of this subtree? */
-        int in = 0;
-        for (int c = q->cg; c != -1; c = g_cgs[c].parent) {
-            if (c == cg) {
-                in = 1;
-                break;
-            }
-            if (c == CG_ROOT)
-                break;
-        }
-        if (!in || !q->as)
-            continue;
-        /* skip an address space we already counted through an earlier
-         * member (shared by threads of one group) */
-        int dup = 0;
-        for (int j = 0; j < k; j++) {
-            proc_t *r = proc_at(j);
-            if (r->state != PROC_UNUSED && r->cg >= 0 && r->as == q->as &&
-                (r->pid != q->pid)) {
-                /* Only skip when the earlier task is also in this subtree
-                 * and the address space is shared (refs > 1). */
-                if (r->as->refs > 1) {
-                    for (int c = r->cg; c != -1; c = g_cgs[c].parent) {
-                        if (c == cg) {
-                            dup = 1;
-                            break;
-                        }
-                        if (c == CG_ROOT)
-                            break;
-                    }
-                }
-                if (dup)
-                    break;
-            }
-        }
-        if (!dup)
-            bytes += (uint64_t)q->as->pages * 4096ULL;
+    for (int c = cg; c != -1; c = g_cgs[c].parent) {
+        if (g_cgs[c].mem_bytes + bytes > g_cgs[c].mem_max)
+            return -ENOMEM;
+        if (c == CG_ROOT)
+            break;
     }
-    return bytes;
+    return 0;
+}
+
+/* Charge `bytes` to every cgroup on cg's ancestor chain.  Returns 0 on
+ * success, -ENOMEM when any level would exceed its memory.max (no partial
+ * charge is applied in that case).  Caller holds the BKL. */
+int cg_mem_charge(int cg, uint64_t bytes)
+{
+    if (cg < 0 || cg >= MAX_CGS || !g_cgs[cg].live || bytes == 0)
+        return 0;
+
+    if (mem_limit_check(cg, bytes) < 0)
+        return -ENOMEM;
+
+    for (int c = cg; c != -1; c = g_cgs[c].parent) {
+        g_cgs[c].mem_bytes += bytes;
+        if (c == CG_ROOT)
+            break;
+    }
+    return 0;
+}
+
+/* Discharge `bytes` from every cgroup on cg's ancestor chain.  Unlike
+ * charging this never fails -- freeing memory is always allowed.  Caller
+ * holds the BKL. */
+void cg_mem_discharge(int cg, uint64_t bytes)
+{
+    if (cg < 0 || cg >= MAX_CGS || !g_cgs[cg].live || bytes == 0)
+        return;
+
+    for (int c = cg; c != -1; c = g_cgs[c].parent) {
+        if (g_cgs[c].mem_bytes >= bytes)
+            g_cgs[c].mem_bytes -= bytes;
+        else
+            g_cgs[c].mem_bytes = 0;       /* shouldn't happen; clamp */
+        if (c == CG_ROOT)
+            break;
+    }
 }
 
 /* ==== cgroupfs (resolve/readdir/control files) ========================= */
@@ -809,7 +826,7 @@ static void render_file(int cg, int f, cgbuf_t *b)
         cg_char(b, '\n');
         break;
     case F_MEM_CURRENT:
-        cg_u64(b, subtree_memory(cg));
+        cg_u64(b, g->mem_bytes);
         cg_char(b, '\n');
         break;
     case F_MEM_MAX:
@@ -822,8 +839,10 @@ static void render_file(int cg, int f, cgbuf_t *b)
         break;
     case F_MEM_STAT:
         cg_str(b, "anon ");
-        cg_u64(b, subtree_memory(cg));
-        cg_str(b, "\nfile 0\n");
+        cg_u64(b, g->mem_anon);
+        cg_str(b, "\nfile ");
+        cg_u64(b, g->mem_file);
+        cg_str(b, "\n");
         break;
     default:
         break;

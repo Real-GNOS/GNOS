@@ -147,6 +147,19 @@ void cg_park(proc_t *p);
  * from the timer tick with the sched lock held. */
 void cg_tick_refresh(void);
 
+/* ---- memory hooks (called from VMM fault/alloc/unmap paths) --------------- */
+
+/* Charge `bytes` resident memory to every cgroup on `cg`'s ancestor chain.
+ * Returns 0 on success, -ENOMEM when any ancestor would exceed its
+ * memory.max.  Caller must hold the BKL (already held at every call site).
+ * When this returns 0, the caller MUST later call cg_mem_discharge() with
+ * the same bytes when the pages are freed. */
+int  cg_mem_charge(int cg, uint64_t bytes);
+
+/* Discharge (un-charge) `bytes` from every cgroup on `cg`'s ancestor chain.
+ * Called when resident pages are freed or an address space is destroyed. */
+void cg_mem_discharge(int cg, uint64_t bytes);
+
 /* ---- cgroupfs ------------------------------------------------------------ */
 /* Path relative to the cgroupfs mount root (always starts with '/') is
  * resolved/enumerated exactly like the tmpfs calls of the same shape. */

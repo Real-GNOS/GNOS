@@ -11,6 +11,7 @@
 #include "kstring.h"
 #include "debugcon.h"
 #include "sysnum.h"              /* PROT_READ/WRITE/EXEC for vmm_protect */
+#include "cgroup.h"
 
 #define PTE_P    0x001
 #define PTE_RW   0x002
@@ -162,6 +163,8 @@ addrspace_t *vmm_create(void)
     g_used[slot] = 1;
     g_spaces[slot].pml4_phys = pml4;
     g_spaces[slot].refs      = 1;
+    g_spaces[slot].pages     = 0;
+    g_spaces[slot].cg        = -1;
     g_spaces[slot].nmmaps    = 0;
     return &g_spaces[slot];
 }
@@ -426,6 +429,8 @@ int vmm_unmap(addrspace_t *as, uint64_t vaddr, uint64_t size)
             pmm_free(*pte & PTE_ADDR);
             if (as->pages > 0)
                 as->pages--;    /* resident-page accounting (cgroup memory) */
+            if (as->cg >= 0)
+                cg_mem_discharge(as->cg, PAGE_SIZE);
         }
         *pte = 0;
     }
@@ -450,11 +455,19 @@ int vmm_alloc_range(addrspace_t *as, uint64_t vaddr, uint64_t size,
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
         if (vmm_resolve(as, va))
             continue;                       /* already backed */
-        uint64_t frame = pmm_alloc_zeroed();
-        if (!frame)
+        /* Charge the cgroup before allocating; reject if over memory.max. */
+        if (as->cg >= 0 && cg_mem_charge(as->cg, PAGE_SIZE) < 0)
             return 0;
+        uint64_t frame = pmm_alloc_zeroed();
+        if (!frame) {
+            if (as->cg >= 0)
+                cg_mem_discharge(as->cg, PAGE_SIZE);
+            return 0;
+        }
         if (!vmm_map(as, va, frame, flags)) {
             pmm_free(frame);
+            if (as->cg >= 0)
+                cg_mem_discharge(as->cg, PAGE_SIZE);
             return 0;
         }
         as->pages++;        /* resident-page accounting for the cgroup
@@ -593,6 +606,8 @@ static int clone_level(addrspace_t *dst, uint64_t src_table, int level,
             return 0;
         }
         dst->pages++;           /* fork copied one more resident page */
+        if (dst->cg >= 0)
+            cg_mem_charge(dst->cg, PAGE_SIZE);
     }
     return 1;
 }
@@ -612,6 +627,7 @@ addrspace_t *vmm_clone(addrspace_t *src)
     dst->nmmaps = src->nmmaps;
     for (int i = 0; i < src->nmmaps; i++)
         dst->mmaps[i] = src->mmaps[i];
+    dst->cg = src->cg;          /* inherit the cgroup membership */
     return dst;
 }
 

@@ -26,3 +26,4 @@ sysfs        /sys           sysfs    defaults             0 0
 tmpfs        /run           tmpfs    rw,nosuid,nodev,mode=755   0 0
 tmpfs        /tmp           tmpfs    rw,nosuid,nodev,mode=1777  0 0
 tmpfs        /dev/shm       tmpfs    rw,nosuid,nodev,mode=1777  0 0
+cgroup2      /sys/fs/cgroup cgroup2  rw,nosuid,nodev,noexec,mode=755  0 0

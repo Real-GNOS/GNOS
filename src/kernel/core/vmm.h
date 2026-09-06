@@ -90,6 +90,14 @@ typedef struct addrspace {
     uint32_t pages;
 
     /*
+     * Leaf cgroup slot (cgroup.h) that owns this address space.  Set when the
+     * first process attaches; inherited across clone(CLONE_VM) and fork().
+     * The memory controller uses this to charge/uncharge page allocations
+     * against the correct cgroup hierarchy.  -1 = unattached (no charging).
+     */
+    int      cg;
+
+    /*
      * Anonymous/file mappings handed out in this address space, shared by
      * every thread that runs on it (clone(CLONE_VM) shares the page tables
      * and these records).  Keeping them here -- not per-proc -- means a

@@ -256,6 +256,18 @@ typedef struct proc {
     uint32_t      sched_weight;   /* hierarchical effective weight, CG_NICE0 base */
     int           cg_park_next;   /* pid link on the throttled cgroup's park list */
 
+    /* ---- seccomp-BPF ----------------------------------------------------
+     * When secc_mode == SECCOMP_MODE_FILTER the process runs every syscall
+     * through a classic-BPF program.  `seccomp_filter` points to a private
+     * copy of the user-supplied instructions (kernel-owned, freed on exec
+     * or exit).  `seccomp_len` is the instruction count.  The mode is
+     * sticky: once set it can only become stricter (disabled -> strict ->
+     * filter).  no_new_privs is a prerequisite for filter installation. */
+    int           secc_mode;        /* SECCOMP_MODE_* or 0 = disabled */
+    struct sock_filter *seccomp_filter; /* BPF instructions (kernel copy) */
+    unsigned short seccomp_len;     /* instruction count */
+    int           no_new_privs;     /* PR_SET_NO_NEW_PRIVS */
+
     /*
      * The current directory, stored as a normalised absolute path rather than
      * as a pinned inode.  A path costs a string compare on every relative

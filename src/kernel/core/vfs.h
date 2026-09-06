@@ -119,6 +119,11 @@
 #define E_ALREADY       114
 #define E_INPROGRESS    115
 
+/* Internal-only (not a real Linux errno): returned by seccomp_check when
+ * the filter decides the process should be killed.  Never seen by user
+ * space; syscall_handler intercepts it and calls proc_exit(). */
+#define E_KILLED        256
+
 struct vfs_node;
 
 typedef struct {

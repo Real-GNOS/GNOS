@@ -1,0 +1,557 @@
+# =============================================================================
+# GNOS Kernel Configuration — 全部内核选项
+# =============================================================================
+# 此文件由 src/gnoscfg 解析，生成 .config 供内核构建使用。
+# 语法与 Linux Kconfig 兼容（简化版但覆盖 GNOS 全部子系统）。
+
+# ---------------------------------------------------------------------------
+# 核心系统
+# ---------------------------------------------------------------------------
+menu "核心系统 (Core)"
+
+config GNOS_SMP
+    bool "多处理器支持 (SMP)"
+    default y
+    help
+      支持多核处理器。启用后内核可在多个 CPU 核心上并发调度进程。
+      关闭后仅使用单核运行。
+
+config GNOS_SMP_CPUS
+    int "CPU 核心数"
+    default 4
+    depends on GNOS_SMP
+    help
+      QEMU 虚拟机暴露的 CPU 核心数量。SMP 启用时此选项生效。
+
+config GNOS_ACPI
+    bool "ACPI 电源管理"
+    default y
+    help
+      高级配置与电源接口。提供电源管理、热插拔和系统信息。
+      关闭后使用 BIOS 传统电源管理。
+
+config GNOS_MM
+    bool "内存管理器"
+    default y
+    help
+      内核的物理内存管理器（PMM）和虚拟内存管理器（VMM）。
+      此选项始终强制启用——没有它内核无法运行。
+
+config GNOS_PAGING
+    bool "虚拟内存分页"
+    default y
+    depends on GNOS_MM
+    help
+      启用 x86-64 页表和按需分页（demand paging）。
+      用户进程通过写时复制（CoW）和懒加载映射共享内存。
+
+config GNOS_HEAP
+    bool "内核堆内存分配器"
+    default y
+    depends on GNOS_MM
+    help
+      内核通用堆内存管理器（kmalloc/kfree）。
+      为驱动程序和子系统提供动态内存分配。
+
+config GNOS_MMAP
+    bool "mmap 支持"
+    default y
+    depends on GNOS_MM
+    help
+      用户空间 mmap/munmap 系统调用。musl 的 malloc 依赖此功能。
+
+config GNOS_BRK
+    bool "brk 堆扩展"
+    default y
+    depends on GNOS_MM
+    help
+      brk/sbrk 系统调用，为小对象提供堆内存。
+
+# ---------------------------------------------------------------------------
+# 调度与进程
+# ---------------------------------------------------------------------------
+menu "调度与进程 (Scheduling & Process)"
+
+config GNOS_SCHED
+    bool "进程调度器"
+    default y
+    help
+      轮转调度器（round-robin），负责在进程间分配 CPU 时间。
+
+config GNOS_PID_HASH
+    bool "PID 哈希表"
+    default y
+    help
+      使用哈希表加速 PID 查找（O(1) 而非 O(n)）。
+
+config GNOS_FORK
+    bool "fork() 系统调用"
+    default y
+    help
+      创建子进程。POSIX 程序的基础。
+
+config GNOS_EXEC
+    bool "execve() 系统调用"
+    default y
+    help
+      加载并执行 ELF 可执行文件。
+
+config GNOS_WAIT
+    bool "wait4() 系统调用"
+    default y
+    help
+      父进程等待子进程完成。
+
+config GNOS_THREAD
+    bool "线程支持 (clone)"
+    default y
+    help
+      clone(CLONE_VM|CLONE_THREAD) 创建共享地址空间的线程。
+      musl 的 pthread 实现依赖此功能。
+
+config GNOS_SIGNAL
+    bool "信号处理"
+    default y
+    help
+      POSIX 信号投递和处理（sigaction、信号帧、sigreturn）。
+
+config GNOS_PTRACE
+    bool "ptrace 调试接口"
+    default y
+    help
+      进程跟踪系统调用。用于 strace、调试器和 seccomp-BPF。
+
+# ---------------------------------------------------------------------------
+# 文件系统
+# ---------------------------------------------------------------------------
+menu "文件系统 (Filesystem)"
+
+config GNOS_VFS
+    bool "虚拟文件系统 (VFS)"
+    default y
+    help
+      统一的文件系统抽象层。所有文件操作的基础。
+
+config GNOS_EXT2
+    bool "ext2 文件系统"
+    default y
+    depends on GNOS_VFS
+    help
+      ext2/Ext2 文件系统驱动。内核 initrd 和磁盘使用此格式。
+
+config GNOS_TMPFS
+    bool "tmpfs 内存文件系统"
+    default y
+    depends on GNOS_VFS
+    help
+      基于内存的文件系统。挂载于 /tmp、/dev/shm、/run 等。
+
+config GNOS_PROCFS
+    bool "procfs (/proc)"
+    default y
+    depends on GNOS_VFS
+    help
+      进程信息虚拟文件系统。提供 /proc/cpuinfo、/proc/meminfo 等。
+
+config GNOS_DEVFS
+    bool "devfs (/dev)"
+    default y
+    depends on GNOS_VFS
+    help
+      设备文件系统。自动创建 /dev 下的设备节点。
+
+config GNOS_SYSFS
+    bool "sysfs (/sys)"
+    default y
+    depends on GNOS_VFS
+    help
+      内核对象文件系统。DRM 客户端工具需要此支持。
+
+config GNOS_DEBUGFS
+    bool "debugfs (/sys/kernel/debug)"
+    default y
+    depends on GNOS_VFS
+    help
+      调试文件系统。提供内核调试信息和 cgroup 状态。
+
+config GNOS_TTY
+    bool "TTY 终端"
+    default y
+    depends on GNOS_VFS
+    help
+      虚拟终端（VT）和 TTY 设备。控制台输出的基础。
+
+config GNOS_FBMEM
+    bool "帧缓冲内存设备 (/dev/fb0)"
+    default y
+    depends on GNOS_VFS
+    help
+      帧缓冲设备节点。为 fbcon 和用户空间图形提供接口。
+
+config GNOS_EPOLL
+    bool "epoll I/O 多路复用"
+    default y
+    depends on GNOS_VFS
+    help
+      epoll_create/epoll_ctl/epoll_wait 系统调用。
+      高性能网络服务器和事件循环的基础。
+
+config GNOS_EVENTFD
+    bool "eventfd"
+    default y
+    depends on GNOS_VFS
+    help
+      事件文件描述符。用于跨进程事件通知。
+
+config GNOS_TIMERFD
+    bool "timerfd"
+    default y
+    depends on GNOS_VFS
+    help
+      定时器文件描述符。基于时间的事件触发。
+
+config GNOS_SIGNALFD
+    bool "signalfd"
+    default y
+    depends on GNOS_VFS
+    help
+      信号文件描述符。将信号转换为可读的文件事件。
+
+config GNOS_ANONFD
+    bool "匿名文件描述符 (memfd/eventfd/pipe)"
+    default y
+    depends on GNOS_VFS
+    help
+      匿名文件描述符支持。memfd_create、管道和事件通知的基础。
+
+config GNOS_UNIX_SOCKET
+    bool "Unix 域套接字 (AF_UNIX)"
+    default y
+    depends on GNOS_VFS
+    help
+      本地进程间通信套接字。D-Bus 和系统服务的基础。
+
+config GNOS_PIPE
+    bool "管道 (pipe/pipe2)"
+    default y
+    depends on GNOS_VFS
+    help
+      匿名管道。shell 管道操作符的基础。
+
+# ---------------------------------------------------------------------------
+# 设备驱动
+# ---------------------------------------------------------------------------
+menu "设备驱动 (Drivers)"
+
+config GNOS_PCI
+    bool "PCI 总线枚举"
+    default y
+    help
+      PCI/PCIe 设备发现和配置空间访问。所有 PCI 设备驱动的基础。
+
+config GNOS_INPUT
+    bool "输入设备 (evdev)"
+    default y
+    help
+      输入事件设备驱动。支持 PS/2 键盘和鼠标。
+
+config GNOS_KEYBOARD
+    bool "PS/2 键盘驱动"
+    default y
+    depends on GNOS_INPUT
+    help
+      PS/2 键盘 IRQ 处理和按键映射。
+
+config GNOS_MOUSE
+    bool "PS/2 鼠标驱动"
+    default y
+    depends on GNOS_INPUT
+    help
+      PS/2 鼠标 IRQ 处理和移动/按键事件。
+
+config GNOS_USB
+    bool "USB 主控制器 (xHCI)"
+    default y
+    depends on GNOS_PCI
+    help
+      xHCI USB 3.0 主控制器驱动。支持 USB 设备热插拔。
+
+config GNOS_USB_HID
+    bool "USB HID 设备"
+    default y
+    depends on GNOS_USB
+    help
+      USB 人机接口设备驱动（键盘、鼠标、触摸板）。
+
+config GNOS_USB_MSC
+    bool "USB 大容量存储"
+    default y
+    depends on GNOS_USB
+    help
+      USB 大容量存储设备驱动（U 盘、移动硬盘）。
+
+config GNOS_ATA
+    bool "ATA/IDE 磁盘驱动"
+    default y
+    help
+      传统 ATA/IDE 磁盘驱动。QEMU 默认磁盘接口。
+
+config GNOS_AUDIO
+    bool "音频驱动"
+    default n
+    help
+      Intel HDA/AC97 音频驱动。提供系统声音输出。
+
+config GNOS_AC97
+    bool "AC97 编解码器"
+    default n
+    depends on GNOS_AUDIO
+    help
+      AC97 音频编解码器驱动。QEMU 的标准音频设备。
+
+config GNOS_HDA
+    bool "Intel HDA 高清音频"
+    default n
+    depends on GNOS_AUDIO
+    help
+      Intel High Definition Audio 驱动。现代 PC 音频标准。
+
+config GNOS_E1000
+    bool "Intel e1000 网卡"
+    default y
+    depends on GNOS_PCI
+    help
+      Intel PRO/1000 系列网卡驱动。QEMU 默认网络设备。
+
+config GNOS_NETWORK
+    bool "TCP/IP 网络协议栈"
+    default y
+    depends on GNOS_E1000
+    help
+      内核 TCP/IP 网络协议栈。支持 TCP、UDP、IP 套接字。
+
+config GNOS_DRM
+    bool "DRM 图形子系统"
+    default y
+    depends on GNOS_PCI
+    help
+      Direct Rendering Manager 图形框架。提供 GPU 渲染接口。
+
+config GNOS_DRM_I915
+    bool "Intel i915 GEM/KMS 驱动"
+    default y
+    depends on GNOS_DRM
+    help
+      Intel 集成显卡驱动。支持 modesetting 和 2D/3D 渲染。
+
+config GNOS_FBCON
+    bool "帧缓冲控制台 (fbcon)"
+    default y
+    help
+      在帧缓冲设备上显示文本控制台。图形模式下的文字输出。
+
+config GNOS_CJKFONT
+    bool "CJK 中文字体"
+    default y
+    depends on GNOS_FBCON
+    help
+      嵌入式 Unifont 中文字体。支持 CJK 字符在 fbcon 上显示。
+
+# ---------------------------------------------------------------------------
+# 进程间通信
+# ---------------------------------------------------------------------------
+menu "进程间通信 (IPC)"
+
+config GNOS_SYSVIPC
+    bool "System V IPC"
+    default y
+    help
+      SysV 信号量、消息队列和共享内存。传统 UNIX IPC。
+
+config GNOS_POSIX_IPC
+    bool "POSIX IPC (mqueue)"
+    default y
+    help
+      POSIX 消息队列。实时进程间通信。
+
+config GNOS_DBUS
+    bool "D-Bus 支持"
+    default n
+    depends on GNOS_UNIX_SOCKET
+    help
+      D-Bus 系统总线支持。桌面环境的进程间通信基础。
+
+# ---------------------------------------------------------------------------
+# 安全与资源控制
+# ---------------------------------------------------------------------------
+menu "安全与资源控制 (Security)"
+
+config GNOS_CGROUP
+    bool "cgroup v2 资源控制"
+    default y
+    help
+      控制组 v2。支持进程组资源限制、CPU/内存统计。
+
+config GNOS_CGROUP_PIDS
+    bool "cgroup pids 控制器"
+    default y
+    depends on GNOS_CGROUP
+    help
+      进程数限制控制器。防止 fork 炸弹。
+
+config GNOS_CGROUP_MEMORY
+    bool "cgroup memory 控制器"
+    default y
+    depends on GNOS_CGROUP
+    help
+      内存资源限制控制器。支持 memory.max 硬限制。
+
+config GNOS_SECCOMP
+    bool "seccomp-BPF 系统调用过滤"
+    default y
+    help
+      允许用户空间进程通过 BPF 程序过滤系统调用。
+      沙箱化和安全加固的基础。
+
+config GNOS_MODULE
+    bool "可加载内核模块"
+    default y
+    help
+      insmod/rmmod 内核模块加载和卸载。
+
+# ---------------------------------------------------------------------------
+# 用户空间
+# ---------------------------------------------------------------------------
+menu "用户空间 (Userspace)"
+
+config GNOS_INIT
+    bool "自定义 init 进程"
+    default y
+    help
+      使用 GNOS 自研的 init 进程代替标准 systemd/OpenRC。
+
+config GNOS_OPENRC
+    bool "OpenRC 服务管理器"
+    default y
+    help
+      在 initrd 中运行 OpenRC 服务管理器。
+
+config GNOS_UDEV
+    bool "udevd 设备管理"
+    default y
+    help
+      运行 udevd 守护进程并自动创建设备节点。
+
+config GNOS_SHELL
+    string "默认 Shell"
+    default "/bin/sh"
+    help
+      登录时启动的默认命令行解释器。
+
+# ---------------------------------------------------------------------------
+# QEMU 虚拟机配置
+# ---------------------------------------------------------------------------
+menu "QEMU 虚拟机 (Emulation)"
+
+config GNOS_QEMU_MEM
+    string "虚拟机内存"
+    default "8G"
+    help
+      QEMU 虚拟机分配的内存大小。
+
+config GNOS_QEMU_SMP
+    int "QEMU CPU 核心数"
+    default 4
+    help
+      QEMU 虚拟机的 CPU 核心数。
+
+config GNOS_QEMU_DISK
+    string "虚拟磁盘大小 (MB)"
+    default "256"
+    help
+      QEMU 虚拟磁盘大小（MB）。
+
+config GNOS_QEMU_INITRD
+    string "initrd 镜像大小 (MB)"
+    default "256"
+    help
+      initrd ext2 镜像的显式大小。
+
+config GNOS_QEMU_AUDIO
+    bool "QEMU 音频设备"
+    default n
+    help
+      在 QEMU 中模拟 AC97 和 HDA 音频设备。
+
+config GNOS_QEMU_NET
+    bool "QEMU 网络设备"
+    default y
+    help
+      在 QEMU 中模拟 Intel e1000 网卡。
+
+config GNOS_QEMU_DISK_IF
+    bool "QEMU ATA 磁盘"
+    default y
+    help
+      在 QEMU 中模拟 ATA/IDE 磁盘。
+
+config GNOS_AUDIO_BACKEND
+    string "音频后端"
+    default "pa"
+    help
+      QEMU 音频后端: pa (PulseAudio), pipewire, alsa, sdl, none.
+
+# ---------------------------------------------------------------------------
+# 调试
+# ---------------------------------------------------------------------------
+menu "调试 (Debug)"
+
+config GNOS_SYSTRACE
+    bool "系统调用跟踪 (SYSTRACE)"
+    default y
+    help
+      在控制台输出系统调用调试信息。用于开发和调试。
+
+config GNOS_DEBUG_CONSOLE
+    bool "调试控制台 (0xe9)"
+    default y
+    help
+      向 QEMU 调试端口 (0xe9) 输出内核调试信息。
+      可通过 QEMU 的 -debugcon stdio 查看。
+
+config GNOS_PANIC_ON_FAULT
+    bool "页错误时 panic"
+    default n
+    help
+      用户空间页错误时直接 panic 而非发送 SIGSEGV。
+      调试内核页错误时有用。
+
+config GNOS_FAULT_BACK_LAZY
+    bool "懒缺页回写"
+    default y
+    help
+      允许未初始化的用户内存按需分配物理页面。
+      启动时更快，但页错误更多。
+
+# ---------------------------------------------------------------------------
+# 构建选项
+# ---------------------------------------------------------------------------
+menu "构建选项 (Build)"
+
+config GNOS_INITRD_SIZE
+    string "initrd 镜像大小 (MB)"
+    default "256"
+    help
+      ext2 initrd 镜像的显式大小。需要足够大以容纳所有用户空间程序。
+
+config GNOS_LIMINE_BIOS
+    bool "BIOS 引导支持 (Limine BIOS)"
+    default y
+    help
+      生成支持传统 BIOS 引导的混合 ISO 镜像。
+
+config GNOS_LIMINE_UEFI
+    bool "UEFI 引导支持 (Limine UEFI)"
+    default y
+    help
+      生成支持 UEFI 引导的混合 ISO 镜像。

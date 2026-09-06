@@ -70,6 +70,8 @@
 #define SYS_geteuid      107
 #define SYS_getegid      108
 #define SYS_arch_prctl   158
+#define SYS_prctl        157
+#define SYS_seccomp      317
 #define SYS_gettid       186
 #define SYS_futex        202
 #define SYS_set_tid_address 218
@@ -898,5 +900,93 @@ typedef struct {
 #define AT_CLKTCK   17
 #define AT_SECURE   23
 #define AT_RANDOM   25
+
+/* ---- prctl() option numbers ------------------------------------------- */
+#define PR_SET_NO_NEW_PRIVS  38
+#define PR_GET_NO_NEW_PRIVS  39
+#define PR_SET_SECCOMP       22
+#define PR_GET_SECCOMP       21
+
+/* ---- seccomp modes ---------------------------------------------------- */
+#define SECCOMP_MODE_DISABLED   0
+#define SECCOMP_MODE_STRICT     1
+#define SECCOMP_MODE_FILTER     2
+
+/* ---- seccomp(2) operations -------------------------------------------- */
+#define SECCOMP_SET_MODE_FILTER    1
+#define SECCOMP_GET_ACTION_AVAIL   2
+
+/* seccomp filter return values (action | data). */
+#define SECCOMP_RET_KILL_PROCESS 0x00000000  /* kill the process */
+#define SECCOMP_RET_KILL_THREAD  0x00010000  /* kill the thread */
+#define SECCOMP_RET_TRAP         0x00020000  /* send SIGSYS */
+#define SECCOMP_RET_ERRNO        0x00050000  /* return -errno (data = errno) */
+#define SECCOMP_RET_USER_NOTIF   0x7fc00000  /* notif to userspace (stub) */
+#define SECCOMP_RET_TRACE        0x7ff00000  /* ptrace event */
+#define SECCOMP_RET_LOG          0x7ffc0000  /* allow + log */
+#define SECCOMP_RET_ALLOW        0x7fff0000  /* allow */
+#define SECCOMP_RET_ACTION       0xffff0000  /* mask for action bits */
+
+/* ---- classic BPF constants for seccomp -------------------------------- */
+#define SECCOMP_BPF_MAXINSNS  256
+struct sock_fprog {
+    unsigned short len;     /* number of BPF instructions */
+    struct sock_filter *filter;
+};
+struct sock_filter {
+    unsigned short code;
+    unsigned char  jt;
+    unsigned char  jf;
+    unsigned int   k;
+};
+
+/* BPF opcodes (subset used by seccomp). */
+#define BPF_LD   0x00
+#define BPF_LDX  0x01
+#define BPF_ST   0x02
+#define BPF_STX  0x03
+#define BPF_ALU  0x04
+#define BPF_JMP  0x05
+#define BPF_RET  0x06
+#define BPF_MISC 0x07
+
+/* BPF size bits (in code, upper 3 bits of load/store size). */
+#define BPF_W    0x00
+#define BPF_H    0x08
+#define BPF_B    0x10
+
+/* BPF source bits (in code). */
+#define BPF_K    0x00
+#define BPF_X    0x08
+
+/* BPF modifier for LD/LDX. */
+#define BPF_ABS  0x20
+#define BPF_IND  0x40
+#define BPF_MEM  0x60
+
+/* BPF ALU operations. */
+#define BPF_ADD  0x00
+#define BPF_SUB  0x10
+#define BPF_MUL  0x20
+#define BPF_DIV  0x30
+#define BPF_AND  0x50
+#define BPF_OR   0x40
+#define BPF_LSH  0x60
+#define BPF_RSH  0x70
+
+/* BPF jump operations. */
+#define BPF_JA   0x00
+#define BPF_JEQ  0x10
+#define BPF_JGT  0x20
+#define BPF_JGE  0x30
+#define BPF_JSET 0x40
+
+/* BPF misc operations. */
+#define BPF_TAX  0x00
+#define BPF_TXA  0x80
+#define BPF_A    0x10
+
+/* Special BPF return values for seccomp. */
+#define SECCOMP_RET_ACTION_MASK  0xffff0000
 
 #endif

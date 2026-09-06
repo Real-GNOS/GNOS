@@ -1,0 +1,5 @@
+comment_char: #
+escape_char:  %
+LC_CTYPE
+copy "C"
+END LC_CTYPE
