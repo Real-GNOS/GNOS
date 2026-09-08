@@ -52,6 +52,9 @@
  * regs_t frame and calls syscall_handler(), exactly like the int 0x80 path. */
 extern uint8_t syscall_entry[];
 
+/* Forward declaration for inputinject (defined in driver/input.c). */
+extern int64_t sys_inputinject(uint64_t type, uint64_t code, uint64_t value);
+
 static void wrmsr(uint32_t msr, uint64_t val)
 {
     uint32_t lo = (uint32_t)val;
@@ -4034,6 +4037,59 @@ static int64_t sys_rw_vec(int fd, uint64_t uiov, uint64_t cnt, int writing)
     return total;
 }
 
+/*
+ * sendfile(40): copy count bytes from in_fd to out_fd.  When offset is
+ * non-NULL it is a user pointer to the source position, which this call
+ * advances by the amount copied (so a caller can resume where it left off),
+ * exactly like Linux.  GNOS has no zero-copy transfer path -- nothing here
+ * does -- so this steps through the file with a small kernel scratch
+ * buffer, which is what vfs_file_pread/vfs_file_write would do anyway.  The
+ * point of the call is the Linux-ABI shape, not a shortcut.
+ */
+static int64_t sys_sendfile(int out_fd, int in_fd, uint64_t uoff,
+                            uint64_t count)
+{
+    int oh = fd_handle(out_fd);
+    int ih = fd_handle(in_fd);
+    if (oh < 0 || ih < 0)
+        return -E_BADF;
+
+    uint64_t off = 0;
+    if (uoff) {
+        if (!user_ptr_ok(uoff, sizeof(uint64_t)))
+            return -E_INVAL;
+        memcpy(&off, (void *)(uintptr_t)uoff, sizeof(uint64_t));
+    }
+
+    int64_t total = 0;
+    char buf[512];
+
+    while (count > 0) {
+        uint32_t chunk = count > sizeof(buf) ? (uint32_t)sizeof(buf)
+                                             : (uint32_t)count;
+        int64_t n = uoff
+            ? vfs_file_pread(ih, buf, chunk, off)
+            : vfs_file_read(ih, buf, chunk);
+        if (n < 0)
+            return total ? total : n;
+        if (n == 0)
+            break;                      /* EOF */
+
+        int64_t w = vfs_file_write(oh, buf, (uint32_t)n);
+        if (w < 0)
+            return total ? total : w;
+        total += w;
+        off += (uint64_t)w;
+        count -= (uint64_t)w;
+        if ((uint32_t)w < (uint32_t)n)
+            break;                      /* target full */
+    }
+
+    if (uoff)
+        memcpy((void *)(uintptr_t)uoff, &off, sizeof(uint64_t));
+    return total;
+}
+
 /* ---- dispatch --------------------------------------------------------- */
 /* One bit per syscall number, set the first time that number is refused.  See
  * the default case at the bottom of syscall_handler(). */
@@ -4071,7 +4127,7 @@ void syscall_handler(regs_t *r)
             if (sc == -E_KILLED) {
                 /* Kill the process.  proc_exit with signal 31 (SIGSYS). */
                 p->term_sig = 31;
-                proc_exit(p);
+                proc_exit(128 + 31);
                 return;
             }
             ret = sc;
@@ -4132,6 +4188,13 @@ void syscall_handler(regs_t *r)
 
     case SYS_readv:
         ret = sys_rw_vec((int)a1, a2, a3, 0);
+        break;
+
+    /* sendfile(40): out_fd, in_fd, offset*, count.  musl exposes it as
+     * sendfile(); nginx/ffmpeg-style programs use it to shunt file bytes
+     * into a socket without sitting in userspace between the two. */
+    case SYS_sendfile:
+        ret = sys_sendfile((int)a1, (int)a2, a3, r->r10);
         break;
 
     case SYS_writev:

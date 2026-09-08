@@ -20,6 +20,11 @@
 #include "lapic.h"
 #include "cgroup.h"
 
+/* Forward declarations for functions defined in vmm.c and lapic.c but not
+ * exported through headers yet. */
+extern void vmm_pte_dump(uint64_t va);
+extern irq_handler_t lapic_timer_handler(void);
+
 struct idt_entry {
     uint16_t off_lo;
     uint16_t selector;

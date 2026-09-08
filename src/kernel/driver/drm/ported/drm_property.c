@@ -428,3 +428,44 @@ struct drm_property *drm_property_find(struct drm_device *dev, struct drm_file *
     if (!obj) return NULL;
     return container_of(obj, struct drm_property, base);
 }
+/*
+ * drm_mode_getpropblob_ioctl - Handle DRM_IOCTL_MODE_GETPROPBLOB.
+ * @dev: DRM device
+ * @data: pointer to struct drm_mode_get_blob (userspace buffer)
+ * @file_priv: DRM file handle
+ *
+ * Two-pass blob query: the first call (with data == 0 or length == 0)
+ * returns the blob length so the caller can allocate a buffer; the second
+ * call copies the blob data into the caller's buffer.
+ */
+int drm_mode_getpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_mode_get_blob    *blob_req = (struct drm_mode_get_blob *)data;
+    struct drm_property_blob    *blob;
+
+    (void)file_priv;
+
+    if (!dev || !blob_req)
+        return -EINVAL;
+
+    blob = drm_property_lookup_blob(dev, blob_req->blob_id);
+    if (!blob) {
+        blob_req->length = 0;
+        return -ENOENT;
+    }
+
+    blob_req->length = (uint32_t)blob->length;
+
+    if (blob_req->data && blob->length > 0
+        && blob_req->length >= blob->length) {
+        if (copy_to_user((void *)(uintptr_t)blob_req->data,
+                         blob->data, blob->length)) {
+            drm_property_blob_put(blob);
+            return -EFAULT;
+        }
+    }
+
+    drm_property_blob_put(blob);
+    return 0;
+}
+

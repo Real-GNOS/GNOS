@@ -325,6 +325,14 @@ void kernel_entry(void)
     acpi_self_test();
     subsys_dump();
 
+    /* kthreadd (PID 2) must be spawned before init (PID 1) so that
+     * proc_alloc() hands it the lower pid.  It will not run until
+     * sched_start(); any work queued between now and then will be
+     * processed once the scheduler is live. */
+    int kd = proc_spawn_kthreadd();
+    if (kd < 0)
+        panic("cannot start kthreadd");
+
     fbcon_puts("starting /init.elf as pid 1...\n\n");
     int pid = proc_spawn_init("/init.elf");
     if (pid < 0)

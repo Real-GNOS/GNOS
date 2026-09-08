@@ -436,7 +436,22 @@ typedef struct kthread_bootstrap {
 } kthread_bootstrap_t;
 
 void kthread_bootstrap(kthread_bootstrap_t *b) __attribute__((noreturn));
+
+/* A pending kernel-thread creation request.  kthread_create() allocates one
+ * of these and appends it to a work queue; kthreadd (PID 2) consumes the
+ * queue, creates the actual proc_t and makes it runnable.  The work item is
+ * freed once the thread has been spawned. */
+typedef struct kthread_work {
+    struct kthread_work *next;
+    proc_t *proc;               /* pre-allocated by kthread_create() */
+    const char *name;
+    void (*entry)(void *);
+    void *arg;
+} kthread_work_t;
+
 proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg);
+int  proc_spawn_kthreadd(void);
+void kthread_wakeup(void);
 
 /* ---- signals ---------------------------------------------------------- */
 int  proc_signal(proc_t *p, int sig);

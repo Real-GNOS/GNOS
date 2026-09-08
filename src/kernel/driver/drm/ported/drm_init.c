@@ -178,6 +178,7 @@ static const struct drm_ioctl_desc drm_dummy_ioctls[] = {
     {DRM_IOCTL_MODE_GETENCODER,        drm_mode_getencoder,              DRM_AUTH             },
     {DRM_IOCTL_MODE_GETCONNECTOR,      drm_mode_getconnector,            DRM_AUTH             },
     {DRM_IOCTL_MODE_GETPROPERTY,       drm_mode_getproperty_ioctl,       DRM_AUTH             },
+    {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,      DRM_AUTH             },
     {DRM_IOCTL_MODE_GETFB,             drm_mode_getfb,                   DRM_AUTH             },
     {DRM_IOCTL_MODE_ADDFB,             drm_mode_addfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_RMFB,              drm_mode_rmfb,                    DRM_MASTER | DRM_AUTH},
@@ -254,6 +255,10 @@ struct dummy_mode_cfg {
  * showing whatever that first commit contained. */
 static struct drm_framebuffer *g_scan_fb;
 
+static void drm_refresh_thread(void *arg);
+void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh,
+                           uint32_t dstep);
+
 /* Called from the PIT tick (timer_irq): push the live dumb buffer to the
  * console framebuffer and stamp the cursor over it.  Cheap enough at
  * console resolutions, and it needs no vblank client to be waiting. */
@@ -292,8 +297,6 @@ void drm_dummy_refresh(void)
     }
     drm_dummy_draw_cursor(dst, dw, dh, dstep);
 }
-
-static void drm_refresh_thread(void *arg);
 
 static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb,
                                struct drm_pending_vblank_event *event,
@@ -340,8 +343,6 @@ static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb
  * renderer draws in place into the dumb buffer, so the framebuffer never
  * changes and no page flip ever fires -- without this hook the display
  * would freeze on whatever the first commit happened to contain. */
-void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh,
-                           uint32_t dstep);
 static void drm_dummy_vblank_blit(struct drm_crtc *crtc)
 {
     struct drm_framebuffer *fb = NULL;
@@ -516,6 +517,48 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
         drm_mode_probed_add(connector, mode);
     }
 
+    /* Also add the actual bootloader framebuffer resolution as the
+     * preferred mode.  This ensures Xorg/wlroots always find a mode
+     * that matches the physical display, regardless of the hardcoded
+     * table above. */
+    {
+        uint32_t fb_w = 0, fb_h = 0, fb_pitch = 0;
+        extern void fbcon_geometry(uint32_t *w, uint32_t *h, uint32_t *pitch);
+        fbcon_geometry(&fb_w, &fb_h, &fb_pitch);
+
+        if (fb_w > 0 && fb_h > 0) {
+            /* Check if this resolution is already in the table. */
+            int duplicate = 0;
+            for (i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
+                if ((uint32_t)dummy_modes[i].hdisplay == fb_w &&
+                    (uint32_t)dummy_modes[i].vdisplay == fb_h) {
+                    duplicate = 1;
+                    break;
+                }
+            }
+
+            if (!duplicate) {
+                struct drm_display_mode *mode = drm_mode_create(dev);
+                if (mode) {
+                    char namebuf[DRM_DISPLAY_MODE_LEN];
+                    snprintf(namebuf, sizeof(namebuf), "%ux%u", fb_w, fb_h);
+                    strncpy(mode->name, namebuf, DRM_DISPLAY_MODE_LEN - 1);
+                    mode->name[DRM_DISPLAY_MODE_LEN - 1] = '\0';
+                    mode->hdisplay    = fb_w;
+                    mode->vdisplay    = fb_h;
+                    mode->htotal      = fb_w;
+                    mode->vtotal      = fb_h;
+                    mode->clock       = (int)((uint64_t)fb_w * fb_h * 60 / 1000);
+                    mode->vrefresh    = 60;
+                    mode->flags       = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
+                    mode->type        = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
+                    mode->status      = MODE_OK;
+                    drm_mode_probed_add(connector, mode);
+                }
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -665,17 +708,11 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
 
 int64_t drm_dev_read(void *file, void *addr, size_t offset, size_t size)
 {
-    (void)file;
-    (void)addr;
-    (void)offset;
-    (void)size;
-    /* The event queue is always empty today, but the answer still matters:
-     * libdrm's drmHandleEvent() read()s the node looking for kernel-pushed
-     * events.  On Linux a 0 means clean END OF FILE, and the caller treated
-     * the device as exhausted -- labwc spun reading card0/renderD128 back to
-     * back, never returned to its event loop, and no wayland client ever got
-     * served.  "No events right now" is EAGAIN, not EOF. */
-    return -EAGAIN;
+    /* Forward to the real event-dequeue logic in drm_file.c.
+     * drm_read() blocks via wait_queue_sleep() when no events are pending
+     * and returns 0 on EOF (event_closing), which is the standard Linux
+     * DRM semantics that libdrm/drmmode expect. */
+    return (int64_t)drm_read((struct drm_file *)file, (char *)addr, size, &offset);
 }
 
 size_t drm_dev_write(void *file, const void *addr, size_t offset, size_t size)

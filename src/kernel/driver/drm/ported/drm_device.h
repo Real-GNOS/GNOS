@@ -254,7 +254,7 @@ struct drm_display_mode {
 /* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
-/* CRTC helper funcs â€?stored in crtc->helper_private                 */
+/* CRTC helper funcs ï¿½?stored in crtc->helper_private                 */
 /* ------------------------------------------------------------------ */
 
 struct drm_crtc_helper_funcs {
@@ -273,7 +273,7 @@ struct drm_crtc_helper_funcs {
 };
 
 /* ------------------------------------------------------------------ */
-/* Encoder helper funcs â€?stored in encoder->helper_private           */
+/* Encoder helper funcs ï¿½?stored in encoder->helper_private           */
 /* ------------------------------------------------------------------ */
 
 struct drm_encoder_helper_funcs {
@@ -281,7 +281,7 @@ struct drm_encoder_helper_funcs {
 };
 
 /* ------------------------------------------------------------------ */
-/* Connector helper funcs â€?stored in connector->helper_private       */
+/* Connector helper funcs ï¿½?stored in connector->helper_private       */
 /* ------------------------------------------------------------------ */
 
 struct drm_connector_helper_funcs {
@@ -937,8 +937,10 @@ int drm_set_client_cap(struct drm_device *dev, void *data, struct drm_file *file
 
 /* KMS property ioctl handlers. */
 int                       drm_mode_getproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int                       drm_mode_getpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int                       drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int                       drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int                       drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 struct drm_property      *drm_property_create(struct drm_device *dev, uint32_t flags, const char *name, int num_values);
 struct drm_property      *drm_property_create_range(struct drm_device *dev, uint32_t flags, const char *name, uint64_t min, uint64_t max);
 struct drm_property      *drm_property_create_enum(struct drm_device *dev, uint32_t flags, const char *name,

@@ -79,6 +79,7 @@ extern int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_
 extern int drm_mode_getproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 
 /* KMS getfb2 (drm_framebuffer.c) */
 extern int drm_mode_getfb2_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
@@ -246,8 +247,8 @@ static const struct drm_ioctl_desc drm_core_ioctls[] = {
     {DRM_IOCTL_MODE_GETENCODER,        drm_mode_getencoder,              DRM_AUTH             },
     {DRM_IOCTL_MODE_GETCONNECTOR,      drm_mode_getconnector,            DRM_AUTH             },
     {DRM_IOCTL_MODE_GETPROPERTY,       drm_mode_getproperty_ioctl,       DRM_AUTH             },
-    {DRM_IOCTL_MODE_SETPROPERTY,       NULL,                             DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_GETPROPBLOB,       NULL,                             DRM_AUTH             },
+    {DRM_IOCTL_MODE_SETPROPERTY,       drm_mode_setproperty_ioctl,       DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,      DRM_AUTH             },
     {DRM_IOCTL_MODE_GETFB,             drm_mode_getfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_ADDFB,             drm_mode_addfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_RMFB,              drm_mode_rmfb,                    DRM_MASTER | DRM_AUTH},

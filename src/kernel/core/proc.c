@@ -38,6 +38,9 @@ extern void switch_context(uint64_t *save_rsp, uint64_t load_rsp);
 extern void ret_to_user(void);
 extern void kthread_trampoline(void);
 
+/* Forward declaration — defined later in this file (see schedule()). */
+static int schedule(void);
+
 /*
  * Argument-vector limits.  These are the real ceiling on what a shell can
  * pass to a program, and BusyBox routinely receives more than sixteen words
@@ -88,6 +91,13 @@ static int     g_next_pid = 1;
 static spinlock_t g_proc_lock;
 static proc_t    *g_rq[MAX_PROCS];
 static unsigned   g_rq_size;
+
+/* ---- kthreadd work queue -----------------------------------------------
+ * kthread_create() appends work items here; kthreadd (PID 2) drains the
+ * queue and creates the actual kernel threads.  Protected by the same
+ * g_proc_lock used for the run queue -- the critical section is tiny. */
+static kthread_work_t *g_kthread_work_head;
+static kthread_work_t *g_kthread_work_tail;
 
 /*
  * Virtual time is kept in fixed-point units of 1/1024 scheduler tick so
@@ -761,48 +771,176 @@ void kthread_bootstrap(kthread_bootstrap_t *b)
     __builtin_unreachable();
 }
 
-proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg)
+/* ---- kthreadd (PID 2) --------------------------------------------------
+ * Linux requires a PID 2 "kthreadd" that owns all kernel threads.  When a
+ * kernel subsystem calls kthread_create(), it queues a work item here and
+ * kthreadd wakes, allocates a proc_t from the kernel page tables, sets up
+ * the trampoline frame, and makes the new thread runnable.  This keeps the
+ * process tree tidy (ps shows [kthreadd] as parent of every [foo] thread)
+ * and satisfies the tgid/ppid invariants musl pthreads relies on. */
+static proc_t *g_kthreadd;
+
+void kthread_wakeup(void)
+{
+    if (g_kthreadd && g_kthreadd->state == PROC_BLOCKED) {
+        proc_make_runnable(g_kthreadd);
+        schedule();
+    }
+}
+
+/* The work-queue consumer: sleep when empty, finish one thread per item.
+ * kthread_create() has already allocated the proc_t and set its name;
+ * kthreadd fills in the remaining fields (ppid, kernel as, trampoline)
+ * and makes it runnable. */
+static void kthreadd_main(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        spin_lock(&g_proc_lock);
+        if (!g_kthread_work_head) {
+            g_kthreadd->state = PROC_BLOCKED;
+            spin_unlock(&g_proc_lock);
+            schedule();
+            continue;
+        }
+        /* Dequeue the oldest request. */
+        kthread_work_t *w = g_kthread_work_head;
+        g_kthread_work_head = w->next;
+        if (!g_kthread_work_head)
+            g_kthread_work_tail = NULL;
+        spin_unlock(&g_proc_lock);
+
+        proc_t *p = w->proc;
+        if (!p) {
+            kfree(w);
+            continue;
+        }
+
+        kthread_bootstrap_t *b = kmalloc(sizeof(*b));
+        if (!b) {
+            p->state = PROC_UNUSED;
+            kfree(w);
+            continue;
+        }
+        b->entry = w->entry;
+        b->arg   = w->arg;
+        kfree(w);
+
+        p->as      = vmm_kernel_as();
+        p->fs_base = 0;
+        p->uid = p->euid = p->suid = 0;
+        p->ppid = g_kthreadd->pid;
+        p->pgid = p->pid;
+        p->sid  = g_kthreadd->sid;
+
+        /* Fabricate a switch_context frame: six callee-saved registers and
+         * a return address of kthread_trampoline. */
+        uint64_t sp = p->kstack_top;
+        sp -= 8;
+        *(uint64_t *)(uintptr_t)sp = (uint64_t)(uintptr_t)kthread_trampoline;
+        sp -= 6 * 8;
+        uint64_t *regs = (uint64_t *)(uintptr_t)sp;
+        regs[0] = 0;                        /* r15 */
+        regs[1] = 0;                        /* r14 */
+        regs[2] = 0;                        /* r13 */
+        regs[3] = (uint64_t)(uintptr_t)b;   /* r12 */
+        regs[4] = 0;                        /* rbx */
+        regs[5] = 0;                        /* rbp */
+        p->saved_rsp = sp;
+
+        if (cg_attach_new(p, CG_ROOT) < 0) {
+            kfree(b);
+            p->state = PROC_UNUSED;
+            continue;
+        }
+        proc_make_runnable(p);
+    }
+    __builtin_unreachable();
+}
+
+/* Spawn kthreadd as PID 2.  Must be called *before* proc_spawn_init() so
+ * that proc_alloc() hands it the second-lowest pid. */
+int proc_spawn_kthreadd(void)
 {
     proc_t *p = proc_alloc();
     if (!p)
-        return NULL;
+        return -1;
 
+    p->as      = vmm_kernel_as();
+    p->fs_base = 0;
+    p->uid = p->euid = p->suid = 0;
+    p->ppid = 0;
+    p->pgid = p->pid;
+    p->sid  = p->pid;
+    strncpy(p->name, "kthreadd", sizeof(p->name) - 1);
+
+    /* Fabricate a switch_context frame pointing at kthreadd_main(NULL). */
     kthread_bootstrap_t *b = kmalloc(sizeof(*b));
-    if (!b)
-        return NULL;            /* slot left PROC_UNUSED: reusable */
+    if (!b) {
+        p->state = PROC_UNUSED;
+        return -1;
+    }
+    b->entry = kthreadd_main;
+    b->arg   = NULL;
 
-    b->entry = entry;
-    b->arg   = arg;
-
-    p->as       = vmm_kernel_as();
-    p->fs_base  = 0;
-    p->uid = p->euid = p->suid = 0;     /* kernel threads are root */
-    if (name)
-        strncpy(p->name, name, sizeof(p->name) - 1);
-
-    /* Fabricate a switch_context frame: six callee-saved registers (R12 =
-     * bootstrap) and a return address of kthread_trampoline, exactly the
-     * shape ret_to_user frames have except for who the return lands on. */
     uint64_t sp = p->kstack_top;
     sp -= 8;
     *(uint64_t *)(uintptr_t)sp = (uint64_t)(uintptr_t)kthread_trampoline;
     sp -= 6 * 8;
     uint64_t *regs = (uint64_t *)(uintptr_t)sp;
-    regs[0] = 0;                            /* r15 */
-    regs[1] = 0;                            /* r14 */
-    regs[2] = 0;                            /* r13 */
-    regs[3] = (uint64_t)(uintptr_t)b;       /* r12 */
-    regs[4] = 0;                            /* rbx */
-    regs[5] = 0;                            /* rbp */
+    regs[0] = 0;                        /* r15 */
+    regs[1] = 0;                        /* r14 */
+    regs[2] = 0;                        /* r13 */
+    regs[3] = (uint64_t)(uintptr_t)b;   /* r12 */
+    regs[4] = 0;                        /* rbx */
+    regs[5] = 0;                        /* rbp */
     p->saved_rsp = sp;
 
-    /* Kernel threads belong to the root cgroup. */
     if (cg_attach_new(p, CG_ROOT) < 0) {
         kfree(b);
         p->state = PROC_UNUSED;
+        return -1;
+    }
+
+    g_kthreadd = p;
+    proc_make_runnable(p);
+    return p->pid;
+}
+
+proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg)
+{
+    if (!entry)
+        return NULL;
+
+    proc_t *p = proc_alloc();
+    if (!p)
+        return NULL;
+
+    p->as = vmm_kernel_as();
+    if (name)
+        strncpy(p->name, name, sizeof(p->name) - 1);
+
+    kthread_work_t *w = kmalloc(sizeof(*w));
+    if (!w) {
+        p->state = PROC_UNUSED;
         return NULL;
     }
-    proc_make_runnable(p);
+    w->proc  = p;
+    w->name  = name;
+    w->entry = entry;
+    w->arg   = arg;
+    w->next  = NULL;
+
+    spin_lock(&g_proc_lock);
+    if (!g_kthread_work_tail)
+        g_kthread_work_head = w;
+    else
+        g_kthread_work_tail->next = w;
+    g_kthread_work_tail = w;
+    spin_unlock(&g_proc_lock);
+
+    kthread_wakeup();
     return p;
 }
 

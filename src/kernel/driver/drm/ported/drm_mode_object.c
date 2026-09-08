@@ -390,3 +390,35 @@ void drm_property_set_destroy(struct drm_property_set *set)
     free(set->values);
     memset(set, 0, sizeof(*set));
 }
+
+/* ------------------------------------------------------------------ */
+/* Legacy SETPROPERTY wrapper (DRM_IOCTL_MODE_SETPROPERTY)              */
+/* Xorg's modesetting driver falls back to this when atomic is not     */
+/* available.  Convert the old connector-centric format to the object  */
+/* format and delegate.                                                */
+/* ------------------------------------------------------------------ */
+
+struct drm_mode_set_property {
+    uint64_t value;
+    uint32_t prop_id;
+    uint32_t connector_id;
+};
+
+int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data,
+                               struct drm_file *file_priv)
+{
+    struct drm_mode_set_property *old = (struct drm_mode_set_property *)data;
+    struct drm_mode_obj_set_property  obj;
+
+    if (!dev || !old)
+        return -EINVAL;
+
+    /* Convert legacy format to object-based format. */
+    memset(&obj, 0, sizeof(obj));
+    obj.obj_id   = old->connector_id;
+    obj.obj_type = DRM_MODE_OBJECT_CONNECTOR;
+    obj.prop_id  = old->prop_id;
+    obj.value    = old->value;
+
+    return drm_mode_obj_setproperty_ioctl(dev, &obj, file_priv);
+}
