@@ -896,6 +896,21 @@ static int64_t sys_mount(uint64_t usrc, uint64_t utgt, uint64_t ufs,
         return vfs_mount_tmpfs(abs);
     if (strcmp(fst, "cgroup2") == 0 || strcmp(fst, "cgroup") == 0)
         return vfs_mount_cgroupfs(abs);
+    /* ext2/ext3/ext4 all name the same on-disk family this kernel reads;
+     * the volume itself decides which layout its files use.  src must be
+     * a /dev block device. */
+    if (strcmp(fst, "ext4") == 0 || strcmp(fst, "ext3") == 0 ||
+        strcmp(fst, "ext2") == 0) {
+        if (!user_ptr_ok(usrc, 1))
+            return -E_FAULT;
+        char src[32];
+        strncpy(src, (const char *)(uintptr_t)usrc, sizeof(src) - 1);
+        src[sizeof(src) - 1] = 0;
+        const char *dev = src;
+        if (strncmp(dev, "/dev/", 5) == 0)
+            dev += 5;                   /* the VFS dev table drops the prefix */
+        return vfs_mount_bdev(abs, dev);
+    }
 
     return -E_NODEV;
 }

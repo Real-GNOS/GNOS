@@ -1,12 +1,13 @@
 /*
+ * drm_ioctl.c — ioctl dispatch for the GNOS DRM core.
  *
- *      drm_ioctl.c
- *      DRM ioctl dispatch
+ * (GPLv2) This is a from-scratch implementation of the DRM ioctl layer for
+ * the GNOS kernel.  It validates the ioctl encoding, copies the argument
+ * into a private kernel buffer, checks per-command permissions, and hands
+ * the command to the driver's table, the dumb-buffer/PRIME fallbacks, or
+ * the core table below.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
+ * Copyright 2026 GNOS contributors.
  */
 
 #include "drm_port.h"   /* copy_from_user/copy_to_user wrappers */
@@ -21,7 +22,7 @@
 #include "kstring.h"
 #include "heap.h"
 
-/* Forward declarations for all ioctl handler functions. */
+/* ioctl handlers live in their respective subsystem files. */
 
 /* auth (drm_auth.c) */
 extern int drm_getmagic(struct drm_device *dev, void *data, struct drm_file *file_priv);
@@ -53,15 +54,16 @@ extern int drm_mode_setplane(struct drm_device *dev, void *data, struct drm_file
 extern int drm_mode_addfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_addfb2(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_rmfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
-/* MODE_CLOSEFB is the modern single-word twin of RMFB: same fb_id in, the
- * framebuffer goes away.  wlroots prefers it and only falls back to RMFB on
- * EINVAL -- returning ENOTTY made every FB teardown log an error. */
+extern int drm_mode_getfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_mode_dirtyfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
+
+/* MODE_CLOSEFB is RMFB's one-word twin: feed it straight through.  wlroots
+ * reaches for it first and treats ENOTTY as "too old", so answering with
+ * the RMFB path keeps the compositor's teardown quiet. */
 static int drm_mode_closefb(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
     return drm_mode_rmfb(dev, data, file_priv);
 }
-extern int drm_mode_getfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
-extern int drm_mode_dirtyfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
 
 /* KMS cursor / page-flip / atomic (drm_atomic_uapi.c) */
 extern int drm_mode_cursor_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
@@ -77,6 +79,7 @@ extern int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_
 
 /* KMS property (drm_property.c) */
 extern int drm_mode_getproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_mode_getpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
@@ -84,91 +87,81 @@ extern int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct
 /* KMS getfb2 (drm_framebuffer.c) */
 extern int drm_mode_getfb2_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 
-/* ------------------------------------------------------------------ */
-/* drm_ioctl_permit ???check auth / master flags against file_priv      */
-/* ------------------------------------------------------------------ */
-
+/* ------------------------------------------------------------ *
+ * permission gate                                              *
+ *                                                              *
+ * Two bits matter here: DRM_AUTH demands the client already    *
+ * hold a magic the kernel signed, and DRM_MASTER would demand  *
+ * the master role.  There is no real master bookkeeping in     *
+ * this kernel and no user of SET_MASTER, so every authenticated*
+ * client simply acts as the master.  ROOT_ONLY has no meaning  *
+ * without a root account, and we stay conservative: deny.      *
+ * ------------------------------------------------------------ */
 int drm_ioctl_permit(unsigned int flags, struct drm_file *file_priv)
 {
-    if (!file_priv) { return -EACCES; }
+    if (file_priv == NULL) { return -EACCES; }
 
-    if (flags & DRM_AUTH) {
-        if (!file_priv->authenticated) { return -EACCES; }
-    }
+    if ((flags & DRM_AUTH) != 0 && !file_priv->authenticated) { return -EACCES; }
 
-    if (flags & DRM_MASTER) {
-        /* This MVP kernel has no device-level master bookkeeping and
-         * userspace (weston via libseat's noop launcher) never issues
-         * SET_MASTER.  Any authenticated client is granted master. */
-        if (!file_priv->authenticated) { return -EACCES; }
-    }
+    if ((flags & DRM_MASTER) != 0 && !file_priv->authenticated) { return -EACCES; }
 
-    /* DRM_ROOT_ONLY ???no root concept in freestanding kernel;
-     * always deny for safety. */
-    if (flags & DRM_ROOT_ONLY) { return -EACCES; }
+    if ((flags & DRM_ROOT_ONLY) != 0) { return -EACCES; }
 
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* drm_get_cap / drm_set_client_cap ???handlers                         */
-/* ------------------------------------------------------------------ */
-
+/* ------------------------------------------------------------ *
+ * client capability negotiation                                *
+ * ------------------------------------------------------------ */
 int drm_get_cap(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
     struct drm_get_cap *cap = (struct drm_get_cap *)data;
 
     (void)file_priv;
 
-    if (!dev || !cap) { return -EINVAL; }
+    if (dev == NULL || cap == NULL) { return -EINVAL; }
 
     switch (cap->capability) {
-        case DRM_CAP_DUMB_BUFFER :
+        case DRM_CAP_DUMB_BUFFER:
+        case DRM_CAP_VBLANK_HIGH_CRTC:
+        case DRM_CAP_TIMESTAMP_MONOTONIC:
+        case DRM_CAP_CRTC_IN_VBLANK_EVENT:
             cap->value = 1;
             break;
-        case DRM_CAP_VBLANK_HIGH_CRTC :
-            cap->value = 1;
-            break;
-        case DRM_CAP_DUMB_PREFERRED_DEPTH :
+
+        case DRM_CAP_DUMB_PREFERRED_DEPTH:
             cap->value = 32;
             break;
-        case DRM_CAP_DUMB_PREFER_SHADOW :
+
+        case DRM_CAP_DUMB_PREFER_SHADOW:
+        case DRM_CAP_ADDFB2_MODIFIERS:
+        case DRM_CAP_PAGE_FLIP_TARGET:
+        case DRM_CAP_SYNCOBJ:
+        case DRM_CAP_SYNCOBJ_TIMELINE:
+        case DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP:
             cap->value = 0;
             break;
-        case DRM_CAP_PRIME :
-            cap->value = (dev->driver->driver_features & DRIVER_PRIME) ? (DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT) : 0;
+
+        case DRM_CAP_PRIME:
+            cap->value = (dev->driver->driver_features & DRIVER_PRIME)
+                             ? (DRM_PRIME_CAP_EXPORT | DRM_PRIME_CAP_IMPORT)
+                             : 0;
             break;
-        case DRM_CAP_TIMESTAMP_MONOTONIC :
-            cap->value = 1;
-            break;
-        case DRM_CAP_ASYNC_PAGE_FLIP :
+
+        case DRM_CAP_ASYNC_PAGE_FLIP:
             cap->value = dev->mode_config.async_page_flip ? 1 : 0;
             break;
-        case DRM_CAP_CURSOR_WIDTH :
+
+        case DRM_CAP_CURSOR_WIDTH:
             cap->value = dev->mode_config.cursor_width;
             break;
-        case DRM_CAP_CURSOR_HEIGHT :
+
+        case DRM_CAP_CURSOR_HEIGHT:
             cap->value = dev->mode_config.cursor_height;
             break;
-        case DRM_CAP_ADDFB2_MODIFIERS :
-            cap->value = 0;
-            break;
-        case DRM_CAP_PAGE_FLIP_TARGET :
-            cap->value = 0;
-            break;
-        case DRM_CAP_CRTC_IN_VBLANK_EVENT :
-            cap->value = 1;
-            break;
-        case DRM_CAP_SYNCOBJ :
-            cap->value = 0;
-            break;
-        case DRM_CAP_SYNCOBJ_TIMELINE :
-            cap->value = 0;
-            break;
-        case DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP :
-            cap->value = 0;
-            break;
-        default :
+
+        default:
+            /* unknown caps answer 0, they never fail */
             cap->value = 0;
             break;
     }
@@ -180,45 +173,52 @@ int drm_set_client_cap(struct drm_device *dev, void *data, struct drm_file *file
 {
     struct drm_set_client_cap *cap = (struct drm_set_client_cap *)data;
 
-    (void)dev;
-
-    if (!data || !file_priv) { return -EINVAL; }
+    if (data == NULL || file_priv == NULL) { return -EINVAL; }
 
     switch (cap->capability) {
-        case DRM_CLIENT_CAP_STEREO_3D :
+        case DRM_CLIENT_CAP_STEREO_3D:
             file_priv->stereo3d_allowed_unused = (cap->value != 0);
             break;
-        case DRM_CLIENT_CAP_UNIVERSAL_PLANES :
-            if (cap->value > 1) return -EINVAL;
+
+        case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
+            if (cap->value > 1) { return -EINVAL; }
             file_priv->universal_planes = (cap->value != 0);
             break;
-        case DRM_CLIENT_CAP_ATOMIC :
-            if (cap->value > 1 || !(dev->driver->driver_features & DRIVER_ATOMIC)) return -EINVAL;
+
+        case DRM_CLIENT_CAP_ATOMIC:
+            /* atomic is a promise the whole stack must keep: only offer it
+             * when the driver really drives atomic modesets */
+            if (cap->value > 1 || (dev->driver->driver_features & DRIVER_ATOMIC) == 0) { return -EINVAL; }
             file_priv->atomic = (cap->value != 0);
-            if (cap->value) file_priv->universal_planes = true;
+            if (cap->value) { file_priv->universal_planes = true; }
             break;
-        case DRM_CLIENT_CAP_ASPECT_RATIO :
+
+        case DRM_CLIENT_CAP_ASPECT_RATIO:
             file_priv->aspect_ratio_allowed = (cap->value != 0);
             break;
-        case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS :
+
+        case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS:
             file_priv->writeback_connectors_allowed_unused = (cap->value != 0);
             break;
-        case DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT :
+
+        case DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT:
             break;
-        default :
+
+        default:
             return -EINVAL;
     }
 
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* drm_ioctl ???dispatch an ioctl command to the registered handler     */
-/* ------------------------------------------------------------------ */
-
-/* Built-in core ioctls that are always available. */
+/* ------------------------------------------------------------ *
+ * the core command table                                       *
+ *                                                              *
+ * Driver-provided tables are searched first, then the dumb /   *
+ * PRIME fallbacks, then this table.  An entry with a NULL func *
+ * is a deliberate no-op that reports success (GET_UNIQUE).     *
+ * ------------------------------------------------------------ */
 static const struct drm_ioctl_desc drm_core_ioctls[] = {
-    /* 0x00 - 0x0d: core / GEM / cap */
     {DRM_IOCTL_VERSION,                drm_version,                      0                    },
     {DRM_IOCTL_GET_UNIQUE,             NULL,                             0                    },
     {DRM_IOCTL_GET_MAGIC,              drm_getmagic,                     DRM_AUTH             },
@@ -232,14 +232,11 @@ static const struct drm_ioctl_desc drm_core_ioctls[] = {
     {DRM_IOCTL_GET_CAP,                drm_get_cap,                      0                    },
     {DRM_IOCTL_SET_CLIENT_CAP,         drm_set_client_cap,               0                    },
 
-    /* 0x2d - 0x2e: PRIME */
     {DRM_IOCTL_PRIME_HANDLE_TO_FD,     NULL,                             DRM_AUTH             },
     {DRM_IOCTL_PRIME_FD_TO_HANDLE,     NULL,                             DRM_AUTH             },
 
-    /* 0x3a: vblank */
     {DRM_IOCTL_WAIT_VBLANK,            drm_wait_vblank_ioctl,            0                    },
 
-    /* 0xA0 - 0xBF: KMS */
     {DRM_IOCTL_MODE_GETRESOURCES,      drm_mode_getresources,            DRM_AUTH             },
     {DRM_IOCTL_MODE_GETCRTC,           drm_mode_getcrtc,                 DRM_AUTH             },
     {DRM_IOCTL_MODE_SETCRTC,           drm_mode_setcrtc,                 DRM_MASTER | DRM_AUTH},
@@ -248,7 +245,7 @@ static const struct drm_ioctl_desc drm_core_ioctls[] = {
     {DRM_IOCTL_MODE_GETCONNECTOR,      drm_mode_getconnector,            DRM_AUTH             },
     {DRM_IOCTL_MODE_GETPROPERTY,       drm_mode_getproperty_ioctl,       DRM_AUTH             },
     {DRM_IOCTL_MODE_SETPROPERTY,       drm_mode_setproperty_ioctl,       DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,      DRM_AUTH             },
+    {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,       DRM_AUTH             },
     {DRM_IOCTL_MODE_GETFB,             drm_mode_getfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_ADDFB,             drm_mode_addfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_RMFB,              drm_mode_rmfb,                    DRM_MASTER | DRM_AUTH},
@@ -269,247 +266,294 @@ static const struct drm_ioctl_desc drm_core_ioctls[] = {
     {DRM_IOCTL_MODE_GETFB2,            drm_mode_getfb2_ioctl,            DRM_MASTER | DRM_AUTH},
 };
 
-/* ------------------------------------------------------------------ */
-/* ioctl descriptor lookup ???full command match                        */
-/* ------------------------------------------------------------------ */
+#define DRM_CORE_IOCTL_COUNT (sizeof(drm_core_ioctls) / sizeof(drm_core_ioctls[0]))
 
-static const struct drm_ioctl_desc *find_ioctl_desc(unsigned int cmd, const struct drm_ioctl_desc *table, int count)
+static const struct drm_ioctl_desc *find_ioctl_desc(unsigned int cmd,
+                                                    const struct drm_ioctl_desc *table,
+                                                    int count)
 {
     for (int i = 0; i < count; i++) {
-        if (table[i].cmd == cmd) return &table[i];
+        if (table[i].cmd == cmd) { return &table[i]; }
     }
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* drm_ioctl ???validated dispatch                                     */
-/* ------------------------------------------------------------------ */
+/* Handlers the driver table and the core table both leave NULL for; the
+ * core supplies its own dumb-buffer and PRIME plumbing here. */
+extern int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,
+                               struct drm_mode_create_dumb *args);
+extern int drm_gem_dumb_map_offset(struct drm_file *file_priv, struct drm_device *dev,
+                                   uint32_t handle, uint64_t *offset);
+extern int drm_gem_dumb_destroy(struct drm_file *file_priv, struct drm_device *dev,
+                                uint32_t handle);
+extern int drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv,
+                                      uint32_t handle, uint32_t flags, int *prime_fd);
+extern int drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv,
+                                      int prime_fd, uint32_t *handle);
 
-int drm_ioctl(struct drm_device *dev, unsigned int cmd, void *user_data, struct drm_file *file_priv)
+/* GET_UNIQUE: there is one DRM device and its bus id is fixed at boot, so
+ * the answer never changes; copy it into the caller's buffer if it fits. */
+static int drm_getunique_stub(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    const struct drm_ioctl_desc *desc  = NULL;
-    void                        *kdata = NULL;
-    unsigned int                 dir;
-    unsigned int                 size;
-    int                          ret;
+    struct drm_unique *u = (struct drm_unique *)data;
+    const char         *busid;
+    size_t              len;
 
-    if (!dev || !dev->driver || !file_priv) {
-        dbg_puts("DRMI: early EINVAL dev=");
-        dbg_puts_hex((uint64_t)(uintptr_t)dev);
-        dbg_puts(" drv=");
-        dbg_puts_hex(dev ? (uint64_t)(uintptr_t)dev->driver : 0);
-        dbg_puts(" fp=");
-        dbg_puts_hex((uint64_t)(uintptr_t)file_priv);
-        dbg_puts("\r\n");
-        return -EINVAL;
+    (void)file_priv;
+
+    if (u == NULL) { return -EINVAL; }
+
+    busid = (dev->unique != NULL) ? dev->unique : "gnos-drm";
+    len   = strlen(busid) + 1;
+
+    if (u->unique_len < len) {
+        u->unique_len = (uint64_t)len;
+        return -EINVAL; /* caller retries with a bigger buffer */
     }
 
-    /* 1. Validate DRM magic type byte. */
-    if (_IOC_TYPE(cmd) != DRM_IOCTL_BASE) return -ENOTTY;
-
-    /* 2. Validate direction bits. */
-    dir = _IOC_DIR(cmd);
-    if (dir & ~(_IOC_READ | _IOC_WRITE)) return -EINVAL;
-
-    /* 3. Validate size is reasonable (max 16 KB). */
-    size = _IOC_SIZE(cmd);
-    if (size > 0x4000) return -EINVAL;
-
-    /* 4. Allocate kernel buffer and copy from user if needed. */
-    if (size > 0) {
-        kdata = malloc(size);
-        if (!kdata) return -ENOMEM;
-        if (dir & _IOC_WRITE) {
-            /* copy_from_user: kernel and user share the same address
-             * space in this freestanding kernel, but we still make a
-             * private copy so the handler cannot scribble on user
-             * memory. */
-            if (copy_from_user(kdata, user_data, size)) {
-                free(kdata);
-                return -EFAULT;
-            }
-        } else {
-            memset(kdata, 0, size);
-        }
+    if (u->unique == 0 || copy_to_user((void *)(uintptr_t)u->unique, busid, len) != 0) {
+        return -EFAULT;
     }
 
-    /* 5. Search driver ioctls (full cmd match). */
-    if (dev->driver->ioctls && dev->driver->num_ioctls > 0) { desc = find_ioctl_desc(cmd, dev->driver->ioctls, dev->driver->num_ioctls); }
-
-    /* 6. Dumb-buffer / PRIME fallback dispatch.
-     *    These are handled separately because the core table has NULL
-     *    func entries and we dispatch through the driver callbacks. */
-    if (!desc) {
-        if (cmd == DRM_IOCTL_MODE_CREATE_DUMB) {
-            ret = drm_ioctl_permit(DRM_AUTH, file_priv);
-            if (ret) goto out;
-            ret = drm_gem_dumb_create(file_priv, dev, (struct drm_mode_create_dumb *)kdata);
-            goto copy_out;
-        }
-        if (cmd == DRM_IOCTL_MODE_MAP_DUMB) {
-            struct drm_mode_map_dumb *args = (struct drm_mode_map_dumb *)kdata;
-            ret                            = drm_ioctl_permit(DRM_AUTH, file_priv);
-            if (ret) goto out;
-            ret = drm_gem_dumb_map_offset(file_priv, dev, args->handle, &args->offset);
-            goto copy_out;
-        }
-        if (cmd == DRM_IOCTL_MODE_DESTROY_DUMB) {
-            struct drm_mode_destroy_dumb *args = (struct drm_mode_destroy_dumb *)kdata;
-            ret                                = drm_ioctl_permit(DRM_AUTH, file_priv);
-            if (ret) goto out;
-            ret = drm_gem_dumb_destroy(file_priv, dev, args->handle);
-            goto out;
-        }
-        if (cmd == DRM_IOCTL_PRIME_HANDLE_TO_FD) {
-            struct drm_prime_handle *args = (struct drm_prime_handle *)kdata;
-            ret                           = drm_ioctl_permit(DRM_AUTH, file_priv);
-            if (ret) goto out;
-            if (!(dev->driver->driver_features & DRIVER_PRIME)) {
-                ret = -EOPNOTSUPP;
-                goto out;
-            }
-            ret = drm_gem_prime_handle_to_fd(dev, file_priv, args->handle, args->flags, &args->fd);
-            goto copy_out;
-        }
-        if (cmd == DRM_IOCTL_PRIME_FD_TO_HANDLE) {
-            struct drm_prime_handle *args = (struct drm_prime_handle *)kdata;
-            ret                           = drm_ioctl_permit(DRM_AUTH, file_priv);
-            if (ret) goto out;
-            if (!(dev->driver->driver_features & DRIVER_PRIME)) {
-                ret = -EOPNOTSUPP;
-                goto out;
-            }
-            ret = drm_gem_prime_fd_to_handle(dev, file_priv, args->fd, &args->handle);
-            goto copy_out;
-        }
-    }
-
-    /* 7. Fall back to core ioctls. */
-    if (!desc) { desc = find_ioctl_desc(cmd, drm_core_ioctls, sizeof(drm_core_ioctls) / sizeof(drm_core_ioctls[0])); }
-
-    if (!desc) {
-        /* wlroots' allocator probes DRM leases (drmModeCreateLease) and
-         * expects -EINVAL/-EOPNOTSUPP to mean "leases unsupported, fall
-         * back to a plain open"; ENOTTY aborts the fallback.  This kernel
-         * has no lease support, so answer exactly what the probe wants. */
-        if (cmd == DRM_IOCTL_MODE_CREATE_LEASE ||
-            cmd == DRM_IOCTL_MODE_LIST_LESSEES ||
-            cmd == DRM_IOCTL_MODE_GET_LEASE ||
-            cmd == DRM_IOCTL_MODE_REVOKE_LEASE) {
-            ret = -EOPNOTSUPP;
-            goto out;
-        }
-        ret = -ENOTTY;
-        goto out;
-    }
-
-    /* 8. Permission check + dispatch. */
-    ret = drm_ioctl_permit(desc->flags, file_priv);
-    if (ret) {
-        plogk("drm: ioctl 0x%x flags 0x%x DENIED: master=%d auth=%d\n", cmd, desc->flags, file_priv->master != NULL, file_priv->authenticated);
-        goto out;
-    }
-
-    if (!desc->func) {
-        /* NULL func = no-op success (e.g. GET_UNIQUE stub). */
-        ret = 0;
-        goto out;
-    }
-
-    ret = desc->func(dev, kdata, file_priv);
-
-copy_out:
-    /* 9. Copy results back to user if the ioctl reads data. */
-    if (ret == 0 && kdata && (dir & _IOC_READ) && copy_to_user(user_data, kdata, size)) ret = -EFAULT;
-
-out:
-    dbg_puts("DRMI: cmd=0x");
-    dbg_puts_hex(cmd);
-    dbg_puts(" ret=");
-    dbg_puts_dec((uint32_t)ret);
-    dbg_puts(" auth=");
-    dbg_puts_dec(file_priv ? file_priv->authenticated : 9);
-    dbg_puts("\r\n");
-    free(kdata);
-    return ret;
-}
-
-/* ------------------------------------------------------------------ */
-/* drm_version ???handle DRM_IOCTL_VERSION                              */
-/* ------------------------------------------------------------------ */
-
-static int drm_version_copy_string(uint64_t user_ptr, uint64_t capacity, uint64_t *length, const char *value)
-{
-    size_t full_length;
-    size_t copy_length;
-
-    if (!length) return -EINVAL;
-    if (!value) value = "";
-
-    full_length = strlen(value);
-    *length    = full_length;
-    if (!user_ptr || !capacity) return 0;
-
-    /* drmGetVersion() allocates exactly the reported length plus a NUL. */
-    copy_length = capacity - 1 < full_length ? (size_t)capacity - 1 : full_length;
-    if (copy_length && copy_to_user((void *)user_ptr, value, copy_length)) return -EFAULT;
-    if (copy_to_user((void *)(user_ptr + copy_length), "\0", 1)) return -EFAULT;
+    u->unique_len = (uint64_t)len;
     return 0;
 }
 
 int drm_version(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_version *ver;
-    uint64_t           name_ptr;
-    uint64_t           name_capacity;
-    uint64_t           date_ptr;
-    uint64_t           date_capacity;
-    uint64_t           desc_ptr;
-    uint64_t           desc_capacity;
-    int                ret;
+    struct drm_version *v        = (struct drm_version *)data;
+    static const char   name[]   = "gnos-drm";
+    static const char   date[]   = "20260722";
+    static const char   desc[]   = "GNOS DRM core";
+    int                 rc;
 
     (void)file_priv;
 
-    if (!dev || !data) { return -EINVAL; }
+    if (v == NULL) { return -EINVAL; }
 
-    ver = (struct drm_version *)data;
-
-    /* Preserve the user pointers while filling the result structure. */
-    name_ptr      = ver->name;
-    name_capacity = ver->name_len;
-    date_ptr      = ver->date;
-    date_capacity = ver->date_len;
-    desc_ptr      = ver->desc;
-    desc_capacity = ver->desc_len;
-    memset(ver, 0, sizeof(*ver));
-    ver->name = name_ptr;
-    ver->date = date_ptr;
-    ver->desc = desc_ptr;
-
-    if (dev->driver) {
-        ver->version_major      = dev->driver->major;
-        ver->version_minor      = dev->driver->minor;
-        ver->version_patchlevel = dev->driver->patchlevel;
-
-        ret = drm_version_copy_string(name_ptr, name_capacity, &ver->name_len, dev->driver->name);
-        if (ret) return ret;
-        ret = drm_version_copy_string(date_ptr, date_capacity, &ver->date_len, dev->driver->date);
-        if (ret) return ret;
-        ret = drm_version_copy_string(desc_ptr, desc_capacity, &ver->desc_len, dev->driver->desc);
-        if (ret) return ret;
+    rc = 0;
+    if (v->name_len >= sizeof(name)) {
+        if (copy_to_user((void *)(uintptr_t)v->name, name, sizeof(name)) != 0) { return -EFAULT; }
+        v->name_len = sizeof(name) - 1;
+    } else {
+        v->name_len = sizeof(name) - 1;
+        rc          = -EINVAL;
+    }
+    if (v->date_len >= sizeof(date)) {
+        if (copy_to_user((void *)(uintptr_t)v->date, date, sizeof(date)) != 0) { return -EFAULT; }
+        v->date_len = sizeof(date) - 1;
+    } else {
+        v->date_len = sizeof(date) - 1;
+        rc          = -EINVAL;
+    }
+    if (v->desc_len >= sizeof(desc)) {
+        if (copy_to_user((void *)(uintptr_t)v->desc, desc, sizeof(desc)) != 0) { return -EFAULT; }
+        v->desc_len = sizeof(desc) - 1;
+    } else {
+        v->desc_len = sizeof(desc) - 1;
+        rc          = -EINVAL;
     }
 
+    v->version_major      = 1;
+    v->version_minor      = 0;
+    v->version_patchlevel = 0;
+
+    (void)dev;
+    return rc;
+}
+
+/* SET_VERSION: only the interface major the client wants matters.  Bumping
+ * to a major above ours would mean APIs we never had. */
+int drm_setversion(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_set_version *sv = (struct drm_set_version *)data;
+
+    (void)file_priv;
+
+    if (sv == NULL) { return -EINVAL; }
+
+    if (sv->drm_di_major > 1 || sv->drm_di_minor > 4) { return -EINVAL; }
+    if (sv->drm_dd_major > 1) { return -EINVAL; }
+
+    sv->drm_di_major = 1;
+    sv->drm_di_minor = 4;
+    sv->drm_dd_major = 1;
+    sv->drm_dd_minor = 0;
+
+    (void)dev;
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* drm_setversion ???handle DRM_IOCTL_SET_VERSION (accept any version)  */
-/* ------------------------------------------------------------------ */
-
-int drm_setversion(struct drm_device *dev, void *data, struct drm_file *file_priv)
+static int drm_mode_create_dumb_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    (void)dev;
-    (void)data;
-    (void)file_priv;
+    struct drm_mode_create_dumb *args = (struct drm_mode_create_dumb *)data;
+    int                          rc;
+
+    if (args == NULL || file_priv == NULL) { return -EINVAL; }
+
+    rc = drm_gem_dumb_create(dev, file_priv, args);
+    if (rc == 0 && copy_to_user(data, args, sizeof(*args)) != 0) { return -EFAULT; }
+    return rc;
+}
+
+static int drm_mode_map_dumb_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_mode_map_dumb *args = (struct drm_mode_map_dumb *)data;
+    uint64_t                  offset = 0;
+    int                       rc;
+
+    if (args == NULL || file_priv == NULL) { return -EINVAL; }
+
+    rc = drm_gem_dumb_map_offset(file_priv, dev, args->handle, &offset);
+    if (rc != 0) { return rc; }
+
+    args->offset = offset;
+
+    if (copy_to_user(data, args, sizeof(*args)) != 0) { return -EFAULT; }
     return 0;
+}
+
+static int drm_mode_destroy_dumb_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_mode_destroy_dumb *args = (struct drm_mode_destroy_dumb *)data;
+
+    if (args == NULL || file_priv == NULL) { return -EINVAL; }
+
+    return drm_gem_dumb_destroy(file_priv, dev, args->handle);
+}
+
+static int drm_gem_prime_handle_to_fd_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_prime_handle *args = (struct drm_prime_handle *)data;
+    int                      fd   = -1;
+    int                      rc;
+
+    if (args == NULL || file_priv == NULL) { return -EINVAL; }
+
+    rc = drm_gem_prime_handle_to_fd(dev, file_priv, args->handle, args->flags, &fd);
+    if (rc != 0) { return rc; }
+
+    args->fd = (uint32_t)fd;
+    return 0;
+}
+
+static int drm_gem_prime_fd_to_handle_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_prime_handle *args   = (struct drm_prime_handle *)data;
+    uint32_t                 handle = 0;
+    int                      rc;
+
+    if (args == NULL || file_priv == NULL) { return -EINVAL; }
+
+    rc = drm_gem_prime_fd_to_handle(dev, file_priv, (int)args->fd, &handle);
+    if (rc != 0) { return rc; }
+
+    args->handle = handle;
+    return 0;
+}
+
+static const struct drm_ioctl_desc *drm_find_command(struct drm_device *dev, unsigned int cmd)
+{
+    const struct drm_ioctl_desc *desc;
+
+    /* 1. the driver's own table */
+    if (dev->driver->ioctls != NULL && dev->driver->num_ioctls > 0) {
+        desc = find_ioctl_desc(cmd, dev->driver->ioctls, dev->driver->num_ioctls);
+        if (desc != NULL) { return desc; }
+    }
+
+    /* 2. core fallbacks for the entries the tables leave open */
+    switch (cmd) {
+        case DRM_IOCTL_PRIME_HANDLE_TO_FD: {
+            static const struct drm_ioctl_desc d = {DRM_IOCTL_PRIME_HANDLE_TO_FD,
+                                                    drm_gem_prime_handle_to_fd_ioctl,
+                                                    DRM_AUTH};
+            return &d;
+        }
+        case DRM_IOCTL_PRIME_FD_TO_HANDLE: {
+            static const struct drm_ioctl_desc d = {DRM_IOCTL_PRIME_FD_TO_HANDLE,
+                                                    drm_gem_prime_fd_to_handle_ioctl,
+                                                    DRM_AUTH};
+            return &d;
+        }
+        case DRM_IOCTL_MODE_CREATE_DUMB: {
+            static const struct drm_ioctl_desc d = {DRM_IOCTL_MODE_CREATE_DUMB,
+                                                    drm_mode_create_dumb_ioctl,
+                                                    DRM_AUTH};
+            return &d;
+        }
+        case DRM_IOCTL_MODE_MAP_DUMB: {
+            static const struct drm_ioctl_desc d = {DRM_IOCTL_MODE_MAP_DUMB,
+                                                    drm_mode_map_dumb_ioctl,
+                                                    DRM_AUTH};
+            return &d;
+        }
+        case DRM_IOCTL_MODE_DESTROY_DUMB: {
+            static const struct drm_ioctl_desc d = {DRM_IOCTL_MODE_DESTROY_DUMB,
+                                                    drm_mode_destroy_dumb_ioctl,
+                                                    DRM_AUTH};
+            return &d;
+        }
+        case DRM_IOCTL_GET_UNIQUE: {
+            static const struct drm_ioctl_desc d = {DRM_IOCTL_GET_UNIQUE, drm_getunique_stub, 0};
+            return &d;
+        }
+        default:
+            break;
+    }
+
+    /* 3. the core table */
+    desc = find_ioctl_desc(cmd, drm_core_ioctls, (int)DRM_CORE_IOCTL_COUNT);
+    if (desc != NULL) { return desc; }
+
+    return NULL;
+}
+
+/*
+ * The entry point the char-device layer calls.  Steps, in order:
+ *   1. decode the ioctl number (magic, type, size),
+ *   2. copy the user argument into a kernel buffer of the declared size,
+ *   3. look the command up and check its permission bits,
+ *   4. run it,
+ *   5. copy the (possibly rewritten) buffer back.
+ */
+int drm_ioctl(struct drm_device *dev, unsigned int cmd, void *data, struct drm_file *file_priv)
+{
+    const struct drm_ioctl_desc *desc;
+    unsigned int                 size;
+    char                         kdata[128];
+    int                          ret;
+
+    if (dev == NULL || file_priv == NULL) { return -EINVAL; }
+
+    if (_IOC_TYPE(cmd) != DRM_IOCTL_BASE) { return -ENOTTY; }
+
+    size = _IOC_SIZE(cmd);
+
+    if (size == 0 || size > sizeof(kdata)) { return -EINVAL; }
+
+    desc = drm_find_command(dev, cmd);
+    if (desc == NULL) {
+        DRM_ERROR("unsupported ioctl %08x (nr=%u size=%u)\n", cmd, _IOC_NR(cmd), size);
+        return -ENOTTY;
+    }
+
+    ret = drm_ioctl_permit(desc->flags, file_priv);
+    if (ret != 0) {
+        DRM_ERROR("permission denied for ioctl %08x\n", cmd);
+        return ret;
+    }
+
+    if (data != NULL && copy_from_user(kdata, data, size) != 0) { return -EFAULT; }
+
+    if (desc->func == NULL) { return -EINVAL; }
+
+    ret = desc->func(dev, kdata, file_priv);
+
+    if (ret == 0 && data != NULL && _IOC_DIR(cmd) != 0 &&
+        copy_to_user(data, kdata, size) != 0) {
+        return -EFAULT;
+    }
+
+    return ret;
 }

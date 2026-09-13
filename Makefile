@@ -22,6 +22,11 @@ AS      := nasm
 LD      := ld
 OBJCOPY := objcopy
 
+# Architecture backend: src/kernel/arch/$(ARCH) supplies the descriptor
+# tables, entry assembly and context switch.  Must be set before BASEFLAGS,
+# which puts the arch tree on the include path.
+ARCH ?= x86_64
+
 # Common freestanding flags.  -mgeneral-regs-only keeps gcc away from
 # SSE/MMX/x87 registers: the CPU arrives from Limine with CR4.OSFXSR clear,
 # so any xmm instruction would raise #UD (and, with no IDT yet, triple-fault).
@@ -30,8 +35,8 @@ BASEFLAGS := -m64 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
              -nostdinc -std=gnu11 -mno-red-zone -mgeneral-regs-only \
              -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fvisibility=hidden \
              -Wall -Wextra -O2 -g -Isrc/include -Isrc/shared \
-             -Isrc/kernel/core -Isrc/kernel/driver -Isrc/kernel/driver/drm \
-             -Isrc/kernel/driver/drm/ported
+             -Isrc/kernel/core -Isrc/kernel/arch/$(ARCH) -Isrc/kernel/driver \
+             -Isrc/kernel/driver/drm -Isrc/kernel/driver/drm/ported
 
 # kernel: PIE so Limine can relocate it into the higher half
 # build/.config (produced by `make config`) defines CONFIG_* macros.
@@ -79,7 +84,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/lapic.o \
         $(BUILD)/net.o $(BUILD)/tcp.o $(BUILD)/sock.o \
          $(BUILD)/pci.o $(BUILD)/e1000.o $(BUILD)/audio.o \
-        $(BUILD)/hda.o $(BUILD)/ata.o $(BUILD)/cjkfont.o \
+        $(BUILD)/hda.o $(BUILD)/ata.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
         $(BUILD)/cjkfont_data.o \
         $(BUILD)/input.o $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
         $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
@@ -475,6 +480,21 @@ $(FF_BIN): $(FF_SRC)/CMakeLists.txt | $(MUSL_GCC)
 	chmod +x tools/build-fastfetch.sh
 	tools/build-fastfetch.sh
 
+# CPython 3.12 — the musl interpreter.  Fetched into build/pysrc and
+# configured by hand for x86_64-unknown-linux-musl (see build/pysrc/
+# Python-3.12.10/README notes): cross-compiled with musl-gcc, shared
+# extension modules, --disable-ipv6/ensurepip, readline/nis/_ctypes &
+# friends trimmed (their dev headers do not exist in the musl sysroot).
+# The result is dynamically linked against /lib/ld-musl-x86_64.so.1, which
+# the initrd already ships, so this rule only relinks when the binary is
+# missing, exactly like the bash/coreutils rules above.
+PY_VER := 3.12.10
+PY_SRC := $(BUILD)/pysrc/Python-$(PY_VER)
+PY_BIN := $(PY_SRC)/python
+
+$(PY_BIN): $(PY_SRC)/Makefile | $(MUSL_GCC)
+	REALGCC=gcc-13 $(MAKE) -C $(PY_SRC) -j4
+
 # Both directories are listed separately: `clean` leaves $(BUILD) standing (the
 # third-party trees live there), so a rule keyed only on $(BUILD) would never
 # fire again and $(BUILD)/user would stay missing.
@@ -496,14 +516,20 @@ DEPS := $(KOBJS:.o=.d) $(UOBJS:.o=.d) $(MUSL_OBJS:.o=.d) $(UCRT:.o=.d) \
 -include $(DEPS)
 
 # ---------- kernel (Limine entry point) ----------
-# Sources live in three trees -- core (arch/mem/fs/proc) and driver
-# (hardware-facing) subdirectories plus the root for the two entry-point
-# files -- while every .o lands flat in $(BUILD).  vpath lets the %.o rules
-# below find a source by bare name no matter which directory it is in.
+# Sources live in four trees -- core (mem/fs/proc), arch (per-CPU entry,
+# descriptor tables, context switch), driver (hardware-facing) subdirectories
+# plus the root for the two entry-point files -- while every .o lands flat in
+# $(BUILD).  vpath lets the %.o rules below find a source by bare name no
+# matter which directory it is in.  ARCH selects the backend tree; only one
+# is searched, so an i386 build never sees x86_64 sources.
+ARCH ?= x86_64
+
 vpath %.c src/kernel src/kernel/core src/kernel/driver src/kernel/driver/drm \
-        src/kernel/driver/drm/ported
-vpath %.asm src/kernel src/kernel/core src/kernel/driver
-vpath %.S src/kernel src/kernel/core src/kernel/driver
+        src/kernel/driver/drm/ported src/kernel/arch/$(ARCH)
+vpath %.asm src/kernel src/kernel/core src/kernel/driver \
+        src/kernel/arch/$(ARCH)
+vpath %.S src/kernel src/kernel/core src/kernel/driver \
+        src/kernel/arch/$(ARCH)
 
 $(BUILD)/%.o: %.c | $(BUILD)
 	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<
@@ -600,7 +626,7 @@ $(BUILD)/dynhello.elf: src/user/dynhello.c $(MUSL_GCC)
 # kernel driver knows how to rewrite.
 $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
            $(CC_BIN) $(KRNL) $(FF_BIN) $(KMODS) $(CURL_BIN) $(NANO_BIN) \
-           $(ALPINE_ROOT) src/user/rc | $(BUILD)
+           $(PY_BIN) $(ALPINE_ROOT) $(BUILD)/.kcmd src/user/rc | $(BUILD)
 	rm -rf $(BUILD)/initrd-root
 	mkdir -p $(BUILD)/initrd-root
 	# ---- FHS skeleton (empty dirs are harmless placeholders for now) ----
@@ -822,6 +848,19 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# rides along too.
 	mkdir -p $(BUILD)/initrd-root/usr/share/terminfo/v
 	cp -a $(NC_STAGE)/share/terminfo/v $(BUILD)/initrd-root/usr/share/terminfo/
+	# ---- python3 (musl CPython 3.12) ----
+	# The interpreter is dynamically linked against musl, so it needs its
+	# stdlib beside it: the pure-python Lib/ tree under /usr/lib/python3.12
+	# and the compiled extension modules in lib-dynload/ (static builds
+	# could not dlopen those; this one can).
+	mkdir -p $(BUILD)/initrd-root/usr/lib/python3.12/lib-dynload
+	cp $(PY_BIN) $(BUILD)/initrd-root/usr/bin/python3.12
+	strip $(BUILD)/initrd-root/usr/bin/python3.12
+	ln -sf python3.12 $(BUILD)/initrd-root/usr/bin/python3
+	ln -sf python3.12 $(BUILD)/initrd-root/usr/bin/python
+	cp -a $(PY_SRC)/Lib/. $(BUILD)/initrd-root/usr/lib/python3.12/
+	cp $(PY_SRC)/Modules/*.so \
+	   $(BUILD)/initrd-root/usr/lib/python3.12/lib-dynload/
 	# ---- desktop stack (labwc/xfce) DISABLED for headless ISO -----------
 	# To re-enable: un-comment the labwc/xfce sections above this line.
 	
@@ -835,6 +874,12 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# C resolver actually work: ping/wget do DNS via /etc/resolv.conf, getent
 	# reads /etc/passwd, and `hostname` uses /etc/hostname.
 	cp -a src/rootfs/etc/. $(BUILD)/initrd-root/etc/
+	# Kernel command line carrier: `make KCMD="single"` drops the words into
+	# /cmdline at the initrd root; the kernel reads that file before PID 1
+	# (Limine does not forward conf cmdline: to direct-protocol kernels).
+	@if [ -n "$(KCMD)" ]; then \
+	    echo "$(KCMD)" > $(BUILD)/initrd-root/cmdline; \
+	fi
 	# ---- root home: ~/.bashrc is sourced by the interactive login shell ----
 	cp -a src/rootfs/root/. $(BUILD)/initrd-root/root/
 	# ---- OpenRC 0.56 tree ------------------------------------------------
@@ -895,11 +940,30 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	         -d $(BUILD)/initrd-root -F $@ $(INITRD_MB)M'
 
 # ---------- Limine hybrid ISO ----------
-$(ISO): $(KRNL) $(INITRD) limine.conf $(LIMINE_BIOS) $(LIMINE_UEFI) | $(BUILD)
+# The bootloader config inside the ISO is generated from the same single
+# entry every time, plus an optional kernel command line.  `make KCMD=single
+# build/gnos.iso` (or any boot target) puts `cmdline: single` in the conf,
+# Limine hands it to the kernel, and the kernel passes the word to /init.elf
+# -> single-user root bash.  The .kcmd stamp makes the ISO rebuild only when
+# KCMD actually changes value.
+KCMD ?=
+
+.PHONY: FORCE
+FORCE:
+
+$(BUILD)/.kcmd: FORCE
+	@old="$$(cat $@ 2>/dev/null || true)"; \
+	if [ "$$old" != "$(KCMD)" ]; then \
+	    echo "$(KCMD)" > $@; \
+	    echo "GNOS kernel cmdline: '$(KCMD)'"; \
+	fi
+
+$(ISO): $(KRNL) $(INITRD) $(BUILD)/.kcmd $(LIMINE_BIOS) $(LIMINE_UEFI) | $(BUILD)
 	mkdir -p $(ISO_ROOT)
 	cp $(KRNL)      $(ISO_ROOT)/GNOSKr.elf
 	cp $(INITRD)    $(ISO_ROOT)/initrd.img
-	cp limine.conf  $(ISO_ROOT)/limine.conf
+	printf 'timeout: 1\n\n/GNOS\n    protocol: limine\n    kernel_path: boot():/GNOSKr.elf\n    module_path: boot():/initrd.img\n' > $(ISO_ROOT)/limine.conf
+	@if [ -n "$(KCMD)" ]; then echo "    cmdline: $(KCMD)" >> $(ISO_ROOT)/limine.conf; fi
 	cp $(LIMINE_BIOS) $(ISO_ROOT)/limine-bios-cd.bin
 	cp $(LIMINE_UEFI) $(ISO_ROOT)/limine-uefi-cd.bin
 	cp limine/limine-bios.sys $(ISO_ROOT)/limine-bios.sys

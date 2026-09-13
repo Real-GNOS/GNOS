@@ -1,104 +1,104 @@
 /*
+ * drm_mode_object.c - the id table behind every KMS object. (GPLv2)
  *
- *      drm_mode_object.c
- *      DRM mode object lifecycle and ID management
+ * User space never sees a kernel pointer.  It sees a 32-bit id, and this
+ * file is where ids come from, what they resolve to, and when the object
+ * behind one may be freed.  Every CRTC, connector, encoder, plane,
+ * framebuffer, property and mode starts life as a drm_mode_object, so this
+ * is the shared substrate of the whole KMS interface.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
+ * Two tables are consulted.  The device-wide one holds everything the
+ * driver created; the per-file one holds things a particular client was
+ * given a handle for.  A lookup tries the device table first and falls back
+ * to the caller's own -- which is what stops one client from reaching an
+ * object another one created but never shared.
  */
+
+#include <stddef.h>
+#include <stdint.h>
 
 #include "drm_device.h"
 #include "drm_idr.h"
 #include "drm_mode.h"
-#include "vfs.h"
-#include <stddef.h>
-#include <stdint.h>
-#include "kstring.h"
-#include "heap.h"
 #include "drm_port.h"
+#include "heap.h"
+#include "kstring.h"
 #include "smp.h"
+#include "vfs.h"
 
 #ifndef container_of
 #    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
-/* External helper from drm_property.c */
+/* Implemented in drm_property.c. */
 extern struct drm_property *drm_property_find(struct drm_device *dev, struct drm_file *file_priv, uint32_t id);
 
-/* Initial backing-array capacity for a freshly attached property set. */
+/* Slots a property set starts with; most objects have fewer than a dozen. */
 #define DRM_OBJECT_PROP_INITIAL_CAPACITY 16u
 
-/* ------------------------------------------------------------------ */
-/* ID allocation and reference counting                               */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------------- ids and refcounts */
 
 /*
- * Allocate a new mode-object ID from the device IDR and initialise the
- * common mode object header. The object is published in the global IDR
- * with an initial reference count of one. Returns 0 on success (with
- * obj->id set) or a negative errno on failure.
- *
- * Internal helper shared with drm_property.c; not declared in any header.
+ * Give @obj an id and publish it.  The object comes back with one
+ * reference, owned by whoever asked for it.
  */
 int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type)
 {
-    uint32_t id = 0;
+    uint32_t id  = 0;
     int      ret;
 
     spin_lock(&dev->mode_config.idr_mutex);
     ret = drm_idr_alloc(&dev->mode_config.object_idr, obj, 1, 0, &id);
     spin_unlock(&dev->mode_config.idr_mutex);
-    if (ret) return ret;
+    if (ret != 0) { return ret; }
 
-    obj->id       = id;
-    obj->type     = type;
-    obj->dev      = dev;
-    obj->refcount = 1;
-    memset(&obj->ref_lock, 0, sizeof(obj->ref_lock));
+    obj->id         = id;
+    obj->type       = type;
+    obj->dev        = dev;
+    obj->refcount   = 1;
     obj->properties = NULL;
+    memset(&obj->ref_lock, 0, sizeof(obj->ref_lock));
+
     return 0;
 }
 
-/* Acquire a reference on a mode object. */
 void drm_mode_object_get(struct drm_mode_object *obj)
 {
-    if (!obj) return;
+    if (obj == NULL) { return; }
+
     spin_lock(&obj->ref_lock);
     obj->refcount++;
     spin_unlock(&obj->ref_lock);
 }
 
 /*
- * Decrement the mode-object reference count under the ref-lock and report
- * whether it reached zero. Making the "last reference" decision atomically
- * with the decrement avoids the lost-wakeup / double-free race that a
- * separate post-put check would introduce. Used by drm_mode_object_put()
- * and by blob destruction in drm_property.c.
+ * Drop a reference and say whether it was the last one.  Deciding that
+ * under the same lock as the decrement is the point: a separate "is it
+ * zero now?" check afterwards can be jumped by another CPU, which is how
+ * objects get freed twice.
  */
 bool drm_mode_object_put_dec_and_test(struct drm_mode_object *obj)
 {
-    bool zero;
+    bool last;
 
-    if (!obj) return false;
+    if (obj == NULL) { return false; }
+
     spin_lock(&obj->ref_lock);
-    zero = (--obj->refcount == 0);
+    last = (--obj->refcount == 0);
     spin_unlock(&obj->ref_lock);
-    return zero;
+
+    return last;
 }
 
-/* Release a reference on a mode object; the caller owns finalisation. */
 void drm_mode_object_put(struct drm_mode_object *obj)
 {
     (void)drm_mode_object_put_dec_and_test(obj);
 }
 
 /*
- * Look up a mode object by userspace ID. If @type is DRM_MODE_OBJECT_ANY
- * the type check is skipped. When @file_priv is non-NULL the per-file
- * handle IDR is consulted as a fallback for objects not present in the
- * global IDR. Returns the object with an extra reference, or NULL.
+ * Resolve @id.  @type filters what may come back; DRM_MODE_OBJECT_ANY
+ * accepts anything.  On success the object carries an extra reference the
+ * caller is responsible for dropping.
  */
 struct drm_mode_object *drm_mode_object_find(struct drm_device *dev, struct drm_file *file_priv, uint32_t id, uint32_t type)
 {
@@ -106,46 +106,42 @@ struct drm_mode_object *drm_mode_object_find(struct drm_device *dev, struct drm_
 
     spin_lock(&dev->mode_config.idr_mutex);
     obj = drm_idr_find(&dev->mode_config.object_idr, id);
-    if (obj && (type == DRM_MODE_OBJECT_ANY || obj->type == type)) {
+    if (obj != NULL && (type == DRM_MODE_OBJECT_ANY || obj->type == type)) {
         drm_mode_object_get(obj);
         spin_unlock(&dev->mode_config.idr_mutex);
         return obj;
     }
     spin_unlock(&dev->mode_config.idr_mutex);
 
-    if (file_priv) {
+    /* Not ours to share: try what this particular client was given. */
+    if (file_priv != NULL) {
         spin_lock(&file_priv->table_lock);
         obj = drm_idr_find(&file_priv->object_idr, id);
-        if (obj && (type == DRM_MODE_OBJECT_ANY || obj->type == type)) {
+        if (obj != NULL && (type == DRM_MODE_OBJECT_ANY || obj->type == type)) {
             drm_mode_object_get(obj);
             spin_unlock(&file_priv->table_lock);
             return obj;
         }
         spin_unlock(&file_priv->table_lock);
     }
+
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* Per-object property storage                                        */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------- per-object properties */
 
-/*
- * Store or update @property's value on @obj. If the property is already
- * present its value is replaced; otherwise a new slot is appended,
- * growing the backing arrays (doubling capacity) when full.
- * Returns 0 on success or -EINVAL / -ENOMEM.
- */
+/* Set (or overwrite) @property's value on @obj. */
 int drm_object_property_set_value(struct drm_mode_object *obj, struct drm_property *property, uint64_t val)
 {
     struct drm_property_set *set;
     uint32_t                 i;
 
-    if (!obj || !property) return -EINVAL;
+    if (obj == NULL || property == NULL) { return -EINVAL; }
     set = obj->properties;
-    if (!set) return -EINVAL;
+    if (set == NULL) { return -EINVAL; }
 
     spin_lock(&set->lock);
+
     for (i = 0; i < set->count; i++) {
         if (set->ids[i] == property->base.id) {
             set->values[i] = val;
@@ -155,46 +151,46 @@ int drm_object_property_set_value(struct drm_mode_object *obj, struct drm_proper
     }
 
     if (set->count >= set->capacity) {
-        uint32_t  new_cap = set->capacity ? set->capacity * 2u : DRM_OBJECT_PROP_INITIAL_CAPACITY;
-        uint32_t *new_ids = realloc(set->ids, (size_t)new_cap * sizeof(*new_ids));
-        uint64_t *new_vals;
+        uint32_t  wanted = (set->capacity != 0) ? set->capacity * 2u : DRM_OBJECT_PROP_INITIAL_CAPACITY;
+        uint32_t *ids    = realloc(set->ids, (size_t)wanted * sizeof(*ids));
+        uint64_t *values;
 
-        if (!new_ids) {
+        if (ids == NULL) {
             spin_unlock(&set->lock);
             return -ENOMEM;
         }
-        set->ids = new_ids; /* realloc() may have freed the old buffer */
-        new_vals = realloc(set->values, (size_t)new_cap * sizeof(*new_vals));
-        if (!new_vals) {
-            /* ids grew but values did not; leave `capacity` unchanged so
-               indexing stays bounded by values' real size. The extra ids
-               headroom is harmless and will be reused on the next grow. */
+        set->ids = ids; /* realloc may have moved it */
+
+        values = realloc(set->values, (size_t)wanted * sizeof(*values));
+        if (values == NULL) {
+            /* The ids array grew but the values one did not, so the extra
+             * room cannot be used: leave the capacity alone and let the
+             * next attempt reuse the ids headroom. */
             spin_unlock(&set->lock);
             return -ENOMEM;
         }
-        set->values   = new_vals;
-        set->capacity = new_cap;
+
+        set->values   = values;
+        set->capacity = wanted;
     }
 
     set->ids[set->count]    = property->base.id;
     set->values[set->count] = val;
     set->count++;
+
     spin_unlock(&set->lock);
     return 0;
 }
 
-/*
- * Read @property's stored value on @obj into *@val_out.
- * Returns 0 on success or -EINVAL when the property is not attached.
- */
+/* Read @property's value back.  -EINVAL when it is not attached. */
 int drm_object_property_get_value(struct drm_mode_object *obj, struct drm_property *property, uint64_t *val_out)
 {
     struct drm_property_set *set;
     uint32_t                 i;
 
-    if (!obj || !property || !val_out) return -EINVAL;
+    if (obj == NULL || property == NULL || val_out == NULL) { return -EINVAL; }
     set = obj->properties;
-    if (!set) return -EINVAL;
+    if (set == NULL) { return -EINVAL; }
 
     spin_lock(&set->lock);
     for (i = 0; i < set->count; i++) {
@@ -205,108 +201,113 @@ int drm_object_property_get_value(struct drm_mode_object *obj, struct drm_proper
         }
     }
     spin_unlock(&set->lock);
+
     return -EINVAL;
 }
 
 /*
- * Attach @property to @obj with an initial value, allocating the per-object
- * property set on first use with DRM_OBJECT_PROP_INITIAL_CAPACITY slots.
- * Must be called before @obj becomes visible to concurrent lookups (i.e.
- * during object construction).
- * Returns 0 on success or -ENOMEM.
+ * Attach @property to @obj, creating the object's property set on first
+ * use.  Meant for object construction: the set is not grown in a way that
+ * is safe against a concurrent reader walking it.
  */
 int drm_object_attach_property(struct drm_mode_object *obj, struct drm_property *property, uint64_t init_val)
 {
-    if (!obj || !property) return -EINVAL;
+    if (obj == NULL || property == NULL) { return -EINVAL; }
 
-    if (!obj->properties) {
-        struct drm_property_set *set;
-        uint32_t                *ids;
-        uint64_t                *vals;
+    if (obj->properties == NULL) {
+        struct drm_property_set *set  = malloc(sizeof(*set));
+        uint32_t                *ids  = malloc((size_t)DRM_OBJECT_PROP_INITIAL_CAPACITY * sizeof(*ids));
+        uint64_t                *vals = malloc((size_t)DRM_OBJECT_PROP_INITIAL_CAPACITY * sizeof(*vals));
 
-        set = malloc(sizeof(*set));
-        if (!set) return -ENOMEM;
-        ids = malloc((size_t)DRM_OBJECT_PROP_INITIAL_CAPACITY * sizeof(*ids));
-        if (!ids) {
+        if (set == NULL || ids == NULL || vals == NULL) {
             free(set);
-            return -ENOMEM;
-        }
-        vals = malloc((size_t)DRM_OBJECT_PROP_INITIAL_CAPACITY * sizeof(*vals));
-        if (!vals) {
             free(ids);
-            free(set);
+            free(vals);
             return -ENOMEM;
         }
+
         memset(set, 0, sizeof(*set));
-        set->count      = 0;
         set->capacity   = DRM_OBJECT_PROP_INITIAL_CAPACITY;
         set->ids        = ids;
         set->values     = vals;
+
         obj->properties = set;
     }
 
     return drm_object_property_set_value(obj, property, init_val);
 }
 
-/* Initialise an empty property set (zero capacity, no backing storage). */
 void drm_property_set_init(struct drm_property_set *set)
 {
-    if (!set) return;
+    if (set == NULL) { return; }
+
     memset(set, 0, sizeof(*set));
 }
 
+void drm_property_set_destroy(struct drm_property_set *set)
+{
+    if (set == NULL) { return; }
+
+    free(set->ids);
+    free(set->values);
+    memset(set, 0, sizeof(*set));
+}
+
+/* --------------------------------------------------------------- ioctls */
+
 /*
- * drm_mode_obj_getproperties_ioctl - Handle DRM_IOCTL_MODE_OBJ_GETPROPERTIES.
- * @dev: DRM device
- * @data: pointer to struct drm_mode_obj_get_properties (userspace buffer)
- * @file_priv: DRM file handle
- *
- * Looks up a mode object by ID and returns its attached property IDs and values.
+ * DRM_IOCTL_MODE_OBJ_GETPROPERTIES.  Called twice in practice: once with
+ * count_props == 0 to learn how much space to allocate, then again with
+ * the arrays filled in.  We report how many exist and copy no more than
+ * the caller has room for.
  */
 int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
     struct drm_mode_obj_get_properties *req = (struct drm_mode_obj_get_properties *)data;
     struct drm_mode_object             *obj;
 
-    if (!dev || !req) { return -EINVAL; }
+    if (dev == NULL || req == NULL) { return -EINVAL; }
 
     obj = drm_mode_object_find(dev, file_priv, req->obj_id, req->obj_type);
-    if (!obj) { return -ENOENT; }
+    if (obj == NULL) { return -ENOENT; }
 
-    if (obj->properties) {
-        struct drm_property_set *set        = obj->properties;
-        uint32_t                 user_count = req->count_props;
-        uint32_t                 copy_count;
-        uint32_t                *ids    = NULL;
-        uint64_t                *values = NULL;
+    if (obj->properties != NULL) {
+        struct drm_property_set *set     = obj->properties;
+        uint32_t                 wanted  = req->count_props;
+        uint32_t                 copying = 0;
+        uint32_t                *ids     = NULL;
+        uint64_t                *values  = NULL;
 
         spin_lock(&set->lock);
         req->count_props = set->count;
-        copy_count       = user_count < set->count ? user_count : set->count;
-        if (copy_count) {
-            ids    = malloc((size_t)copy_count * sizeof(*ids));
-            values = malloc((size_t)copy_count * sizeof(*values));
-            if (ids && values) {
-                memcpy(ids, set->ids, (size_t)copy_count * sizeof(*ids));
-                memcpy(values, set->values, (size_t)copy_count * sizeof(*values));
+        copying          = (wanted < set->count) ? wanted : set->count;
+        if (copying != 0) {
+            ids    = malloc((size_t)copying * sizeof(*ids));
+            values = malloc((size_t)copying * sizeof(*values));
+            if (ids != NULL && values != NULL) {
+                memcpy(ids, set->ids, (size_t)copying * sizeof(*ids));
+                memcpy(values, set->values, (size_t)copying * sizeof(*values));
             }
         }
         spin_unlock(&set->lock);
-        if (copy_count && (!ids || !values)) {
+
+        if (copying != 0 && (ids == NULL || values == NULL)) {
             free(ids);
             free(values);
             drm_mode_object_put(obj);
             return -ENOMEM;
         }
-        if (copy_count
-            && (!req->props_ptr || !req->prop_values_ptr
-                || copy_to_user((void *)(uintptr_t)req->props_ptr, ids, (size_t)copy_count * sizeof(*ids))
-                || copy_to_user((void *)(uintptr_t)req->prop_values_ptr, values, (size_t)copy_count * sizeof(*values)))) {
+
+        if (copying != 0
+            && (req->props_ptr == 0 || req->prop_values_ptr == 0
+                || copy_to_user((void *)(uintptr_t)req->props_ptr, ids, (size_t)copying * sizeof(*ids)) != 0
+                || copy_to_user((void *)(uintptr_t)req->prop_values_ptr, values, (size_t)copying * sizeof(*values)) != 0)) {
             free(ids);
             free(values);
             drm_mode_object_put(obj);
             return -EFAULT;
         }
+
         free(ids);
         free(values);
     } else {
@@ -318,107 +319,86 @@ int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct 
 }
 
 /*
- * drm_mode_obj_setproperty_ioctl - Handle DRM_IOCTL_MODE_OBJ_SETPROPERTY.
- * @dev: DRM device
- * @data: pointer to struct drm_mode_obj_set_property (userspace buffer)
- * @file_priv: DRM file handle
- *
- * Looks up a mode object and property, then sets the property value on the object.
+ * DRM_IOCTL_MODE_OBJ_SETPROPERTY.  Refuses atomic properties (those only
+ * make sense inside a MODE_ATOMIC commit), immutable ones, values outside
+ * a range property's bounds, and properties the object does not carry.
  */
 int drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_obj_set_property *req = (struct drm_mode_obj_set_property *)data;
+    struct drm_mode_obj_set_property *req  = (struct drm_mode_obj_set_property *)data;
     struct drm_mode_object           *obj;
     struct drm_property              *prop;
+    uint64_t                          current_value;
+    int                               ret;
 
     (void)file_priv;
 
-    if (!dev || !req) { return -EINVAL; }
+    if (dev == NULL || req == NULL) { return -EINVAL; }
 
     obj = drm_mode_object_find(dev, NULL, req->obj_id, req->obj_type);
-    if (!obj) { return -ENOENT; }
+    if (obj == NULL) { return -ENOENT; }
 
     prop = drm_property_find(dev, NULL, req->prop_id);
-    if (!prop) {
+    if (prop == NULL) {
         drm_mode_object_put(obj);
         return -ENOENT;
     }
 
-    /* Atomic properties must be changed transactionally through MODE_ATOMIC. */
-    if ((prop->flags & DRM_MODE_PROP_ATOMIC) || !obj->properties) {
+    if ((prop->flags & DRM_MODE_PROP_ATOMIC) != 0 || obj->properties == NULL) {
         drm_mode_object_put(&prop->base);
         drm_mode_object_put(obj);
         return -EINVAL;
     }
-    {
-        uint64_t ignored;
-        if (drm_object_property_get_value(obj, prop, &ignored)) {
-            drm_mode_object_put(&prop->base);
-            drm_mode_object_put(obj);
-            return -ENOENT;
-        }
+
+    if (drm_object_property_get_value(obj, prop, &current_value) != 0) {
+        drm_mode_object_put(&prop->base);
+        drm_mode_object_put(obj);
+        return -ENOENT;
     }
-    if (prop->flags & DRM_MODE_PROP_IMMUTABLE) {
+
+    if ((prop->flags & DRM_MODE_PROP_IMMUTABLE) != 0) {
         drm_mode_object_put(&prop->base);
         drm_mode_object_put(obj);
         return -EINVAL;
     }
-    if ((prop->flags & DRM_MODE_PROP_RANGE) && (req->value < prop->values[0] || req->value > prop->values[1])) {
+
+    if ((prop->flags & DRM_MODE_PROP_RANGE) != 0 && (req->value < prop->values[0] || req->value > prop->values[1])) {
         drm_mode_object_put(&prop->base);
         drm_mode_object_put(obj);
         return -EINVAL;
     }
-    {
-        int ret = drm_object_property_set_value(obj, prop, req->value);
-        if (ret) {
-            drm_mode_object_put(&prop->base);
-            drm_mode_object_put(obj);
-            return ret;
-        }
-    }
+
+    ret = drm_object_property_set_value(obj, prop, req->value);
 
     drm_mode_object_put(&prop->base);
     drm_mode_object_put(obj);
-    return 0;
+    return ret;
 }
 
-/* Release backing storage of a property set and zero the struct. */
-void drm_property_set_destroy(struct drm_property_set *set)
-{
-    if (!set) return;
-    free(set->ids);
-    free(set->values);
-    memset(set, 0, sizeof(*set));
-}
-
-/* ------------------------------------------------------------------ */
-/* Legacy SETPROPERTY wrapper (DRM_IOCTL_MODE_SETPROPERTY)              */
-/* Xorg's modesetting driver falls back to this when atomic is not     */
-/* available.  Convert the old connector-centric format to the object  */
-/* format and delegate.                                                */
-/* ------------------------------------------------------------------ */
-
+/*
+ * DRM_IOCTL_MODE_SETPROPERTY: the pre-atomic spelling, which names a
+ * connector instead of an arbitrary object.  Xorg's modesetting driver
+ * still uses it whenever atomic is not offered, so translate and share
+ * the object-based implementation above.
+ */
 struct drm_mode_set_property {
     uint64_t value;
     uint32_t prop_id;
     uint32_t connector_id;
 };
 
-int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data,
-                               struct drm_file *file_priv)
+int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_set_property *old = (struct drm_mode_set_property *)data;
-    struct drm_mode_obj_set_property  obj;
+    struct drm_mode_set_property     *legacy = (struct drm_mode_set_property *)data;
+    struct drm_mode_obj_set_property  modern;
 
-    if (!dev || !old)
-        return -EINVAL;
+    if (dev == NULL || legacy == NULL) { return -EINVAL; }
 
-    /* Convert legacy format to object-based format. */
-    memset(&obj, 0, sizeof(obj));
-    obj.obj_id   = old->connector_id;
-    obj.obj_type = DRM_MODE_OBJECT_CONNECTOR;
-    obj.prop_id  = old->prop_id;
-    obj.value    = old->value;
+    memset(&modern, 0, sizeof(modern));
+    modern.obj_id   = legacy->connector_id;
+    modern.obj_type = DRM_MODE_OBJECT_CONNECTOR;
+    modern.prop_id  = legacy->prop_id;
+    modern.value    = legacy->value;
 
-    return drm_mode_obj_setproperty_ioctl(dev, &obj, file_priv);
+    return drm_mode_obj_setproperty_ioctl(dev, &modern, file_priv);
 }

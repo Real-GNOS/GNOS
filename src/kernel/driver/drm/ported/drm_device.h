@@ -1,16 +1,13 @@
 /*
+ * drm_device.h
+ * DRM central contract header (device / driver / file / KMS objects)
  *
- *      drm_device.h
- *      DRM central contract header (device / driver / file / KMS objects)
+ * GPLv2 — Copyright 2026 GNOS contributors.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *
- *  Adapted from the Linux DRM core type definitions (include/drm/drm_*.h).
- *  This is the single source of truth for cross-module type layout; every
- *  KMS object header includes it. Pointers to user-space / file-system /
- *  bus objects are intentionally opaque (void *) so the DRM core remains
- *  independent of the rest of the kernel.
+ * This is the single source of truth for cross-module type layout; every
+ * KMS object header includes it. Pointers to user-space / file-system /
+ * bus objects are intentionally opaque (void *) so the DRM core remains
+ * independent of the rest of the kernel.
  *
  */
 

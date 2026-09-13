@@ -1,369 +1,359 @@
 /*
+ * rbtree.c - augmented red-black tree over intrusive nodes. (GPLv2)
  *
- *      rbtree.c
- *      Augmented red-black tree implementation
+ * A red-black tree keeps itself roughly balanced by colouring every node
+ * red or black and insisting that (a) the root and every leaf are black,
+ * (b) no red node has a red child, and (c) every path down from a node to
+ * the leaves crosses the same number of black nodes.  Insertions and
+ * removals break those rules locally, and the two fixup routines below put
+ * them back with recolourings and rotations: never more than O(log n) of
+ * them, and amortised almost none at all.
  *
- *      2026/7/21 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
+ * Nodes are intrusive: nothing is copied or allocated here, the tree only
+ * rearranges pointers, so anything a caller embedded an rb_node_t in can
+ * sit in a tree and keep a stable address.
  *
+ * Leaves are represented by one shared sentinel node rather than by NULL.
+ * That is not decoration: during a deletion the *absence* of a node still
+ * has a position (left or right child of something) that the rebalancing
+ * has to know, and a sentinel can remember which side it stands on where a
+ * NULL cannot.
  */
 
-#include "rbtree.h"
 #include <stddef.h>
 #include <stdint.h>
 
-/* ------------------------------------------------------------------ */
-/*  Internal helpers                                                    */
-/* ------------------------------------------------------------------ */
+#include "rbtree.h"
 
-static void augment_propagate(rb_node_t *node, rb_augment_fn augment, void *data)
+/* The one and only leaf.  Its own pointers fold back on itself so that a
+ * careless descent cannot run off; nothing writes to it except its parent
+ * link, transiently, while a deletion is being repaired. */
+static rb_node_t rb_sentinel = {
+    .parent = &rb_sentinel, .left = &rb_sentinel, .right = &rb_sentinel, .min_vruntime = 0, .color = RB_BLACK
+};
+
+#define RB_NIL (&rb_sentinel)
+
+/* ------------------------------------------------------------- small tools */
+
+/* Refresh @augment from @node up to the root. */
+static void rb_refresh_path(rb_node_t *node, rb_augment_fn augment, void *data)
 {
-    while (node) {
+    while (node != RB_NIL) {
         augment(node, data);
         node = node->parent;
     }
 }
 
-/* Left rotation:     node                     right
- *                   /    \                    /    \
- *                 left  right     ==>       node    rr
- *                       /   \              /   \
- *                      rl   rr          left   rl
- */
-static void rb_rotate_left(rb_root_t *root, rb_node_t *node, rb_augment_fn augment, void *data)
+/* Leftmost node of a (possibly empty) subtree. */
+static rb_node_t *rb_leftmost_of(rb_node_t *node)
 {
-    rb_node_t *right = node->right;
+    while (node->left != RB_NIL) { node = node->left; }
+    return node;
+}
 
-    node->right = right->left;
-    if (right->left) right->left->parent = node;
-
-    right->parent = node->parent;
-    if (!node->parent) {
-        root->root = right;
-    } else if (node == node->parent->left) {
-        node->parent->left = right;
+/*
+ * Replace subtree @old with subtree @new, which may be the sentinel.
+ *
+ *     pivot                  pivot
+ *       |                      |
+ *      old       becomes      new
+ *     /   \                  /   \
+ *    A     B                A     B
+ */
+static void rb_graft(rb_root_t *root, rb_node_t *old, rb_node_t *new_node)
+{
+    if (old->parent == RB_NIL) {
+        root->root = new_node;
+    } else if (old == old->parent->left) {
+        old->parent->left = new_node;
     } else {
-        node->parent->right = right;
+        old->parent->right = new_node;
     }
 
-    right->left  = node;
-    node->parent = right;
+    new_node->parent = old->parent;
+}
 
-    if (augment) {
-        augment(node, data);
-        augment(right, data);
+/*
+ *     x                y
+ *    / \              / \
+ *   A   y     ->     x   C
+ *      / \          / \
+ *     B   C        A   B
+ */
+static void rb_pivot_left(rb_root_t *root, rb_node_t *x, rb_augment_fn augment, void *data)
+{
+    rb_node_t *y = x->right;
+
+    x->right = y->left;
+    y->left->parent = x;
+
+    rb_graft(root, x, y);
+
+    y->left   = x;
+    x->parent = y;
+
+    if (augment != NULL) {
+        augment(x, data); /* x dropped below y: redo its summary first */
+        augment(y, data);
     }
 }
 
-/* Right rotation:       node                 left
- *                      /    \               /    \
- *                   left  right   ==>      ll    node
- *                   /   \                       /   \
- *                  ll   lr                     lr  right
- */
-static void rb_rotate_right(rb_root_t *root, rb_node_t *node, rb_augment_fn augment, void *data)
+/* Mirror image of rb_pivot_left. */
+static void rb_pivot_right(rb_root_t *root, rb_node_t *x, rb_augment_fn augment, void *data)
 {
-    rb_node_t *left = node->left;
+    rb_node_t *y = x->left;
 
-    node->left = left->right;
-    if (left->right) left->right->parent = node;
+    x->left = y->right;
+    y->right->parent = x;
 
-    left->parent = node->parent;
-    if (!node->parent) {
-        root->root = left;
-    } else if (node == node->parent->left) {
-        node->parent->left = left;
-    } else {
-        node->parent->right = left;
-    }
+    rb_graft(root, x, y);
 
-    left->right  = node;
-    node->parent = left;
+    y->right  = x;
+    x->parent = y;
 
-    if (augment) {
-        augment(node, data);
-        augment(left, data);
+    if (augment != NULL) {
+        augment(x, data);
+        augment(y, data);
     }
 }
 
-/* Fix red-red violations after insertion */
-static void rb_insert_rebalance(rb_root_t *root, rb_node_t *node, rb_augment_fn augment, void *data)
+/* ------------------------------------------------------------ insert fixup */
+
+/* Fresh nodes arrive red, which can put two reds in a row. */
+static void rb_insert_repair(rb_root_t *root, rb_node_t *node, rb_augment_fn augment, void *data)
 {
-    rb_node_t *parent, *grandparent, *uncle;
+    while (node != root->root && node->parent->color == RB_RED) {
+        rb_node_t *parent = node->parent;
+        rb_node_t *uncle;
+        int        parent_on_left = (parent == parent->parent->left);
 
-    while ((parent = node->parent) && parent->color == RB_RED) {
-        grandparent = parent->parent;
+        uncle = parent_on_left ? parent->parent->right : parent->parent->left;
 
-        if (parent == grandparent->left) {
-            uncle = grandparent->right;
-
-            /* Case 1: uncle is RED â€?recolor and move up */
-            if (uncle && uncle->color == RB_RED) {
-                parent->color      = RB_BLACK;
-                uncle->color       = RB_BLACK;
-                grandparent->color = RB_RED;
-                node               = grandparent;
-                continue;
-            }
-
-            /* Case 2: node is right child â€?rotate left */
-            if (node == parent->right) {
-                node = parent;
-                rb_rotate_left(root, node, augment, data);
-                parent      = node->parent;
-                grandparent = parent->parent;
-            }
-
-            /* Case 3: node is left child â€?rotate right */
-            parent->color      = RB_BLACK;
-            grandparent->color = RB_RED;
-            rb_rotate_right(root, grandparent, augment, data);
-        } else {
-            uncle = grandparent->left;
-
-            /* Case 1: uncle is RED â€?recolor and move up */
-            if (uncle && uncle->color == RB_RED) {
-                parent->color      = RB_BLACK;
-                uncle->color       = RB_BLACK;
-                grandparent->color = RB_RED;
-                node               = grandparent;
-                continue;
-            }
-
-            /* Case 2: node is left child â€?rotate right */
-            if (node == parent->left) {
-                node = parent;
-                rb_rotate_right(root, node, augment, data);
-                parent      = node->parent;
-                grandparent = parent->parent;
-            }
-
-            /* Case 3: node is right child â€?rotate left */
-            parent->color      = RB_BLACK;
-            grandparent->color = RB_RED;
-            rb_rotate_left(root, grandparent, augment, data);
+        if (uncle->color == RB_RED) {
+            /* A red uncle can be fixed by recolouring alone: blackness
+             * moves down one level and the violation moves up to the
+             * grandparent, which the loop takes over. */
+            parent->color         = RB_BLACK;
+            uncle->color          = RB_BLACK;
+            parent->parent->color = RB_RED;
+            node                  = parent->parent;
+            continue;
         }
+
+        if (parent_on_left) {
+            if (node == parent->right) {
+                /* The node hangs the wrong way for a single rotation, so
+                 * turn it into the mirror case first. */
+                rb_pivot_left(root, parent, augment, data);
+                node = parent;
+            }
+            node->parent->color         = RB_BLACK;
+            node->parent->parent->color = RB_RED;
+            rb_pivot_right(root, node->parent->parent, augment, data);
+        } else {
+            if (node == parent->left) {
+                rb_pivot_right(root, parent, augment, data);
+                node = parent;
+            }
+            node->parent->color         = RB_BLACK;
+            node->parent->parent->color = RB_RED;
+            rb_pivot_left(root, node->parent->parent, augment, data);
+        }
+        break;
     }
 
     root->root->color = RB_BLACK;
 }
 
-/* Fix double-black violations after erase */
-static void rb_erase_rebalance(rb_root_t *root, rb_node_t *node, rb_node_t *parent, rb_augment_fn augment, void *data)
+/* ------------------------------------------------------------- erase fixup */
+
+/*
+ * @x stands where a black node was taken away, so every path through it is
+ * one black short.  Recolouring the sibling (and rotating when its children
+ * allow it) pushes that shortage upward until it either cancels against a
+ * red node or reaches the root, where one black fewer on every path is
+ * simply legal.
+ */
+static void rb_erase_repair(rb_root_t *root, rb_node_t *x, rb_augment_fn augment, void *data)
 {
-    rb_node_t *sibling;
+    while (x != root->root && x->color == RB_BLACK) {
+        rb_node_t *parent    = x->parent;
+        rb_node_t *sibling;
+        int        x_on_left = (x == parent->left);
 
-    while ((!node || node->color == RB_BLACK) && node != root->root) {
-        if (node == parent->left) {
-            sibling = parent->right;
+        sibling = x_on_left ? parent->right : parent->left;
 
-            /* Case 1: sibling is RED */
-            if (sibling->color == RB_RED) {
-                sibling->color = RB_BLACK;
-                parent->color  = RB_RED;
-                rb_rotate_left(root, parent, augment, data);
+        if (sibling->color == RB_RED) {
+            /* A red sibling cannot give up a black node directly; one
+             * rotation makes it black with a red child to borrow from. */
+            sibling->color = RB_BLACK;
+            parent->color  = RB_RED;
+            if (x_on_left) {
+                rb_pivot_left(root, parent, augment, data);
+            } else {
+                rb_pivot_right(root, parent, augment, data);
+            }
+            sibling = x_on_left ? parent->right : parent->left;
+        }
+
+        if (sibling->left->color == RB_BLACK && sibling->right->color == RB_BLACK) {
+            /* Nothing to borrow: redden the sibling so both of @parent's
+             * sides are equally short and carry the shortage upward. */
+            sibling->color = RB_RED;
+            x              = parent;
+            continue;
+        }
+
+        if (x_on_left) {
+            if (sibling->right->color == RB_BLACK) {
+                sibling->left->color = RB_BLACK;
+                sibling->color       = RB_RED;
+                rb_pivot_right(root, sibling, augment, data);
                 sibling = parent->right;
             }
-
-            /* Case 2: sibling's children are both BLACK */
-            if ((!sibling->left || sibling->left->color == RB_BLACK) && (!sibling->right || sibling->right->color == RB_BLACK)) {
-                sibling->color = RB_RED;
-                node           = parent;
-                parent         = node->parent;
-            } else {
-                /* Case 3: sibling's right child is BLACK */
-                if (!sibling->right || sibling->right->color == RB_BLACK) {
-                    if (sibling->left) sibling->left->color = RB_BLACK;
-                    sibling->color = RB_RED;
-                    rb_rotate_right(root, sibling, augment, data);
-                    sibling = parent->right;
-                }
-
-                /* Case 4: sibling's right child is RED */
-                sibling->color = parent->color;
-                parent->color  = RB_BLACK;
-                if (sibling->right) sibling->right->color = RB_BLACK;
-                rb_rotate_left(root, parent, augment, data);
-                node = root->root;
-                break;
-            }
+            sibling->color        = parent->color;
+            parent->color         = RB_BLACK;
+            sibling->right->color = RB_BLACK;
+            rb_pivot_left(root, parent, augment, data);
         } else {
-            sibling = parent->left;
-
-            /* Case 1: sibling is RED */
-            if (sibling->color == RB_RED) {
-                sibling->color = RB_BLACK;
-                parent->color  = RB_RED;
-                rb_rotate_right(root, parent, augment, data);
+            if (sibling->left->color == RB_BLACK) {
+                sibling->right->color = RB_BLACK;
+                sibling->color        = RB_RED;
+                rb_pivot_left(root, sibling, augment, data);
                 sibling = parent->left;
             }
-
-            /* Case 2: sibling's children are both BLACK */
-            if ((!sibling->left || sibling->left->color == RB_BLACK) && (!sibling->right || sibling->right->color == RB_BLACK)) {
-                sibling->color = RB_RED;
-                node           = parent;
-                parent         = node->parent;
-            } else {
-                /* Case 3: sibling's left child is BLACK */
-                if (!sibling->left || sibling->left->color == RB_BLACK) {
-                    if (sibling->right) sibling->right->color = RB_BLACK;
-                    sibling->color = RB_RED;
-                    rb_rotate_left(root, sibling, augment, data);
-                    sibling = parent->left;
-                }
-
-                /* Case 4: sibling's left child is RED */
-                sibling->color = parent->color;
-                parent->color  = RB_BLACK;
-                if (sibling->left) sibling->left->color = RB_BLACK;
-                rb_rotate_right(root, parent, augment, data);
-                node = root->root;
-                break;
-            }
+            sibling->color       = parent->color;
+            parent->color        = RB_BLACK;
+            sibling->left->color = RB_BLACK;
+            rb_pivot_right(root, parent, augment, data);
         }
+        break;
     }
 
-    if (node) node->color = RB_BLACK;
+    x->color = RB_BLACK;
 }
 
-/* Return the node with the minimum value in the subtree */
-static rb_node_t *rb_subtree_min(rb_node_t *node)
-{
-    while (node->left) node = node->left;
-    return node;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Public API                                                          */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ public */
 
 void rb_init_root(rb_root_t *root)
 {
-    root->root     = NULL;
-    root->leftmost = NULL;
+    root->root     = RB_NIL;
+    root->leftmost = RB_NIL;
 }
 
 rb_node_t *rb_first(rb_root_t *root)
 {
-    return root->leftmost;
+    return (root->leftmost == RB_NIL) ? NULL : root->leftmost;
 }
 
 rb_node_t *rb_next(rb_node_t *node)
 {
-    /* If right subtree exists, return leftmost of right subtree */
-    if (node->right) return rb_subtree_min(node->right);
+    rb_node_t *parent;
 
-    /* Otherwise, go up until we find a node that is a left child */
-    rb_node_t *parent = node->parent;
-    while (parent && node == parent->right) {
+    if (node == NULL) { return NULL; }
+    if (node->right != RB_NIL) { return rb_leftmost_of(node->right); }
+
+    /* Climb until coming up out of a left subtree: that ancestor is the
+     * next node in order. */
+    parent = node->parent;
+    while (parent != RB_NIL && node == parent->right) {
         node   = parent;
         parent = parent->parent;
     }
-    return parent;
+    return (parent == RB_NIL) ? NULL : parent;
 }
 
 int rb_is_empty(rb_root_t *root)
 {
-    return root->root == NULL;
+    return root->root == RB_NIL;
 }
 
 void rb_insert_augmented(rb_root_t *root, rb_node_t *node, rb_less_fn less, rb_augment_fn augment, void *data)
 {
-    rb_node_t **link   = &root->root;
-    rb_node_t  *parent = NULL;
+    rb_node_t *parent = RB_NIL;
+    rb_node_t *walk   = root->root;
 
-    /* BST search for insertion point */
-    while (*link) {
-        parent = *link;
-        if (less(node, parent)) {
-            link = &parent->left;
-        } else {
-            link = &parent->right;
-        }
+    while (walk != RB_NIL) {
+        parent = walk;
+        walk   = less(node, walk) ? walk->left : walk->right;
     }
 
-    /* Link the node */
     node->parent       = parent;
-    node->left         = NULL;
-    node->right        = NULL;
+    node->left         = RB_NIL;
+    node->right        = RB_NIL;
     node->color        = RB_RED;
     node->min_vruntime = 0;
-    *link              = node;
 
-    /* Update cached leftmost */
-    if (!root->leftmost || less(node, root->leftmost)) root->leftmost = node;
+    if (parent == RB_NIL) {
+        root->root = node;
+    } else if (less(node, parent)) {
+        parent->left = node;
+    } else {
+        parent->right = node;
+    }
 
-    /* Fix red-black violations */
-    rb_insert_rebalance(root, node, augment, data);
+    if (root->leftmost == RB_NIL || less(node, root->leftmost)) { root->leftmost = node; }
 
-    /* Propagate augmentation up from the inserted node */
-    if (augment) augment_propagate(node, augment, data);
+    rb_insert_repair(root, node, augment, data);
+
+    if (augment != NULL) { rb_refresh_path(node, augment, data); }
 }
 
 void rb_erase_augmented(rb_root_t *root, rb_node_t *node, rb_augment_fn augment, void *data)
 {
-    rb_node_t *child, *rebalance_parent;
-    rb_color_t color;
+    rb_node_t *heir;           /* what took its place, maybe the sentinel */
+    rb_color_t detached_color;
+    rb_node_t *refresh_from;
 
-    /* Update cached leftmost */
-    if (root->leftmost == node) root->leftmost = rb_next(node);
+    if (root->leftmost == node) { root->leftmost = rb_next(node); }
 
-    /* Find the node to actually unlink: if node has two children,
-	 * swap with the in-order successor (which has at most one child) */
-    if (node->left && node->right) {
-        rb_node_t *successor = rb_subtree_min(node->right);
+    detached_color = node->color;
 
-        /* Unlink successor from its current position */
-        child            = successor->right;
-        rebalance_parent = successor->parent;
-        color            = successor->color;
-
-        if (child) child->parent = rebalance_parent;
-        if (rebalance_parent) {
-            if (successor == rebalance_parent->left)
-                rebalance_parent->left = child;
-            else
-                rebalance_parent->right = child;
-        }
-
-        /* If successor was node's direct right child, adjust parent */
-        if (rebalance_parent == node) rebalance_parent = successor;
-
-        /* Transplant successor into node's position */
-        successor->parent = node->parent;
-        successor->left   = node->left;
-        successor->right  = node->right;
-        successor->color  = node->color;
-
-        if (node->left) node->left->parent = successor;
-        if (node->right) node->right->parent = successor;
-
-        if (!node->parent) {
-            root->root = successor;
-        } else if (node == node->parent->left) {
-            node->parent->left = successor;
-        } else {
-            node->parent->right = successor;
-        }
+    if (node->left == RB_NIL) {
+        heir = node->right;
+        rb_graft(root, node, heir);
+    } else if (node->right == RB_NIL) {
+        heir = node->left;
+        rb_graft(root, node, heir);
     } else {
-        /* Node has at most one child */
-        child            = node->right ? node->right : node->left;
-        rebalance_parent = node->parent;
-        color            = node->color;
+        /* Two children: the in-order successor has room to spare (it has no
+         * left child of its own), so it inherits this node's position,
+         * children and colour. */
+        rb_node_t *successor = rb_leftmost_of(node->right);
 
-        if (child) child->parent = rebalance_parent;
-        if (!rebalance_parent) {
-            root->root = child;
-        } else if (node == rebalance_parent->left) {
-            rebalance_parent->left = child;
+        detached_color = successor->color;
+        heir           = successor->right;
+
+        if (successor->parent == node) {
+            /* Sentinel included: it must remember it now hangs off the
+             * successor, which is about to take @node's place. */
+            heir->parent = successor;
         } else {
-            rebalance_parent->right = child;
+            rb_graft(root, successor, successor->right);
+            successor->right         = node->right;
+            successor->right->parent = successor;
         }
+
+        rb_graft(root, node, successor);
+
+        successor->left         = node->left;
+        successor->left->parent = successor;
+        successor->color        = node->color;
     }
 
-    /* Propagate augmentation up from the rebalance parent */
-    if (augment) augment_propagate(rebalance_parent, augment, data);
+    /* Summaries along the changed path need redoing: once for what moved,
+     * and again below for whatever the repair rotates. */
+    refresh_from = (heir != RB_NIL) ? heir : heir->parent;
+    if (augment != NULL && refresh_from != RB_NIL) { rb_refresh_path(refresh_from, augment, data); }
 
-    /* Fix double-black violations */
-    if (color == RB_BLACK) rb_erase_rebalance(root, child, rebalance_parent, augment, data);
+    if (detached_color == RB_BLACK) { rb_erase_repair(root, heir, augment, data); }
+
+    if (augment != NULL && root->root != RB_NIL) { rb_refresh_path(root->root, augment, data); }
+
+    /* Leave the sentinel tidy: a stale parent here is the sort of thing
+     * that silently misdirects the next deletion. */
+    rb_sentinel.parent = RB_NIL;
+    node->left         = RB_NIL;
+    node->right        = RB_NIL;
 }

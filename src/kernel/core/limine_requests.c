@@ -49,6 +49,15 @@ __attribute__((used, section(".limine_requests"))) volatile struct limine_kernel
     .revision = 0,
 };
 
+/* The kernel command line, taken verbatim from the boot entry's `cmdline:`
+ * line in limine.conf.  Words the kernel does not consume are passed on to
+ * /init.elf as argv[1..], Linux style -- that is how "single" reaches init
+ * to select single-user mode. */
+__attribute__((used, section(".limine_requests"))) volatile struct limine_executable_cmdline_request cmdline_request = {
+    .id       = LIMINE_EXECUTABLE_CMDLINE_REQUEST,
+    .revision = 0,
+};
+
 __attribute__((used, section(".limine_requests"))) volatile struct limine_entry_point_request entry_point_request = {
     .id       = LIMINE_ENTRY_POINT_REQUEST,
     .revision = 3,

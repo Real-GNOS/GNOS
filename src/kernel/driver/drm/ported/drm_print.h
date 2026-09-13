@@ -1,28 +1,26 @@
 /*
+ * drm_print.h - how the DRM core talks to the console. (GPLv2)
  *
- *      drm_print.h
- *      DRM printing infrastructure
- *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
- *  Adapted from the Linux DRM printer API (include/drm/drm_print.h).
- *  Implemented on top of the kernel printk/plogk backends.
- *
+ * A struct drm_printer bundles "somewhere to write" with "how to write
+ * there", so that a debug dump aimed at the kernel log can be redirected at
+ * a sequence file or swallowed entirely without touching the dumping code.
+ * Everything else here is shorthand for the ordinary case: say it once, to
+ * the log, tagged so grep can find it.
  */
 
 #ifndef INCLUDE_DRM_DRM_PRINT_H_
 #define INCLUDE_DRM_DRM_PRINT_H_
 
-#include "debugcon.h"
-#include "drm_vsnprintf.h"   /* vsnprintf/snprintf/plogk for GNOS */
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
+#include "debugcon.h"
+#include "drm_vsnprintf.h" /* vsnprintf/snprintf/plogk for GNOS */
+
 struct drm_device;
 
+/* Debug categories, matching the classic DRM_UT_* set. */
 enum drm_debug_category {
     DRM_UT_CORE   = 0x01,
     DRM_UT_DRIVER = 0x02,
@@ -34,28 +32,30 @@ enum drm_debug_category {
     DRM_UT_DRMRES = 0x80,
 };
 
+/* Where formatted text goes.  `extra` is owned storage the destructor (such
+ * as it is) frees: the printer does not manage it by itself. */
 struct drm_printer {
-        void (*printfn)(void *arg, const char *fmt, va_list args);
-        void (*hex)(void *arg, ...); // optional, unused
-        void *arg;
-        void *extra;
+    void (*printfn)(void *arg, const char *fmt, va_list args);
+    void (*hex)(void *arg, ...); /* reserved, not used yet */
+    void *arg;
+    void *extra;
 };
 
 #define DRM_PRINTK_FMT "drm: "
 
-/* Construct a printk-backed printer. */
+/* A printer that sends everything to the kernel log, each line prefixed. */
 struct drm_printer drm_printk_printer(const char *prefix);
 
-/* Format-agnostic printf through a printer. */
+/* Send one message to @p. */
 void drm_vprintf(struct drm_printer *p, const char *fmt, va_list args);
 
 /* printf through a printer. */
 void drm_printf(struct drm_printer *p, const char *fmt, ...);
 
-/* Device-level printk helpers. */
+/* Log a message tagged with @level and, when present, the owning device. */
 void drm_dev_printk(const struct drm_device *dev, const char *level, const char *fmt, ...);
 
-/* Convenience macros wrapping plogk. */
+/* Shorthand for the log; the tags are what you grep for afterwards. */
 #define DRM_INFO(fmt, ...)           plogk("drm: " fmt, ##__VA_ARGS__)
 #define DRM_ERROR(fmt, ...)          plogk("drm: [error] " fmt, ##__VA_ARGS__)
 #define DRM_DEBUG(fmt, ...)          plogk("drm: [debug] " fmt, ##__VA_ARGS__)

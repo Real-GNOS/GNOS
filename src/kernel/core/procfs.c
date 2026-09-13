@@ -203,8 +203,12 @@ static void gen_version(sbuf_t *s)
     sb_str(s, "AEOS version 0.1 (x86_64)\n");
 }
 
+/* The boot command line captured by kernel.c from the Limine cmdline tag. */
+extern char g_boot_cmdline[];
+
 static void gen_cmdline(sbuf_t *s)
 {
+    sb_str(s, g_boot_cmdline);
     sb_str(s, "\n");
 }
 

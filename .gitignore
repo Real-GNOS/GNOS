@@ -42,3 +42,13 @@ oneOS-new/target/
 rustix-vkernel/$PLUGINSDIR/
 build/
 neorunst/
+*.swp
+*.md
+nohup.out
+output/
+HBOS/
+ash/
+os
+gg.py
+main.py
+fff.md

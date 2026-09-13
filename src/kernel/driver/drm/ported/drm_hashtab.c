@@ -1,39 +1,54 @@
 /*
+ * drm_hashtab.c ¡ª keyed lookups over a fixed bucket array. (GPLv2)
  *
- *      drm_hashtab.c
- *      DRM open hash table (used by magic authentication)
- *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *
+ * Sixteen buckets and usually a couple of items: this table exists only for
+ * the auth magic-to-file linkage, so the interesting properties are that it
+ * cannot fail after creation, that it allocates nothing per item, and that
+ * removing something twice is detected rather than corrupting a list.
  */
 
 #include "drm_port.h"
 #include "drm_hashtab.h"
 
-/*
- * container_of â€?obtain a pointer to the containing struct from a pointer
- * to one of its members. Equivalent to the Linux kernel macro.
- */
-#define container_of(ptr, type, member) ((type *)((uint8_t *)(ptr) - offsetof(type, member)))
+/* Recover the surrounding item from one of its list links. */
+#define ht_item(node) ((struct drm_hash_item *)((uint8_t *)(node) - offsetof(struct drm_hash_item, link)))
 
-/* Linux hash_long multiplier for 64-bit keys. */
-#define HT_HASH_MULT 0x9e370001UL
+/* Spread a key over the buckets: multiply by the 64-bit golden-ratio
+ * constant and keep the top 'order' bits, which is the whole point of the
+ * multiplication -- the low bits of adjacent keys are the bits that are
+ * least alike. */
+#define HT_GOLDEN 0x9e370001UL
 
-/* Compute the bucket index for @key using multiplicative hashing. */
-static inline unsigned int ht_hash(struct drm_open_hash *ht, unsigned long key)
+static unsigned int ht_bucket(const struct drm_open_hash *ht, unsigned long key)
 {
-    return (unsigned int)((key * HT_HASH_MULT) >> (64U - ht->order));
+    if (ht->order == 0U) { return 0U; }
+    return (unsigned int)((key * HT_GOLDEN) >> (64U - ht->order));
 }
 
-/* Create a hash table with 2^order buckets. Returns 0 or -ENOMEM. */
+/* Walk @head's chain for @key.  Returns NULL when it is not there. */
+static struct drm_hash_item *ht_chain_find(const ilist_node_t *head, unsigned long key)
+{
+    const ilist_node_t *cur;
+
+    for (cur = head->next; cur != head; cur = cur->next) {
+        struct drm_hash_item *item = ht_item(cur);
+
+        if (item->key == key) { return item; }
+    }
+    return NULL;
+}
+
 int drm_ht_create(struct drm_open_hash *ht, unsigned int order)
 {
     unsigned int i;
 
+    /* Beyond this the bucket count stops fitting in an unsigned int, which
+     * would make every later index arithmetic meaningless. */
+    if (order >= (sizeof(unsigned int) * 8U)) { return -EINVAL; }
+
     ht->size  = 1U << order;
     ht->order = order;
-    ht->table = (ilist_node_t *)malloc(ht->size * sizeof(ilist_node_t));
+    ht->table = malloc(ht->size * sizeof(ilist_node_t));
     if (ht->table == NULL) { return -ENOMEM; }
 
     for (i = 0; i < ht->size; i++) { ilist_init(&ht->table[i]); }
@@ -41,82 +56,57 @@ int drm_ht_create(struct drm_open_hash *ht, unsigned int order)
     return 0;
 }
 
-/* Destroy a hash table (entries are not freed). */
 void drm_ht_destroy(struct drm_open_hash *ht)
 {
     free(ht->table);
     memset(ht, 0, sizeof(*ht));
 }
 
-/* Insert @item keyed by item->key. Returns 0 or -EINVAL/-ENOMEM. */
 int drm_ht_insert_item(struct drm_open_hash *ht, struct drm_hash_item *item)
 {
-    unsigned int  idx;
-    ilist_node_t *head, *cur;
+    ilist_node_t *head;
 
-    idx  = ht_hash(ht, item->key);
-    head = &ht->table[idx];
+    if (item == NULL) { return -EINVAL; }
 
-    /* Walk the bucket to check for duplicate keys. */
-    for (cur = head->next; cur != head; cur = cur->next) {
-        struct drm_hash_item *existing = container_of(cur, struct drm_hash_item, link);
+    head = &ht->table[ht_bucket(ht, item->key)];
 
-        if (existing->key == item->key) { return -EINVAL; }
-    }
+    /* One key stands for exactly one item, so a second insert of the same
+     * key has to be refused rather than silently shadowed. */
+    if (ht_chain_find(head, item->key) != NULL) { return -EINVAL; }
 
     ilist_insert_after(head, &item->link);
     return 0;
 }
 
-/* Test whether (*item)->key is present; if so set *item to it. Returns 0 or -EINVAL. */
 int drm_ht_peek(struct drm_open_hash *ht, struct drm_hash_item **item)
 {
-    unsigned int  idx;
-    unsigned long key;
-    ilist_node_t *head, *cur;
+    struct drm_hash_item *found;
 
-    key  = (*item)->key;
-    idx  = ht_hash(ht, key);
-    head = &ht->table[idx];
+    if (item == NULL || *item == NULL) { return -EINVAL; }
 
-    for (cur = head->next; cur != head; cur = cur->next) {
-        struct drm_hash_item *candidate = container_of(cur, struct drm_hash_item, link);
+    found = ht_chain_find(&ht->table[ht_bucket(ht, (*item)->key)], (*item)->key);
+    if (found == NULL) { return -EINVAL; }
 
-        if (candidate->key == key) {
-            *item = candidate;
-            return 0;
-        }
-    }
-
-    return -EINVAL;
+    *item = found;
+    return 0;
 }
 
-/* Find an item by key. Returns 0 or -EINVAL. */
 int drm_ht_find_item(struct drm_open_hash *ht, unsigned long key, struct drm_hash_item **item)
 {
-    unsigned int  idx;
-    ilist_node_t *head, *cur;
+    struct drm_hash_item *found;
 
-    idx  = ht_hash(ht, key);
-    head = &ht->table[idx];
+    found = ht_chain_find(&ht->table[ht_bucket(ht, key)], key);
+    if (found == NULL) { return -EINVAL; }
 
-    for (cur = head->next; cur != head; cur = cur->next) {
-        struct drm_hash_item *candidate = container_of(cur, struct drm_hash_item, link);
-
-        if (candidate->key == key) {
-            *item = candidate;
-            return 0;
-        }
-    }
-
-    return -EINVAL;
+    if (item != NULL) { *item = found; }
+    return 0;
 }
 
-/* Remove @item from the table. Returns 0 or -EINVAL. */
 int drm_ht_remove_item(struct drm_open_hash *ht, struct drm_hash_item *item)
 {
     (void)ht;
 
+    if (item == NULL) { return -EINVAL; }
     if (item->link.prev == NULL) { return -EINVAL; }
 
     ilist_remove(&item->link);

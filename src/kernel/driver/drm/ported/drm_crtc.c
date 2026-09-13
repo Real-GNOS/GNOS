@@ -1,27 +1,32 @@
 /*
+ * drm_crtc.c - the hardware that reads a framebuffer and makes a signal.
+ * (GPLv2)
  *
- *      drm_crtc.c
- *      DRM CRTC management
+ * A CRTC is the scanout engine: it reads pixels out of whatever its primary
+ * plane points at, at the rate a mode describes, and feeds the result to an
+ * encoder.  Everything else in KMS exists to decide three things for it --
+ * which mode, which framebuffer, which connectors -- and both SETCRTC and
+ * the atomic path end up expressing exactly that.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
+ * SETCRTC here is deliberately built as an atomic state and committed like
+ * any other, rather than programming registers directly: one validation
+ * path, one completion path, and no second set of rules to keep in step.
  */
+
+#include <stddef.h>
+#include <stdint.h>
 
 #include "drm_device.h"
 #include "drm_fourcc.h"
 #include "drm_idr.h"
 #include "drm_mode.h"
 #include "drm_modeset_lock.h"
-#include "drm_print.h"
-#include "vfs.h"
-#include <stddef.h>
-#include <stdint.h>
-#include "kstring.h"
-#include "heap.h"
 #include "drm_port.h"
+#include "drm_print.h"
+#include "heap.h"
+#include "kstring.h"
 #include "smp.h"
+#include "vfs.h"
 
 #ifndef container_of
 #    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
@@ -29,34 +34,21 @@
 
 #define DRM_S32_MAX ((int32_t)0x7fffffff)
 
-/* Internal helper from drm_mode_object.c */
+/* From drm_mode_object.c / drm_framebuffer.c. */
 extern int                     drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type);
 extern struct drm_framebuffer *drm_framebuffer_lookup(struct drm_device *dev, struct drm_file *file_priv, uint32_t id);
 
-/*
- * drm_crtc_init_with_planes - Initialise a new CRTC object with primary and cursor planes.
- * @dev: DRM device
- * @crtc: CRTC object to initialise
- * @primary: primary plane to attach (may be NULL)
- * @cursor: cursor plane to attach (may be NULL)
- * @funcs: CRTC helper funcs pointer (stored in helper_private)
- * @name: name of the CRTC (unused in MVP, kept for API compatibility)
- *
- * Allocates a mode-object ID, initialises the mutex and spinlocks,
- * inserts the CRTC into the device's crtc_list, and sets defaults.
- * Returns 0 on success or a negative errno on failure.
- */
-int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, struct drm_plane *primary, struct drm_plane *cursor, void *funcs,
-                              const char *name)
+int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, struct drm_plane *primary,
+                              struct drm_plane *cursor, void *funcs, const char *name)
 {
     int ret;
 
     (void)name;
 
-    if (!dev || !crtc) { return -EINVAL; }
+    if (dev == NULL || crtc == NULL) { return -EINVAL; }
 
     ret = drm_mode_object_idr_alloc(dev, &crtc->base, DRM_MODE_OBJECT_CRTC);
-    if (ret) { return ret; }
+    if (ret != 0) { return ret; }
 
     drm_modeset_lock_init(&crtc->mutex);
 
@@ -84,9 +76,11 @@ int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, str
 
     ilist_insert_after(&dev->mode_config.crtc_list, &crtc->head);
 
+    /* ACTIVE and MODE_ID are what an atomic commit sets on a CRTC; the
+     * rest of the standard set is still to come. */
     ret = drm_object_attach_property(&crtc->base, dev->mode_config.prop_active, 0);
-    if (!ret) ret = drm_object_attach_property(&crtc->base, dev->mode_config.prop_mode_id, 0);
-    if (ret) {
+    if (ret == 0) { ret = drm_object_attach_property(&crtc->base, dev->mode_config.prop_mode_id, 0); }
+    if (ret != 0) {
         drm_crtc_cleanup(crtc);
         return ret;
     }
@@ -94,284 +88,272 @@ int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, str
     return 0;
 }
 
-/*
- * drm_crtc_create_properties - Create the standard CRTC KMS properties.
- * @dev: DRM device
- *
- * Creates ACTIVE, MODE_ID, and OUT_FENCE_PTR properties for all registered
- * CRTCs. In the MVP this is a stub; returns 0.
- */
 int drm_crtc_create_properties(struct drm_device *dev)
 {
-    if (!dev) { return -EINVAL; }
+    if (dev == NULL) { return -EINVAL; }
 
-    /* MVP stub: standard properties will be created by a future
-     * drm_property_create_range / drm_property_create_object call. */
+    /* The properties a CRTC needs are created once for the device in
+     * drm_mode_config_init and attached per CRTC above, so there is
+     * nothing left to do here. */
     return 0;
 }
 
-/*
- * drm_crtc_set_mode_prop_for_crtc - Set the current mode and enable the CRTC.
- * @crtc: CRTC to update
- * @mode: display mode to apply
- *
- * Copies the mode into crtc->mode and marks the CRTC as enabled.
- */
+/* Record a mode as the CRTC's current one and switch it on. */
 void drm_crtc_set_mode_prop_for_crtc(struct drm_crtc *crtc, const struct drm_display_mode *mode)
 {
-    if (!crtc || !mode) { return; }
+    if (crtc == NULL || mode == NULL) { return; }
 
     memcpy(&crtc->mode, mode, sizeof(crtc->mode));
     crtc->enabled = true;
 }
 
-/*
- * drm_mode_getcrtc - Handle DRM_IOCTL_MODE_GETCRTC.
- * @dev: DRM device
- * @data: pointer to struct drm_mode_crtc (userspace buffer)
- * @file_priv: DRM file handle
- *
- * Looks up the CRTC by id, fills the drm_mode_crtc struct with the
- * current CRTC state (fb_id, position, mode, gamma_size), and returns
- * the mode_valid flag. Returns 0 on success or -EINVAL/-ENOENT.
- */
+/* DRM_IOCTL_MODE_GETCRTC: the current mode, position and framebuffer. */
 int drm_mode_getcrtc(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_crtc   *crtc_req = (struct drm_mode_crtc *)data;
+    struct drm_mode_crtc   *req = (struct drm_mode_crtc *)data;
     struct drm_mode_object *obj;
     struct drm_crtc        *crtc;
 
-    if (!dev || !crtc_req) { return -EINVAL; }
+    if (dev == NULL || req == NULL) { return -EINVAL; }
 
     dbg_puts("PSETCRTC id=");
-    dbg_puts_dec((uint32_t)crtc_req->crtc_id);
+    dbg_puts_dec((uint32_t)req->crtc_id);
     dbg_puts(" fb=");
-    dbg_puts_dec((uint32_t)crtc_req->fb_id);
+    dbg_puts_dec((uint32_t)req->fb_id);
     dbg_puts(" mv=");
-    dbg_puts_dec((uint32_t)crtc_req->mode_valid);
+    dbg_puts_dec((uint32_t)req->mode_valid);
     dbg_puts("\n");
-    obj = drm_mode_object_find(dev, file_priv, crtc_req->crtc_id, DRM_MODE_OBJECT_CRTC);
-    if (!obj) {
+
+    obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
+    if (obj == NULL) {
         dbg_puts("PSETCRTC: object_find miss\n");
         return -ENOENT;
     }
     crtc = container_of(obj, struct drm_crtc, base);
 
-    crtc_req->fb_id      = crtc->primary ? crtc->primary->fb_id : 0;
-    crtc_req->x          = (__u32)crtc->x;
-    crtc_req->y          = (__u32)crtc->y;
-    crtc_req->gamma_size = crtc->gamma_size;
-    crtc_req->mode_valid = crtc->enabled ? 1 : 0;
+    req->fb_id      = (crtc->primary != NULL) ? crtc->primary->fb_id : 0;
+    req->x          = (__u32)crtc->x;
+    req->y          = (__u32)crtc->y;
+    req->gamma_size = crtc->gamma_size;
+    req->mode_valid = crtc->enabled ? 1 : 0;
 
-    /* Convert the internal display mode to UAPI modeinfo */
-    crtc_req->mode.clock       = (__u32)crtc->mode.clock;
-    crtc_req->mode.hdisplay    = (__u16)crtc->mode.hdisplay;
-    crtc_req->mode.hsync_start = (__u16)crtc->mode.hsync_start;
-    crtc_req->mode.hsync_end   = (__u16)crtc->mode.hsync_end;
-    crtc_req->mode.htotal      = (__u16)crtc->mode.htotal;
-    crtc_req->mode.hskew       = (__u16)crtc->mode.hskew;
-    crtc_req->mode.vdisplay    = (__u16)crtc->mode.vdisplay;
-    crtc_req->mode.vsync_start = (__u16)crtc->mode.vsync_start;
-    crtc_req->mode.vsync_end   = (__u16)crtc->mode.vsync_end;
-    crtc_req->mode.vtotal      = (__u16)crtc->mode.vtotal;
-    crtc_req->mode.vscan       = (__u16)crtc->mode.vscan;
-    crtc_req->mode.vrefresh    = (__u32)crtc->mode.vrefresh;
-    crtc_req->mode.flags       = crtc->mode.flags;
-    crtc_req->mode.type        = crtc->mode.type;
-    strncpy(crtc_req->mode.name, crtc->mode.name, DRM_DISPLAY_MODE_LEN - 1);
-    crtc_req->mode.name[DRM_DISPLAY_MODE_LEN - 1] = '\0';
+    /* The internal mode carries fields user space has no business seeing,
+     * so it is converted rather than copied. */
+    req->mode.clock       = (__u32)crtc->mode.clock;
+    req->mode.hdisplay    = (__u16)crtc->mode.hdisplay;
+    req->mode.hsync_start = (__u16)crtc->mode.hsync_start;
+    req->mode.hsync_end   = (__u16)crtc->mode.hsync_end;
+    req->mode.htotal      = (__u16)crtc->mode.htotal;
+    req->mode.hskew       = (__u16)crtc->mode.hskew;
+    req->mode.vdisplay    = (__u16)crtc->mode.vdisplay;
+    req->mode.vsync_start = (__u16)crtc->mode.vsync_start;
+    req->mode.vsync_end   = (__u16)crtc->mode.vsync_end;
+    req->mode.vtotal      = (__u16)crtc->mode.vtotal;
+    req->mode.vscan       = (__u16)crtc->mode.vscan;
+    req->mode.vrefresh    = (__u32)crtc->mode.vrefresh;
+    req->mode.flags       = crtc->mode.flags;
+    req->mode.type        = crtc->mode.type;
+    strncpy(req->mode.name, crtc->mode.name, DRM_DISPLAY_MODE_LEN - 1);
+    req->mode.name[DRM_DISPLAY_MODE_LEN - 1] = '\0';
 
     drm_mode_object_put(obj);
     return 0;
 }
 
 /*
- * drm_mode_setcrtc - Handle DRM_IOCTL_MODE_SETCRTC.
- * @dev: DRM device
- * @data: pointer to struct drm_mode_crtc (userspace buffer)
- * @file_priv: DRM file handle
- *
- * Looks up the CRTC and framebuffer. Validates the mode parameters
- * (clock, hdisplay, vdisplay, sync ranges). Programs the CRTC with
- * the new mode and binds the framebuffer to the primary plane.
- * Returns 0 on success or -EINVAL/-ENOENT.
+ * DRM_IOCTL_MODE_SETCRTC.  With mode_valid set this is "show this
+ * framebuffer, in this mode, on these connectors"; without it, "turn the
+ * CRTC off".  The whole thing becomes one atomic commit so that a failure
+ * part way through cannot leave the display half configured.
  */
 int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_crtc    *crtc_req = (struct drm_mode_crtc *)data;
+    struct drm_mode_crtc    *req = (struct drm_mode_crtc *)data;
     struct drm_mode_object  *obj;
     struct drm_crtc         *crtc;
-    struct drm_framebuffer  *fb    = NULL;
+    struct drm_framebuffer  *fb   = NULL;
     struct drm_atomic_state *state = NULL;
     struct drm_crtc_state   *crtc_state;
-    struct drm_plane_state  *plane_state = NULL;
+    struct drm_plane_state  *plane_state;
     struct drm_display_mode  mode;
     uint32_t                *connector_ids = NULL;
     int                      ret           = 0;
 
-    if (!dev || !crtc_req) { return -EINVAL; }
+    if (dev == NULL || req == NULL) { return -EINVAL; }
 
     dbg_puts("PSETCRTC id=");
-    dbg_puts_dec((uint32_t)crtc_req->crtc_id);
+    dbg_puts_dec((uint32_t)req->crtc_id);
     dbg_puts(" fb=");
-    dbg_puts_dec((uint32_t)crtc_req->fb_id);
+    dbg_puts_dec((uint32_t)req->fb_id);
     dbg_puts(" mv=");
-    dbg_puts_dec((uint32_t)crtc_req->mode_valid);
+    dbg_puts_dec((uint32_t)req->mode_valid);
     dbg_puts("\n");
-    obj = drm_mode_object_find(dev, file_priv, crtc_req->crtc_id, DRM_MODE_OBJECT_CRTC);
-    if (!obj) {
+
+    obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
+    if (obj == NULL) {
         dbg_puts("PSETCRTC: object_find miss\n");
         return -ENOENT;
     }
     crtc = container_of(obj, struct drm_crtc, base);
 
-    /* Look up the framebuffer if specified */
-    if (crtc_req->fb_id != 0) {
-        fb = drm_framebuffer_lookup(dev, file_priv, crtc_req->fb_id);
-        if (!fb) {
+    if (req->fb_id != 0) {
+        fb = drm_framebuffer_lookup(dev, file_priv, req->fb_id);
+        if (fb == NULL) {
             dbg_puts("PSETCRTC: fb lookup miss\n");
             drm_mode_object_put(obj);
             return -ENOENT;
         }
     }
 
-    if (crtc_req->mode_valid) {
-        /* Validate mode parameters */
-        if (!fb || crtc_req->mode.clock == 0 || crtc_req->mode.hdisplay == 0 || crtc_req->mode.vdisplay == 0) {
+    if (req->mode_valid != 0) {
+        /* A mode has to be a mode: a clock, a visible area, and timings
+         * that run forwards. */
+        if (fb == NULL || req->mode.clock == 0 || req->mode.hdisplay == 0 || req->mode.vdisplay == 0) {
+            ret = -EINVAL;
+            goto out;
+        }
+        if (req->mode.hsync_start > req->mode.hsync_end || req->mode.hsync_end > req->mode.htotal) {
+            ret = -EINVAL;
+            goto out;
+        }
+        if (req->mode.vsync_start > req->mode.vsync_end || req->mode.vsync_end > req->mode.vtotal) {
+            ret = -EINVAL;
+            goto out;
+        }
+        if (req->mode.htotal == 0 || req->mode.vtotal == 0) {
+            ret = -EINVAL;
+            goto out;
+        }
+        if (req->mode.hdisplay > dev->mode_config.max_width || req->mode.vdisplay > dev->mode_config.max_height) {
+            ret = -EINVAL;
+            goto out;
+        }
+        /* Position plus size has to stay inside signed 32 bits too. */
+        if (req->x > DRM_S32_MAX || req->y > DRM_S32_MAX
+            || (uint64_t)req->x + req->mode.hdisplay > DRM_S32_MAX
+            || (uint64_t)req->y + req->mode.vdisplay > DRM_S32_MAX) {
             ret = -EINVAL;
             goto out;
         }
 
-        /* Validate sync ranges: hsync_start <= hsync_end <= htotal */
-        if (crtc_req->mode.hsync_start > crtc_req->mode.hsync_end || crtc_req->mode.hsync_end > crtc_req->mode.htotal) {
+        if (req->count_connectors > (uint32_t)dev->mode_config.num_connector
+            || (req->count_connectors != 0 && req->set_connectors_ptr == 0)) {
             ret = -EINVAL;
             goto out;
         }
-
-        /* Validate sync ranges: vsync_start <= vsync_end <= vtotal */
-        if (crtc_req->mode.vsync_start > crtc_req->mode.vsync_end || crtc_req->mode.vsync_end > crtc_req->mode.vtotal) {
-            ret = -EINVAL;
-            goto out;
-        }
-
-        /* Validate htotal/vtotal are non-zero */
-        if (crtc_req->mode.htotal == 0 || crtc_req->mode.vtotal == 0) {
-            ret = -EINVAL;
-            goto out;
-        }
-
-        /* Validate dimensions against mode_config limits */
-        if (crtc_req->mode.hdisplay > dev->mode_config.max_width || crtc_req->mode.vdisplay > dev->mode_config.max_height) {
-            ret = -EINVAL;
-            goto out;
-        }
-        if (crtc_req->x > DRM_S32_MAX || crtc_req->y > DRM_S32_MAX || (uint64_t)crtc_req->x + crtc_req->mode.hdisplay > DRM_S32_MAX
-            || (uint64_t)crtc_req->y + crtc_req->mode.vdisplay > DRM_S32_MAX) {
-            ret = -EINVAL;
-            goto out;
-        }
-
-        if (crtc_req->count_connectors > (uint32_t)dev->mode_config.num_connector
-            || (crtc_req->count_connectors && !crtc_req->set_connectors_ptr)) {
-            ret = -EINVAL;
-            goto out;
-        }
-        if (crtc_req->count_connectors) {
-            connector_ids = malloc((size_t)crtc_req->count_connectors * sizeof(*connector_ids));
-            if (!connector_ids) {
+        if (req->count_connectors != 0) {
+            connector_ids = malloc((size_t)req->count_connectors * sizeof(*connector_ids));
+            if (connector_ids == NULL) {
                 ret = -ENOMEM;
                 goto out;
             }
-            if (copy_from_user(connector_ids, (const void *)(uintptr_t)crtc_req->set_connectors_ptr,
-                               (size_t)crtc_req->count_connectors * sizeof(*connector_ids))) {
+            if (copy_from_user(connector_ids, (const void *)(uintptr_t)req->set_connectors_ptr,
+                               (size_t)req->count_connectors * sizeof(*connector_ids)) != 0) {
                 ret = -EFAULT;
                 goto out;
             }
         }
 
-        /* Convert UAPI modeinfo to internal display mode */
         memset(&mode, 0, sizeof(mode));
-        mode.clock       = (int)crtc_req->mode.clock;
-        mode.hdisplay    = (int)crtc_req->mode.hdisplay;
-        mode.hsync_start = (int)crtc_req->mode.hsync_start;
-        mode.hsync_end   = (int)crtc_req->mode.hsync_end;
-        mode.htotal      = (int)crtc_req->mode.htotal;
-        mode.hskew       = (int)crtc_req->mode.hskew;
-        mode.vdisplay    = (int)crtc_req->mode.vdisplay;
-        mode.vsync_start = (int)crtc_req->mode.vsync_start;
-        mode.vsync_end   = (int)crtc_req->mode.vsync_end;
-        mode.vtotal      = (int)crtc_req->mode.vtotal;
-        mode.vscan       = (int)crtc_req->mode.vscan;
-        mode.vrefresh    = (int)crtc_req->mode.vrefresh;
-        mode.flags       = crtc_req->mode.flags;
-        mode.type        = crtc_req->mode.type;
+        mode.clock       = (int)req->mode.clock;
+        mode.hdisplay    = (int)req->mode.hdisplay;
+        mode.hsync_start = (int)req->mode.hsync_start;
+        mode.hsync_end   = (int)req->mode.hsync_end;
+        mode.htotal      = (int)req->mode.htotal;
+        mode.hskew       = (int)req->mode.hskew;
+        mode.vdisplay    = (int)req->mode.vdisplay;
+        mode.vsync_start = (int)req->mode.vsync_start;
+        mode.vsync_end   = (int)req->mode.vsync_end;
+        mode.vtotal      = (int)req->mode.vtotal;
+        mode.vscan       = (int)req->mode.vscan;
+        mode.vrefresh    = (int)req->mode.vrefresh;
+        mode.flags       = req->mode.flags;
+        mode.type        = req->mode.type;
         mode.status      = MODE_OK;
-        strncpy(mode.name, crtc_req->mode.name, DRM_DISPLAY_MODE_LEN - 1);
-    } else if (crtc_req->count_connectors) {
+        strncpy(mode.name, req->mode.name, DRM_DISPLAY_MODE_LEN - 1);
+    } else if (req->count_connectors != 0) {
+        /* Switching off while naming connectors makes no sense. */
         ret = -EINVAL;
         goto out;
     }
 
     state = drm_atomic_state_alloc(dev);
-    if (!state) {
+    if (state == NULL) {
         ret = -ENOMEM;
         goto out;
     }
     state->allow_modeset = 1;
     state->file_priv     = file_priv;
-    crtc_state           = drm_atomic_get_crtc_state(state, crtc);
-    if (!crtc_state) {
+
+    crtc_state = drm_atomic_get_crtc_state(state, crtc);
+    if (crtc_state == NULL) {
         ret = -ENOMEM;
         goto out;
     }
-    crtc_state->active         = crtc_req->mode_valid;
-    crtc_state->enable         = crtc_req->mode_valid;
-    crtc_state->active_changed = crtc_state->active != crtc->enabled;
+    crtc_state->active         = req->mode_valid;
+    crtc_state->enable         = req->mode_valid;
+    crtc_state->active_changed = (crtc_state->active != 0) != (crtc->enabled != 0);
     crtc_state->mode_changed   = true;
-    if (crtc_req->mode_valid) crtc_state->mode = mode;
+    if (req->mode_valid != 0) { crtc_state->mode = mode; }
 
-    if (crtc->primary) {
+    /* The primary plane is what actually shows the framebuffer, so it gets
+     * the source rectangle (the whole buffer, 16.16) and the destination
+     * (the mode's size at the CRTC's position). */
+    if (crtc->primary != NULL) {
         plane_state = drm_atomic_get_plane_state(state, crtc->primary);
-        if (!plane_state) {
+        if (plane_state == NULL) {
             ret = -ENOMEM;
             goto out;
         }
-        plane_state->crtc = crtc_req->mode_valid ? crtc : NULL;
-        plane_state->fb   = crtc_req->mode_valid ? fb : NULL;
-        plane_state->src  = (struct drm_rect) {0, 0, crtc_req->mode_valid ? (int32_t)(fb->width << 16) : 0,
-                                              crtc_req->mode_valid ? (int32_t)(fb->height << 16) : 0};
-        plane_state->dst
-            = (struct drm_rect) {(int32_t)crtc_req->x, (int32_t)crtc_req->y, crtc_req->mode_valid ? (int32_t)(crtc_req->x + mode.hdisplay) : 0,
-                                 crtc_req->mode_valid ? (int32_t)(crtc_req->y + mode.vdisplay) : 0};
+
+        plane_state->crtc = (req->mode_valid != 0) ? crtc : NULL;
+        plane_state->fb   = (req->mode_valid != 0) ? fb : NULL;
+        plane_state->src  = (struct drm_rect) {0, 0, (req->mode_valid != 0) ? (int32_t)(fb->width << 16) : 0,
+                                               (req->mode_valid != 0) ? (int32_t)(fb->height << 16) : 0};
+        plane_state->dst  = (struct drm_rect) {(int32_t)req->x, (int32_t)req->y,
+                                               (req->mode_valid != 0) ? (int32_t)(req->x + mode.hdisplay) : 0,
+                                               (req->mode_valid != 0) ? (int32_t)(req->y + mode.vdisplay) : 0};
         crtc_state->planes_changed = true;
     }
 
-    for (uint32_t i = 0; i < crtc_req->count_connectors; i++) {
+    /* Every named connector must exist, and must be named only once. */
+    for (uint32_t i = 0; i < req->count_connectors; i++) {
         struct drm_mode_object *conn_obj;
-        for (uint32_t j = 0; j < i; j++)
+
+        for (uint32_t j = 0; j < i; j++) {
             if (connector_ids[i] == connector_ids[j]) {
                 ret = -EINVAL;
                 goto out;
             }
+        }
+
         conn_obj = drm_mode_object_find(dev, file_priv, connector_ids[i], DRM_MODE_OBJECT_CONNECTOR);
-        if (!conn_obj) {
+        if (conn_obj == NULL) {
             ret = -ENOENT;
             goto out;
         }
         drm_mode_object_put(conn_obj);
     }
-    for (ilist_node_t *node = dev->mode_config.connector_list.next; node != &dev->mode_config.connector_list; node = node->next) {
+
+    /* Rewire the connectors: away from this CRTC if they were on it and
+     * are not named, onto it if they are. */
+    for (ilist_node_t *node = dev->mode_config.connector_list.next; node != &dev->mode_config.connector_list;
+         node = node->next) {
         struct drm_connector       *connector = container_of(node, struct drm_connector, head);
         struct drm_connector_state *conn_state;
         bool                        selected = false;
-        for (uint32_t i = 0; i < crtc_req->count_connectors; i++)
+
+        for (uint32_t i = 0; i < req->count_connectors; i++) {
             if (connector_ids[i] == connector->base.id) {
                 selected = true;
                 break;
             }
-        if (!selected && (!connector->state || connector->state->crtc != crtc)) continue;
+        }
+
+        if (!selected && (connector->state == NULL || connector->state->crtc != crtc)) { continue; }
+
         conn_state = drm_atomic_get_connector_state(state, connector);
-        if (!conn_state) {
+        if (conn_state == NULL) {
             ret = -ENOMEM;
             goto out;
         }
@@ -381,32 +363,26 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
     }
 
     ret = drm_atomic_commit(state);
-    if (!ret) state = NULL;
+    if (ret == 0) { state = NULL; /* ownership passed to the commit */ }
+
 out:
-    if (state) drm_atomic_state_free(state);
+    if (state != NULL) { drm_atomic_state_free(state); }
     free(connector_ids);
     drm_mode_object_put(obj);
     return ret;
 }
 
-/*
- * drm_crtc_cleanup - Tear down a CRTC and release its resources.
- * @crtc: CRTC to clean up
- *
- * Removes the CRTC from the device CRTC list, removes it from the
- * global IDR, frees the gamma store, and decrements num_crtc.
- */
 void drm_crtc_cleanup(struct drm_crtc *crtc)
 {
     struct drm_device *dev;
 
-    if (!crtc) { return; }
+    if (crtc == NULL) { return; }
 
     dev = crtc->dev;
 
     ilist_remove(&crtc->head);
 
-    if (dev) {
+    if (dev != NULL) {
         spin_lock(&dev->mode_config.idr_mutex);
         drm_idr_remove(&dev->mode_config.object_idr, crtc->base.id);
         spin_unlock(&dev->mode_config.idr_mutex);
@@ -416,11 +392,13 @@ void drm_crtc_cleanup(struct drm_crtc *crtc)
 
     free(crtc->gamma_store);
     crtc->gamma_store = NULL;
-    if (crtc->cursor_obj) {
+
+    if (crtc->cursor_obj != NULL) {
         drm_gem_object_put(crtc->cursor_obj);
         crtc->cursor_obj = NULL;
     }
-    if (crtc->base.properties) {
+
+    if (crtc->base.properties != NULL) {
         drm_property_set_destroy(crtc->base.properties);
         free(crtc->base.properties);
         crtc->base.properties = NULL;

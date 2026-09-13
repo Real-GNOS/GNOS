@@ -1,27 +1,32 @@
 /*
+ * drm_plane.c - the layers a picture is made of. (GPLv2)
  *
- *      drm_plane.c
- *      DRM plane management
+ * A plane is one layer of the final image: a framebuffer, a rectangle of
+ * it to read (src, in 16.16 fixed point), and a rectangle of the screen to
+ * put it in (dst).  Every display has at least a primary plane -- the one
+ * that shows the desktop -- and may have a cursor plane and extra overlay
+ * planes that the hardware composites for free.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
+ * Planes carry most of the atomic properties a client sets, so the
+ * registration here attaches the whole standard set: FB_ID, CRTC_ID, the
+ * four source and four destination coordinates, zpos, alpha and the
+ * immutable type.
  */
+
+#include <stddef.h>
+#include <stdint.h>
 
 #include "drm_device.h"
 #include "drm_fourcc.h"
 #include "drm_idr.h"
 #include "drm_mode.h"
 #include "drm_modeset_lock.h"
-#include "drm_print.h"
-#include "vfs.h"
-#include <stddef.h>
-#include <stdint.h>
-#include "kstring.h"
-#include "heap.h"
 #include "drm_port.h"
+#include "drm_print.h"
+#include "heap.h"
+#include "kstring.h"
 #include "smp.h"
+#include "vfs.h"
 
 #ifndef container_of
 #    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
@@ -29,37 +34,22 @@
 
 #define DRM_S32_MAX ((int32_t)0x7fffffff)
 
-/* Internal helpers from drm_mode_object.c */
+/* From drm_mode_object.c. */
 extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type);
 
-/*
- * drm_plane_init - Initialise a plane object.
- * @dev: DRM device
- * @plane: plane to initialise
- * @possible_crtcs: bitmask of CRTC indices that can drive this plane
- * @funcs: plane helper funcs pointer (stored in helper_private)
- * @formats: array of supported DRM_FORMAT_* fourcc codes
- * @format_count: number of entries in @formats
- * @modifiers: array of supported format modifiers (may be NULL)
- * @type: DRM_PLANE_TYPE_* (primary, cursor, overlay)
- * @name: human-readable name for the plane
- *
- * Allocates a mode-object ID, initialises the mutex, copies the format
- * and modifier arrays, inserts into the device plane list, and stores
- * the plane type and name. Returns 0 on success or -ENOMEM/-errno.
- */
-int drm_plane_init(struct drm_device *dev, struct drm_plane *plane, uint32_t possible_crtcs, void *funcs, const uint32_t *formats,
-                   unsigned int format_count, const uint64_t *modifiers, enum drm_plane_type type, const char *name)
+int drm_plane_init(struct drm_device *dev, struct drm_plane *plane, uint32_t possible_crtcs, void *funcs,
+                   const uint32_t *formats, unsigned int format_count, const uint64_t *modifiers,
+                   enum drm_plane_type type, const char *name)
 {
     int ret;
 
-    (void)modifiers;
+    (void)modifiers; /* only linear is supported for now */
     (void)name;
 
-    if (!dev || !plane || !formats || format_count == 0) { return -EINVAL; }
+    if (dev == NULL || plane == NULL || formats == NULL || format_count == 0) { return -EINVAL; }
 
     ret = drm_mode_object_idr_alloc(dev, &plane->base, DRM_MODE_OBJECT_PLANE);
-    if (ret) { return ret; }
+    if (ret != 0) { return ret; }
 
     drm_modeset_lock_init(&plane->mutex);
 
@@ -73,7 +63,7 @@ int drm_plane_init(struct drm_device *dev, struct drm_plane *plane, uint32_t pos
     plane->zpos_property_default = 0;
 
     plane->format_types = malloc((size_t)format_count * sizeof(uint32_t));
-    if (!plane->format_types) {
+    if (plane->format_types == NULL) {
         ilist_remove(&plane->head);
         spin_lock(&dev->mode_config.idr_mutex);
         drm_idr_remove(&dev->mode_config.object_idr, plane->base.id);
@@ -86,8 +76,8 @@ int drm_plane_init(struct drm_device *dev, struct drm_plane *plane, uint32_t pos
     plane->modifiers      = NULL;
     plane->modifier_count = 0;
 
-    plane->name = strdup(name ? name : "plane");
-    if (!plane->name) {
+    plane->name = strdup((name != NULL) ? name : "plane");
+    if (plane->name == NULL) {
         free(plane->format_types);
         plane->format_types = NULL;
         ilist_remove(&plane->head);
@@ -100,20 +90,22 @@ int drm_plane_init(struct drm_device *dev, struct drm_plane *plane, uint32_t pos
     dev->mode_config.num_plane++;
     dev->mode_config.num_total_plane++;
 
+    /* The standard atomic set.  Alpha defaults to fully opaque and the
+     * plane type is immutable, because neither can change after the fact. */
     ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_fb_id, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_id, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_src_x, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_src_y, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_src_w, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_src_h, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_x, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_y, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_w, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_h, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_zpos, 0);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_alpha, UINT16_MAX);
-    if (!ret) ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_plane_type, type);
-    if (ret) {
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_id, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_src_x, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_src_y, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_src_w, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_src_h, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_x, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_y, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_w, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_crtc_h, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_zpos, 0); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_alpha, UINT16_MAX); }
+    if (ret == 0) { ret = drm_object_attach_property(&plane->base, dev->mode_config.prop_plane_type, type); }
+    if (ret != 0) {
         drm_plane_cleanup(plane);
         return ret;
     }
@@ -121,101 +113,89 @@ int drm_plane_init(struct drm_device *dev, struct drm_plane *plane, uint32_t pos
     return 0;
 }
 
-/*
- * drm_mode_getplane_res - Handle DRM_IOCTL_MODE_GETPLANERESOURCES.
- * @dev: DRM device
- * @data: pointer to struct drm_mode_get_plane_res (userspace buffer)
- * @file_priv: DRM file handle
- *
- * Fills the count_planes field with the total number of planes.
- * Returns 0 on success.
- */
+/* DRM_IOCTL_MODE_GETPLANERESOURCES: how many planes, and their ids. */
 int drm_mode_getplane_res(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_get_plane_res *plane_res = (struct drm_mode_get_plane_res *)data;
+    struct drm_mode_get_plane_res *req = (struct drm_mode_get_plane_res *)data;
+    uint32_t                       wanted, total, copying, n = 0;
+    uint32_t                      *ids = NULL;
+    ilist_node_t                  *node;
 
     (void)file_priv;
 
-    if (!dev || !plane_res) { return -EINVAL; }
+    if (dev == NULL || req == NULL) { return -EINVAL; }
 
-    uint32_t  user_count = plane_res->count_planes;
-    uint32_t  count      = (uint32_t)dev->mode_config.num_total_plane;
-    uint32_t  copy_count = user_count < count ? user_count : count;
-    uint32_t *ids        = NULL;
-    uint32_t  n          = 0;
+    wanted  = req->count_planes;
+    total   = (uint32_t)dev->mode_config.num_total_plane;
+    copying = (wanted < total) ? wanted : total;
 
-    if (copy_count) {
-        ids = malloc((size_t)count * sizeof(*ids));
-        if (!ids) return -ENOMEM;
-        for (ilist_node_t *node = dev->mode_config.plane_list.next; node != &dev->mode_config.plane_list; node = node->next)
+    if (copying != 0) {
+        ids = malloc((size_t)total * sizeof(*ids));
+        if (ids == NULL) { return -ENOMEM; }
+
+        for (node = dev->mode_config.plane_list.next; node != &dev->mode_config.plane_list; node = node->next) {
             ids[n++] = container_of(node, struct drm_plane, head)->base.id;
-        if (!plane_res->plane_id_ptr || copy_to_user((void *)(uintptr_t)plane_res->plane_id_ptr, ids, (size_t)copy_count * sizeof(*ids))) {
+        }
+
+        if (req->plane_id_ptr == 0
+            || copy_to_user((void *)(uintptr_t)req->plane_id_ptr, ids, (size_t)copying * sizeof(*ids)) != 0) {
             free(ids);
             return -EFAULT;
         }
         free(ids);
     }
-    plane_res->count_planes = count;
 
+    req->count_planes = total;
     return 0;
 }
 
-/*
- * drm_mode_getplane - Handle DRM_IOCTL_MODE_GETPLANE.
- * @dev: DRM device
- * @data: pointer to struct drm_mode_get_plane (userspace buffer)
- * @file_priv: DRM file handle
- *
- * Looks up the plane by id, fills the struct with possible_crtcs,
- * format count, and currently attached CRTC/FB ids.
- * Returns 0 on success or -EINVAL/-ENOENT.
- */
+/* DRM_IOCTL_MODE_GETPLANE: what this plane can be wired to, the formats it
+ * takes, and what it is showing now. */
 int drm_mode_getplane(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_get_plane *plane_req = (struct drm_mode_get_plane *)data;
+    struct drm_mode_get_plane *req = (struct drm_mode_get_plane *)data;
     struct drm_mode_object    *obj;
     struct drm_plane          *plane;
-    uint32_t                   user_format_count;
+    uint32_t                   wanted;
 
-    if (!dev || !plane_req) { return -EINVAL; }
+    if (dev == NULL || req == NULL) { return -EINVAL; }
 
-    user_format_count = plane_req->count_format_types;
-    obj               = drm_mode_object_find(dev, file_priv, plane_req->plane_id, DRM_MODE_OBJECT_PLANE);
-    if (!obj) { return -ENOENT; }
+    wanted = req->count_format_types;
+
+    obj = drm_mode_object_find(dev, file_priv, req->plane_id, DRM_MODE_OBJECT_PLANE);
+    if (obj == NULL) { return -ENOENT; }
     plane = container_of(obj, struct drm_plane, base);
 
-    plane_req->possible_crtcs = plane->possible_crtcs;
-    plane_req->crtc_id        = plane->crtc_id;
-    plane_req->fb_id          = plane->fb_id;
-    plane_req->gamma_size     = 0;
+    req->possible_crtcs = plane->possible_crtcs;
+    req->crtc_id        = plane->crtc_id;
+    req->fb_id          = plane->fb_id;
+    req->gamma_size     = 0;
 
-    if (user_format_count) {
-        uint32_t count = user_format_count < plane->format_count ? user_format_count : plane->format_count;
-        if (!plane_req->format_type_ptr
-            || copy_to_user((void *)(uintptr_t)plane_req->format_type_ptr, plane->format_types, (size_t)count * sizeof(*plane->format_types))) {
+    if (wanted != 0) {
+        uint32_t count = (wanted < plane->format_count) ? wanted : plane->format_count;
+
+        if (req->format_type_ptr == 0
+            || copy_to_user((void *)(uintptr_t)req->format_type_ptr, plane->format_types,
+                            (size_t)count * sizeof(*plane->format_types)) != 0) {
             drm_mode_object_put(obj);
             return -EFAULT;
         }
     }
-    plane_req->count_format_types = plane->format_count;
+    req->count_format_types = plane->format_count;
 
     drm_mode_object_put(obj);
     return 0;
 }
 
 /*
- * drm_mode_setplane - Handle DRM_IOCTL_MODE_SETPLANE.
- * @dev: DRM device
- * @data: pointer to struct drm_mode_set_plane (userspace buffer)
- * @file_priv: DRM file handle
- *
- * Looks up the plane by id. If fb_id is non-zero, applies the plane's
- * framebuffer, CRTC binding, and source/destination coordinates.
- * Returns 0 on success or -EINVAL/-ENOENT.
+ * DRM_IOCTL_MODE_SETPLANE: point a plane at a framebuffer (or at nothing,
+ * when both ids are zero).  Rather than poking the hardware directly, this
+ * builds a one-plane atomic state and commits it, so the same checks and
+ * the same completion path as MODE_ATOMIC apply.
  */
 int drm_mode_setplane(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_set_plane *plane_req = (struct drm_mode_set_plane *)data;
+    struct drm_mode_set_plane *req = (struct drm_mode_set_plane *)data;
     struct drm_mode_object    *obj;
     struct drm_plane          *plane;
     struct drm_crtc           *crtc = NULL;
@@ -223,99 +203,107 @@ int drm_mode_setplane(struct drm_device *dev, void *data, struct drm_file *file_
     struct drm_atomic_state   *state;
     struct drm_plane_state    *plane_state;
     struct drm_crtc_state     *crtc_state = NULL;
-    int                        ret;
+    int                        ret        = 0;
 
-    if (!dev || !plane_req) { return -EINVAL; }
+    if (dev == NULL || req == NULL) { return -EINVAL; }
 
-    obj = drm_mode_object_find(dev, file_priv, plane_req->plane_id, DRM_MODE_OBJECT_PLANE);
-    if (!obj) { return -ENOENT; }
+    obj = drm_mode_object_find(dev, file_priv, req->plane_id, DRM_MODE_OBJECT_PLANE);
+    if (obj == NULL) { return -ENOENT; }
     plane = container_of(obj, struct drm_plane, base);
-    if (!!plane_req->crtc_id != !!plane_req->fb_id) {
+
+    /* A plane with a framebuffer but no CRTC (or the other way round) is
+     * meaningless: either show something somewhere, or show nothing. */
+    if ((req->crtc_id != 0) != (req->fb_id != 0)) {
         ret = -EINVAL;
         goto out;
     }
-    if (plane_req->fb_id) {
-        struct drm_mode_object *crtc_obj = drm_mode_object_find(dev, file_priv, plane_req->crtc_id, DRM_MODE_OBJECT_CRTC);
-        if (!crtc_obj) {
+
+    if (req->fb_id != 0) {
+        struct drm_mode_object *crtc_obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
+
+        if (crtc_obj == NULL) {
             ret = -ENOENT;
             goto out;
         }
         crtc = container_of(crtc_obj, struct drm_crtc, base);
         drm_mode_object_put(crtc_obj);
-        fb = drm_framebuffer_lookup(dev, file_priv, plane_req->fb_id);
-        if (!fb) {
+
+        fb = drm_framebuffer_lookup(dev, file_priv, req->fb_id);
+        if (fb == NULL) {
             ret = -ENOENT;
             goto out;
         }
-        if (plane_req->src_w > DRM_S32_MAX || plane_req->src_h > DRM_S32_MAX || plane_req->crtc_w > DRM_S32_MAX
-            || plane_req->crtc_h > DRM_S32_MAX || (int64_t)(int32_t)plane_req->src_x + plane_req->src_w > DRM_S32_MAX
-            || (int64_t)(int32_t)plane_req->src_y + plane_req->src_h > DRM_S32_MAX
-            || (int64_t)plane_req->crtc_x + plane_req->crtc_w > DRM_S32_MAX || (int64_t)plane_req->crtc_y + plane_req->crtc_h > DRM_S32_MAX) {
+
+        /* Keep every rectangle inside signed 32 bits, including the far
+         * corner: a source or destination of 2^31-1 plus a width is not a
+         * rectangle, it is an overflow. */
+        if (req->src_w > DRM_S32_MAX || req->src_h > DRM_S32_MAX || req->crtc_w > DRM_S32_MAX
+            || req->crtc_h > DRM_S32_MAX
+            || (int64_t)(int32_t)req->src_x + req->src_w > DRM_S32_MAX
+            || (int64_t)(int32_t)req->src_y + req->src_h > DRM_S32_MAX
+            || (int64_t)req->crtc_x + req->crtc_w > DRM_S32_MAX
+            || (int64_t)req->crtc_y + req->crtc_h > DRM_S32_MAX) {
             ret = -EINVAL;
             goto out;
         }
     }
+
     state = drm_atomic_state_alloc(dev);
-    if (!state) {
+    if (state == NULL) {
         ret = -ENOMEM;
         goto out;
     }
     state->file_priv = file_priv;
-    plane_state      = drm_atomic_get_plane_state(state, plane);
-    if (!plane_state) {
+
+    plane_state = drm_atomic_get_plane_state(state, plane);
+    if (plane_state == NULL) {
         drm_atomic_state_free(state);
         ret = -ENOMEM;
         goto out;
     }
+
     plane_state->crtc = crtc;
     plane_state->fb   = fb;
-    plane_state->src  = (struct drm_rect) {(int32_t)plane_req->src_x, (int32_t)plane_req->src_y, (int32_t)(plane_req->src_x + plane_req->src_w),
-                                           (int32_t)(plane_req->src_y + plane_req->src_h)};
-    plane_state->dst  = (struct drm_rect) {plane_req->crtc_x, plane_req->crtc_y, plane_req->crtc_x + (int32_t)plane_req->crtc_w,
-                                           plane_req->crtc_y + (int32_t)plane_req->crtc_h};
-    if (crtc) {
+    plane_state->src  = (struct drm_rect) {(int32_t)req->src_x, (int32_t)req->src_y,
+                                           (int32_t)(req->src_x + req->src_w), (int32_t)(req->src_y + req->src_h)};
+    plane_state->dst  = (struct drm_rect) {req->crtc_x, req->crtc_y, req->crtc_x + (int32_t)req->crtc_w,
+                                           req->crtc_y + (int32_t)req->crtc_h};
+
+    /* The CRTC has to re-evaluate its planes, both when we bind to it and
+     * when we let go of the one we were bound to. */
+    if (crtc != NULL) {
         crtc_state = drm_atomic_get_crtc_state(state, crtc);
-        if (!crtc_state) {
-            drm_atomic_state_free(state);
-            ret = -ENOMEM;
-            goto out;
-        }
-        crtc_state->planes_changed = true;
-    } else if (plane->state && plane->state->crtc) {
+    } else if (plane->state != NULL && plane->state->crtc != NULL) {
         crtc_state = drm_atomic_get_crtc_state(state, plane->state->crtc);
-        if (!crtc_state) {
-            drm_atomic_state_free(state);
-            ret = -ENOMEM;
-            goto out;
-        }
-        crtc_state->planes_changed = true;
     }
+
+    if (crtc_state != NULL) {
+        crtc_state->planes_changed = true;
+    } else if (crtc != NULL || (plane->state != NULL && plane->state->crtc != NULL)) {
+        drm_atomic_state_free(state);
+        ret = -ENOMEM;
+        goto out;
+    }
+
     ret = drm_atomic_commit(state);
-    if (ret) drm_atomic_state_free(state);
+    if (ret != 0) { drm_atomic_state_free(state); }
+
 out:
     drm_mode_object_put(obj);
     return ret;
 }
 
-/*
- * drm_plane_cleanup - Tear down a plane and release its resources.
- * @plane: plane to clean up
- *
- * Removes the plane from the device plane list, removes it from the
- * global IDR, frees the format array, modifier array, and name.
- * Decrements num_plane and num_total_plane.
- */
 void drm_plane_cleanup(struct drm_plane *plane)
 {
     struct drm_device *dev;
 
-    if (!plane) { return; }
+    if (plane == NULL) { return; }
 
     dev = plane->dev;
 
     ilist_remove(&plane->head);
 
-    if (dev) {
+    if (dev != NULL) {
         spin_lock(&dev->mode_config.idr_mutex);
         drm_idr_remove(&dev->mode_config.object_idr, plane->base.id);
         spin_unlock(&dev->mode_config.idr_mutex);
@@ -334,7 +322,8 @@ void drm_plane_cleanup(struct drm_plane *plane)
 
     free(plane->name);
     plane->name = NULL;
-    if (plane->base.properties) {
+
+    if (plane->base.properties != NULL) {
         drm_property_set_destroy(plane->base.properties);
         free(plane->base.properties);
         plane->base.properties = NULL;

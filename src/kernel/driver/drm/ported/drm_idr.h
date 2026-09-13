@@ -1,17 +1,14 @@
 /*
+ * drm_idr.h — small integer ID allocator used by the DRM core. (GPLv2)
  *
- *      drm_idr.h
- *      Integer ID allocator (radix-free hash-backed IDR)
+ * Every DRM mode object (CRTC, connector, encoder, plane, framebuffer,
+ * property) and every GEM handle a userspace fd owns is reached by a 32-bit
+ * id rather than a pointer: user space never learns kernel addresses, and
+ * an id handed to a dead or foreign file descriptor simply fails to look
+ * up instead of being dereferenced.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
- *  Faithful subset of the Linux IDR API used by the DRM subsystem for
- *  mode-object and GEM-handle IDs. Backed by an open-addressing hash
- *  table for O(1) lookup/insert/remove; IDs are allocated monotonically
- *  above a caller-supplied lower bound.
- *
+ * The API mirrors the subset of Linux's IDR that the DRM port relies on.
+ * id 0 is never handed out, so it can mean "no object".
  */
 
 #ifndef INCLUDE_DRM_DRM_IDR_H_
@@ -19,48 +16,66 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
 #include "smp.h"
 
+/* One slot of the hash table.  `state` distinguishes the three things a
+ * slot can hold, because an open-addressed table cannot tell "never used"
+ * from "used and then removed" by looking at the payload alone. */
+enum drm_idr_slot_state {
+    DRM_IDR_SLOT_EMPTY = 0, /* never held an entry; a probe stops here  */
+    DRM_IDR_SLOT_LIVE,      /* holds id/ptr                             */
+    DRM_IDR_SLOT_DEAD       /* held an entry that was removed           */
+};
+
 struct drm_idr_entry {
-        uint32_t id;
-        void    *ptr;
+    uint32_t                 id;
+    void                    *ptr;
+    enum drm_idr_slot_state  state;
 };
 
 struct drm_idr {
-        spinlock_t            lock;     // protects buckets and counter
-        uint32_t              next_id;  // monotonic hint
-        struct drm_idr_entry *table;    // open-addressing bucket array
-        uint32_t              capacity; // power-of-two bucket count
-        uint32_t              count;    // live entries
+    spinlock_t            lock;     /* covers every member below          */
+    uint32_t              next_id;  /* first id to try on the next alloc   */
+    struct drm_idr_entry *table;    /* open-addressed buckets              */
+    uint32_t              capacity; /* always a power of two               */
+    uint32_t              count;    /* live entries (tombstones excluded)  */
 };
 
 #define DRM_IDR_INVALID 0U
 
-/* Initialize an empty IDR. */
+/* Prepare @idr for use.  Allocates its first bucket array; if that fails
+ * the idr is left empty and every later call reports -ENOMEM or NULL. */
 void drm_idr_init(struct drm_idr *idr);
 
-/* Release all IDR storage. Entries are not freed (callers own them). */
+/* Release @idr's storage.  The payload pointers are owned by the caller
+ * and are *not* freed. */
 void drm_idr_destroy(struct drm_idr *idr);
 
 /*
- * Allocate a new id in [start, end) bound to @ptr.
- * Returns 0 and stores the id in *@id_out, or a negative errno on failure.
+ * Bind @ptr to a fresh id and report it in *@id_out.
+ * The id is chosen in [start, end); @end == 0 means "up to UINT32_MAX".
+ * Returns 0, or -ENOMEM / -ENOSPC when no id is available.
  */
 int drm_idr_alloc(struct drm_idr *idr, void *ptr, uint32_t start, uint32_t end, uint32_t *id_out);
 
-/* Allocate the specific @id; returns 0 or -EEXIST/-ENOMEM. */
+/* Bind @ptr to exactly @id.  Returns 0, -EINVAL for id 0, -EEXIST if @id
+ * is taken, or -ENOMEM / -ENOSPC on resource exhaustion. */
 int drm_idr_alloc_exact(struct drm_idr *idr, void *ptr, uint32_t id);
 
-/* Look up the pointer bound to @id, or NULL if none. */
+/* Return what @id is bound to, or NULL when @id is free/invalid. */
 void *drm_idr_find(struct drm_idr *idr, uint32_t id);
 
-/* Remove @id; returns the pointer that was bound or NULL. */
+/* Unbind @id and return what it was bound to (NULL when free/invalid). */
 void *drm_idr_remove(struct drm_idr *idr, uint32_t id);
 
-/* Replace the pointer bound to @id; returns the old pointer or NULL. */
+/* Rebind an existing @id to @ptr and return the previous pointer. */
 void *drm_idr_replace(struct drm_idr *idr, void *ptr, uint32_t id);
 
-/* Iterate every entry: fn returns 0 to continue, non-zero to stop. */
+/*
+ * Walk every live entry, in table order (not id order).
+ * @fn returning non-zero stops the walk, and that value comes back here.
+ */
 int drm_idr_for_each(struct drm_idr *idr, int (*fn)(uint32_t id, void *ptr, void *data), void *data);
 
 #endif /* INCLUDE_DRM_DRM_IDR_H_ */

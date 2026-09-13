@@ -1,19 +1,20 @@
 /*
+ * drm_init.c — DRM subsystem bootstrap for GNOS.
  *
- *      drm_init.c
- *      DRM subsystem initialization entry point
+ * GPLv2 — Copyright 2026 GNOS contributors.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
+ * This file brings up the built-in DRM device: a global device list, the
+ * software ("dummy") driver that backs /dev/dri/card0, the KMS pipeline
+ * (one CRTC + primary plane + encoder + connector), and the VFS glue that
+ * turns open()/ioctl()/mmap() on the device node into DRM core calls.
  *
- *  Creates a singleton DRM device, registers it, and exposes
- *  /dev/dri/card0 via devtmpfs. Designed to be called once from
- *  kernel_entry() after VFS/devtmpfs are available.
- *
+ * Display output is a software scanout: the compositor's dumb buffer is
+ * blitted into the console framebuffer by the refresh thread, and the
+ * cursor is stamped on top per frame.  There is no hardware overlay and
+ * no vblank interrupt; drm_vblank_tick() plays that role on a timer.
  */
 
-#include "drm_devtmpfs.h"  /* device/class/devtmpfs shim -> GNOS VFS */
+#include "drm_devtmpfs.h" /* device/class/devtmpfs shim -> GNOS VFS */
 #include "drm.h"
 #include "drm_device.h"
 #include "drm_fourcc.h"
@@ -26,14 +27,14 @@
 #include <stdint.h>
 #include "kstring.h"
 #include "heap.h"
-#define DRM_WAIT_SLEEP 5 /* proc.h WAIT_SLEEP */
-/* proc.h: kthread_create returns proc_t*, sched_block_timeout takes
- * wait_reason_t (WAIT_SLEEP == 5 there).  Match those signatures exactly. */
-typedef struct { int _; } proc_t_fwd;
+
+/* proc.h: kthread_create returns proc_t*, sched_block_timeout takes a
+ * wait_reason_t (WAIT_SLEEP == 5 there).  Match those signatures. */
+#define DRM_WAIT_SLEEP 5
 void sched_block_timeout(uint32_t why, uint64_t ticks);
 
-/* GNOS always builds the DRM core (the Uinxed build gate has no GNOS
- * counterpart). */
+/* GNOS always builds the DRM core; the Uinxed CONFIG_DRM gate has no
+ * counterpart here. */
 #ifndef CONFIG_DRM
 #define CONFIG_DRM 1
 #endif
@@ -42,9 +43,12 @@ extern int                      drm_vblank_init(struct drm_device *dev, unsigned
 extern struct drm_display_mode *drm_mode_create(struct drm_device *dev);
 extern void                     drm_mode_probed_add(struct drm_connector *connector, struct drm_display_mode *mode);
 
-/* ------------------------------------------------------------------ */
-/* Global DRM device list (replaces singleton)                         */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------------------- *
+ * Global device list                                              *
+ *                                                                 *
+ * Replaces the old singleton: several devices can coexist, and    *
+ * drm_get_singleton() keeps working by returning the first one.   *
+ * --------------------------------------------------------------- */
 
 #define DRM_MAX_DEVICES 16
 
@@ -77,8 +81,8 @@ void drm_device_list_remove(struct drm_device *dev)
 
 struct drm_device *drm_get_singleton(void)
 {
-    /* Return the first registered primary device for backward
-     * compatibility. New code should use drm_get_device_by_minor. */
+    /* First registered device; new code should prefer
+     * drm_get_device_by_minor(). */
     spin_lock(&drm_device_list_lock);
     dbg_puts("DRMSING: list[0]=");
     dbg_puts_hex((uint64_t)(uintptr_t)drm_device_list[0]);
@@ -113,9 +117,14 @@ struct drm_device *drm_get_device_by_minor(int type, int index)
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* Dummy driver for the built-in DRM node                              */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------------------- *
+ * The built-in software driver                                    *
+ *                                                                 *
+ * Everything userspace can do against card0 is served by the core *
+ * (ioctls, GEM, atomic); the driver hooks below only cover the    *
+ * bits the core cannot do for us: object release and PRIME import *
+ * of our own buffers.                                             *
+ * --------------------------------------------------------------- */
 
 static int drm_dummy_open(struct drm_device *dev, struct drm_file *file)
 {
@@ -147,9 +156,8 @@ static void drm_dummy_gem_free_object(struct drm_gem_object *obj)
 
 static struct drm_gem_object *drm_dummy_gem_prime_import(struct drm_device *dev, void *dma_buf)
 {
-    /* For the dummy driver, we can only import buffers that were
-     * exported by ourselves. The dma_buf pointer is actually a
-     * drm_gem_object pointer. */
+    /* The dummy driver only understands buffers it exported itself:
+     * the dma_buf cookie is really a drm_gem_object back-pointer. */
     struct drm_gem_object *obj = (struct drm_gem_object *)dma_buf;
 
     (void)dev;
@@ -197,7 +205,7 @@ static const struct drm_ioctl_desc drm_dummy_ioctls[] = {
 
 static struct drm_driver drm_dummy_driver = {
     .name             = "drm",
-    .desc             = "Uinxed DRM",
+    .desc             = "GNOS DRM",
     .date             = "20260722",
     .major            = 1,
     .minor            = 0,
@@ -215,39 +223,20 @@ static struct drm_driver drm_dummy_driver = {
     .num_ioctls       = sizeof(drm_dummy_ioctls) / sizeof(drm_dummy_ioctls[0]),
 };
 
-/* ------------------------------------------------------------------ */
-/* KMS pipeline setup for the dummy driver                              */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------------------- *
+ * KMS pipeline objects and the software scanout bridge            *
+ *                                                                 *
+ * The ported atomic stack owns the KMS object model; the pixels   *
+ * land in the console framebuffer, which is also what text mode   *
+ * draws through -- so a successful page flip visibly replaces the *
+ * tty.                                                            *
+ * --------------------------------------------------------------- */
+#include "../../fbcon.h"
 
 static struct drm_crtc      pipeline_crtc;
 static struct drm_plane     pipeline_primary_plane;
 static struct drm_encoder   pipeline_encoder;
 static struct drm_connector pipeline_connector;
-
-/* ------------------------------------------------------------------ */
-/* Configurable mode table - data-driven, not hardcoded in logic       */
-/* ------------------------------------------------------------------ */
-
-struct dummy_mode_cfg {
-        const char *name;
-        int         clock;
-        int         hdisplay;
-        int         hsync_start;
-        int         hsync_end;
-        int         htotal;
-        int         vdisplay;
-        int         vsync_start;
-        int         vsync_end;
-        int         vtotal;
-        int         vrefresh;
-        unsigned    flags;
-        unsigned    type;
-};
-
-/* Scanout bridge: the ported atomic stack owns the KMS object model; the
- * pixels land in the console framebuffer, which is also what text mode
- * draws through -- so a successful page flip visibly replaces the tty. */
-#include "../../fbcon.h"
 
 /* The framebuffer currently being scanned out.  The pixman renderer draws
  * in place into the dumb buffer, so after the first commit no ioctl ever
@@ -256,22 +245,19 @@ struct dummy_mode_cfg {
 static struct drm_framebuffer *g_scan_fb;
 
 static void drm_refresh_thread(void *arg);
-void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh,
-                           uint32_t dstep);
+void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep);
 
-/* Called from the PIT tick (timer_irq): push the live dumb buffer to the
- * console framebuffer and stamp the cursor over it.  Cheap enough at
- * console resolutions, and it needs no vblank client to be waiting. */
+/* Heartbeat counter: once the compositor hands us its first framebuffer
+ * this counts up every frame; a stalled desktop with n=0 means the commit
+ * path never delivered anything worth showing. */
 static unsigned long g_refresh_count;
 
+/* Push the live dumb buffer to the console framebuffer and stamp the
+ * cursor over it.  Called from the PIT tick (timer_irq).  Cheap enough at
+ * console resolutions, and it needs no vblank client to be waiting. */
 void drm_dummy_refresh(void)
 {
-    /* Heartbeat: once the compositor hands us its first framebuffer this
-     * counts up every frame; a stalled desktop with n=0 means the commit
-     * path never delivered anything worth showing. */
     if ((++g_refresh_count & 511) == 0) {
-        extern void dbg_puts(const char *);
-        extern void dbg_puts_hex(uint64_t);
         dbg_puts("REFRESH n=");
         dbg_puts_hex(g_refresh_count);
         dbg_puts(" fb=");
@@ -280,15 +266,18 @@ void drm_dummy_refresh(void)
     }
     if (!g_scan_fb || !g_scan_fb->obj[0] || !g_scan_fb->obj[0]->backing)
         return;
+
     uint32_t dw = 0, dh = 0, dpitch = 0;
     fbcon_geometry(&dw, &dh, &dpitch);
     uint32_t *dst = (uint32_t *)fbcon_fb();
     const uint8_t *src = (const uint8_t *)g_scan_fb->obj[0]->backing;
     if (!dst || !src || !dw || !dpitch)
         return;
+
     uint32_t w = g_scan_fb->width  > dw ? dw : g_scan_fb->width;
     uint32_t h = g_scan_fb->height > dh ? dh : g_scan_fb->height;
     uint32_t dstep = dpitch / 4;
+
     for (uint32_t row = 0; row < h; row++) {
         uint32_t       *d = dst + (uint64_t)row * dstep;
         const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * g_scan_fb->pitches[0]);
@@ -311,11 +300,15 @@ static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb
             refresh_thread_up = 0;
     }
 
-    (void)crtc; (void)event; (void)flags;
+    (void)crtc;
+    (void)event;
+    (void)flags;
+
     if (!fb)
         return 0;
     if (!fb->obj[0] || !fb->obj[0]->backing)
         return -EINVAL;
+
     g_scan_fb = fb;
 
     uint32_t dw = 0, dh = 0, dpitch = 0;
@@ -339,10 +332,9 @@ static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb
     }
     return 0;
 }
-/* Re-blit the primary framebuffer on every software vblank.  The pixman
- * renderer draws in place into the dumb buffer, so the framebuffer never
- * changes and no page flip ever fires -- without this hook the display
- * would freeze on whatever the first commit happened to contain. */
+
+/* Re-blit the primary framebuffer on every software vblank.  Without this
+ * hook the display would freeze on whatever the first commit contained. */
 static void drm_dummy_vblank_blit(struct drm_crtc *crtc)
 {
     struct drm_framebuffer *fb = NULL;
@@ -374,7 +366,7 @@ static struct {
     struct drm_gem_object *bo;
     uint32_t               w, h;
     int32_t                hot_x, hot_y;
-    int32_t                x, y;      /* top-left of the cursor image */
+    int32_t                x, y; /* top-left of the cursor image */
     bool                   on;
 } sw_cursor;
 
@@ -404,11 +396,10 @@ static int drm_dummy_cursor_move(struct drm_crtc *crtc, int32_t x, int32_t y)
     return 0;
 }
 
-/* Stamp the cursor image over `dst` (the console framebuffer).  Pixels with
- * their high byte clear are treated as transparent; everything else is
- * copied verbatim -- cheap, and close enough for an X shape. */
-void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh,
-                           uint32_t dstep)
+/* Stamp the cursor image over `dst` (the console framebuffer).  Pixels
+ * with their high byte clear are treated as transparent; everything else
+ * is copied verbatim -- cheap, and close enough for an X shape. */
+void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep)
 {
     const uint32_t *src;
     uint32_t cw, ch;
@@ -451,6 +442,25 @@ static const struct drm_crtc_helper_funcs pipeline_crtc_helper = {
     .cursor_move = drm_dummy_cursor_move,
 };
 
+/* --------------------------------------------------------------- *
+ * Mode table (data-driven, not hardcoded in logic)                *
+ * --------------------------------------------------------------- */
+
+struct dummy_mode_cfg {
+    const char *name;
+    int         clock;
+    int         hdisplay;
+    int         hsync_start;
+    int         hsync_end;
+    int         htotal;
+    int         vdisplay;
+    int         vsync_start;
+    int         vsync_end;
+    int         vtotal;
+    int         vrefresh;
+    unsigned    flags;
+    unsigned    type;
+};
 
 static const struct dummy_mode_cfg dummy_modes[] = {
     {
@@ -487,15 +497,12 @@ static const struct dummy_mode_cfg dummy_modes[] = {
 
 static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector *connector)
 {
-    unsigned int i;
-
     (void)dev;
 
-    for (i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
-        const struct dummy_mode_cfg *cfg = &dummy_modes[i];
-        struct drm_display_mode     *mode;
+    for (unsigned i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
+        const struct dummy_mode_cfg *cfg  = &dummy_modes[i];
+        struct drm_display_mode     *mode = drm_mode_create(dev);
 
-        mode = drm_mode_create(dev);
         if (!mode) { return -ENOMEM; }
 
         strncpy(mode->name, cfg->name, DRM_DISPLAY_MODE_LEN - 1);
@@ -518,18 +525,15 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
     }
 
     /* Also add the actual bootloader framebuffer resolution as the
-     * preferred mode.  This ensures Xorg/wlroots always find a mode
-     * that matches the physical display, regardless of the hardcoded
-     * table above. */
+     * preferred mode.  This ensures Xorg/wlroots always find a mode that
+     * matches the physical display, regardless of the table above. */
     {
         uint32_t fb_w = 0, fb_h = 0, fb_pitch = 0;
-        extern void fbcon_geometry(uint32_t *w, uint32_t *h, uint32_t *pitch);
         fbcon_geometry(&fb_w, &fb_h, &fb_pitch);
 
         if (fb_w > 0 && fb_h > 0) {
-            /* Check if this resolution is already in the table. */
             int duplicate = 0;
-            for (i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
+            for (unsigned i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
                 if ((uint32_t)dummy_modes[i].hdisplay == fb_w &&
                     (uint32_t)dummy_modes[i].vdisplay == fb_h) {
                     duplicate = 1;
@@ -544,15 +548,15 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
                     snprintf(namebuf, sizeof(namebuf), "%ux%u", fb_w, fb_h);
                     strncpy(mode->name, namebuf, DRM_DISPLAY_MODE_LEN - 1);
                     mode->name[DRM_DISPLAY_MODE_LEN - 1] = '\0';
-                    mode->hdisplay    = fb_w;
-                    mode->vdisplay    = fb_h;
-                    mode->htotal      = fb_w;
-                    mode->vtotal      = fb_h;
-                    mode->clock       = (int)((uint64_t)fb_w * fb_h * 60 / 1000);
-                    mode->vrefresh    = 60;
-                    mode->flags       = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
-                    mode->type        = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
-                    mode->status      = MODE_OK;
+                    mode->hdisplay = fb_w;
+                    mode->vdisplay = fb_h;
+                    mode->htotal   = fb_w;
+                    mode->vtotal   = fb_h;
+                    mode->clock    = (int)((uint64_t)fb_w * fb_h * 60 / 1000);
+                    mode->vrefresh = 60;
+                    mode->flags    = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
+                    mode->type     = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
+                    mode->status   = MODE_OK;
                     drm_mode_probed_add(connector, mode);
                 }
             }
@@ -565,12 +569,9 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
 static void drm_refresh_thread(void *arg)
 {
     (void)arg;
-    {
-        extern void dbg_puts(const char *);
-        dbg_puts("RTHREAD start\n");
-    }
+    dbg_puts("RTHREAD start\n");
     for (;;) {
-        sched_block_timeout((uint32_t)DRM_WAIT_SLEEP, 1);   /* one PIT tick per frame */
+        sched_block_timeout((uint32_t)DRM_WAIT_SLEEP, 1); /* one PIT tick per frame */
         /* One software vblank per frame: retires pending page flips
          * (otherwise every flip after the first returns EBUSY forever),
          * delivers flip/vblank events to clients, then pushes the live
@@ -595,7 +596,7 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     memset(&pipeline_encoder, 0, sizeof(pipeline_encoder));
     memset(&pipeline_connector, 0, sizeof(pipeline_connector));
 
-    /* Create primary plane (can only be driven by CRTC 0) */
+    /* Primary plane: only ever driven by CRTC 0. */
     ret = drm_plane_init(dev, &pipeline_primary_plane, 1, /* possible_crtcs = bit 0 */
                          NULL, primary_formats, sizeof(primary_formats) / sizeof(primary_formats[0]), NULL, DRM_PLANE_TYPE_PRIMARY, "primary");
     if (ret) {
@@ -603,7 +604,6 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
         return ret;
     }
 
-    /* Allocate and initialise the primary plane state */
     pipeline_primary_plane.state = malloc(sizeof(*pipeline_primary_plane.state));
     if (!pipeline_primary_plane.state) {
         DRM_ERROR("Failed to alloc primary plane state\n");
@@ -617,7 +617,6 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_primary_plane.state->pixel_blend_mode = 0;
     pipeline_primary_plane.state->visible          = true;
 
-    /* Create CRTC with the primary plane */
     ret = drm_crtc_init_with_planes(dev, &pipeline_crtc, &pipeline_primary_plane, NULL,
                                     &pipeline_crtc_helper, "CRTC-0");
     if (ret) {
@@ -625,7 +624,6 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
         return ret;
     }
 
-    /* Allocate and initialise the CRTC state */
     pipeline_crtc.state = malloc(sizeof(*pipeline_crtc.state));
     if (!pipeline_crtc.state) {
         DRM_ERROR("Failed to alloc CRTC state\n");
@@ -636,7 +634,7 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_crtc.state->active = false;
     pipeline_crtc.state->enable = false;
 
-    /* Create encoder (VIRTUAL type for software-only output) */
+    /* VIRTUAL encoder/connector: the output is software-only. */
     ret = drm_encoder_init(dev, &pipeline_encoder, NULL, DRM_MODE_ENCODER_VIRTUAL, "encoder-0");
     if (ret) {
         DRM_ERROR("Failed to init encoder: %d\n", ret);
@@ -645,7 +643,6 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_encoder.possible_crtcs = 1;
     pipeline_encoder.crtc           = &pipeline_crtc;
 
-    /* Create connector (VIRTUAL, initially connected) */
     ret = drm_connector_init(dev, &pipeline_connector, NULL, DRM_MODE_CONNECTOR_VIRTUAL);
     if (ret) {
         DRM_ERROR("Failed to init connector: %d\n", ret);
@@ -655,7 +652,6 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_connector.display_info_width_mm  = 500;
     pipeline_connector.display_info_height_mm = 280;
 
-    /* Allocate and initialise the connector state */
     pipeline_connector.state = malloc(sizeof(*pipeline_connector.state));
     if (!pipeline_connector.state) {
         DRM_ERROR("Failed to alloc connector state\n");
@@ -666,21 +662,18 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_connector.state->crtc         = &pipeline_crtc;
     pipeline_connector.state->best_encoder = &pipeline_encoder;
 
-    /* Attach encoder to connector */
     ret = drm_connector_attach_encoder(&pipeline_connector, &pipeline_encoder);
     if (ret) {
         DRM_ERROR("Failed to attach encoder: %d\n", ret);
         return ret;
     }
 
-    /* Add display modes from the configurable table */
     ret = drm_dummy_kms_add_modes(dev, &pipeline_connector);
     if (ret) {
         DRM_ERROR("Failed to add modes: %d\n", ret);
         return ret;
     }
 
-    /* Initialise vblank for this CRTC */
     ret = drm_vblank_init(dev, 1);
     if (ret) {
         DRM_ERROR("Failed to init vblank: %d\n", ret);
@@ -701,17 +694,16 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     return 0;
 }
 
-
-/* ------------------------------------------------------------------ */
-/* DRM VFS ioctl wrapper                                               */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------------------- *
+ * VFS glue: turning device-node calls into DRM core calls         *
+ * --------------------------------------------------------------- */
 
 int64_t drm_dev_read(void *file, void *addr, size_t offset, size_t size)
 {
     /* Forward to the real event-dequeue logic in drm_file.c.
      * drm_read() blocks via wait_queue_sleep() when no events are pending
      * and returns 0 on EOF (event_closing), which is the standard Linux
-     * DRM semantics that libdrm/drmmode expect. */
+     * DRM semantics that libdrm/modesetting expect. */
     return (int64_t)drm_read((struct drm_file *)file, (char *)addr, size, &offset);
 }
 
@@ -726,8 +718,8 @@ size_t drm_dev_write(void *file, const void *addr, size_t offset, size_t size)
 
 int drm_dev_ioctl(void *file, size_t req, void *arg)
 {
+    struct drm_file *file_priv = (struct drm_file *)file;
     struct drm_device *dev;
-    struct drm_file   *file_priv = (struct drm_file *)file;
 
     if (!file_priv) return -ENODEV;
 
@@ -738,7 +730,7 @@ int drm_dev_ioctl(void *file, size_t req, void *arg)
 }
 
 /* tmpfs/devtmpfs per-open bridge. A VFS node is shared by all processes, so
- * storing drm_file in node->handle is incorrect: one close could release
+ * storing drm_file in node->handle would be wrong: one close could release
  * another client's state. */
 int drm_dev_open(void *node_ptr, uint64_t flags, void **private_data)
 {
@@ -753,9 +745,11 @@ int drm_dev_open(void *node_ptr, uint64_t flags, void **private_data)
 
     dev = drm_get_singleton();
     if (!dev) return -ENODEV;
+
     file = malloc(sizeof(*file));
     if (!file) return -ENOMEM;
     memset(file, 0, sizeof(*file));
+
     ret = drm_open(dev, file);
     if (ret) {
         free(file);
@@ -767,9 +761,13 @@ int drm_dev_open(void *node_ptr, uint64_t flags, void **private_data)
      * open (before issuing SET_MASTER); leaving this bit clear makes the
      * otherwise valid KMS device look absent to its DRM backend.  Render
      * nodes intentionally keep the normal unauthenticated state. */
-    struct vfs_node *node = (struct vfs_node *)node_ptr;
-    process_t       *proc = process_current();
-    if (node && node->name[0] && !strncmp(node->name, "card", 4) && proc && proc->uid == 0) file->authenticated = true;
+    {
+        struct vfs_node *node = (struct vfs_node *)node_ptr;
+        process_t       *proc = process_current();
+        if (node && node->name[0] && !strncmp(node->name, "card", 4) && proc && proc->uid == 0)
+            file->authenticated = true;
+    }
+
     *private_data = file;
     return 0;
 }
@@ -820,7 +818,6 @@ int drm_dev_poll(void *file, size_t events)
 
 void *drm_dev_mmap(void *file, size_t offset, size_t size, int flags)
 {
-    struct drm_device     *dev;
     struct drm_file       *file_priv = (struct drm_file *)file;
     struct drm_gem_object *obj;
     void                  *result;
@@ -830,12 +827,9 @@ void *drm_dev_mmap(void *file, size_t offset, size_t size, int flags)
 
     if (!file_priv) return NULL;
 
-    dev = drm_get_singleton();
-    if (!dev) return NULL;
-
-    /* Look up the GEM object by the mmap offset that was returned
-     * from MAP_DUMB. Its backing memory is identity-mapped (physical
-     * == virtual) so we can return the pointer directly. */
+    /* Look up the GEM object by the mmap offset that was returned from
+     * MAP_DUMB.  Its backing memory is identity-mapped (physical ==
+     * virtual) so we can return the pointer directly. */
     obj = drm_gem_object_lookup_by_offset(file_priv, (uint64_t)offset);
     if (!obj) { return NULL; }
 
@@ -844,10 +838,7 @@ void *drm_dev_mmap(void *file, size_t offset, size_t size, int flags)
     return result;
 }
 
-/* ------------------------------------------------------------------ */
-/* DRM per-open mmap callback (VMA-aware GEM mmap)                     */
-/* ------------------------------------------------------------------ */
-
+/* Per-open mmap callback (VMA-aware GEM mmap). */
 void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t size, int flags, struct vm_area *vma)
 {
     struct drm_device     *dev       = (struct drm_device *)ctx;
@@ -858,6 +849,7 @@ void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t
     (void)flags;
 
     if (!dev) dev = drm_get_singleton();
+
     dbg_puts("DRMMAP: dev=");
     dbg_puts_hex((uint64_t)(uintptr_t)dev);
     dbg_puts(" fp=");
@@ -873,7 +865,6 @@ void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t
     dbg_puts("\r\n");
     if (!dev || !file_priv || !vma) return NULL;
 
-    /* Look up the GEM object by its mmap offset. */
     obj = drm_gem_object_lookup_by_offset(file_priv, (uint64_t)offset);
     dbg_puts("DRMMAP: obj=");
     dbg_puts_hex((uint64_t)(uintptr_t)obj);
@@ -882,22 +873,17 @@ void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t
     dbg_puts("\r\n");
     if (!obj || !obj->backing) return NULL;
 
-    /* Store GEM object in VMA for lifetime tracking.
-     * process_munmap will call drm_gem_object_put when the
-     * mapping is torn down. */
+    /* Store the GEM object in the VMA for lifetime tracking:
+     * process_munmap calls drm_gem_object_put when the mapping goes away. */
     vma->vm_private_data = obj;
 
-    /* Identity-mapped physical memory: return the backing pointer.
-     * The syscall mmap layer handles PTE creation using this pointer. */
+    /* Identity-mapped physical memory: return the backing pointer; the
+     * syscall mmap layer creates the PTEs from it. */
     return obj->backing;
 }
 
-/* ------------------------------------------------------------------ */
-/* DRM open / release callbacks for devtmpfs                           */
-/* ------------------------------------------------------------------ */
-
 /*
- * When userspace opens /dev/dri/card0, tmpfs calls this open callback.
+ * When userspace opens /dev/dri/card0, tmpfs calls the open callback.
  * GNOS's VFS has no per-open callbacks (the DRM open path runs through
  * drm_dev_open above instead), so these two are inert here.
  */
@@ -913,9 +899,9 @@ void drm_vfs_close_cb(void *current)
     (void)current;
 }
 
-/* ------------------------------------------------------------------ */
-/* DRM class (global, shared by all DRM devices)                       */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------------------- *
+ * DRM class (global, shared by all DRM devices)                   *
+ * --------------------------------------------------------------- */
 
 static int drm_device_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
@@ -925,19 +911,19 @@ static int drm_device_uevent(struct device *dev, struct kobj_uevent_env *env)
 }
 
 struct class drm_class = {
-    .name      = "drm",
+    .name       = "drm",
     .dev_uevent = drm_device_uevent,
 };
 int drm_class_registered = 0;
 
-/* ------------------------------------------------------------------ */
-/* Public init                                                         */
-/* ------------------------------------------------------------------ */
+/* --------------------------------------------------------------- *
+ * Public init                                                     *
+ * --------------------------------------------------------------- */
 
 int drm_init(void)
 {
 #if CONFIG_DRM
-    /* Register core DRM services first.  The software fallback must not
+    /* Register the core DRM class first.  The software fallback must not
      * claim card0/renderD128 before a hardware driver probes. */
     if (!drm_class_registered) {
         int ret = class_register(&drm_class);
@@ -968,7 +954,6 @@ int drm_init_fallback(void)
         return ret;
     }
 
-    /* Set up the minimal KMS display pipeline */
     ret = drm_dummy_kms_setup(dev);
     if (ret != 0) {
         DRM_ERROR("Failed to set up KMS pipeline: %d\n", ret);
@@ -977,6 +962,7 @@ int drm_init_fallback(void)
     }
 
     drm_device_list_add(dev);
+
     dbg_puts("DRMINIT: fallback device=");
     dbg_puts_hex((uint64_t)(uintptr_t)dev);
     dbg_puts(" list[0]=");

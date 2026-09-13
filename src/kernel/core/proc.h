@@ -346,7 +346,9 @@ proc_t *proc_by_pid(int pid);
 int     proc_capacity(void);
 proc_t *proc_at(int i);
 
-/* Build PID 1 from an executable in the filesystem and make it runnable. */
+/* Build PID 1 from an executable in the filesystem and make it runnable.
+ * Words from the boot command line (an initrd-root /cmdline file) are
+ * spliced into init's argv[1..] here, Linux style. */
 int  proc_spawn_init(const char *path);
 
 /* fork(): duplicate the caller.  Returns the child's pid to the parent and

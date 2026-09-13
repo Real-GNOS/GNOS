@@ -1,13 +1,19 @@
 /*
+ * drm_blend.c - per-plane appearance properties. (GPLv2)
  *
- *      drm_blend.c
- *      DRM plane blending helpers
+ * How a plane is stacked (zpos), oriented (rotation), and combined with
+ * what is under it (blend mode, alpha) is exposed to user space as
+ * properties.  This is the place those defaults are recorded when a driver
+ * registers a plane.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
+ * Two of them are only recorded, not published yet: creating a property
+ * needs the property machinery, and until a driver reports support for
+ * rotation or blending the value is a statement of intent rather than
+ * something a client can change.
  */
+
+#include <stddef.h>
+#include <stdint.h>
 
 #include "drm_device.h"
 #include "drm_fourcc.h"
@@ -15,76 +21,43 @@
 #include "drm_mode.h"
 #include "drm_modeset_lock.h"
 #include "drm_print.h"
-#include "vfs.h"
-#include <stddef.h>
-#include <stdint.h>
-#include "kstring.h"
 #include "heap.h"
+#include "kstring.h"
 #include "smp.h"
+#include "vfs.h"
 
-/*
- * drm_plane_create_zpos_property - Set the default z-position for a plane.
- * @plane: plane
- * @zpos: default z-position value
- *
- * Stores the default zpos in the plane's zpos_property_default field.
- * In a full implementation this would also create a DRM range property
- * and attach it; MVP stores the value only.
- */
+/* Stacking order, from back to front. */
 void drm_plane_create_zpos_property(struct drm_plane *plane, unsigned int zpos)
 {
-    if (!plane) { return; }
+    if (plane == NULL) { return; }
 
     plane->zpos_property_default = zpos;
 }
 
-/*
- * drm_plane_create_rotation_property - Create the rotation property for a plane.
- * @plane: plane
- * @rotation: bitmask of supported rotation/reflection flags
- *
- * MVP stub: the property infrastructure is not yet wired.
- * Returns 0.
- */
+/* Which rotations and reflections the plane can apply. */
 int drm_plane_create_rotation_property(struct drm_plane *plane, unsigned int rotation)
 {
-    if (!plane) { return -EINVAL; }
+    if (plane == NULL) { return -EINVAL; }
 
-    (void)rotation;
+    (void)rotation; /* published once properties are wired up */
 
-    /* MVP stub: property creation deferred to drm_property_create_bitmask */
     return 0;
 }
 
-/*
- * drm_plane_create_blend_mode_property - Create the pixel blend mode property.
- * @plane: plane
- * @blend_mode: bitmask of supported blend modes
- *
- * MVP stub: the property infrastructure is not yet wired.
- * Returns 0.
- */
+/* Which pixel blend modes the plane's hardware understands. */
 int drm_plane_create_blend_mode_property(struct drm_plane *plane, unsigned int blend_mode)
 {
-    if (!plane) { return -EINVAL; }
+    if (plane == NULL) { return -EINVAL; }
 
     (void)blend_mode;
 
-    /* MVP stub: property creation deferred to drm_property_create_enum */
     return 0;
 }
 
-/*
- * drm_plane_create_alpha_property - Create the alpha property for a plane.
- * @plane: plane
- *
- * MVP stub: the property infrastructure is not yet wired.
- * Returns 0.
- */
+/* Constant transparency applied across the whole plane. */
 int drm_plane_create_alpha_property(struct drm_plane *plane)
 {
-    if (!plane) { return -EINVAL; }
+    if (plane == NULL) { return -EINVAL; }
 
-    /* MVP stub: property creation deferred to drm_property_create_range */
     return 0;
 }

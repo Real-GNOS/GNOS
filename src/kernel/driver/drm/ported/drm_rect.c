@@ -1,87 +1,76 @@
 /*
+ * drm_rect.c - half-open rectangles, the units display hardware thinks in.
+ * (GPLv2)
  *
- *      drm_rect.c
- *      DRM rectangle helpers
- *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
+ * Nothing here allocates or loops; see drm_rect.h for the contracts.
  */
 
-#include "drm_rect.h"
-#include "vfs.h"
-#include "debugcon.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include "heap.h"
 
-/* Returns true if the rectangle has strictly positive area. */
+#include "drm_rect.h"
+
 bool drm_rect_visible(const struct drm_rect *r)
 {
     return (r->x2 > r->x1) && (r->y2 > r->y1);
 }
 
-/* Intersect @r with @clip in place; returns true if the resulting rectangle is visible. */
 bool drm_rect_intersect(struct drm_rect *r, const struct drm_rect *clip)
 {
-    int32_t x1, y1, x2, y2;
+    int32_t left   = (r->x1 > clip->x1) ? r->x1 : clip->x1;
+    int32_t top    = (r->y1 > clip->y1) ? r->y1 : clip->y1;
+    int32_t right  = (r->x2 < clip->x2) ? r->x2 : clip->x2;
+    int32_t bottom = (r->y2 < clip->y2) ? r->y2 : clip->y2;
 
-    x1 = (r->x1 > clip->x1) ? r->x1 : clip->x1;
-    y1 = (r->y1 > clip->y1) ? r->y1 : clip->y1;
-    x2 = (r->x2 < clip->x2) ? r->x2 : clip->x2;
-    y2 = (r->y2 < clip->y2) ? r->y2 : clip->y2;
+    r->x1 = left;
+    r->y1 = top;
+    r->x2 = right;
+    r->y2 = bottom;
 
-    r->x1 = x1;
-    r->y1 = y1;
-    r->x2 = x2;
-    r->y2 = y2;
-
+    /* Empty is fine as a result, it just is not drawable: an intersection
+     * that misses entirely leaves the caller with a degenerate rectangle. */
     return drm_rect_visible(r);
 }
 
-/*
- * Clip @src and @dst against @clip while preserving the 16.16 fixed-point
- * scaling ratio between source and destination. All scaling arithmetic is
- * performed in 64 bits to avoid overflow. Returns true if the destination
- * rectangle remains visible after clipping.
- */
 bool drm_rect_clip_scaled(struct drm_rect *src, struct drm_rect *dst, const struct drm_rect *clip)
 {
-    int64_t diff;
+    int64_t overshoot;
 
-    /* A degenerate destination cannot be clipped; avoid division by zero. */
-    if (drm_rect_width(dst) == 0 || drm_rect_height(dst) == 0) return drm_rect_visible(dst);
+    /* Nothing to scale against, so nothing can be trimmed consistently. */
+    if (drm_rect_width(dst) == 0 || drm_rect_height(dst) == 0) { return drm_rect_visible(dst); }
 
-    diff = (int64_t)clip->x1 - (int64_t)dst->x1;
-    if (diff > 0) {
-        int64_t src_diff = diff * (int64_t)drm_rect_width(src) / (int64_t)drm_rect_width(dst);
-        if (src_diff < 0) src_diff = 0;
-        src->x1 = (int32_t)((int64_t)src->x1 + src_diff);
+    /* Each side is handled on its own: how far @dst pokes past @clip is
+     * converted into source units through the width ratio, so whatever ends
+     * up clipped describes the same picture, only smaller. */
+    overshoot = (int64_t)clip->x1 - (int64_t)dst->x1;
+    if (overshoot > 0) {
+        int64_t shift = overshoot * (int64_t)drm_rect_width(src) / (int64_t)drm_rect_width(dst);
+        if (shift < 0) { shift = 0; }
+        src->x1 = (int32_t)((int64_t)src->x1 + shift);
         dst->x1 = clip->x1;
     }
 
-    diff = (int64_t)clip->x2 - (int64_t)dst->x2;
-    if (diff < 0) {
-        int64_t src_diff = diff * (int64_t)drm_rect_width(src) / (int64_t)drm_rect_width(dst);
-        if (src_diff > 0) src_diff = 0;
-        src->x2 = (int32_t)((int64_t)src->x2 + src_diff);
+    overshoot = (int64_t)clip->x2 - (int64_t)dst->x2;
+    if (overshoot < 0) {
+        int64_t shift = overshoot * (int64_t)drm_rect_width(src) / (int64_t)drm_rect_width(dst);
+        if (shift > 0) { shift = 0; }
+        src->x2 = (int32_t)((int64_t)src->x2 + shift);
         dst->x2 = clip->x2;
     }
 
-    diff = (int64_t)clip->y1 - (int64_t)dst->y1;
-    if (diff > 0) {
-        int64_t src_diff = diff * (int64_t)drm_rect_height(src) / (int64_t)drm_rect_height(dst);
-        if (src_diff < 0) src_diff = 0;
-        src->y1 = (int32_t)((int64_t)src->y1 + src_diff);
+    overshoot = (int64_t)clip->y1 - (int64_t)dst->y1;
+    if (overshoot > 0) {
+        int64_t shift = overshoot * (int64_t)drm_rect_height(src) / (int64_t)drm_rect_height(dst);
+        if (shift < 0) { shift = 0; }
+        src->y1 = (int32_t)((int64_t)src->y1 + shift);
         dst->y1 = clip->y1;
     }
 
-    diff = (int64_t)clip->y2 - (int64_t)dst->y2;
-    if (diff < 0) {
-        int64_t src_diff = diff * (int64_t)drm_rect_height(src) / (int64_t)drm_rect_height(dst);
-        if (src_diff > 0) src_diff = 0;
-        src->y2 = (int32_t)((int64_t)src->y2 + src_diff);
+    overshoot = (int64_t)clip->y2 - (int64_t)dst->y2;
+    if (overshoot < 0) {
+        int64_t shift = overshoot * (int64_t)drm_rect_height(src) / (int64_t)drm_rect_height(dst);
+        if (shift > 0) { shift = 0; }
+        src->y2 = (int32_t)((int64_t)src->y2 + shift);
         dst->y2 = clip->y2;
     }
 

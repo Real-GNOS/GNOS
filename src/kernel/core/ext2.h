@@ -71,6 +71,7 @@
 #define EXT2_ENOTEMPTY  (-5)
 #define EXT2_EINVAL     (-6)
 #define EXT2_EISDIR     (-7)
+#define EXT2_EROFS      (-8)
 
 /*
  * Block cache geometry for disk mode.  The cache is a fixed array of
@@ -81,6 +82,25 @@
  */
 #define EXT2_CACHE_SLOTS   16
 #define EXT2_MAX_BLOCK     4096
+
+/*
+ * EXT4 features this driver reads.  EXTENTS moves file block maps into a
+ * B-tree inside i_block[]; 64BIT widens group descriptors and block
+ * numbers past 2^32; FLEX_BG only relocates bitmaps within the group
+ * table's flex groups and does not change how any block is found.  All
+ * three are tolerated; files with extent trees are read-only, ext2-style
+ * indirect files remain fully read-write either way.
+ */
+#define EXT4_FEATURE_INCOMPAT_EXTENTS  0x0040
+#define EXT4_FEATURE_INCOMPAT_64BIT    0x0080
+#define EXT4_FEATURE_INCOMPAT_MMP      0x0100
+#define EXT4_FEATURE_INCOMPAT_FLEX_BG  0x0200
+#define EXT4_FEATURE_INCOMPAT_INLINE   0x8000
+#define EXT4_EXTENTS_FL                0x00080000   /* i_flags */
+
+/* i_size_high sits at byte 108 -- the directory-ACL slot on rev-0 ext2,
+ * repurposed by ext4 (and rev-1 ext2/3 with HUGE_FILE) for regular files. */
+#define I_SIZE_HIGH         108
 
 /*
  * Raw block I/O for disk mode.  `ctx` is whatever the caller passed to
@@ -121,6 +141,14 @@ typedef struct {
 
     uint32_t alloc_hint;         /* block number the last search stopped at */
     int      has_filetype;       /* directory entries carry a type byte */
+
+    /* EXT4 geometry.  desc_size is 32 on ext2/3 and 64 on 64-bit ext4
+     * volumes; has_extents marks a volume whose files may use extent
+     * trees (those files read read-only); has_64bit switches group
+     * descriptor block pointers to the high words. */
+    uint16_t desc_size;
+    int      has_extents;
+    int      has_64bit;
 
     /* Owner stamped onto newly allocated inodes.  ext2 has no notion of a
      * "current process", so the VFS pushes the caller's effective ids down

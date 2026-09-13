@@ -139,6 +139,22 @@ config GNOS_EXT2
     help
       ext2/Ext2 文件系统驱动。内核 initrd 和磁盘使用此格式。
 
+config GNOS_EXT4
+    bool "ext4 只读扩展"
+    default y
+    depends on GNOS_EXT2
+    help
+      在 ext2 驱动之上支持 ext4 卷：extent 树文件读取、64 位组描述符、
+      flex_bg 布局。extent 文件只读，ext2 风格间接块文件保持读写。
+
+config GNOS_NVME
+    bool "NVMe 块设备驱动"
+    default y
+    depends on GNOS_PCI
+    help
+      NVMe 1.x 控制器驱动（PCI class 01/08）。轮询式完成队列，
+      发布 /dev/nvme*N 命名空间与分区节点。
+
 config GNOS_TMPFS
     bool "tmpfs 内存文件系统"
     default y

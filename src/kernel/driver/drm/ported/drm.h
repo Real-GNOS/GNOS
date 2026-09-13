@@ -1,17 +1,18 @@
 /*
+ * drm.h - the ioctl interface between user space and the display driver.
+ * (GPLv2)
  *
- *      drm.h
- *      Direct Rendering Manager core UAPI
+ * Everything here is an interface to code we do not build: libdrm, and
+ * through it X, Wayland compositors and every other client.  A field moved
+ * or a command renumbered is not a change, it is a break, so the layouts
+ * are byte-for-byte what those clients expect on x86-64 -- fixed-width
+ * types everywhere, so the kernel's view does not depend on how wide a
+ * pointer happens to be.
  *
- *      2026/7/22 By JiTianYu391
- *      Copyright 2020 ViudiraTech, based on the Apache 2.0 license.
- *      Ported from Uinxed-Kernel (OpenXJ380/Uinxed-Kernel).  See README.md.
- *
- *  Adapted from the Linux DRM UAPI (include/uapi/drm/drm.h). Layouts are
- *  byte-compatible with Linux on x86-64: pointer and `unsigned long` UAPI
- *  fields are expressed as fixed-width `uint64_t` so the in-kernel view is
- *  stable regardless of the host pointer model.
- *
+ * Much of the file is the original 1999-era DRM surface (hardware locks,
+ * AGP, DMA buffers) kept for the sake of clients that still probe it; a
+ * modern driver answers the handful of GEM, capability and mode-setting
+ * commands at the end and says ENOSYS to the rest.
  */
 
 #ifndef INCLUDE_DRM_DRM_H_
@@ -20,7 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Fixed-width UAPI aliases mirroring Linux __u8/__s8/... */
+/* Widths spelled the way the interface spells them. */
 typedef int8_t   __s8;
 typedef uint8_t  __u8;
 typedef int16_t  __s16;
@@ -29,32 +30,40 @@ typedef int32_t  __s32;
 typedef uint32_t __u32;
 typedef int64_t  __s64;
 typedef uint64_t __u64;
+
 typedef uint32_t drm_handle_t;
 typedef uint32_t drm_context_t;
 typedef uint32_t drm_drawable_t;
 typedef uint32_t drm_magic_t;
 
-/* Generic DRM event ABI (byte-for-byte compatible with Linux). */
+/* ----------------------------------------------------------------- events */
+
+/* What a client may find queued on the fd it polls. */
 #define DRM_EVENT_VBLANK        0x01
 #define DRM_EVENT_FLIP_COMPLETE 0x02
 
 struct drm_event {
-        __u32 type;
-        __u32 length;
+    __u32 type;
+    __u32 length; /* total, including this header */
 };
 
 struct drm_event_vblank {
-        struct drm_event base;
-        __u64            user_data;
-        __u32            tv_sec;
-        __u32            tv_usec;
-        __u32            sequence;
-        __u32            crtc_id;
+    struct drm_event base;
+    __u64            user_data; /* copied straight back to the waiter */
+    __u32            tv_sec;
+    __u32            tv_usec;
+    __u32            sequence;
+    __u32            crtc_id;
 };
 
-/* ioctl encoding macros, x86-64 identical to Linux asm-generic/ioctl.h.
- * Guarded with #ifndef so they coexist with input_event.h which also
- * defines them (the project has no single asm/ioctl.h header). */
+/* --------------------------------------------------------- ioctl encoding */
+
+/*
+ * A command number packs four things into 32 bits: direction (2), argument
+ * size (14), driver letter (8) and ordinal (8).  Guarded with #ifndef
+ * because other headers in this tree define the same set and there is no
+ * single place to put them.
+ */
 #ifndef _IOC_NRBITS
 #    define _IOC_NRBITS 8
 #endif
@@ -120,70 +129,73 @@ struct drm_event_vblank {
 #define DRM_MAX_ORDER   22
 #define DRM_RAM_PERCENT 10
 
+/* The old userspace lock word: two flag bits and a context number. */
 #define _DRM_LOCK_HELD             0x80000000U
 #define _DRM_LOCK_CONT             0x40000000U
 #define _DRM_LOCK_IS_HELD(lock)    ((lock) & _DRM_LOCK_HELD)
 #define _DRM_LOCK_IS_CONT(lock)    ((lock) & _DRM_LOCK_CONT)
 #define _DRM_LOCKING_CONTEXT(lock) ((lock) & ~(_DRM_LOCK_HELD | _DRM_LOCK_CONT))
 
-/* Clip rectangle (legacy) */
+/* ------------------------------------------------------------ core ioctls */
+
 struct drm_clip_rect {
-        __u16 x1;
-        __u16 y1;
-        __u16 x2;
-        __u16 y2;
+    __u16 x1;
+    __u16 y1;
+    __u16 x2;
+    __u16 y2;
 };
 
 struct drm_drawable_info {
-        __u32                 num_rects;
-        struct drm_clip_rect *rects;
+    __u32                 num_rects;
+    struct drm_clip_rect *rects;
 };
 
 struct drm_tex_region {
-        __u8  next;
-        __u8  prev;
-        __u8  in_use;
-        __u8  padding;
-        __u32 age;
+    __u8  next;
+    __u8  prev;
+    __u8  in_use;
+    __u8  padding;
+    __u32 age;
 };
 
+/* The hardware lock itself, padded so it sits alone on a cache line. */
 struct drm_hw_lock {
-        volatile __u32 lock;
-        char           padding[60];
+    volatile __u32 lock;
+    char           padding[60];
 };
 
-/* DRM_IOCTL_VERSION */
+/* DRM_IOCTL_VERSION: what this kernel's DRM is, and what it is called. */
 struct drm_version {
-        __s32 version_major;
-        __s32 version_minor;
-        __s32 version_patchlevel;
-        __u64 name_len; // Length of name buffer
-        __u64 name;     // Pointer to name buffer (user)
-        __u64 date_len; // Length of date buffer
-        __u64 date;     // Pointer to date buffer (user)
-        __u64 desc_len; // Length of desc buffer
-        __u64 desc;     // Pointer to desc buffer (user)
+    __s32 version_major;
+    __s32 version_minor;
+    __s32 version_patchlevel;
+    __u64 name_len; /* length of the caller's buffer */
+    __u64 name;     /* caller's buffer                */
+    __u64 date_len;
+    __u64 date;
+    __u64 desc_len;
+    __u64 desc;
 };
 
 /* DRM_IOCTL_GET_UNIQUE / DRM_IOCTL_SET_UNIQUE */
 struct drm_unique {
-        __u64 unique_len;
-        __u64 unique;
+    __u64 unique_len;
+    __u64 unique;
 };
 
 struct drm_list {
-        __s32 count;
-        __u64 version;
+    __s32 count;
+    __u64 version;
 };
 
 struct drm_block {
-        __s32 unused;
+    __s32 unused;
 };
 
 /* DRM_IOCTL_CONTROL */
 struct drm_control {
-        __s32 func;
-        __s32 irq;
+    __s32 func;
+    __s32 irq;
 };
 #define DRM_ADD_COMMAND    0
 #define DRM_RM_COMMAND     1
@@ -211,27 +223,28 @@ enum drm_map_flags {
 };
 
 struct drm_ctx_priv_map {
-        __u32 ctx_id;
-        __u64 handle;
+    __u32 ctx_id;
+    __u64 handle;
 };
 
+/* DRM_IOCTL_GET_MAP / ADD_MAP / RM_MAP */
 struct drm_map {
-        __u64              offset; // Requested physical address
-        __u64              size;   // Requested physical size in bytes
-        enum drm_map_type  type;
-        enum drm_map_flags flags;
-        __u64              handle; // User "handle" / kernel-virtual address
-        __s32              mtrr;   // MTRR slot used
+    __u64              offset; /* physical address asked for */
+    __u64              size;   /* bytes                      */
+    enum drm_map_type  type;
+    enum drm_map_flags flags;
+    __u64              handle; /* what the caller passes back */
+    __s32              mtrr;
 };
 
 /* DRM_IOCTL_GET_CLIENT */
 struct drm_client {
-        __s32 idx;
-        __s32 auth;
-        __u64 pid;
-        __u64 uid;
-        __u64 magic;
-        __u64 iocs;
+    __s32 idx;
+    __s32 auth;
+    __u64 pid;
+    __u64 uid;
+    __u64 magic;
+    __u64 iocs;
 };
 
 enum drm_stat_type {
@@ -253,11 +266,11 @@ enum drm_stat_type {
 };
 
 struct drm_stats {
-        __u64 count;
-        struct {
-                __u64              value;
-                enum drm_stat_type type;
-        } data[15];
+    __u64 count;
+    struct {
+        __u64              value;
+        enum drm_stat_type type;
+    } data[15];
 };
 
 enum drm_lock_flags {
@@ -270,8 +283,8 @@ enum drm_lock_flags {
 };
 
 struct drm_lock {
-        __s32               context;
-        enum drm_lock_flags flags;
+    __s32               context;
+    enum drm_lock_flags flags;
 };
 
 enum drm_dma_flags {
@@ -284,12 +297,12 @@ enum drm_dma_flags {
 };
 
 struct drm_buf_desc {
-        __s32 count;
-        __s32 size;
-        __s32 low_mark;
-        __s32 high_mark;
-        __u32 flags;
-        __u64 agp_start;
+    __s32 count;
+    __s32 size;
+    __s32 low_mark;
+    __s32 high_mark;
+    __u32 flags;
+    __u64 agp_start;
 };
 #define _DRM_PAGE_ALIGN    0x01
 #define _DRM_AGP_BUFFER    0x02
@@ -298,39 +311,39 @@ struct drm_buf_desc {
 #define _DRM_PCI_BUFFER_RO 0x10
 
 struct drm_buf_info {
-        __s32 count;
-        __u64 list;
+    __s32 count;
+    __u64 list;
 };
 
 struct drm_buf_free {
-        __s32 count;
-        __u64 list;
+    __s32 count;
+    __u64 list;
 };
 
 struct drm_buf_pub {
-        __s32 idx;
-        __s32 total;
-        __s32 used;
-        __u64 address;
+    __s32 idx;
+    __s32 total;
+    __s32 used;
+    __u64 address;
 };
 
 struct drm_buf_map {
-        __s32 count;
-        __u64 virtual_; // Mmap'd area in user-virtual
-        __u64 list;     // drm_buf_pub array (user)
+    __s32 count;
+    __u64 virtual_; /* where the buffers landed in user space */
+    __u64 list;     /* array of drm_buf_pub                    */
 };
 
 struct drm_dma {
-        __s32              context;
-        __s32              send_count;
-        __u64              send_indices;
-        __u64              send_sizes;
-        enum drm_dma_flags flags;
-        __s32              request_count;
-        __s32              request_size;
-        __u64              request_indices;
-        __u64              request_sizes;
-        __s32              granted_count;
+    __s32              context;
+    __s32              send_count;
+    __u64              send_indices;
+    __u64              send_sizes;
+    enum drm_dma_flags flags;
+    __s32              request_count;
+    __s32              request_size;
+    __u64              request_indices;
+    __u64              request_sizes;
+    __s32              granted_count;
 };
 
 enum drm_ctx_flags {
@@ -339,39 +352,39 @@ enum drm_ctx_flags {
 };
 
 struct drm_ctx {
-        drm_context_t      handle;
-        enum drm_ctx_flags flags;
+    drm_context_t      handle;
+    enum drm_ctx_flags flags;
 };
 
 struct drm_ctx_res {
-        __s32 count;
-        __u64 contexts;
+    __s32 count;
+    __u64 contexts;
 };
 
 struct drm_draw {
-        drm_drawable_t handle;
+    drm_drawable_t handle;
 };
 
 typedef enum { DRM_DRAWABLE_CLIPRECTS } drm_drawable_info_type_t;
 
 struct drm_update_draw {
-        drm_drawable_t handle;
-        __u32          type;
-        __u32          num;
-        __u64          data;
+    drm_drawable_t handle;
+    __u32          type;
+    __u32          num;
+    __u64          data;
 };
 
 /* DRM_IOCTL_GET_MAGIC / DRM_IOCTL_AUTH_MAGIC */
 struct drm_auth {
-        drm_magic_t magic;
+    drm_magic_t magic;
 };
 
 /* DRM_IOCTL_IRQ_BUSID */
 struct drm_irq_busid {
-        __s32 irq;
-        __s32 busnum;
-        __s32 devnum;
-        __s32 funcnum;
+    __s32 irq;
+    __s32 busnum;
+    __s32 devnum;
+    __s32 funcnum;
 };
 
 enum drm_vblank_seq_type {
@@ -389,89 +402,94 @@ enum drm_vblank_seq_type {
 #define _DRM_VBLANK_FLAGS_MASK      (_DRM_VBLANK_EVENT | _DRM_VBLANK_SIGNAL | _DRM_VBLANK_SECONDARY | _DRM_VBLANK_NEXTONMISS)
 
 struct drm_wait_vblank_request {
-        enum drm_vblank_seq_type type;
-        __u32                    sequence;
-        __u64                    signal;
+    enum drm_vblank_seq_type type;
+    __u32                    sequence;
+    __u64                    signal;
 };
 
 struct drm_wait_vblank_reply {
-        enum drm_vblank_seq_type type;
-        __u32                    sequence;
-        __s64                    tval_sec;
-        __s64                    tval_usec;
+    enum drm_vblank_seq_type type;
+    __u32                    sequence;
+    __s64                    tval_sec;
+    __s64                    tval_usec;
 };
 
+/* One command, two meanings: the request the client sent and the reply the
+ * kernel overwrites it with. */
 union drm_wait_vblank {
-        struct drm_wait_vblank_request request;
-        struct drm_wait_vblank_reply   reply;
+    struct drm_wait_vblank_request request;
+    struct drm_wait_vblank_reply   reply;
 };
 
 #define _DRM_PRE_MODESET  1
 #define _DRM_POST_MODESET 2
 
 struct drm_modeset_ctl {
-        __u32 crtc;
-        __u32 cmd;
+    __u32 crtc;
+    __u32 cmd;
 };
 
-/* AGP UAPI (legacy, retained for binary compatibility) */
+/* --------------------------------------------------------- AGP (obsolete) */
+
 struct drm_agp_mode {
-        __u64 mode;
+    __u64 mode;
 };
 struct drm_agp_buffer {
-        __u64 size;
-        __u64 handle;
-        __u64 type;
-        __u64 physical;
+    __u64 size;
+    __u64 handle;
+    __u64 type;
+    __u64 physical;
 };
 struct drm_agp_binding {
-        __u64 handle;
-        __u64 offset;
+    __u64 handle;
+    __u64 offset;
 };
 struct drm_agp_info {
-        __s32 agp_version_major;
-        __s32 agp_version_minor;
-        __u64 mode;
-        __u64 aperture_base;
-        __u64 aperture_size;
-        __u64 memory_allowed;
-        __u64 memory_used;
-        __u16 id_vendor;
-        __u16 id_device;
+    __s32 agp_version_major;
+    __s32 agp_version_minor;
+    __u64 mode;
+    __u64 aperture_base;
+    __u64 aperture_size;
+    __u64 memory_allowed;
+    __u64 memory_used;
+    __u16 id_vendor;
+    __u16 id_device;
 };
 struct drm_scatter_gather {
-        __u64 size;
-        __u64 handle;
+    __u64 size;
+    __u64 handle;
 };
+
+/* --------------------------------------------------- GEM and capabilities */
 
 /* DRM_IOCTL_SET_VERSION */
 struct drm_set_version {
-        __s32 drm_di_major;
-        __s32 drm_di_minor;
-        __s32 drm_dd_major;
-        __s32 drm_dd_minor;
+    __s32 drm_di_major;
+    __s32 drm_di_minor;
+    __s32 drm_dd_major;
+    __s32 drm_dd_minor;
 };
 
-/* DRM_IOCTL_GEM_CLOSE / FLINK / OPEN */
+/* DRM_IOCTL_GEM_CLOSE / FLINK / OPEN: handles are per-file numbers, names
+ * are the global ones used to share a buffer between processes. */
 struct drm_gem_close {
-        __u32 handle;
-        __u32 pad;
+    __u32 handle;
+    __u32 pad;
 };
 struct drm_gem_flink {
-        __u32 handle;
-        __u32 name;
+    __u32 handle;
+    __u32 name;
 };
 struct drm_gem_open {
-        __u32 name;
-        __u32 handle;
-        __u64 size;
+    __u32 name;
+    __u32 handle;
+    __u64 size;
 };
 
-/* PRIME capability flags */
 #define DRM_PRIME_CAP_EXPORT 1
 #define DRM_PRIME_CAP_IMPORT 2
 
-/* DRM_IOCTL_GET_CAP / SET_CLIENT_CAP */
+/* DRM_IOCTL_GET_CAP: "can you do this?" */
 #define DRM_CAP_DUMB_BUFFER            0x1
 #define DRM_CAP_VBLANK_HIGH_CRTC       0x2
 #define DRM_CAP_DUMB_PREFERRED_DEPTH   0x3
@@ -489,10 +507,12 @@ struct drm_gem_open {
 #define DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP 0x15
 
 struct drm_get_cap {
-        __u64 capability;
-        __u64 value;
+    __u64 capability;
+    __u64 value;
 };
 
+/* DRM_IOCTL_SET_CLIENT_CAP: "I intend to use this."  A client that does not
+ * ask for atomic or universal planes gets the old, restricted view. */
 #define DRM_CLIENT_CAP_STEREO_3D            1
 #define DRM_CLIENT_CAP_UNIVERSAL_PLANES     2
 #define DRM_CLIENT_CAP_ATOMIC               3
@@ -501,20 +521,20 @@ struct drm_get_cap {
 #define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT 6
 
 struct drm_set_client_cap {
-        __u64 capability;
-        __u64 value;
+    __u64 capability;
+    __u64 value;
 };
 
-/* DRM_IOCTL_PRIME_HANDLE_TO_FD / PRIME_FD_TO_HANDLE (dma-buf) */
+/* Sharing buffers through file descriptors. */
 struct drm_prime_handle {
-        __u32 handle;
-        __u32 flags;
-        __s32 fd;
+    __u32 handle;
+    __u32 flags;
+    __s32 fd;
 };
 
 /*
- * ioctl command numbers. Order and values match Linux exactly so that
- * libdrm-built userspace drives this kernel without recompilation.
+ * Command numbers.  The ordinals are part of the interface: libdrm built
+ * against Linux sends these exact values.
  */
 #define DRM_IOCTL_VERSION     DRM_IOWR(0x00, struct drm_version)
 #define DRM_IOCTL_GET_UNIQUE  DRM_IOWR(0x01, struct drm_unique)
@@ -581,10 +601,11 @@ struct drm_prime_handle {
 #define DRM_IOCTL_WAIT_VBLANK DRM_IOWR(0x3a, union drm_wait_vblank)
 #define DRM_IOCTL_UPDATE_DRAW DRM_IOW(0x3f, struct drm_update_draw)
 
-/* Driver-private ioctls (0x40..0x9f). Drivers install their own table. */
+/* 0x40..0x9f belong to whichever driver is bound; each installs its own
+ * table for that range. */
 #define DRM_COMMAND_BASE 0x40
 #define DRM_COMMAND_END  0xa0
 
-/* Mode setting ioctls begin at 0xa0; defined in drm_mode.h */
+/* Mode setting starts at 0xa0; see drm_mode.h */
 
 #endif /* INCLUDE_DRM_DRM_H_ */

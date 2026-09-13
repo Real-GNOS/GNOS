@@ -54,6 +54,7 @@
 #include "ac97.h"
 #include "hda.h"
 #include "ata.h"
+#include "nvme.h"
 #include "drm.h"
 #include "drm_init.h"
 #include "procfs.h"
@@ -66,6 +67,11 @@ extern volatile struct limine_module_request      module_request;
 extern volatile struct limine_hhdm_request        hhdm_request;
 extern volatile struct limine_kernel_address_request kernel_address_request;
 extern volatile struct limine_rsdp_request        rsdp_request;
+extern volatile struct limine_executable_cmdline_request cmdline_request;
+
+/* The boot command line (limine.conf's `cmdline:` line), kept for
+ * /proc/cmdline; its words are also handed to PID 1 as argv[1..]. */
+char g_boot_cmdline[256];
 
 /* How often the scheduler pre-empts a running user process: SCHED_HZ, which
  * timer.h owns because times(2) and AT_CLKTCK have to report the same rate. */
@@ -295,6 +301,12 @@ void kernel_entry(void)
      * not enough to lose data to a driver bug. */
     usb_msc_init();
 
+    /* NVMe controllers (class 01/08 on the PCI bus) publish /dev/nvme*N
+     * through the same block-device layer.  Like ATA, it is not on the
+     * path to a running system -- the root is the initrd image -- but it
+     * gives the installer NVMe disks and partitions to work with. */
+    nvme_init();
+
     /* ----. The rest of the root fs setup ---------------------------------
      * At this point the root filesystem is mounted and the disks are up, the
      * two halves a booted-from-disk system is built from.  The live-CD half
@@ -334,6 +346,10 @@ void kernel_entry(void)
         panic("cannot start kthreadd");
 
     fbcon_puts("starting /init.elf as pid 1...\n\n");
+
+    /* The boot command line (an initrd-root /cmdline file, written by make
+     * from KCMD=...) is spliced into PID 1's argv inside proc_spawn_init();
+     * g_boot_cmdline is kept here for /proc/cmdline. */
     int pid = proc_spawn_init("/init.elf");
     if (pid < 0)
         panic("cannot start /init.elf");

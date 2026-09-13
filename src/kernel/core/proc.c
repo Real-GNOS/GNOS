@@ -678,12 +678,47 @@ static char *const g_init_env[] = {
 
 int proc_spawn_init(const char *path)
 {
-    char *argv[1];
-    argv[0] = (char *)path;
+    /* Splice the boot command line into init's argv[1..], Linux style.
+     * The carrier is an initrd-root /cmdline file (written by make from
+     * KCMD=...): this Limine build does not deliver its conf `cmdline:` to
+     * direct-protocol kernels, and reading the file here -- the same VFS
+     * the /init.elf read below uses, moments later -- is guaranteed to see
+     * the mounted root.  `single` in that file selects single-user mode. */
+    char *argv[16];
+    int argc = 0;
+    argv[argc++] = (char *)path;
+
+    extern char g_boot_cmdline[256];
+    g_boot_cmdline[0] = 0;
+    uint32_t clen = 0;
+    if (vfs_read_all("/cmdline", g_boot_cmdline,
+                     (uint32_t)sizeof(g_boot_cmdline) - 1, &clen)) {
+        g_boot_cmdline[clen] = 0;
+        while (clen > 0 &&
+               (g_boot_cmdline[clen - 1] == '\n' ||
+                g_boot_cmdline[clen - 1] == '\r' ||
+                g_boot_cmdline[clen - 1] == ' '))
+            g_boot_cmdline[--clen] = 0;
+    }
+    if (g_boot_cmdline[0]) {
+        char *p = g_boot_cmdline;
+        while (p && *p && argc < 15) {
+            while (*p == ' ' || *p == '\t')
+                p++;
+            if (!*p)
+                break;
+            argv[argc++] = p;
+            while (*p && *p != ' ' && *p != '\t')
+                p++;
+            if (*p)
+                *p++ = 0;
+        }
+    }
+    argv[argc] = NULL;
 
     addrspace_t *as;
     uint64_t entry, sp;
-    int r = build_image(path, argv, 1, g_init_env, INIT_ENVC,
+    int r = build_image(path, argv, argc, g_init_env, INIT_ENVC,
                         &as, &entry, &sp);
     if (r < 0)
         return r;
@@ -701,7 +736,7 @@ int proc_spawn_init(const char *path)
     p->sid  = p->pid;
     p->as   = as;
     strncpy(p->name, "init", sizeof(p->name) - 1);
-    proc_set_cmdline(p, &argv[0], 1);
+    proc_set_cmdline(p, argv, argc);
 
     /* PID 1's controlling terminal is the first one, the same console the
      * kernel has been logging to.  It has to be set before the open below:

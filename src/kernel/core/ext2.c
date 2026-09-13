@@ -42,6 +42,8 @@
 #define SB_FIRST_INO        84
 #define SB_INODE_SIZE       88
 #define SB_FEATURE_INCOMPAT 96
+#define SB_FEATURE_ROCOMPAT 100
+#define SB_DESC_SIZE        254      /* rev 1: group descriptor size */
 
 /* ---- group descriptor field offsets ----------------------------------- */
 #define GD_SIZE             32
@@ -236,7 +238,7 @@ static uint32_t fs_now(ext2_fs_t *fs)
 
 /* Pointer to a whole block, or NULL if it falls outside the volume.  In disk
  * mode the pointer is borrowed from the cache and blk_put() returns it. */
-static uint8_t *blk_ptr(ext2_fs_t *fs, uint32_t blk)
+static uint8_t *blk_ptr(ext2_fs_t *fs, uint64_t blk)
 {
     if (!blk || blk >= fs->blocks_count)
         return NULL;
@@ -259,23 +261,40 @@ static void zero_block(ext2_fs_t *fs, uint32_t blk)
     }
 }
 
-/* The group descriptor `group`, borrowed in disk mode.  GD_SIZE divides
- * every legal block size and gdt_off is a multiple of it, so an entry
- * never straddles a block boundary. */
+/* The group descriptor `group`, borrowed in disk mode.  desc_size (32 or
+ * 64) divides every legal block size and gdt_off is a multiple of it, so
+ * an entry never straddles a block boundary. */
 static uint8_t *gd_ptr(ext2_fs_t *fs, uint32_t group)
 {
     if (group >= fs->group_count)
         return NULL;
 
-    uint64_t off = (uint64_t)fs->gdt_off + (uint64_t)group * GD_SIZE;
+    uint64_t off = (uint64_t)fs->gdt_off + (uint64_t)group * fs->desc_size;
     if (fs->blkio.read) {
         uint8_t *p = cache_borrow(fs, (uint32_t)(off / fs->block_size));
         return p ? p + (uint32_t)(off % fs->block_size) : NULL;
     }
 
-    if (off + GD_SIZE > fs->img_size)
+    if (off + fs->desc_size > fs->img_size)
         return NULL;
     return fs->img + off;
+}
+
+/* A group's block pointer.  On a 64BIT volume each of the three block
+ * pointers carries a high 32-bit word at descriptor offset 20 (the
+ * layout: 32-byte legacy fields, then __hi_dword at +20..+31).  Reading
+ * the high half of a 32-byte descriptor would be reading the next
+ * entry's magic, so the caller passes the whole descriptor and this
+ * picks the right pair. */
+static uint64_t gd_block(ext2_fs_t *fs, const uint8_t *gd, int which)
+{
+    /* which: 0 = block bitmap, 1 = inode bitmap, 2 = inode table */
+    static const int lo_off[3] = { GD_BLOCK_BITMAP, GD_INODE_BITMAP,
+                                   GD_INODE_TABLE };
+    uint64_t blk = rd32(gd + lo_off[which]);
+    if (fs->has_64bit && fs->desc_size >= 64)
+        blk |= (uint64_t)rd32(gd + 20 + which * 4) << 32;
+    return blk;
 }
 
 /* Pointer to the raw inode, or NULL if the number is out of range.  The
@@ -293,7 +312,7 @@ static uint8_t *inode_ptr(ext2_fs_t *fs, uint32_t ino)
     if (!gd)
         return NULL;
 
-    uint64_t off = (uint64_t)rd32(gd + GD_INODE_TABLE) * fs->block_size +
+    uint64_t off = gd_block(fs, gd, 2) * fs->block_size +
                    (uint64_t)idx * fs->inode_size;
     blk_put(fs, gd);
 
@@ -378,7 +397,7 @@ static uint32_t balloc(ext2_fs_t *fs)
             continue;
         }
 
-        uint8_t *bm = blk_ptr(fs, rd32(gd + GD_BLOCK_BITMAP));
+        uint8_t *bm = blk_ptr(fs, gd_block(fs, gd, 0));
         if (!bm) {
             blk_put(fs, gd);
             continue;
@@ -420,7 +439,7 @@ static void bfree(ext2_fs_t *fs, uint32_t blk)
     if (!gd)
         return;
 
-    uint8_t *bm = blk_ptr(fs, rd32(gd + GD_BLOCK_BITMAP));
+    uint8_t *bm = blk_ptr(fs, gd_block(fs, gd, 0));
     if (!bm) {
         blk_put(fs, gd);
         return;
@@ -457,7 +476,7 @@ static uint32_t ialloc(ext2_fs_t *fs, int isdir)
             continue;
         }
 
-        uint8_t *bm = blk_ptr(fs, rd32(gd + GD_INODE_BITMAP));
+        uint8_t *bm = blk_ptr(fs, gd_block(fs, gd, 1));
         if (!bm) {
             blk_put(fs, gd);
             continue;
@@ -502,7 +521,7 @@ static void ifree(ext2_fs_t *fs, uint32_t ino, int isdir)
     if (!gd)
         return;
 
-    uint8_t *bm = blk_ptr(fs, rd32(gd + GD_INODE_BITMAP));
+    uint8_t *bm = blk_ptr(fs, gd_block(fs, gd, 1));
     if (!bm) {
         blk_put(fs, gd);
         return;
@@ -547,6 +566,109 @@ static uint32_t slot_get(ext2_fs_t *fs, uint8_t *slot, int alloc, uint32_t *adde
 }
 
 /*
+ * EXT4 extent tree lookup, read-only.
+ *
+ * i_block[] no longer holds block numbers but an extent header: 12 bytes
+ * (entries, depth, generation) followed by either a root index array
+ * (depth > 0) or a leaf extent array (depth 0).  An extent covers up to
+ * 2^15 contiguous filesystem blocks starting at ee_start_lo/high; holes
+ * inside the tree's logical range read as zeroes exactly as ext2 holes
+ * do.  Uninitialized extents (ee_len high bit) read as zeroes too.
+ *
+ * This deliberately does not write: creating extents means journalling
+ * and checksum discipline this driver does not implement.  Volumes whose
+ * files carry EXT4_EXTENTS_FL are read-only; ext2-indirect files on the
+ * same volume keep full read-write (bmap handles those below).
+ */
+#define EXT4_EH_MAGIC      0xF30A
+#define EXT4_EXT_MAX_LEN   0x8000u
+
+/* Scan one extent-bearing node (the i_block[] root at depth 0, or a
+ * cached leaf block) for the extent covering iblk.  Holes and
+ * uninitialized extents read as 0. */
+static uint32_t ext4_leaf_bmap(ext2_fs_t *fs, const uint8_t *eh, uint32_t iblk)
+{
+    (void)fs;
+    uint16_t entries = rd16(eh + 2);
+    for (uint16_t i = 0; i < entries; i++) {
+        const uint8_t *ex = eh + 12 + i * 12;
+        uint32_t lblk   = rd32(ex);
+        uint16_t raw    = rd16(ex + 4);
+        uint16_t len    = raw & (EXT4_EXT_MAX_LEN - 1);
+        uint64_t phys   = rd32(ex + 8) | ((uint64_t)rd16(ex + 12) << 32);
+
+        if (iblk >= lblk && iblk < lblk + len) {
+            if ((raw & EXT4_EXT_MAX_LEN) || !phys)
+                return 0;                /* hole / uninitialized */
+            return (uint32_t)(phys + (iblk - lblk));
+        }
+    }
+    return 0;                            /* beyond the last extent: hole */
+}
+
+/* Descend one index node to the child covering iblk.  *node is a borrow;
+ * on return it points at the child (the caller's borrow has moved down a
+ * level) or is NULL with the old borrow released.  Returns 0 on hole or
+ * corruption, 1 when *node is now a leaf (its depth reads 0). */
+static int ext4_descend(ext2_fs_t *fs, uint8_t **node, uint32_t iblk)
+{
+    uint16_t depth = rd16(*node + 6);
+    while (depth > 0) {
+        if (depth > 5)
+            goto corrupt;                /* loop guard on corrupt depth */
+
+        uint16_t entries = rd16(*node + 2);
+        uint64_t child = 0;
+        for (uint16_t i = 0; i < entries; i++) {
+            uint8_t *ix = *node + 12 + i * 12;
+            if (rd32(ix) <= iblk)
+                child = rd32(ix + 8) | ((uint64_t)rd16(ix + 12) << 32);
+            else
+                break;                   /* sorted: past iblk's subtree */
+        }
+        if (!child)
+            goto corrupt;                /* hole before the first extent */
+
+        uint8_t *next = blk_ptr(fs, child);
+        blk_put(fs, *node);
+        if (!next || rd16(next + 0) != EXT4_EH_MAGIC ||
+            rd16(next + 6) != depth - 1)
+            goto corrupt;                /* missing or inconsistent child */
+        *node = next;
+        depth = rd16(next + 6);
+    }
+    return 1;                            /* *node is a leaf, borrow held */
+
+corrupt:
+    if (*node) {
+        blk_put(fs, *node);
+        *node = NULL;
+    }
+    return 0;
+}
+
+static uint32_t ext4_bmap(ext2_fs_t *fs, uint8_t *ip, uint32_t iblk)
+{
+    if (rd16(ip + I_BLOCK) != EXT4_EH_MAGIC || rd16(ip + I_BLOCK + 2) == 0)
+        return 0;                        /* empty / corrupt: read as hole */
+
+    uint8_t *node = ip;                  /* the root lives in the inode */
+    int is_root = 1;
+    uint32_t r;
+
+    if (rd16(node + 6) > 0) {
+        if (!ext4_descend(fs, &node, iblk))
+            return 0;
+        is_root = 0;
+    }
+
+    r = ext4_leaf_bmap(fs, node, iblk);
+    if (!is_root)
+        blk_put(fs, node);               /* root's borrow belongs to inode_ptr */
+    return r;
+}
+
+/*
  * Translate a file-relative block index into an image block number.  With
  * `alloc` set, missing blocks (including the indirect blocks along the way)
  * are created; `added` accumulates how many, so the caller can keep i_blocks
@@ -555,6 +677,16 @@ static uint32_t slot_get(ext2_fs_t *fs, uint8_t *slot, int alloc, uint32_t *adde
 static uint32_t bmap(ext2_fs_t *fs, uint8_t *ip, uint32_t iblk,
                      int alloc, uint32_t *added)
 {
+    /* An extents inode's i_block[] is a tree, not a pointer array; the
+     * read path resolves through it, the write path refuses (extents are
+     * read-only here).  alloc on such an inode would corrupt the tree. */
+    if (fs->has_extents &&
+        (rd32(ip + I_FLAGS) & EXT4_EXTENTS_FL)) {
+        if (alloc)
+            return 0;
+        return ext4_bmap(fs, ip, iblk);
+    }
+
     uint32_t ppb = fs->block_size / 4;      /* pointers per indirect block */
 
     if (iblk < EXT2_NDIR_BLOCKS)
@@ -716,16 +848,41 @@ static int parse_sb(ext2_fs_t *fs, uint8_t *sb, uint64_t byte_cap)
 
     /*
      * Incompatible features are exactly the ones we may not ignore.  We
-     * understand FILETYPE and nothing else, so anything further -- extents,
-     * 64-bit, meta_bg, a journal awaiting recovery -- means the image would be
-     * misread, and refusing is the only safe answer.  Compatible and
-     * read-only-compatible bits (has_journal, sparse_super, large_file...) are
+     * understand FILETYPE plus the three ext4 bits that change how the
+     * volume is laid out but not how its files are addressed: EXTENTS
+     * (per-file, handled at inode level), 64BIT (handled by desc_size)
+     * and FLEX_BG (only relocates bitmaps inside the group table).
+     * Anything further -- meta_bg, journal-awaiting-recovery, verity,
+     * casefold, inline data -- would be misread, and refusing is the only
+     * safe answer.  Compatible and read-only-compatible bits
+     * (has_journal, sparse_super, large_file, metadata_csum...) are
      * ignorable by definition and are ignored.
      */
     uint32_t incompat = rd32(sb + SB_FEATURE_INCOMPAT);
-    if (incompat & ~(uint32_t)EXT2_FEATURE_INCOMPAT_FILETYPE)
+    uint32_t known = (uint32_t)EXT2_FEATURE_INCOMPAT_FILETYPE |
+                     EXT4_FEATURE_INCOMPAT_EXTENTS |
+                     EXT4_FEATURE_INCOMPAT_64BIT |
+                     EXT4_FEATURE_INCOMPAT_FLEX_BG;
+    if (incompat & ~known)
         return 0;
     fs->has_filetype = (incompat & EXT2_FEATURE_INCOMPAT_FILETYPE) ? 1 : 0;
+    fs->has_extents  = (incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) ? 1 : 0;
+    fs->has_64bit    = (incompat & EXT4_FEATURE_INCOMPAT_64BIT) ? 1 : 0;
+
+    /*
+     * Group descriptor size: 32 bytes on ext2/3, and on a 64BIT volume
+     * s_desc_size from byte 254 (64 for the high words).  Some ext4
+     * makers leave the volume 64-bit-capable but set desc_size 0; treat
+     * that as the 32-byte default rather than as corruption.
+     */
+    fs->desc_size = GD_SIZE;
+    if (fs->has_64bit) {
+        uint16_t ds = rd16(sb + SB_DESC_SIZE);
+        if (ds == 64 || ds == 32)
+            fs->desc_size = ds;
+        else if (ds != 0)
+            return 0;
+    }
 
     /* Groups cover everything from the first data block onwards. */
     uint32_t span = fs->blocks_count - fs->first_data_block;
@@ -740,7 +897,7 @@ static int parse_sb(ext2_fs_t *fs, uint8_t *sb, uint64_t byte_cap)
 
     if (!byte_cap)
         byte_cap = (uint64_t)fs->blocks_count * fs->block_size;
-    if ((uint64_t)fs->gdt_off + (uint64_t)fs->group_count * GD_SIZE > byte_cap)
+    if ((uint64_t)fs->gdt_off + (uint64_t)fs->group_count * fs->desc_size > byte_cap)
         return 0;
 
     return 1;
@@ -1309,6 +1466,13 @@ uint32_t ext2_write(ext2_fs_t *fs, ext2_dirent_t *ent,
     if (!ip)
         return 0;
     if ((rd16(ip + I_MODE) & EXT2_S_IFMT) == EXT2_S_IFDIR) {
+        blk_put(fs, ip);
+        return 0;
+    }
+    /* An extents inode's i_block[] is a tree; allocating into it as if it
+     * were an indirect-block array would corrupt it, so extent files are
+     * read-only here and a write simply moves no bytes. */
+    if (fs->has_extents && (rd32(ip + I_FLAGS) & EXT4_EXTENTS_FL)) {
         blk_put(fs, ip);
         return 0;
     }

@@ -163,11 +163,50 @@ static int spawn_getty(int n)
     return pid;
 }
 
+/*
+ * Single-user (recovery) mode: `single`, `S` or `-s` on init's command line
+ * skips /etc/rc and drops to a root login shell on the console instead --
+ * the boot stops at a bare bash, exactly like a classic init "s" runlevel.
+ * The shell runs as the console's foreground job (the same arrangement
+ * spawn_getty falls back to when no getty exists); when it exits, the boot
+ * continues with rc and the normal gettys, like every other System V init.
+ */
+static void run_single_user(void)
+{
+    print("init: single-user mode: starting a root shell on the console\n");
+    print("init: exit the shell to continue the normal boot\n");
+
+    int pid = fork();
+    if (pid < 0) {
+        print("init: fork failed for single-user shell\n");
+        return;
+    }
+
+    if (pid == 0) {
+        char *av[2];
+        av[0] = (char *)"-bash";       /* leading '-' => login shell */
+        av[1] = 0;
+
+        setpgid(0, 0);
+        default_terminal_signals();
+        execv(FALLBACK_SH, av);
+        print("init: execv " FALLBACK_SH " failed\n");
+        exit(127);
+    }
+
+    /* Make the shell the foreground job of the console while it runs, so
+     * job control and Ctrl-C behave; init ignores SIGTTOU, so this
+     * tcsetpgrp from a non-foreground process is safe (as in run_rc). */
+    setpgid(pid, pid);
+    tcsetpgrp(0, pid);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    print("init: single-user shell exited, continuing boot\n");
+}
+
 int main(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
-
     ignore_terminal_signals();
 
     sys_dbgputs("INITDBG: main entered (new init)");
@@ -175,6 +214,19 @@ int main(int argc, char **argv)
     print("\nAEOS init: pid ");
     printn(getpid());
     print(" - starting the session\n");
+
+    /* Kernel command line words that the kernel did not consume arrive here
+     * as argv[1..], Linux style; "single" / "S" / "-s" mean single-user. */
+    int single = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "single") == 0 ||
+            strcmp(argv[i], "S") == 0 ||
+            strcmp(argv[i], "-s") == 0)
+            single = 1;
+    }
+
+    if (single)
+        run_single_user();      /* drops to root bash; returns on exit */
 
     run_rc();                       /* one-shot /etc/rc before the prompts */
 

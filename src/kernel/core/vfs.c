@@ -72,6 +72,7 @@ static int fs_errno(int e)
     case EXT2_ENOTDIR:   return -E_NOTDIR;
     case EXT2_ENOTEMPTY: return -E_NOTEMPTY;
     case EXT2_EISDIR:    return -E_ISDIR;
+    case EXT2_EROFS:     return -E_ACCES;   /* closest errno: read-only fs */
     default:             return -E_INVAL;
     }
 }
@@ -419,12 +420,112 @@ static vfs_node_t *dev_lookup(const char *name)
 #define MAX_MOUNTS 8
 #define MT_TMPFS   1
 #define MT_CGROUP  2
+#define MT_EXT2    3    /* an ext2/ext4 volume from a block device */
 struct mount_entry {
     char     mnt[GNUOS_PATH_MAX];
     int      type;
-    tmpfs_t *fs;            /* MT_TMPFS payload; NULL for MT_CGROUP */
+    tmpfs_t *fs;            /* MT_TMPFS payload; NULL for MT_CGROUP/MT_EXT2 */
 } g_mounts[MAX_MOUNTS];
 int g_mount_count = 0;
+
+/*
+ * The block-device ext2 mount.  One at a time: the root volume (image
+ * mode) lives in g_fs, and a disk volume -- "mount -t ext4
+ * /dev/nvme0n1p1 /mnt" -- lands here.  The blkio goes through the block
+ * device's own vfs_ops, so the fs rides on whichever driver published
+ * the node (ATA, NVMe, USB mass storage).
+ */
+static ext2_fs_t  g_bfs;
+static int        g_bfs_ok;
+static vfs_node_t g_bfs_dev;     /* the block device the volume rides on */
+
+static int32_t bfs_blk_read(void *ctx, uint64_t off, void *buf, uint32_t len)
+{
+    (void)ctx;
+    return g_bfs_dev.ops->read(&g_bfs_dev, off, buf, len);
+}
+
+static int32_t bfs_blk_write(void *ctx, uint64_t off, const void *buf,
+                             uint32_t len)
+{
+    (void)ctx;
+    return g_bfs_dev.ops->write(&g_bfs_dev, off, buf, len);
+}
+
+/* Reads and writes through the disk-mounted volume (g_bfs), reached via
+ * the blkio shims that route through g_bfs_dev's own ops. */
+static int32_t bfs_node_read(vfs_node_t *n, uint64_t off, void *buf,
+                             uint32_t len)
+{
+    (void)n;
+    if (off > 0xFFFFFFFFULL)
+        return 0;
+    return (int32_t)ext2_read(&g_bfs, &n->e2, (uint32_t)off, buf, len);
+}
+
+static int32_t bfs_node_write(vfs_node_t *n, uint64_t off, const void *buf,
+                              uint32_t len)
+{
+    (void)n;
+    if (off > 0xFFFFFFFFULL)
+        return -E_INVAL;
+    uint32_t w = ext2_write(&g_bfs, &n->e2, (uint32_t)off, buf, len);
+    if (!w)
+        return len ? -E_NOSPC : 0;
+    n->size = n->e2.size;
+    return (int32_t)w;
+}
+
+static const vfs_ops_t g_bfs_file_ops = {
+    .read = bfs_node_read, .write = bfs_node_write
+};
+
+static int32_t bfs_dir_read(vfs_node_t *n, uint64_t off, void *buf,
+                            uint32_t len)
+{
+    const uint32_t rec = (uint32_t)sizeof(gdirent_t);
+    if (off % rec)
+        return -E_INVAL;
+    if (len < rec)
+        return -E_INVAL;
+
+    uint32_t skip = (uint32_t)(off / rec);
+    uint32_t room = len / rec;
+
+    gdirent_t    *out = (gdirent_t *)buf;
+    ext2_dir_t    d;
+    ext2_dirent_t e;
+
+    ext2_opendir(&g_bfs, n->e2.ino, &d);
+
+    uint32_t seen = 0, got = 0;
+    while (got < room && ext2_readdir(&d, &e)) {
+        if (seen++ < skip)
+            continue;
+        int i = 0;
+        while (i < GDIRENT_NAME - 1 && e.name[i]) {
+            out[got].name[i] = e.name[i];
+            i++;
+        }
+        while (i < GDIRENT_NAME)
+            out[got].name[i++] = 0;
+        out[got].size = e.size;
+        out[got].kind = ext2_is_dir(&e) ? GK_DIR : GK_FILE;
+        got++;
+    }
+    return (int32_t)(got * rec);
+}
+
+static int32_t bfs_dir_write(vfs_node_t *n, uint64_t off, const void *buf,
+                             uint32_t len)
+{
+    (void)n; (void)off; (void)buf; (void)len;
+    return -E_ISDIR;
+}
+
+static const vfs_ops_t g_bfs_dir_ops = {
+    .read = bfs_dir_read, .write = bfs_dir_write
+};
 
 /* Return the tmpfs instance (if any) that owns `abs`, choosing the longest
  * matching mount prefix, and write the path relative to that instance's root
@@ -507,6 +608,91 @@ int vfs_mount_cgroupfs(const char *path)
     return 0;
 }
 
+/*
+ * Mount an ext2/ext4 volume from a block device at `path`.
+ * `devname` is the /dev node (e.g. "nvme0n1p1"); its registered ops do
+ * the sector I/O through the blkio shims above.  One disk volume at a
+ * time (the root image occupies g_fs); a second attempt replaces the
+ * first, unmounting it implicitly -- the installer is the only caller
+ * that needs more, and it mounts one volume per run.
+ */
+int vfs_mount_bdev(const char *path, const char *devname)
+{
+    if (g_mount_count >= MAX_MOUNTS)
+        return -E_NFILE;
+    for (int i = 0; i < g_mount_count; i++)
+        if (strcmp(g_mounts[i].mnt, path) == 0)
+            return -E_EXIST;
+
+    vfs_node_t *d = dev_lookup(devname);
+    if (!d || d->kind != VFS_BLOCKDEV)
+        return -E_NODEV;
+
+    ext2_blkio_t blkio = {
+        .read  = bfs_blk_read,
+        .write = bfs_blk_write,
+        .ctx   = NULL,
+    };
+    memset(&g_bfs, 0, sizeof(g_bfs));
+    g_bfs_dev = *d;
+    if (!ext2_mount_bdev(&g_bfs, &blkio)) {
+        dbg_puts("VFS: ");
+        dbg_puts(devname);
+        dbg_puts(" holds no ext2/ext4 volume\r\n");
+        return -E_INVAL;
+    }
+
+    for (int i = 0; i < g_mount_count; i++)
+        if (g_mounts[i].type == MT_EXT2)
+            g_mount_count--, memmove(&g_mounts[i], &g_mounts[i + 1],
+                    (unsigned)(g_mount_count - i) * sizeof(g_mounts[0])), i--;
+
+    strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
+    g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
+    g_mounts[g_mount_count].type = MT_EXT2;
+    g_mounts[g_mount_count].fs = NULL;
+    g_mount_count++;
+    g_bfs_ok = 1;
+
+    dbg_puts("VFS: mounted ");
+    dbg_puts(devname);
+    dbg_puts(" ext4/ext2 on ");
+    dbg_puts(path);
+    dbg_puts(" (");
+    dbg_puts_dec(g_bfs.blocks_count);
+    dbg_puts(" blocks, ");
+    dbg_puts_dec(g_bfs.block_size);
+    dbg_puts(" B/block, ");
+    dbg_puts(g_bfs.has_extents ? "extents" : "indirect");
+    dbg_puts(")\r\n");
+    return 0;
+}
+
+/* The disk-mounted ext2 volume that owns `abs` (if any). */
+static int vfs_route_bfs(const char *abs, char *rel)
+{
+    if (!g_bfs_ok)
+        return 0;
+    int bestlen = -1;
+    for (int i = 0; i < g_mount_count; i++) {
+        if (g_mounts[i].type != MT_EXT2)
+            continue;
+        size_t ml = strlen(g_mounts[i].mnt);
+        if (strncmp(abs, g_mounts[i].mnt, ml) == 0 &&
+            (abs[ml] == '/' || abs[ml] == '\0') && (int)ml > bestlen) {
+            bestlen = (int)ml;
+            if (abs[ml]) {
+                strncpy(rel, abs + ml, GNUOS_PATH_MAX - 1);
+                rel[GNUOS_PATH_MAX - 1] = 0;
+            } else {
+                rel[0] = '/';
+                rel[1] = '\0';
+            }
+        }
+    }
+    return bestlen >= 0;
+}
+
 int vfs_mount_count(void)
 {
     return g_mount_count;
@@ -576,6 +762,27 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     tmpfs_t *mfs = vfs_route_tmpfs(path, mrel);
     if (mfs)
         return tmpfs_resolve(mfs, mrel, out);
+
+    /* A disk-mounted ext2/ext4 volume shadows the root image below its
+     * mount point.  The relative path is always '/'-rooted, which is what
+     * ext2_lookup expects. */
+    char bfs_rel[GNUOS_PATH_MAX];
+    if (vfs_route_bfs(path, bfs_rel)) {
+        if (!g_bfs_ok)
+            return -E_NOENT;
+        ext2_dirent_t ent;
+        if (!ext2_lookup(&g_bfs, bfs_rel, &ent, follow))
+            return -E_NOENT;
+        memset(out, 0, sizeof(*out));
+        strncpy(out->name, ent.name, VFS_NAME_MAX - 1);
+        uint16_t m = (uint16_t)(ent.mode & 0xF000);
+        out->kind = (m == EXT2_S_IFDIR) ? VFS_DIR
+                  : (m == EXT2_S_IFLNK) ? VFS_SYMLINK : VFS_FILE;
+        out->size = ent.size;
+        out->ops  = (out->kind == VFS_DIR) ? &g_bfs_dir_ops : &g_bfs_file_ops;
+        out->e2   = ent;
+        return 0;
+    }
 
     if (!g_fs_ok)
         return -E_NOENT;
@@ -824,9 +1031,14 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
     if (mfs)
         return tmpfs_getdents64(f, buf, len);
 
+    /* A disk-mounted ext2/ext4 volume is enumerated from g_bfs, not the
+     * root image.  The node's ops tell us which volume it belongs to. */
+    int disk_vol = (f->node.ops == &g_bfs_file_ops ||
+                    f->node.ops == &g_bfs_dir_ops);
+    ext2_fs_t *walk_fs = disk_vol ? &g_bfs : &g_fs;
     ext2_dir_t     d;
     ext2_dirent_t  e;
-    ext2_opendir(&g_fs, f->node.e2.ino, &d);
+    ext2_opendir(walk_fs, f->node.e2.ino, &d);
 
     uint8_t  *p   = (uint8_t *)buf;
     uint64_t  off = 0;
@@ -837,7 +1049,7 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
      * them; every reader expects them.  The skip below honours a non-zero
      * f->pos so a rewind-free walk still resumes correctly. */
     const char dot[] = ".", dotdot[] = "..";
-    uint32_t parent = ext2_parent_ino(&g_fs, f->node.e2.ino);
+    uint32_t parent = ext2_parent_ino(walk_fs, f->node.e2.ino);
 
     if (total++ >= f->pos) {
         uint32_t rec = emit_dirent(p, off, len, f->node.e2.ino, dot, DT_DIR);

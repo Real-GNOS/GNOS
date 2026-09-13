@@ -229,6 +229,10 @@ int  vfs_mount_tmpfs(const char *path);
  * Several mounts of the same hierarchy are allowed at different paths. */
 int  vfs_mount_cgroupfs(const char *path);
 
+/* Mount an ext2/ext4 volume from a block device (/dev node name, e.g.
+ * "nvme0n1p1") at `path`.  Returns 0 or a negative errno. */
+int  vfs_mount_bdev(const char *path, const char *devname);
+
 /* Remove the mount at `path`.  Returns 0 or a negative errno. */
 int  vfs_umount(const char *path);
 
