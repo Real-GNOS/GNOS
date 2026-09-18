@@ -1,55 +1,62 @@
 /*
- * drm_init.c — DRM subsystem bootstrap for GNOS.
+ * drm_init.c - bringing up the display device this kernel actually has.
+ * (GPLv2)
  *
- * GPLv2 — Copyright 2026 GNOS contributors.
+ * GNOS has no GPU driver of its own, so the DRM device it presents is a
+ * software one: a real KMS pipeline -- CRTC, primary plane, encoder,
+ * connector with a mode list -- whose scanout target is the framebuffer the
+ * bootloader set up.  A client that speaks DRM (Xorg, wlroots, anything
+ * built on libdrm) therefore finds an ordinary KMS device and needs no
+ * special case; the pixels it commits are copied to the console framebuffer
+ * by the refresh path at the bottom of this file.
  *
- * This file brings up the built-in DRM device: a global device list, the
- * software ("dummy") driver that backs /dev/dri/card0, the KMS pipeline
- * (one CRTC + primary plane + encoder + connector), and the VFS glue that
- * turns open()/ioctl()/mmap() on the device node into DRM core calls.
+ * Two details are the whole trick:
  *
- * Display output is a software scanout: the compositor's dumb buffer is
- * blitted into the console framebuffer by the refresh thread, and the
- * cursor is stamped on top per frame.  There is no hardware overlay and
- * no vblank interrupt; drm_vblank_tick() plays that role on a timer.
+ *  - A client's renderer draws into the buffer it allocated and never commits
+ *    again, so the picture has to be re-copied on a timer.  That is the
+ *    refresh thread (and drm_vblank_tick, which also retires page flips and
+ *    delivers their completion events).
+ *  - Nothing here may start a kernel thread during boot: KMS setup runs before
+ *    the scheduler exists.  The refresh thread is created lazily by the first
+ *    page flip, which by definition happens once user space -- and a working
+ *    scheduler -- is there.
  */
 
-#include "drm_devtmpfs.h" /* device/class/devtmpfs shim -> GNOS VFS */
+#include <stddef.h>
+#include <stdint.h>
+
 #include "drm.h"
 #include "drm_device.h"
+#include "drm_devtmpfs.h" /* device/class/devtmpfs shim -> GNOS VFS */
 #include "drm_fourcc.h"
 #include "drm_init.h"
 #include "drm_mode.h"
 #include "drm_print.h"
-#include "vfs.h"
 #include "drm_vsnprintf.h"
-#include <stddef.h>
-#include <stdint.h>
-#include "kstring.h"
 #include "heap.h"
+#include "kstring.h"
+#include "vfs.h"
 
-/* proc.h: kthread_create returns proc_t*, sched_block_timeout takes a
- * wait_reason_t (WAIT_SLEEP == 5 there).  Match those signatures. */
+/* proc.h: WAIT_SLEEP is 5 there; match the signature exactly rather than
+ * pulling the header in here. */
 #define DRM_WAIT_SLEEP 5
 void sched_block_timeout(uint32_t why, uint64_t ticks);
 
-/* GNOS always builds the DRM core; the Uinxed CONFIG_DRM gate has no
- * counterpart here. */
+/* The DRM core is always built into this kernel. */
 #ifndef CONFIG_DRM
-#define CONFIG_DRM 1
+#    define CONFIG_DRM 1
 #endif
 
 extern int                      drm_vblank_init(struct drm_device *dev, unsigned int num_crtcs);
+extern void                     drm_vblank_tick(void);
 extern struct drm_display_mode *drm_mode_create(struct drm_device *dev);
 extern void                     drm_mode_probed_add(struct drm_connector *connector, struct drm_display_mode *mode);
+extern int                      drm_read(struct drm_file *file_priv, char *buf, size_t count, size_t *offset);
 
-/* --------------------------------------------------------------- *
- * Global device list                                              *
- *                                                                 *
- * Replaces the old singleton: several devices can coexist, and    *
- * drm_get_singleton() keeps working by returning the first one.   *
- * --------------------------------------------------------------- */
+/* ------------------------------------------------------- device registry */
 
+/* Every registered device, in registration order.  Most of the kernel asks
+ * for "the" device, which means the first one. */
 #define DRM_MAX_DEVICES 16
 
 static struct drm_device *drm_device_list[DRM_MAX_DEVICES];
@@ -59,7 +66,7 @@ void drm_device_list_add(struct drm_device *dev)
 {
     spin_lock(&drm_device_list_lock);
     for (int i = 0; i < DRM_MAX_DEVICES; i++) {
-        if (!drm_device_list[i]) {
+        if (drm_device_list[i] == NULL) {
             drm_device_list[i] = dev;
             break;
         }
@@ -81,50 +88,51 @@ void drm_device_list_remove(struct drm_device *dev)
 
 struct drm_device *drm_get_singleton(void)
 {
-    /* First registered device; new code should prefer
-     * drm_get_device_by_minor(). */
     spin_lock(&drm_device_list_lock);
+
     dbg_puts("DRMSING: list[0]=");
     dbg_puts_hex((uint64_t)(uintptr_t)drm_device_list[0]);
     dbg_puts("\r\n");
+
     for (int i = 0; i < DRM_MAX_DEVICES; i++) {
-        if (drm_device_list[i]) {
-            struct drm_device *dev = drm_device_list[i];
+        struct drm_device *dev = drm_device_list[i];
+
+        if (dev != NULL) {
             spin_unlock(&drm_device_list_lock);
             return dev;
         }
     }
+
     spin_unlock(&drm_device_list_lock);
     return NULL;
 }
 
+/* The device behind a given /dev/dri node, which is how a driver finds the
+ * device an ioctl arrived on. */
 struct drm_device *drm_get_device_by_minor(int type, int index)
 {
     spin_lock(&drm_device_list_lock);
+
     for (int i = 0; i < DRM_MAX_DEVICES; i++) {
         struct drm_device *dev = drm_device_list[i];
-        if (!dev) continue;
-        if (type == DRM_MINOR_PRIMARY && dev->primary && dev->primary->index == index) {
+
+        if (dev == NULL) { continue; }
+
+        if (type == DRM_MINOR_PRIMARY && dev->primary != NULL && dev->primary->index == index) {
             spin_unlock(&drm_device_list_lock);
             return dev;
         }
-        if (type == DRM_MINOR_RENDER && dev->render && dev->render->index == index) {
+        if (type == DRM_MINOR_RENDER && dev->render != NULL && dev->render->index == index) {
             spin_unlock(&drm_device_list_lock);
             return dev;
         }
     }
+
     spin_unlock(&drm_device_list_lock);
     return NULL;
 }
 
-/* --------------------------------------------------------------- *
- * The built-in software driver                                    *
- *                                                                 *
- * Everything userspace can do against card0 is served by the core *
- * (ioctls, GEM, atomic); the driver hooks below only cover the    *
- * bits the core cannot do for us: object release and PRIME import *
- * of our own buffers.                                             *
- * --------------------------------------------------------------- */
+/* --------------------------------------------------------- the device itself */
 
 static int drm_dummy_open(struct drm_device *dev, struct drm_file *file)
 {
@@ -144,28 +152,36 @@ static void drm_dummy_lastclose(struct drm_device *dev)
     (void)dev;
 }
 
+/* Buffers here are ordinary page-aligned allocations, so freeing one is just
+ * giving the pages back. */
 static void drm_dummy_gem_free_object(struct drm_gem_object *obj)
 {
-    if (obj) {
-        aligned_free(obj->backing);
-        obj->backing = NULL;
-        free(obj->dma_buf);
-        obj->dma_buf = NULL;
-    }
+    if (obj == NULL) { return; }
+
+    aligned_free(obj->backing);
+    obj->backing = NULL;
+
+    free(obj->dma_buf);
+    obj->dma_buf = NULL;
 }
 
+/*
+ * PRIME import: the only buffers this device can import are the ones it
+ * exported, so the "dma-buf" handed back is really the GEM object itself.
+ */
 static struct drm_gem_object *drm_dummy_gem_prime_import(struct drm_device *dev, void *dma_buf)
 {
-    /* The dummy driver only understands buffers it exported itself:
-     * the dma_buf cookie is really a drm_gem_object back-pointer. */
     struct drm_gem_object *obj = (struct drm_gem_object *)dma_buf;
 
     (void)dev;
-    if (!obj) { return NULL; }
+
+    if (obj == NULL) { return NULL; }
+
     drm_gem_object_get(obj);
     return obj;
 }
 
+/* The commands this device answers; anything else gets ENOTTY. */
 static const struct drm_ioctl_desc drm_dummy_ioctls[] = {
     {DRM_IOCTL_VERSION,                drm_version,                      0                    },
     {DRM_IOCTL_GET_MAGIC,              drm_getmagic,                     DRM_AUTH             },
@@ -186,7 +202,7 @@ static const struct drm_ioctl_desc drm_dummy_ioctls[] = {
     {DRM_IOCTL_MODE_GETENCODER,        drm_mode_getencoder,              DRM_AUTH             },
     {DRM_IOCTL_MODE_GETCONNECTOR,      drm_mode_getconnector,            DRM_AUTH             },
     {DRM_IOCTL_MODE_GETPROPERTY,       drm_mode_getproperty_ioctl,       DRM_AUTH             },
-    {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,      DRM_AUTH             },
+    {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,       DRM_AUTH             },
     {DRM_IOCTL_MODE_GETFB,             drm_mode_getfb,                   DRM_AUTH             },
     {DRM_IOCTL_MODE_ADDFB,             drm_mode_addfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_RMFB,              drm_mode_rmfb,                    DRM_MASTER | DRM_AUTH},
@@ -205,7 +221,7 @@ static const struct drm_ioctl_desc drm_dummy_ioctls[] = {
 
 static struct drm_driver drm_dummy_driver = {
     .name             = "drm",
-    .desc             = "GNOS DRM",
+    .desc             = "GNOS software DRM",
     .date             = "20260722",
     .major            = 1,
     .minor            = 0,
@@ -223,229 +239,14 @@ static struct drm_driver drm_dummy_driver = {
     .num_ioctls       = sizeof(drm_dummy_ioctls) / sizeof(drm_dummy_ioctls[0]),
 };
 
-/* --------------------------------------------------------------- *
- * KMS pipeline objects and the software scanout bridge            *
- *                                                                 *
- * The ported atomic stack owns the KMS object model; the pixels   *
- * land in the console framebuffer, which is also what text mode   *
- * draws through -- so a successful page flip visibly replaces the *
- * tty.                                                            *
- * --------------------------------------------------------------- */
-#include "../../fbcon.h"
+/* ---------------------------------------------------------- the pipeline */
 
 static struct drm_crtc      pipeline_crtc;
 static struct drm_plane     pipeline_primary_plane;
 static struct drm_encoder   pipeline_encoder;
 static struct drm_connector pipeline_connector;
 
-/* The framebuffer currently being scanned out.  The pixman renderer draws
- * in place into the dumb buffer, so after the first commit no ioctl ever
- * changes state again -- without a periodic re-blit the screen would keep
- * showing whatever that first commit contained. */
-static struct drm_framebuffer *g_scan_fb;
-
-static void drm_refresh_thread(void *arg);
-void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep);
-
-/* Heartbeat counter: once the compositor hands us its first framebuffer
- * this counts up every frame; a stalled desktop with n=0 means the commit
- * path never delivered anything worth showing. */
-static unsigned long g_refresh_count;
-
-/* Push the live dumb buffer to the console framebuffer and stamp the
- * cursor over it.  Called from the PIT tick (timer_irq).  Cheap enough at
- * console resolutions, and it needs no vblank client to be waiting. */
-void drm_dummy_refresh(void)
-{
-    if ((++g_refresh_count & 511) == 0) {
-        dbg_puts("REFRESH n=");
-        dbg_puts_hex(g_refresh_count);
-        dbg_puts(" fb=");
-        dbg_puts_hex((uint64_t)(uintptr_t)g_scan_fb);
-        dbg_puts("\n");
-    }
-    if (!g_scan_fb || !g_scan_fb->obj[0] || !g_scan_fb->obj[0]->backing)
-        return;
-
-    uint32_t dw = 0, dh = 0, dpitch = 0;
-    fbcon_geometry(&dw, &dh, &dpitch);
-    uint32_t *dst = (uint32_t *)fbcon_fb();
-    const uint8_t *src = (const uint8_t *)g_scan_fb->obj[0]->backing;
-    if (!dst || !src || !dw || !dpitch)
-        return;
-
-    uint32_t w = g_scan_fb->width  > dw ? dw : g_scan_fb->width;
-    uint32_t h = g_scan_fb->height > dh ? dh : g_scan_fb->height;
-    uint32_t dstep = dpitch / 4;
-
-    for (uint32_t row = 0; row < h; row++) {
-        uint32_t       *d = dst + (uint64_t)row * dstep;
-        const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * g_scan_fb->pitches[0]);
-        for (uint32_t col = 0; col < w; col++)
-            d[col] = s[col];
-    }
-    drm_dummy_draw_cursor(dst, dw, dh, dstep);
-}
-
-static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb,
-                               struct drm_pending_vblank_event *event,
-                               uint32_t flags)
-{
-    /* Lazy start: the first flip proves userland is driving KMS, which
-     * also proves the scheduler exists to run the refresh thread. */
-    static int refresh_thread_up;
-    if (!refresh_thread_up) {
-        refresh_thread_up = 1;
-        if (!kthread_create("drm-refresh", drm_refresh_thread, NULL))
-            refresh_thread_up = 0;
-    }
-
-    (void)crtc;
-    (void)event;
-    (void)flags;
-
-    if (!fb)
-        return 0;
-    if (!fb->obj[0] || !fb->obj[0]->backing)
-        return -EINVAL;
-
-    g_scan_fb = fb;
-
-    uint32_t dw = 0, dh = 0, dpitch = 0;
-    fbcon_geometry(&dw, &dh, &dpitch);
-    uint32_t *dst = (uint32_t *)fbcon_fb();
-    const uint8_t *src = (const uint8_t *)fb->obj[0]->backing;
-    if (!dst || !src || !dw || !dpitch)
-        return -EINVAL;
-
-    /* Clip to the active scanout; the client may have picked a mode larger
-     * than the display was booted with. */
-    uint32_t w = fb->width  > dw ? dw : fb->width;
-    uint32_t h = fb->height > dh ? dh : fb->height;
-    uint32_t dstep = dpitch / 4;
-
-    for (uint32_t row = 0; row < h; row++) {
-        uint32_t       *d = dst + (uint64_t)row * dstep;
-        const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * fb->pitches[0]);
-        for (uint32_t col = 0; col < w; col++)
-            d[col] = s[col];
-    }
-    return 0;
-}
-
-/* Re-blit the primary framebuffer on every software vblank.  Without this
- * hook the display would freeze on whatever the first commit contained. */
-static void drm_dummy_vblank_blit(struct drm_crtc *crtc)
-{
-    struct drm_framebuffer *fb = NULL;
-
-    if (!crtc || !crtc->primary)
-        return;
-    if (crtc->primary->state)
-        fb = crtc->primary->state->fb;
-    if (!fb)
-        return;
-    if (drm_dummy_page_flip(crtc, fb, NULL, 0) == 0) {
-        /* The main blit only runs when the helper succeeds; stamping the
-         * cursor here keeps it above whatever was just scanned out. */
-        uint32_t dw = 0, dh = 0, dpitch = 0;
-        fbcon_geometry(&dw, &dh, &dpitch);
-        uint32_t *dst = (uint32_t *)fbcon_fb();
-        if (dst && dw && dpitch)
-            drm_dummy_draw_cursor(dst, dw, dh, dpitch / 4);
-    }
-}
-
-/* ---- software cursor ----------------------------------------------------
- * No hardware overlay exists, so the cursor plane is drawn by the vblank
- * blit: cursor_set/keep the ARGB source, and drm_dummy_vblank_blit stamps
- * it over the scanout after the main copy. */
-static spinlock_t sw_cursor_lock;
-
-static struct {
-    struct drm_gem_object *bo;
-    uint32_t               w, h;
-    int32_t                hot_x, hot_y;
-    int32_t                x, y; /* top-left of the cursor image */
-    bool                   on;
-} sw_cursor;
-
-static int drm_dummy_cursor_set(struct drm_crtc *crtc, struct drm_gem_object *bo,
-                                uint32_t width, uint32_t height,
-                                int32_t hot_x, int32_t hot_y)
-{
-    (void)crtc;
-    spin_lock(&sw_cursor_lock);
-    sw_cursor.bo    = bo;
-    sw_cursor.w     = width;
-    sw_cursor.h     = height;
-    sw_cursor.hot_x = hot_x;
-    sw_cursor.hot_y = hot_y;
-    sw_cursor.on    = (bo != NULL);
-    spin_unlock(&sw_cursor_lock);
-    return 0;
-}
-
-static int drm_dummy_cursor_move(struct drm_crtc *crtc, int32_t x, int32_t y)
-{
-    (void)crtc;
-    spin_lock(&sw_cursor_lock);
-    sw_cursor.x = x - sw_cursor.hot_x;
-    sw_cursor.y = y - sw_cursor.hot_y;
-    spin_unlock(&sw_cursor_lock);
-    return 0;
-}
-
-/* Stamp the cursor image over `dst` (the console framebuffer).  Pixels
- * with their high byte clear are treated as transparent; everything else
- * is copied verbatim -- cheap, and close enough for an X shape. */
-void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep)
-{
-    const uint32_t *src;
-    uint32_t cw, ch;
-    int32_t  cx, cy;
-
-    spin_lock(&sw_cursor_lock);
-    if (!sw_cursor.on || !sw_cursor.bo || !sw_cursor.bo->backing) {
-        spin_unlock(&sw_cursor_lock);
-        return;
-    }
-    src = (const uint32_t *)sw_cursor.bo->backing;
-    cw  = sw_cursor.w;
-    ch  = sw_cursor.h;
-    cx  = sw_cursor.x;
-    cy  = sw_cursor.y;
-    spin_unlock(&sw_cursor_lock);
-
-    if (cx < 0) { cx = 0; }
-    if (cy < 0) { cy = 0; }
-    if ((uint32_t)cx >= dw || (uint32_t)cy >= dh)
-        return;
-    if (cw > dw - (uint32_t)cx) cw = dw - (uint32_t)cx;
-    if (ch > dh - (uint32_t)cy) ch = dh - (uint32_t)cy;
-
-    for (uint32_t row = 0; row < ch; row++) {
-        uint32_t       *d = dst + (uint64_t)(cy + row) * dstep + cx;
-        const uint32_t *srow = src + (uint64_t)row * sw_cursor.w;
-        for (uint32_t col = 0; col < cw; col++) {
-            uint32_t px = srow[col];
-            if ((px >> 24) > 127)
-                d[col] = px;
-        }
-    }
-}
-
-static const struct drm_crtc_helper_funcs pipeline_crtc_helper = {
-    .page_flip   = drm_dummy_page_flip,
-    .vblank      = drm_dummy_vblank_blit,
-    .cursor_set  = drm_dummy_cursor_set,
-    .cursor_move = drm_dummy_cursor_move,
-};
-
-/* --------------------------------------------------------------- *
- * Mode table (data-driven, not hardcoded in logic)                *
- * --------------------------------------------------------------- */
-
+/* Modes are data, not code: adding one is a table entry. */
 struct dummy_mode_cfg {
     const char *name;
     int         clock;
@@ -460,6 +261,225 @@ struct dummy_mode_cfg {
     int         vrefresh;
     unsigned    flags;
     unsigned    type;
+};
+
+/* The scanout bridge: the pixel copy at the end goes through the console
+ * framebuffer -- the same one text mode draws into, so a successful commit
+ * visibly replaces the tty. */
+#include "../fbcon.h"
+
+/* Whatever is being scanned out right now. */
+static struct drm_framebuffer *g_scan_fb;
+
+static void drm_refresh_thread(void *arg);
+void        drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep);
+
+static unsigned long g_refresh_count;
+
+/* Copy the live buffer to the console framebuffer and stamp the cursor on
+ * top.  Called from the timer tick as well as from the refresh thread. */
+void drm_dummy_refresh(void)
+{
+    uint32_t       dw = 0, dh = 0, dpitch = 0;
+    uint32_t      *dst;
+    const uint8_t *src;
+    uint32_t       w, h, dstep;
+
+    /* Heartbeat: once a client hands us a framebuffer this counts up every
+     * frame.  A compositor that is up but showing nothing shows up here as
+     * a count that never moves. */
+    if ((++g_refresh_count & 511) == 0) {
+        dbg_puts("REFRESH n=");
+        dbg_puts_hex(g_refresh_count);
+        dbg_puts(" fb=");
+        dbg_puts_hex((uint64_t)(uintptr_t)g_scan_fb);
+        dbg_puts("\n");
+    }
+
+    if (g_scan_fb == NULL || g_scan_fb->obj[0] == NULL || g_scan_fb->obj[0]->backing == NULL) { return; }
+
+    fbcon_geometry(&dw, &dh, &dpitch);
+    dst = (uint32_t *)fbcon_fb();
+    src = (const uint8_t *)g_scan_fb->obj[0]->backing;
+    if (dst == NULL || src == NULL || dw == 0 || dpitch == 0) { return; }
+
+    /* Clip: the client may have chosen a mode larger than the display was
+     * booted with. */
+    w     = (g_scan_fb->width > dw) ? dw : g_scan_fb->width;
+    h     = (g_scan_fb->height > dh) ? dh : g_scan_fb->height;
+    dstep = dpitch / 4;
+
+    for (uint32_t row = 0; row < h; row++) {
+        uint32_t       *d = dst + (uint64_t)row * dstep;
+        const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * g_scan_fb->pitches[0]);
+
+        for (uint32_t col = 0; col < w; col++) { d[col] = s[col]; }
+    }
+
+    drm_dummy_draw_cursor(dst, dw, dh, dstep);
+}
+
+/*
+ * A page flip here means "start showing this framebuffer".  It also starts
+ * the refresh thread the first time it happens, which is the earliest point
+ * at which a thread can survive.
+ */
+static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb,
+                               struct drm_pending_vblank_event *event, uint32_t flags)
+{
+    static int refresh_thread_up;
+    uint32_t       dw = 0, dh = 0, dpitch = 0;
+    uint32_t      *dst;
+    const uint8_t *src;
+    uint32_t       w, h, dstep;
+
+    if (!refresh_thread_up) {
+        refresh_thread_up = 1;
+        if (kthread_create("drm-refresh", drm_refresh_thread, NULL) == NULL) { refresh_thread_up = 0; }
+    }
+
+    (void)crtc;
+    (void)event;
+    (void)flags;
+
+    if (fb == NULL) { return 0; }
+    if (fb->obj[0] == NULL || fb->obj[0]->backing == NULL) { return -EINVAL; }
+
+    g_scan_fb = fb;
+
+    fbcon_geometry(&dw, &dh, &dpitch);
+    dst = (uint32_t *)fbcon_fb();
+    src = (const uint8_t *)fb->obj[0]->backing;
+    if (dst == NULL || src == NULL || dw == 0 || dpitch == 0) { return -EINVAL; }
+
+    w     = (fb->width > dw) ? dw : fb->width;
+    h     = (fb->height > dh) ? dh : fb->height;
+    dstep = dpitch / 4;
+
+    for (uint32_t row = 0; row < h; row++) {
+        uint32_t       *d = dst + (uint64_t)row * dstep;
+        const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * fb->pitches[0]);
+
+        for (uint32_t col = 0; col < w; col++) { d[col] = s[col]; }
+    }
+
+    return 0;
+}
+
+/*
+ * Called once per software vblank: copy whatever the CRTC's primary plane is
+ * showing.  A renderer that paints into its own buffer and never commits
+ * again depends entirely on this, otherwise the display freezes on the first
+ * frame it ever saw.
+ */
+static void drm_dummy_vblank_blit(struct drm_crtc *crtc)
+{
+    struct drm_framebuffer *fb = NULL;
+
+    if (crtc == NULL || crtc->primary == NULL) { return; }
+    if (crtc->primary->state != NULL) { fb = crtc->primary->state->fb; }
+    if (fb == NULL) { return; }
+
+    if (drm_dummy_page_flip(crtc, fb, NULL, 0) == 0) {
+        /* Keep the cursor above whatever was just scanned out. */
+        uint32_t dw = 0, dh = 0, dpitch = 0;
+
+        fbcon_geometry(&dw, &dh, &dpitch);
+        uint32_t *dst = (uint32_t *)fbcon_fb();
+        if (dst != NULL && dw != 0 && dpitch != 0) { drm_dummy_draw_cursor(dst, dw, dh, dpitch / 4); }
+    }
+}
+
+/* --------------------------------------------------------- software cursor */
+
+/* There is no cursor overlay in hardware, so the cursor plane is drawn by
+ * hand after each copy: cursor_set keeps the ARGB source, cursor_move the
+ * position, and the blit stamps it. */
+static spinlock_t sw_cursor_lock;
+
+static struct {
+    struct drm_gem_object *bo;
+    uint32_t               w, h;
+    int32_t                hot_x, hot_y;
+    int32_t                x, y; /* top-left of the image, hotspot applied */
+    bool                   on;
+} sw_cursor;
+
+static int drm_dummy_cursor_set(struct drm_crtc *crtc, struct drm_gem_object *bo, uint32_t width, uint32_t height,
+                                int32_t hot_x, int32_t hot_y)
+{
+    (void)crtc;
+
+    spin_lock(&sw_cursor_lock);
+    sw_cursor.bo    = bo;
+    sw_cursor.w     = width;
+    sw_cursor.h     = height;
+    sw_cursor.hot_x = hot_x;
+    sw_cursor.hot_y = hot_y;
+    sw_cursor.on    = (bo != NULL);
+    spin_unlock(&sw_cursor_lock);
+
+    return 0;
+}
+
+static int drm_dummy_cursor_move(struct drm_crtc *crtc, int32_t x, int32_t y)
+{
+    (void)crtc;
+
+    spin_lock(&sw_cursor_lock);
+    /* The position a client gives is where the hotspot goes; what we draw
+     * from is the image's top-left corner. */
+    sw_cursor.x = x - sw_cursor.hot_x;
+    sw_cursor.y = y - sw_cursor.hot_y;
+    spin_unlock(&sw_cursor_lock);
+
+    return 0;
+}
+
+/* Draw the cursor over @dst.  Pixels whose high byte is mostly clear are
+ * transparent; everything else is copied as it is. */
+void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep)
+{
+    const uint32_t *src;
+    uint32_t        cw, ch;
+    int32_t         cx, cy;
+
+    spin_lock(&sw_cursor_lock);
+    if (!sw_cursor.on || sw_cursor.bo == NULL || sw_cursor.bo->backing == NULL) {
+        spin_unlock(&sw_cursor_lock);
+        return;
+    }
+    src = (const uint32_t *)sw_cursor.bo->backing;
+    cw  = sw_cursor.w;
+    ch  = sw_cursor.h;
+    cx  = sw_cursor.x;
+    cy  = sw_cursor.y;
+    spin_unlock(&sw_cursor_lock);
+
+    if (cx < 0) { cx = 0; }
+    if (cy < 0) { cy = 0; }
+    if ((uint32_t)cx >= dw || (uint32_t)cy >= dh) { return; }
+
+    if (cw > dw - (uint32_t)cx) { cw = dw - (uint32_t)cx; }
+    if (ch > dh - (uint32_t)cy) { ch = dh - (uint32_t)cy; }
+
+    for (uint32_t row = 0; row < ch; row++) {
+        uint32_t       *d    = dst + (uint64_t)(cy + row) * dstep + cx;
+        const uint32_t *srow = src + (uint64_t)row * sw_cursor.w;
+
+        for (uint32_t col = 0; col < cw; col++) {
+            uint32_t px = srow[col];
+
+            if ((px >> 24) > 127) { d[col] = px; }
+        }
+    }
+}
+
+static const struct drm_crtc_helper_funcs pipeline_crtc_helper = {
+    .page_flip   = drm_dummy_page_flip,
+    .vblank      = drm_dummy_vblank_blit,
+    .cursor_set  = drm_dummy_cursor_set,
+    .cursor_move = drm_dummy_cursor_move,
 };
 
 static const struct dummy_mode_cfg dummy_modes[] = {
@@ -499,11 +519,11 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
 {
     (void)dev;
 
-    for (unsigned i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
-        const struct dummy_mode_cfg *cfg  = &dummy_modes[i];
+    for (unsigned int i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
+        const struct dummy_mode_cfg *cfg = &dummy_modes[i];
         struct drm_display_mode     *mode = drm_mode_create(dev);
 
-        if (!mode) { return -ENOMEM; }
+        if (mode == NULL) { return -ENOMEM; }
 
         strncpy(mode->name, cfg->name, DRM_DISPLAY_MODE_LEN - 1);
         mode->name[DRM_DISPLAY_MODE_LEN - 1] = '\0';
@@ -524,18 +544,19 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
         drm_mode_probed_add(connector, mode);
     }
 
-    /* Also add the actual bootloader framebuffer resolution as the
-     * preferred mode.  This ensures Xorg/wlroots always find a mode that
-     * matches the physical display, regardless of the table above. */
+    /* Offer the resolution the bootloader actually programmed, so a client
+     * always finds a mode matching the real display however the table above
+     * is set up. */
     {
         uint32_t fb_w = 0, fb_h = 0, fb_pitch = 0;
+
         fbcon_geometry(&fb_w, &fb_h, &fb_pitch);
 
         if (fb_w > 0 && fb_h > 0) {
             int duplicate = 0;
-            for (unsigned i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
-                if ((uint32_t)dummy_modes[i].hdisplay == fb_w &&
-                    (uint32_t)dummy_modes[i].vdisplay == fb_h) {
+
+            for (unsigned int i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
+                if ((uint32_t)dummy_modes[i].hdisplay == fb_w && (uint32_t)dummy_modes[i].vdisplay == fb_h) {
                     duplicate = 1;
                     break;
                 }
@@ -543,8 +564,10 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
 
             if (!duplicate) {
                 struct drm_display_mode *mode = drm_mode_create(dev);
-                if (mode) {
+
+                if (mode != NULL) {
                     char namebuf[DRM_DISPLAY_MODE_LEN];
+
                     snprintf(namebuf, sizeof(namebuf), "%ux%u", fb_w, fb_h);
                     strncpy(mode->name, namebuf, DRM_DISPLAY_MODE_LEN - 1);
                     mode->name[DRM_DISPLAY_MODE_LEN - 1] = '\0';
@@ -555,8 +578,9 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
                     mode->clock    = (int)((uint64_t)fb_w * fb_h * 60 / 1000);
                     mode->vrefresh = 60;
                     mode->flags    = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
-                    mode->type     = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
-                    mode->status   = MODE_OK;
+                    mode->type    = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
+                    mode->status  = MODE_OK;
+
                     drm_mode_probed_add(connector, mode);
                 }
             }
@@ -566,16 +590,15 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
     return 0;
 }
 
+/* One frame per tick: retire flips, deliver their events, then refresh. */
 static void drm_refresh_thread(void *arg)
 {
     (void)arg;
+
     dbg_puts("RTHREAD start\n");
+
     for (;;) {
-        sched_block_timeout((uint32_t)DRM_WAIT_SLEEP, 1); /* one PIT tick per frame */
-        /* One software vblank per frame: retires pending page flips
-         * (otherwise every flip after the first returns EBUSY forever),
-         * delivers flip/vblank events to clients, then pushes the live
-         * dumb buffer to the visible framebuffer. */
+        sched_block_timeout((uint32_t)DRM_WAIT_SLEEP, 1);
         drm_vblank_tick();
         drm_dummy_refresh();
     }
@@ -589,23 +612,24 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
         DRM_FORMAT_RGB888,
         DRM_FORMAT_RGB565,
     };
-    int ret;
+    int                   ret;
 
     memset(&pipeline_crtc, 0, sizeof(pipeline_crtc));
     memset(&pipeline_primary_plane, 0, sizeof(pipeline_primary_plane));
     memset(&pipeline_encoder, 0, sizeof(pipeline_encoder));
     memset(&pipeline_connector, 0, sizeof(pipeline_connector));
 
-    /* Primary plane: only ever driven by CRTC 0. */
+    /* The primary plane, bound to CRTC 0. */
     ret = drm_plane_init(dev, &pipeline_primary_plane, 1, /* possible_crtcs = bit 0 */
-                         NULL, primary_formats, sizeof(primary_formats) / sizeof(primary_formats[0]), NULL, DRM_PLANE_TYPE_PRIMARY, "primary");
-    if (ret) {
+                         NULL, primary_formats, sizeof(primary_formats) / sizeof(primary_formats[0]), NULL,
+                         DRM_PLANE_TYPE_PRIMARY, "primary");
+    if (ret != 0) {
         DRM_ERROR("Failed to init primary plane: %d\n", ret);
         return ret;
     }
 
     pipeline_primary_plane.state = malloc(sizeof(*pipeline_primary_plane.state));
-    if (!pipeline_primary_plane.state) {
+    if (pipeline_primary_plane.state == NULL) {
         DRM_ERROR("Failed to alloc primary plane state\n");
         return -ENOMEM;
     }
@@ -617,15 +641,14 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_primary_plane.state->pixel_blend_mode = 0;
     pipeline_primary_plane.state->visible          = true;
 
-    ret = drm_crtc_init_with_planes(dev, &pipeline_crtc, &pipeline_primary_plane, NULL,
-                                    &pipeline_crtc_helper, "CRTC-0");
-    if (ret) {
+    ret = drm_crtc_init_with_planes(dev, &pipeline_crtc, &pipeline_primary_plane, NULL, &pipeline_crtc_helper, "CRTC-0");
+    if (ret != 0) {
         DRM_ERROR("Failed to init CRTC: %d\n", ret);
         return ret;
     }
 
     pipeline_crtc.state = malloc(sizeof(*pipeline_crtc.state));
-    if (!pipeline_crtc.state) {
+    if (pipeline_crtc.state == NULL) {
         DRM_ERROR("Failed to alloc CRTC state\n");
         return -ENOMEM;
     }
@@ -634,9 +657,9 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_crtc.state->active = false;
     pipeline_crtc.state->enable = false;
 
-    /* VIRTUAL encoder/connector: the output is software-only. */
+    /* A virtual encoder and connector: there is no cable. */
     ret = drm_encoder_init(dev, &pipeline_encoder, NULL, DRM_MODE_ENCODER_VIRTUAL, "encoder-0");
-    if (ret) {
+    if (ret != 0) {
         DRM_ERROR("Failed to init encoder: %d\n", ret);
         return ret;
     }
@@ -644,7 +667,7 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_encoder.crtc           = &pipeline_crtc;
 
     ret = drm_connector_init(dev, &pipeline_connector, NULL, DRM_MODE_CONNECTOR_VIRTUAL);
-    if (ret) {
+    if (ret != 0) {
         DRM_ERROR("Failed to init connector: %d\n", ret);
         return ret;
     }
@@ -653,7 +676,7 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_connector.display_info_height_mm = 280;
 
     pipeline_connector.state = malloc(sizeof(*pipeline_connector.state));
-    if (!pipeline_connector.state) {
+    if (pipeline_connector.state == NULL) {
         DRM_ERROR("Failed to alloc connector state\n");
         return -ENOMEM;
     }
@@ -663,19 +686,19 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_connector.state->best_encoder = &pipeline_encoder;
 
     ret = drm_connector_attach_encoder(&pipeline_connector, &pipeline_encoder);
-    if (ret) {
+    if (ret != 0) {
         DRM_ERROR("Failed to attach encoder: %d\n", ret);
         return ret;
     }
 
     ret = drm_dummy_kms_add_modes(dev, &pipeline_connector);
-    if (ret) {
+    if (ret != 0) {
         DRM_ERROR("Failed to add modes: %d\n", ret);
         return ret;
     }
 
     ret = drm_vblank_init(dev, 1);
-    if (ret) {
+    if (ret != 0) {
         DRM_ERROR("Failed to init vblank: %d\n", ret);
         return ret;
     }
@@ -683,27 +706,18 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     drm_connector_register(&pipeline_connector);
 
     DRM_INFO("KMS pipeline: CRTC-%u + primary plane-%u + encoder-%u + connector-%u (%u modes)\n", pipeline_crtc.base.id,
-             pipeline_primary_plane.base.id, pipeline_encoder.base.id, pipeline_connector.base.id, sizeof(dummy_modes) / sizeof(dummy_modes[0]));
+             pipeline_primary_plane.base.id, pipeline_encoder.base.id, pipeline_connector.base.id,
+             sizeof(dummy_modes) / sizeof(dummy_modes[0]));
 
-    /* The refresh kernel thread is NOT created here: KMS setup runs from
-     * kernel_init() BEFORE proc_init()/sched_start(), and a task enqueued
-     * that early is silently dropped when the scheduler initialises.  It
-     * is started lazily by the first page flip instead (see
-     * drm_dummy_page_flip), which by definition happens once userland --
-     * and therefore a working scheduler -- exists. */
     return 0;
 }
 
-/* --------------------------------------------------------------- *
- * VFS glue: turning device-node calls into DRM core calls         *
- * --------------------------------------------------------------- */
+/* ------------------------------------------------------------ VFS plumbing */
 
+/* read() on a DRM node dequeues events: it blocks while there are none and
+ * returns 0 once the file is being closed, which is what libdrm expects. */
 int64_t drm_dev_read(void *file, void *addr, size_t offset, size_t size)
 {
-    /* Forward to the real event-dequeue logic in drm_file.c.
-     * drm_read() blocks via wait_queue_sleep() when no events are pending
-     * and returns 0 on EOF (event_closing), which is the standard Linux
-     * DRM semantics that libdrm/modesetting expect. */
     return (int64_t)drm_read((struct drm_file *)file, (char *)addr, size, &offset);
 }
 
@@ -713,59 +727,65 @@ size_t drm_dev_write(void *file, const void *addr, size_t offset, size_t size)
     (void)addr;
     (void)offset;
     (void)size;
+
     return 0;
 }
 
 int drm_dev_ioctl(void *file, size_t req, void *arg)
 {
-    struct drm_file *file_priv = (struct drm_file *)file;
+    struct drm_file   *file_priv = (struct drm_file *)file;
     struct drm_device *dev;
 
-    if (!file_priv) return -ENODEV;
+    if (file_priv == NULL) { return -ENODEV; }
 
     dev = drm_get_singleton();
-    if (!dev) return -ENODEV;
+    if (dev == NULL) { return -ENODEV; }
 
     return drm_ioctl(dev, (unsigned int)req, arg, file_priv);
 }
 
-/* tmpfs/devtmpfs per-open bridge. A VFS node is shared by all processes, so
- * storing drm_file in node->handle would be wrong: one close could release
- * another client's state. */
+/*
+ * A VFS node is shared by every process that has it open, so per-open state
+ * cannot live on the node: it is allocated here and handed back in
+ * @private_data instead.
+ */
 int drm_dev_open(void *node_ptr, uint64_t flags, void **private_data)
 {
     struct drm_device *dev;
     struct drm_file   *file;
     int                ret;
 
-    (void)node_ptr;
     (void)flags;
-    if (!private_data) return -EINVAL;
+
+    if (private_data == NULL) { return -EINVAL; }
     *private_data = NULL;
 
     dev = drm_get_singleton();
-    if (!dev) return -ENODEV;
+    if (dev == NULL) { return -ENODEV; }
 
     file = malloc(sizeof(*file));
-    if (!file) return -ENOMEM;
+    if (file == NULL) { return -ENOMEM; }
     memset(file, 0, sizeof(*file));
 
     ret = drm_open(dev, file);
-    if (ret) {
+    if (ret != 0) {
         free(file);
         return ret;
     }
 
-    /* A root compositor opening the primary node is already trusted for
-     * DRM_AUTH ioctls.  Weston performs GETRESOURCES immediately after the
-     * open (before issuing SET_MASTER); leaving this bit clear makes the
-     * otherwise valid KMS device look absent to its DRM backend.  Render
-     * nodes intentionally keep the normal unauthenticated state. */
+    /* A compositor running as root on the primary node is trusted for
+     * DRM_AUTH commands straight away: Weston goes straight to GETRESOURCES
+     * after opening, without issuing SET_MASTER first, and would otherwise
+     * decide the device has nothing to show.  Render nodes stay
+     * unauthenticated, which is the point of them. */
     {
         struct vfs_node *node = (struct vfs_node *)node_ptr;
         process_t       *proc = process_current();
-        if (node && node->name[0] && !strncmp(node->name, "card", 4) && proc && proc->uid == 0)
+
+        if (node != NULL && node->name[0] != '\0' && !strncmp(node->name, "card", 4) && proc != NULL
+            && proc->uid == 0) {
             file->authenticated = true;
+        }
     }
 
     *private_data = file;
@@ -775,7 +795,8 @@ int drm_dev_open(void *node_ptr, uint64_t flags, void **private_data)
 void drm_dev_release(void *node_ptr, void *private_data)
 {
     (void)node_ptr;
-    if (private_data) {
+
+    if (private_data != NULL) {
         drm_release((struct drm_file *)private_data);
         free(private_data);
     }
@@ -785,6 +806,7 @@ int drm_dev_file_ioctl(void *ctx, void *private_data, uint64_t flags, size_t req
 {
     (void)ctx;
     (void)flags;
+
     return drm_dev_ioctl(private_data, req, arg);
 }
 
@@ -792,6 +814,7 @@ int64_t drm_dev_file_read(void *ctx, void *private_data, uint64_t flags, void *a
 {
     (void)ctx;
     (void)flags;
+
     return drm_dev_read(private_data, addr, offset, size);
 }
 
@@ -799,6 +822,7 @@ int64_t drm_dev_file_write(void *ctx, void *private_data, uint64_t flags, const 
 {
     (void)ctx;
     (void)flags;
+
     return (int64_t)drm_dev_write(private_data, addr, offset, size);
 }
 
@@ -806,6 +830,7 @@ int drm_dev_file_poll(void *ctx, void *private_data, uint64_t flags, size_t even
 {
     (void)ctx;
     (void)flags;
+
     return drm_dev_poll(private_data, events);
 }
 
@@ -813,32 +838,32 @@ int drm_dev_poll(void *file, size_t events)
 {
     (void)file;
     (void)events;
+
     return 0;
 }
 
+/* mmap: the offset handed out by MAP_DUMB identifies the buffer, and the
+ * backing memory is identity-mapped, so its address is the answer. */
 void *drm_dev_mmap(void *file, size_t offset, size_t size, int flags)
 {
     struct drm_file       *file_priv = (struct drm_file *)file;
     struct drm_gem_object *obj;
     void                  *result;
 
-    (void)flags;
     (void)size;
+    (void)flags;
 
-    if (!file_priv) return NULL;
+    if (file_priv == NULL) { return NULL; }
 
-    /* Look up the GEM object by the mmap offset that was returned from
-     * MAP_DUMB.  Its backing memory is identity-mapped (physical ==
-     * virtual) so we can return the pointer directly. */
     obj = drm_gem_object_lookup_by_offset(file_priv, (uint64_t)offset);
-    if (!obj) { return NULL; }
+    if (obj == NULL) { return NULL; }
 
     result = obj->backing;
     drm_gem_object_put(obj);
+
     return result;
 }
 
-/* Per-open mmap callback (VMA-aware GEM mmap). */
 void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t size, int flags, struct vm_area *vma)
 {
     struct drm_device     *dev       = (struct drm_device *)ctx;
@@ -848,7 +873,7 @@ void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t
     (void)size;
     (void)flags;
 
-    if (!dev) dev = drm_get_singleton();
+    if (dev == NULL) { dev = drm_get_singleton(); }
 
     dbg_puts("DRMMAP: dev=");
     dbg_puts_hex((uint64_t)(uintptr_t)dev);
@@ -863,30 +888,27 @@ void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t
     dbg_puts(" vma=");
     dbg_puts_hex((uint64_t)(uintptr_t)vma);
     dbg_puts("\r\n");
-    if (!dev || !file_priv || !vma) return NULL;
+
+    if (dev == NULL || file_priv == NULL || vma == NULL) { return NULL; }
 
     obj = drm_gem_object_lookup_by_offset(file_priv, (uint64_t)offset);
+
     dbg_puts("DRMMAP: obj=");
     dbg_puts_hex((uint64_t)(uintptr_t)obj);
     dbg_puts(" backing=");
-    dbg_puts_hex(obj ? (uint64_t)(uintptr_t)obj->backing : 0);
+    dbg_puts_hex((obj != NULL) ? (uint64_t)(uintptr_t)obj->backing : 0);
     dbg_puts("\r\n");
-    if (!obj || !obj->backing) return NULL;
 
-    /* Store the GEM object in the VMA for lifetime tracking:
-     * process_munmap calls drm_gem_object_put when the mapping goes away. */
+    if (obj == NULL || obj->backing == NULL) { return NULL; }
+
+    /* The VMA keeps the object alive: unmap drops the reference. */
     vma->vm_private_data = obj;
 
-    /* Identity-mapped physical memory: return the backing pointer; the
-     * syscall mmap layer creates the PTEs from it. */
     return obj->backing;
 }
 
-/*
- * When userspace opens /dev/dri/card0, tmpfs calls the open callback.
- * GNOS's VFS has no per-open callbacks (the DRM open path runs through
- * drm_dev_open above instead), so these two are inert here.
- */
+/* GNOS's VFS has no per-open directory callbacks -- the DRM open path runs
+ * through drm_dev_open above -- so these two are inert. */
 void drm_vfs_open_cb(void *parent, const char *name, void *node_ptr)
 {
     (void)parent;
@@ -899,14 +921,14 @@ void drm_vfs_close_cb(void *current)
     (void)current;
 }
 
-/* --------------------------------------------------------------- *
- * DRM class (global, shared by all DRM devices)                   *
- * --------------------------------------------------------------- */
+/* -------------------------------------------------------------- DRM class */
 
+/* udev finds the device nodes through /sys/class/drm and expects this
+ * uevent variable to tell it what kind of node it is looking at. */
 static int drm_device_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
     (void)dev;
-    /* Match the Linux DRM minor contract consumed by eudev/libudev. */
+
     return add_uevent_var(env, "DEVTYPE=drm_minor");
 }
 
@@ -916,38 +938,35 @@ struct class drm_class = {
 };
 int drm_class_registered = 0;
 
-/* --------------------------------------------------------------- *
- * Public init                                                     *
- * --------------------------------------------------------------- */
+/* ------------------------------------------------------------------- init */
+
+#if CONFIG_DRM
 
 int drm_init(void)
 {
-#if CONFIG_DRM
-    /* Register the core DRM class first.  The software fallback must not
-     * claim card0/renderD128 before a hardware driver probes. */
+    /* Only the class: the software device must not claim card0 or renderD128
+     * before a hardware driver has had its chance to probe. */
     if (!drm_class_registered) {
         int ret = class_register(&drm_class);
-        if (ret != EOK) return ret;
+
+        if (ret != EOK) { return ret; }
         drm_class_registered = 1;
     }
+
     return 0;
-#else
-    return -ENODEV;
-#endif
 }
 
 int drm_init_fallback(void)
 {
-#if CONFIG_DRM
-    struct drm_device *dev;
+    struct drm_device *dev = drm_dev_alloc(&drm_dummy_driver);
+    int                ret;
 
-    dev = drm_dev_alloc(&drm_dummy_driver);
-    if (!dev) {
+    if (dev == NULL) {
         DRM_ERROR("Failed to allocate DRM device\n");
         return -ENOMEM;
     }
 
-    int ret = drm_dev_register(dev, 0);
+    ret = drm_dev_register(dev, 0);
     if (ret != 0) {
         DRM_ERROR("Failed to register DRM device: %d\n", ret);
         free(dev);
@@ -970,7 +989,18 @@ int drm_init_fallback(void)
     dbg_puts("\r\n");
 
     return 0;
-#else
-    return -ENODEV;
-#endif
 }
+
+#else
+
+int drm_init(void)
+{
+    return -ENODEV;
+}
+
+int drm_init_fallback(void)
+{
+    return -ENODEV;
+}
+
+#endif /* CONFIG_DRM */

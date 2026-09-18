@@ -36,7 +36,7 @@ BASEFLAGS := -m64 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
              -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fvisibility=hidden \
              -Wall -Wextra -O2 -g -Isrc/include -Isrc/shared \
              -Isrc/kernel/core -Isrc/kernel/arch/$(ARCH) -Isrc/kernel/driver \
-             -Isrc/kernel/driver/drm -Isrc/kernel/driver/drm/ported
+             -Isrc/kernel/driver/drm
 
 # kernel: PIE so Limine can relocate it into the higher half
 # build/.config (produced by `make config`) defines CONFIG_* macros.
@@ -525,7 +525,7 @@ DEPS := $(KOBJS:.o=.d) $(UOBJS:.o=.d) $(MUSL_OBJS:.o=.d) $(UCRT:.o=.d) \
 ARCH ?= x86_64
 
 vpath %.c src/kernel src/kernel/core src/kernel/driver src/kernel/driver/drm \
-        src/kernel/driver/drm/ported src/kernel/arch/$(ARCH)
+        src/kernel/arch/$(ARCH)
 vpath %.asm src/kernel src/kernel/core src/kernel/driver \
         src/kernel/arch/$(ARCH)
 vpath %.S src/kernel src/kernel/core src/kernel/driver \
