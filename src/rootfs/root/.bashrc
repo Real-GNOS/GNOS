@@ -1,6 +1,6 @@
-# ~/.bashrc — AEOS root shell setup.  Sourced by interactive, non-login bash.
+# ~/.bashrc — GNOS root shell setup.  Sourced by interactive, non-login bash.
 #
-# AEOS boots straight into an interactive bash (init execs /bin/bash with
+# GNOS boots straight into an interactive bash (init execs /bin/bash with
 # stdin/stdout/stderr on /dev/tty, and the tty answers isatty()), so this file
 # is what turns the bare prompt into something usable.
 

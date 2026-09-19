@@ -14,6 +14,7 @@
 #include "panic.h"
 #include "proc.h"
 #include "vmm.h"
+#include "sysnum.h"              /* PROT_READ/WRITE/EXEC */
 #include "pmm.h"
 #include "debugcon.h"
 #include "smp.h"
@@ -172,29 +173,82 @@ static void __attribute__((noreturn)) fault_halt(regs_t *r, const char *tag)
  * user code has touched yet, and a kernel-mode fault there used to be
  * instantly fatal.
  */
-static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int is_write)
+static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
 {
     if (!as)
         return 0;
+    int is_write = (int)(errcode & 2);
+    int is_fetch = (int)(errcode & 16);
+    /* Records can overlap (a MAP_FIXED mapping replaces an earlier one), so
+     * the LAST matching record -- the one a fixed mapping most recently
+     * claimed -- wins, exactly as a page-table walk would resolve it. */
+    int hit = -1;
     for (int i = 0; i < as->nmmaps; i++) {
         uint64_t mb = as->mmaps[i].base;
         uint64_t ms = as->mmaps[i].size;
-        if (cr2 < mb || cr2 >= mb + ms)
-            continue;
-        unsigned vf = as->mmaps[i].flags;
+        if (cr2 >= mb && cr2 < mb + ms)
+            hit = i;
+    }
+    if (hit < 0) {
+        /* TEMPORARY Xorg debugging: the address is in nobody's business. */
+        dbg_puts("LAZY: no record covers cr2=");
+        dbg_puts_hex(cr2);
+        dbg_puts("\r\n");
+        vmm_as_debug_dump();
+        return 0;
+    }
+    {
+        uint64_t mb = as->mmaps[hit].base;
+        uint64_t ms = as->mmaps[hit].size;
+        unsigned vf = as->mmaps[hit].flags;
+        /* TEMPORARY Xorg debugging: say why a fault is not being backed. */
+        if (is_write && !(vf & VM_WRITE)) {
+            dbg_puts("LAZY: write into R-only record base=");
+            dbg_puts_hex(mb);
+            dbg_puts(" flags=");
+            dbg_puts_hex(vf);
+            dbg_puts("\r\n");
+        }
         /* A write into a mapping that is not writable is a REAL fault --
          * thread-stack guard pages live on this path.  Backing them
          * silently would turn a runaway recursion into a machine that
          * eats one zeroed frame per iteration instead of just killing
-         * the offender. */
+         * the offender.  Same for an instruction fetch into a mapping
+         * without exec permission. */
         if (is_write && !(vf & VM_WRITE))
             return 0;
+        if (is_fetch && !(vf & VM_EXEC))
+            return 0;
+        /* A fault on a page that is ALREADY present is a protection
+         * fault, not demand paging: the PTE's permissions went stale
+         * (a MAP_FIXED remap once skipped present pages, leaving the
+         * whole-file temp map's R-only+NX bits behind).  Upgrade the
+         * existing PTE to the record's permissions instead of replacing
+         * the frame -- replacing it here used to silently ZERO live
+         * pages: initialized .data was wiped on its first write and
+         * executable text came back as all-zero pages that the CPU
+         * happily executed. */
+        if (vmm_resolve(as, cr2 & ~0xFFFULL)) {
+            unsigned prot = ((vf & VM_READ) ? PROT_READ : 0) |
+                            ((vf & VM_WRITE) ? PROT_WRITE : 0) |
+                            ((vf & VM_EXEC) ? PROT_EXEC : 0);
+            return vmm_protect(as, cr2 & ~0xFFFULL, PAGE_SIZE, prot);
+        }
         uint64_t frame = pmm_alloc_zeroed();
         if (!frame)
             return 0;
         int ok = vmm_map(as, cr2 & ~0xFFFULL, frame, vf);
         if (ok) {
             as->pages++;    /* lazy fault backed a resident page */
+            /* TEMPORARY Xorg debugging: lazy mappings are silent -- expose
+             * them, they are exactly how a text page becomes zeros. */
+            dbg_puts("LAZY: backed va=");
+            dbg_puts_hex(cr2 & ~0xFFFULL);
+            dbg_puts(" frame=");
+            dbg_puts_hex(frame);
+            dbg_puts(" vf=");
+            dbg_puts_hex(vf);
+            dbg_puts("\r\n");
             /* Charge the page to the cgroup hierarchy; if the cgroup has
              * exceeded memory.max the allocation is rejected and the page
              * is immediately freed.  The BKL is already held by isr_dispatch
@@ -207,7 +261,6 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int is_write)
         }
         return ok;
     }
-    return 0;
 }
 
 void isr_dispatch(regs_t *r)
@@ -376,6 +429,86 @@ void isr_dispatch(regs_t *r)
                     dbg_puts(" ");
                 }
                 dbg_puts("\r\n");
+            }
+            /* TEMPORARY Xorg debugging: identify where user programs die. */
+            {
+                uint64_t ucr2;
+                asm volatile("mov %%cr2, %0" : "=r"(ucr2));
+                dbg_puts("USERFAULT: vec=");
+                dbg_puts_dec(r->vector);
+                dbg_puts(" rip=");
+                dbg_puts_hex(r->rip);
+                dbg_puts(" cr2=");
+                dbg_puts_hex(ucr2);
+                dbg_puts(" rsp=");
+                dbg_puts_hex(r->rsp);
+                dbg_puts("\r\n");
+                /* TEMPORARY Xorg debugging: re-verify the checksum of every
+                 * record covering rip or cr2, and scan for frame aliases of
+                 * cr2. */
+                {
+                    addrspace_t *uas = proc_current()->as;
+                    for (int i = 0; i < uas->nmmaps; i++) {
+                        uint64_t mb = uas->mmaps[i].base;
+                        uint64_t ms = uas->mmaps[i].size;
+                        if ((r->rip < mb || r->rip >= mb + ms) &&
+                            (ucr2 < mb || ucr2 >= mb + ms))
+                            continue;
+                        uint64_t now = vmm_region_checksum(uas, mb, ms);
+                        dbg_puts("  REC cksum base=");
+                        dbg_puts_hex(mb);
+                        dbg_puts(" stored=");
+                        dbg_puts_hex(uas->mmaps[i].cksum);
+                        dbg_puts(" now=");
+                        dbg_puts_hex(now);
+                        dbg_puts(uas->mmaps[i].cksum == now ? " OK" : " CHANGED");
+                        dbg_puts("\r\n");
+                        /* TEMPORARY: per-page zero/nonzero map. */
+                        dbg_puts("  pagemap: ");
+                        for (uint64_t va = mb; va < mb + ms; va += PAGE_SIZE) {
+                            uint64_t ph = vmm_resolve(uas, va);
+                            if (!ph) { dbg_puts("?"); continue; }
+                            uint8_t *p = (uint8_t *)pmm_virt(ph);
+                            int z = 1;
+                            for (uint64_t o = 0; o < PAGE_SIZE; o++)
+                                if (p[o]) { z = 0; break; }
+                            dbg_puts(z ? "0" : "X");
+                        }
+                        dbg_puts("\r\n");
+                    }
+                    uint64_t cr2phys = vmm_resolve(uas, ucr2 & ~0xFFFULL);
+                    if (cr2phys) {
+                        dbg_puts("  ALIAS SCAN for frame ");
+                        dbg_puts_hex(cr2phys);
+                        dbg_puts("\r\n");
+                        vmm_alias_scan(cr2phys);
+                    }
+                    /* TEMPORARY Xorg debugging: who else maps the faulting
+                     * code page? */
+                    uint64_t ripphys = vmm_resolve(uas, r->rip & ~0xFFFULL);
+                    dbg_puts("  rip page frame=");
+                    dbg_puts_hex(ripphys);
+                    dbg_puts("\r\n");
+                    if (ripphys) {
+                        dbg_puts("  ALIAS SCAN for rip frame\r\n");
+                        vmm_alias_scan(ripphys);
+                        pmm_dump_free_log(ripphys, ripphys + PAGE_SIZE);
+                    }
+                }
+                /* TEMPORARY: dump the faulting instruction bytes so the
+                 * crashing operation can be disassembled offline. */
+                {
+                    dbg_puts("  code: ");
+                    for (int b = -8; b < 16; b++) {
+                        uint64_t ua = r->rip + (uint64_t)b;
+                        uint64_t phys = vmm_resolve(proc_current()->as, ua & ~0xFFFULL);
+                        if (!phys) { dbg_puts("?? "); continue; }
+                        uint8_t *kp = (uint8_t *)pmm_virt(phys);
+                        dbg_puts_hex(kp[ua & 0xFFF]);
+                        dbg_puts(" ");
+                    }
+                    dbg_puts("\r\n");
+                }
             }
             proc_signal(proc_current(), SIGSEGV);
             proc_check_signals(r);

@@ -38,6 +38,7 @@
 #include "anonfd.h"
 #include "timerfd.h"
 #include "signalfd.h"
+#include "pty.h"
 #include "epoll.h"
 #include "input.h"
 #include "unix.h"
@@ -313,6 +314,16 @@ static int64_t open_resolved(const char *abs, int flags)
     int h = vfs_file_open(abs, flags);
     if (h < 0)
         return h;
+
+    /* /dev/ptmx is a cloning device: every open allocates a fresh pty
+     * pair -- the master rides on this descriptor, the slave registers
+     * as /dev/pts/N for the emulator's child to open. */
+    if (pty_is_ptmx(vfs_file_node(h))) {
+        if (pty_reattach_master(vfs_file_node(h)) != 0) {
+            vfs_file_unref(h);
+            return -E_NOMEM;
+        }
+    }
 
     int fd = fd_alloc(p, h);
     if (fd < 0) {
@@ -1579,7 +1590,8 @@ static int64_t sys_socket(int domain, int type, int protocol)
  * bytes, truncated at the first NUL like Linux does. */
 #define UNIX_PATH_MAX 108
 
-static int sa_un_in(uint64_t uaddr, uint64_t alen, char *path, uint32_t *plen)
+static int sa_un_in(uint64_t uaddr, uint64_t alen, char *path, uint32_t *plen,
+                    int *abstract)
 {
     if (!uaddr || alen < 3 || alen > 2 + UNIX_PATH_MAX)
         return -E_INVAL;
@@ -1598,6 +1610,18 @@ static int sa_un_in(uint64_t uaddr, uint64_t alen, char *path, uint32_t *plen)
         return -E_FAULT;
     memcpy(path, (const void *)(uintptr_t)(uaddr + 2), n);
     path[n] = 0;
+    if (n > 0 && path[0] == 0) {
+        /* Abstract namespace: the name is sun_path after the leading NUL,
+         * kept as raw bytes with no terminator required -- this is the
+         * "@/tmp/.X11-unix/X0" transport Xorg listens on first, and the
+         * reason it used to fall over before any client could connect. */
+        *abstract = 1;
+        memmove(path, path + 1, n - 1);
+        path[n - 1] = 0;
+        *plen = n - 1;
+        return 0;
+    }
+    *abstract = 0;
     /* Linux does not require the sockaddr length to include the NUL:
      * libwayland binds with size = offsetof(sun_path) + strlen, so the
      * terminator sits just past the given length.  A path that fills the
@@ -1656,8 +1680,9 @@ static int64_t sys_bind(int fd, uint64_t uaddr, uint64_t alen)
 
     char path[UNIX_PATH_MAX];
     uint32_t plen;
-    int r = sa_un_in(uaddr, alen, path, &plen);
-    return r < 0 ? r : unix_bind_sys(-2 - s, path, plen);
+    int abstract = 0;
+    int r = sa_un_in(uaddr, alen, path, &plen, &abstract);
+    return r < 0 ? r : unix_bind_sys(-2 - s, path, plen, abstract);
 }
 
 static int64_t sys_connect(int fd, uint64_t uaddr, uint64_t alen)
@@ -1674,15 +1699,16 @@ static int64_t sys_connect(int fd, uint64_t uaddr, uint64_t alen)
 
     char path[UNIX_PATH_MAX];
     uint32_t plen;
-    int r = sa_un_in(uaddr, alen, path, &plen);
+    int abstract = 0;
+    int r = sa_un_in(uaddr, alen, path, &plen, &abstract);
     if (r == 0) {
         dbg_puts("UCONN pid=");
         dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
-        dbg_puts(" path=");
+        dbg_puts(abstract ? " abs=@" : " path=");
         dbg_puts(path);
         dbg_puts("\n");
     }
-    return r < 0 ? r : unix_connect_sys(-2 - s, path, plen);
+    return r < 0 ? r : unix_connect_sys(-2 - s, path, plen, abstract);
 }
 
 static int64_t sys_listen(int fd, int backlog)
@@ -2948,10 +2974,19 @@ static int mmap_record(proc_t *p, uint64_t base, uint64_t size, unsigned flags)
     as->mmaps[as->nmmaps].flags = flags;
     as->nmmaps++;
 
-    /* Coalesce neighbours that are contiguous and equally protected.  GUI
-     * processes mmap thousands of times; without merging the fixed record
-     * array fills up and every later mmap reports ENOMEM even though both
-     * the virtual arena and physical RAM have plenty left. */
+    /* Coalesce neighbours that are contiguous, equally protected, and not
+     * overlapped by anything else.  GUI processes mmap thousands of times;
+     * without merging the fixed record array fills up and every later mmap
+     * reports ENOMEM even though both the virtual arena and physical RAM
+     * have plenty left.
+     *
+     * The overlap check is the load-bearing part: musl's loader maps a
+     * library whole (R-only) and then lays its segments on top with
+     * MAP_FIXED, so two libraries' whole-file records are address-adjacent
+     * while the segments between them cover the same addresses.  Merging
+     * across those would forge one giant record that shadows every
+     * segment's protection -- and the first write into the arena would
+     * then fault against it forever. */
     for (int i = 0; i < as->nmmaps - 1; i++) {
         for (int j = i + 1; j < as->nmmaps; j++) {
             if (as->mmaps[j].flags != as->mmaps[i].flags)
@@ -2959,6 +2994,18 @@ static int mmap_record(proc_t *p, uint64_t base, uint64_t size, unsigned flags)
             uint64_t lo = i, hi = j;
             if (as->mmaps[j].base < as->mmaps[i].base) { lo = j; hi = i; }
             if (as->mmaps[lo].base + as->mmaps[lo].size != as->mmaps[hi].base)
+                continue;
+            uint64_t cb = as->mmaps[lo].base;
+            uint64_t ce = as->mmaps[hi].base + as->mmaps[hi].size;
+            int blocked = 0;
+            for (int k = 0; k < as->nmmaps; k++) {
+                if (k == lo || k == hi)
+                    continue;
+                uint64_t kb = as->mmaps[k].base;
+                uint64_t ke = kb + as->mmaps[k].size;
+                if (kb < ce && ke > cb) { blocked = 1; break; }
+            }
+            if (blocked)
                 continue;
             as->mmaps[lo].size += as->mmaps[hi].size;
             as->mmaps[hi] = as->mmaps[as->nmmaps - 1];
@@ -3107,7 +3154,14 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
             } else {
                 vfs_stat(fpath, &fsize, &fk);
             }
-            uint64_t mapsize = (fsize + PAGE_SIZE - 1) & ~0xFFFULL;
+            /* The mapping spans what the caller ASKED for, not the whole
+             * file: musl's map_library maps each PT_LOAD segment separately
+             * with MAP_FIXED at base+off, and sizing every one of them from
+             * fsize made four mutually-overlapping records with conflicting
+             * protections -- the fault handler then matched whichever came
+             * first in the array, and a write into the text segment's stale
+             * R-only record killed the process. */
+            uint64_t mapsize = (len + PAGE_SIZE - 1) & ~0xFFFULL;
             if (mapsize == 0)
                 mapsize = PAGE_SIZE;
 
@@ -3116,22 +3170,124 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
                                   : mmap_pick_base(p, mapsize));
             if (!base || base + mapsize > USER_LIMIT)
                 return -E_INVAL;
+            /* MAP_FIXED replaces whatever was mapped before (Linux
+             * semantics).  Without the unmap, vmm_alloc_range skips the
+             * already-present pages and their stale protections survive:
+             * the whole-file PROT_READ temp map left every page R-only+NX,
+             * the copy landed in the frames through the HHDM alias where
+             * the content looked right, and the first write or instruction
+             * fetch then faulted -- fault_back_lazy "helpfully" backed it
+             * with a fresh ZERO frame, wiping the copied data. */
+            if (flags & MAP_FIXED)
+                vmm_unmap(p->as, base, mapsize);
             if (!vmm_alloc_range(p->as, base, mapsize, vflags))
                 return -ENOMEM;
 
             /* Copy the file in page by page through a kernel bounce buffer. */
             static uint8_t g_mmap_bounce[PAGE_SIZE];
-            for (uint64_t o = 0; o < fsize; o += PAGE_SIZE) {
-                uint32_t chunk = (fsize - o < PAGE_SIZE)
-                                 ? (uint32_t)(fsize - o) : PAGE_SIZE;
-                int32_t got = vfs_pread_fd(h, o, g_mmap_bounce, chunk);
-                if (got > 0)
-                    vmm_copy_to_user(p->as, base + o, g_mmap_bounce,
-                                     (uint64_t)got);
+            /* File bytes start at the mapping's own offset: a per-segment
+             * MAP_FIXED map of base+off must show file bytes from off, not
+             * from the start of the file.  Beyond the file's end a mapping
+             * reads as zeroes, exactly like Linux. */
+            uint64_t foff = (flags & MAP_FIXED) ? (off & ~0xFFFULL) : 0;
+            uint64_t to_copy = (fsize > foff) ? fsize - foff : 0;
+            if (to_copy > mapsize)
+                to_copy = mapsize;
+            uint64_t copied = 0;
+            for (uint64_t o = 0; o < to_copy; o += PAGE_SIZE) {
+                uint32_t chunk = (to_copy - o < PAGE_SIZE)
+                                 ? (uint32_t)(to_copy - o) : PAGE_SIZE;
+                int32_t got = vfs_pread_fd(h, foff + o, g_mmap_bounce, chunk);
+                if (got > 0) {
+                    /* TEMPORARY Xorg debugging: verify every page write. */
+                    if (!vmm_copy_to_user(p->as, base + o, g_mmap_bounce,
+                                          (uint64_t)got)) {
+                        dbg_puts("COPYFAIL: base=");
+                        dbg_puts_hex(base + o);
+                        dbg_puts("\r\n");
+                    } else {
+                        /* TEMPORARY Xorg debugging: full-page byte sum, not
+                         * just the first byte -- the earlier first-byte check
+                         * missed partial-zero pages. */
+                        uint64_t chk = vmm_resolve(p->as, base + o);
+                        const uint8_t *kp = (const uint8_t *)pmm_virt(chk);
+                        uint32_t sum = 0;
+                        for (uint32_t b = 0; b < got; b++)
+                            sum += kp[b];
+                        uint32_t wsum = 0;
+                        for (uint32_t b = 0; b < (uint32_t)got; b++)
+                            wsum += g_mmap_bounce[b];
+                        if (sum != wsum) {
+                            dbg_puts("VERIFY-MISMATCH: va=");
+                            dbg_puts_hex(base + o);
+                            dbg_puts(" frame=");
+                            dbg_puts_hex(chk);
+                            dbg_puts(" sum=");
+                            dbg_puts_hex(sum);
+                            dbg_puts(" want=");
+                            dbg_puts_hex(wsum);
+                            dbg_puts("\r\n");
+                        }
+                        /* TEMPORARY Xorg debugging: log the frame each page
+                         * landed in, so the fault path can compare the
+                         * copy-time frame with the fault-time frame. */
+                        dbg_puts("MMPG: va=");
+                        dbg_puts_hex(base + o);
+                        dbg_puts(" frame=");
+                        dbg_puts_hex(chk);
+                        dbg_puts("\r\n");
+                    }
+                    copied += (uint64_t)got;
+                } else if (copied == 0 || o + PAGE_SIZE >= to_copy) {
+                    /* TEMPORARY Xorg debugging: show every pread hiccup. */
+                    dbg_puts("MMCOPY: FAIL off=");
+                    dbg_puts_hex(foff + o);
+                    dbg_puts(" got=");
+                    dbg_puts_dec((uint32_t)got);
+                    dbg_puts("\r\n");
+                }
             }
-            if (!mmap_record(p, base, mapsize, vflags)) {
-                vmm_unmap(p->as, base, mapsize);
-                return -ENOMEM;
+            /* TEMPORARY Xorg debugging */
+            dbg_puts("MMCOPY: base=");
+            dbg_puts_hex(base);
+            dbg_puts(" fsize=");
+            dbg_puts_hex(fsize);
+            dbg_puts(" foff=");
+            dbg_puts_hex(foff);
+            dbg_puts(" to_copy=");
+            dbg_puts_hex(to_copy);
+            dbg_puts(" copied=");
+            dbg_puts_hex(copied);
+            dbg_puts("\r\n");
+            /* TEMPORARY Xorg debugging: watch library mappings and their
+             * records. */
+            {
+                int rec_ok = mmap_record(p, base, mapsize, vflags);
+                dbg_puts("FMMAP: base=");
+                dbg_puts_hex(base);
+                dbg_puts(" size=");
+                dbg_puts_hex(mapsize);
+                dbg_puts(" vf=");
+                dbg_puts_hex(vflags);
+                dbg_puts(" rec=");
+                dbg_puts_dec((uint32_t)rec_ok);
+                dbg_puts("\r\n");
+                if (!rec_ok) {
+                    vmm_unmap(p->as, base, mapsize);
+                    return -ENOMEM;
+                }
+                {
+                    /* TEMPORARY Xorg debugging: store the copy's checksum on
+                     * the EXACT record (base must match exactly -- a contain
+                     * match would hit the overlapping whole-file record). */
+                    for (int i = 0; i < p->as->nmmaps; i++) {
+                        if (p->as->mmaps[i].base == base) {
+                            p->as->mmaps[i].cksum =
+                                vmm_region_checksum(p->as, base, mapsize);
+                            break;
+                        }
+                    }
+                }
             }
             return (int64_t)base;
         }
@@ -3297,6 +3453,16 @@ static int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot)
     if (prot & PROT_WRITE) vflags |= VM_WRITE;
     if (prot & PROT_EXEC)  vflags |= VM_EXEC;
     mmap_update_flags(p, addr, size, vflags);
+    /* TEMPORARY Xorg debugging */
+    dbg_puts("MPROT: addr=");
+    dbg_puts_hex(addr);
+    dbg_puts(" size=");
+    dbg_puts_hex(size);
+    dbg_puts(" prot=");
+    dbg_puts_hex(prot);
+    dbg_puts(" vflags=");
+    dbg_puts_hex(vflags);
+    dbg_puts("\r\n");
 
     return vmm_protect(p->as, addr, size, (unsigned)prot) ? 0 : -E_NOMEM;
 }
@@ -5171,7 +5337,10 @@ void syscall_handler(regs_t *r)
         nr == 0 || nr == 1 || nr == 7 || nr == 29 || nr == 43 ||
         nr == 202 || nr == 232 || nr == 257 || nr == 57 ||
         nr == 217 || nr == 16 || nr == 8 || nr == 59 || nr == 61 ||
-        nr == 270 || nr == 23 || nr == 281 || nr == 35 || nr == 230) {
+        nr == 270 || nr == 23 || nr == 281 || nr == 35 || nr == 230 ||
+        nr == 2 || nr == 3 || nr == 5 || nr == 11 || nr == 13 ||
+        nr == 14 || nr == 6 || nr == 4 || nr == 89 || nr == 90 ||
+        nr == 41 || nr == 42 || nr == 45 || nr == 46 || nr == 47) {
         dbg_puts("SY p=");
         dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
         dbg_puts(" nr=");

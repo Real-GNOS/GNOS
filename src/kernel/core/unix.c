@@ -45,6 +45,7 @@ typedef struct unix_sock {
 
     char     bound[UNIX_NAME_MAX];   /* pathname we are bound to */
     int      has_path;               /* bound to a pathname (vs socketpair) */
+    int      abstract;               /* name lives in the abstract namespace */
 
     int      listening;
     struct unix_sock *peer;          /* connected stream peer */
@@ -160,7 +161,7 @@ void unix_close(int u)
 
 /* ---- address handling (pathname) ----------------------------------------- */
 
-static int unix_bind(int u, const char *path, uint32_t len)
+static int unix_bind(int u, const char *path, uint32_t len, int abstract)
 {
     unix_t *s = unix_at(u);
     if (!s)
@@ -169,26 +170,27 @@ static int unix_bind(int u, const char *path, uint32_t len)
         return -E_INVAL;
     if (len == 0 || len > UNIX_NAME_MAX - 1)
         return -E_NAMETOOLONG;
-    if (path[0] != '/')
-        return -E_INVAL;                /* no abstract sockets here */
 
     for (int i = 0; i < UNIX_MAX; i++)
         if (g_unix[i].used && g_unix[i].has_path &&
+            g_unix[i].abstract == abstract &&
             !memcmp(g_unix[i].bound, path, len + 1) && i != u)
             return -E_ADDRINUSE;
 
     memcpy(s->bound, path, len);
     s->bound[len] = 0;
     s->has_path = 1;
+    s->abstract = abstract;
     return 0;
 }
 
 /* Find the listening socket bound to `path`. */
-static unix_t *unix_listener(const char *path, uint32_t len)
+static unix_t *unix_listener(const char *path, uint32_t len, int abstract)
 {
     for (int i = 0; i < UNIX_MAX; i++) {
         unix_t *s = &g_unix[i];
         if (s->used && s->has_path && s->listening &&
+            s->abstract == abstract &&
             !memcmp(s->bound, path, len + 1))
             return s;
     }
@@ -213,7 +215,7 @@ int unix_listen(int u, int backlog)
     return 0;
 }
 
-int unix_connect(int u, const char *path, uint32_t len)
+int unix_connect(int u, const char *path, uint32_t len, int abstract)
 {
     unix_t *s = unix_at(u);
     if (!s)
@@ -225,7 +227,7 @@ int unix_connect(int u, const char *path, uint32_t len)
     if (len == 0 || len > UNIX_NAME_MAX - 1)
         return -E_NAMETOOLONG;
 
-    unix_t *l = unix_listener(path, len);
+    unix_t *l = unix_listener(path, len, abstract);
     if (!l)
         return -E_CONNREFUSED;
     if (l->n_backlog >= UNIX_BACKLOG)
@@ -448,14 +450,14 @@ int unix_getname(int u, char *path, uint32_t *len, int peer)
 
 /* ---- syscall-facing entry points ----------------------------------------- */
 
-int unix_bind_sys(int u, const char *path, uint32_t len)
+int unix_bind_sys(int u, const char *path, uint32_t len, int abstract)
 {
-    return unix_bind(u, path, len);
+    return unix_bind(u, path, len, abstract);
 }
 
-int unix_connect_sys(int u, const char *path, uint32_t len)
+int unix_connect_sys(int u, const char *path, uint32_t len, int abstract)
 {
-    return unix_connect(u, path, len);
+    return unix_connect(u, path, len, abstract);
 }
 
 int unix_listen_sys(int u, int backlog)

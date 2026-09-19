@@ -404,3 +404,157 @@ void drm_crtc_cleanup(struct drm_crtc *crtc)
         crtc->base.properties = NULL;
     }
 }
+
+/* ------------------------------------------------------------------ gamma */
+
+/* Software display: there is no hardware LUT, but clients (and modesetting's
+ * initial CRTC restore) still expect the ioctls to work, so the tables are
+ * stored per CRTC and served back.  Xorg diffs against its saved table, so
+ * an accurate echo is what keeps it from re-programming every repaint. */
+#define GAMMA_ENTRIES 256
+
+typedef struct {
+    uint32_t id;                       /* crtc object id, 0 = unused */
+    uint16_t red[GAMMA_ENTRIES];
+    uint16_t green[GAMMA_ENTRIES];
+    uint16_t blue[GAMMA_ENTRIES];
+} gamma_lut_t;
+
+static gamma_lut_t       g_gamma_luts[4];
+static spinlock_t        g_gamma_lock;
+
+static gamma_lut_t *gamma_lut_for(struct drm_device *dev, uint32_t crtc_id)
+{
+    gamma_lut_t *slot = NULL;
+
+    for (int i = 0; i < 4; i++) {
+        if (g_gamma_luts[i].id == crtc_id)
+            return &g_gamma_luts[i];
+        if (slot == NULL && g_gamma_luts[i].id == 0)
+            slot = &g_gamma_luts[i];
+    }
+    if (slot == NULL)
+        return NULL;
+    slot->id = crtc_id;
+    return slot;
+}
+
+static int gamma_copy_in(gamma_lut_t *dst, const struct drm_mode_crtc_lut *req)
+{
+    if (req->gamma_size != GAMMA_ENTRIES)
+        return -EINVAL;
+    if (req->red == 0 || req->green == 0 || req->blue == 0)
+        return -EINVAL;
+    if (copy_from_user(dst->red, (const void *)(uintptr_t)req->red,
+                       sizeof(dst->red)) != 0 ||
+        copy_from_user(dst->green, (const void *)(uintptr_t)req->green,
+                       sizeof(dst->green)) != 0 ||
+        copy_from_user(dst->blue, (const void *)(uintptr_t)req->blue,
+                       sizeof(dst->blue)) != 0)
+        return -EFAULT;
+    return 0;
+}
+
+/*
+ * DRM_IOCTL_MODE_SETGAMMA.  Validates against the CRTC's advertised
+ * gamma_size (256) and stores the table.
+ */
+int drm_mode_setgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_mode_crtc_lut *req = (struct drm_mode_crtc_lut *)data;
+    struct drm_mode_object   *obj;
+    struct drm_crtc          *crtc;
+    gamma_lut_t              *lut;
+    int                       ret;
+
+    (void)file_priv;
+
+    if (dev == NULL || req == NULL) { return -EINVAL; }
+
+    obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
+    if (obj == NULL) { return -ENOENT; }
+    crtc = container_of(obj, struct drm_crtc, base);
+
+    if (req->gamma_size != (uint32_t)crtc->gamma_size) {
+        drm_mode_object_put(obj);
+        return -EINVAL;
+    }
+
+    spin_lock(&g_gamma_lock);
+    lut = gamma_lut_for(dev, req->crtc_id);
+    ret = (lut != NULL) ? gamma_copy_in(lut, req) : -ENOMEM;
+    spin_unlock(&g_gamma_lock);
+
+    drm_mode_object_put(obj);
+    return ret;
+}
+
+/*
+ * DRM_IOCTL_MODE_GETGAMMA.  Returns the stored table, or an identity ramp
+ * if the CRTC's gamma was never programmed -- that is what the hardware
+ * would have been showing.
+ */
+int drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_mode_crtc_lut *req = (struct drm_mode_crtc_lut *)data;
+    struct drm_mode_object   *obj;
+    struct drm_crtc          *crtc;
+    gamma_lut_t              *lut;
+
+    (void)file_priv;
+
+    if (dev == NULL || req == NULL) { return -EINVAL; }
+
+    obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
+    if (obj == NULL) { return -ENOENT; }
+    crtc = container_of(obj, struct drm_crtc, base);
+
+    if (req->gamma_size != (uint32_t)crtc->gamma_size ||
+        req->red == 0 || req->green == 0 || req->blue == 0) {
+        drm_mode_object_put(obj);
+        return -EINVAL;
+    }
+
+    spin_lock(&g_gamma_lock);
+    lut = gamma_lut_for(dev, req->crtc_id);
+    if (lut == NULL || lut->red[0] == 0) {
+        /* Identity ramp: entry i reads i scaled to 16 bit. */
+        for (int i = 0; i < GAMMA_ENTRIES; i++) {
+            uint16_t v = (uint16_t)((i * 0xFFFF) / (GAMMA_ENTRIES - 1));
+            req->gamma_size = (uint32_t)GAMMA_ENTRIES;
+            /* build the ramp in the stored slot so future reads are cheap */
+            if (lut == NULL)
+                break;
+            lut->red[i] = lut->green[i] = lut->blue[i] = v;
+        }
+        if (lut != NULL) {
+            if (copy_to_user((void *)(uintptr_t)req->red, lut->red,
+                             sizeof(lut->red)) != 0 ||
+                copy_to_user((void *)(uintptr_t)req->green, lut->green,
+                             sizeof(lut->green)) != 0 ||
+                copy_to_user((void *)(uintptr_t)req->blue, lut->blue,
+                             sizeof(lut->blue)) != 0) {
+                spin_unlock(&g_gamma_lock);
+                drm_mode_object_put(obj);
+                return -EFAULT;
+            }
+        }
+        spin_unlock(&g_gamma_lock);
+        drm_mode_object_put(obj);
+        return 0;
+    }
+
+    if (copy_to_user((void *)(uintptr_t)req->red, lut->red,
+                     sizeof(lut->red)) != 0 ||
+        copy_to_user((void *)(uintptr_t)req->green, lut->green,
+                     sizeof(lut->green)) != 0 ||
+        copy_to_user((void *)(uintptr_t)req->blue, lut->blue,
+                     sizeof(lut->blue)) != 0) {
+        spin_unlock(&g_gamma_lock);
+        drm_mode_object_put(obj);
+        return -EFAULT;
+    }
+    spin_unlock(&g_gamma_lock);
+    drm_mode_object_put(obj);
+    return 0;
+}

@@ -49,6 +49,14 @@ static struct {
     uint32_t  rows;       /* glyph rows,    clamped to FBCON_MAX_ROWS */
 } g_fb;
 
+/* When a DRM client owns the scanout, the refresh thread copies its buffer
+ * over the console framebuffer every frame.  Any text fbcon paints into the
+ * same memory would show up as a flicker for one refresh cycle (a stray
+ * "^C" echo, part of the login prompt) before being wiped, so the DRM
+ * driver suppresses fbcon rendering while a client framebuffer is live.
+ * Console state is still maintained; only the pixel writes are skipped. */
+static volatile int g_suppressed;
+
 /* ---- a single screen cell ----------------------------------------------- *
  * Once per cell, not per write: repaint after a switch and scroll and erase
  * must all reconstruct the screen exactly, including colour and wide glyphs. */
@@ -909,6 +917,11 @@ static void con_emit(console_t *c, uint8_t b)
             c->cy--;
             c->cx = g_fb.cols - 1;
         }
+        /* ECHOE semantics: the cell the cursor backs onto is erased, not
+         * just revisited.  Without this the deleted glyph lingers on the
+         * framebuffer until some later write happens to repaint the cell
+         * (Python's backspace looked dead until the next keypress). */
+        put_codepoint(c, c->cx, c->cy, ' ', 0);
         return;
     case '\t':
         do {
@@ -1022,16 +1035,24 @@ static console_t *pick(int con)
     return &g_con[con];
 }
 
+void fbcon_suppress(int on)                   { g_suppressed = on; }
+
 void fbcon_putc_on(int con, char c)
 {
-    console_t *t = pick(con);
+    console_t *t;
+    if (g_suppressed)
+        return;
+    t = pick(con);
     if (t)
         con_emit(t, (uint8_t)c);
 }
 
 void fbcon_lf_on(int con)
 {
-    console_t *t = pick(con);
+    console_t *t;
+    if (g_suppressed)
+        return;
+    t = pick(con);
     if (!t)
         return;
     if (++t->cy >= g_fb.rows)
@@ -1040,8 +1061,11 @@ void fbcon_lf_on(int con)
 
 void fbcon_clear_on(int con)
 {
+    console_t *t;
+    if (g_suppressed)
+        return;
     dbg_puts("FBCON fbcon_clear_on con="); dbg_puts_dec(con); dbg_puts("\n");
-    console_t *t = pick(con);
+    t = pick(con);
     if (t)
         clear_console(t);
 }
@@ -1152,6 +1176,8 @@ void fbcon_resize(uint32_t w, uint32_t h, uint32_t pitch)
 
 void fbcon_panic(void)
 {
+    /* Panic output must always be visible, client scanout or not. */
+    g_suppressed = 0;
     /* Whatever terminal the user was on, the panic goes on console 0 -- so
      * bring console 0 to the front before painting it red. */
     fbcon_activate(0);

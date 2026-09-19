@@ -111,7 +111,11 @@ typedef struct addrspace {
      * so the fault path needs the original protection to back a page with
      * the right permissions and to keep PROT_NONE guard pages faulting.
      */
-    struct { uint64_t base; uint64_t size; unsigned flags; } mmaps[128];
+    /* mmap records back the lazy-fault path (idt.c fault_back_lazy).  A
+     * dynamically linked program with dozens of shared libraries easily
+     * makes more mappings than you would guess -- Xorg plus its libraries
+     * overflowed 128 -- so keep real headroom here. */
+    struct { uint64_t base; uint64_t size; unsigned flags; uint64_t cksum; } mmaps[512];
     int      nmmaps;
 
     /*
@@ -213,6 +217,9 @@ void vmm_switch_kernel(void);
  * kernel threads: vmm_switch() needs a valid addrspace_t and a kthread has
  * no user memory of its own, so it runs on the kernel PML4 instead. */
 addrspace_t *vmm_kernel_as(void);
+void vmm_as_debug_dump(void);
+uint64_t vmm_region_checksum(addrspace_t *as, uint64_t base, uint64_t size);
+void vmm_alias_scan(uint64_t frame);
 
 /* Copy into a user address space that may not be the current one. */
 int vmm_copy_to_user(addrspace_t *as, uint64_t dst, const void *src, uint64_t n);

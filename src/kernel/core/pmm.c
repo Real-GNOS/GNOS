@@ -16,6 +16,7 @@
 #include "panic.h"
 #include "debugcon.h"
 #include "kstring.h"
+#include "smp.h"
 
 extern volatile struct limine_memmap_request memmap_request;
 extern uint64_t g_hhdm;
@@ -24,7 +25,14 @@ static uint8_t  *g_bitmap;          /* 1 = allocated, 0 = free */
 static uint64_t  g_bitmap_bytes;
 static uint64_t  g_total;           /* frames covered by the bitmap */
 static uint64_t  g_free;
+/* TEMPORARY Xorg debugging: release history ring. */
+static struct { uint64_t frame; uint64_t ra; } g_free_log[4096];
+static int         g_free_log_idx;
 static uint64_t  g_next_hint;       /* where the last search stopped */
+/* The physical allocator runs on every CPU (syscall paths hold the BKL, but
+ * kernel threads -- the DRM refresh tick, for one -- allocate without it), so
+ * the bitmap itself needs its own IRQ-safe lock. */
+static spinlock_t pmm_lock;
 
 void *pmm_virt(uint64_t phys)
 {
@@ -129,6 +137,7 @@ void pmm_init(void)
 
 uint64_t pmm_alloc(void)
 {
+    spin_lock_irq(&pmm_lock);
     for (int pass = 0; pass < 2; pass++) {
         uint64_t start = pass ? 0 : g_next_hint;
         uint64_t end   = pass ? g_next_hint : g_total;
@@ -139,9 +148,11 @@ uint64_t pmm_alloc(void)
             bit_set(f);
             g_free--;
             g_next_hint = f + 1;
+            spin_unlock_irq(&pmm_lock);
             return f * PAGE_SIZE;
         }
     }
+    spin_unlock_irq(&pmm_lock);
     return 0;
 }
 
@@ -155,13 +166,46 @@ uint64_t pmm_alloc_zeroed(void)
 
 void pmm_free(uint64_t phys)
 {
+    spin_lock_irq(&pmm_lock);
     uint64_t f = phys / PAGE_SIZE;
-    if (f >= g_total || !bit_test(f))
+    if (f >= g_total || !bit_test(f)) {
+        spin_unlock_irq(&pmm_lock);
         return;
+    }
     bit_clear(f);
     g_free++;
     if (f < g_next_hint)
         g_next_hint = f;
+    /* TEMPORARY Xorg debugging: ring-buffer the last frees so a
+     * freed-while-still-mapped frame can be traced to its release site. */
+    g_free_log[g_free_log_idx].frame = f;
+    g_free_log[g_free_log_idx].ra = (uint64_t)__builtin_return_address(0);
+    g_free_log_idx = (g_free_log_idx + 1) %
+                     (int)(sizeof(g_free_log) / sizeof(g_free_log[0]));
+    spin_unlock_irq(&pmm_lock);
+}
+
+/* TEMPORARY Xorg debugging: dump recent frees within [lo, hi). */
+void pmm_dump_free_log(uint64_t lo, uint64_t hi)
+{
+    int cap = (int)(sizeof(g_free_log) / sizeof(g_free_log[0]));
+
+    dbg_puts("  PMM-FREES in [");
+    dbg_puts_hex(lo);
+    dbg_puts(",");
+    dbg_puts_hex(hi);
+    dbg_puts("):\r\n");
+    for (int n = 0; n < cap; n++) {
+        int idx = (g_free_log_idx + n) % cap; /* oldest first */
+        uint64_t bytes = g_free_log[idx].frame * PAGE_SIZE;
+        if (bytes < lo || bytes >= hi)
+            continue;
+        dbg_puts("    frame=");
+        dbg_puts_hex(bytes);
+        dbg_puts(" from=");
+        dbg_puts_hex(g_free_log[idx].ra);
+        dbg_puts("\r\n");
+    }
 }
 
 uint64_t pmm_total_frames(void) { return g_total; }
@@ -177,6 +221,7 @@ uint64_t pmm_alloc_contiguous(uint64_t n)
 {
     if (n == 0)
         return 0;
+    spin_lock_irq(&pmm_lock);
 
     uint64_t f = 0;
     while (f + n <= g_total) {
@@ -190,10 +235,12 @@ uint64_t pmm_alloc_contiguous(uint64_t n)
                 g_free--;
             }
             g_next_hint = f + n;
+            spin_unlock_irq(&pmm_lock);
             return f * PAGE_SIZE;
         }
         /* Skip past the first occupied frame in this failed run. */
         f += k + 1;
     }
+    spin_unlock_irq(&pmm_lock);
     return 0;
 }

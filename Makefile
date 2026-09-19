@@ -13,6 +13,11 @@
 BUILD := build
 OVMF  := /usr/share/ovmf/OVMF.fd
 
+# `all` (kernel + ISO) is defined further down; without this, make's default
+# goal is the first target in the file (the mbedtls library) and a bare
+# `make` would never rebuild the kernel.
+.DEFAULT_GOAL := all
+
 # The system compiler for the userland programs.  Must be gcc-13: the
 # stock gcc 12.3 on this machine has a libcpp ICE (_cpp_process_line_notes,
 # libcpp/lex.cc:1163) that randomly kills preprocessing of perfectly
@@ -73,7 +78,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/drm_atomic_uapi.o $(BUILD)/drm_vblank.o \
          $(BUILD)/drm_gem.o $(BUILD)/drm_framebuffer.o \
          $(BUILD)/drm_property.o $(BUILD)/drm_libc.o \
-         $(BUILD)/subsys.o $(BUILD)/acpi.o \
+         $(BUILD)/subsys.o $(BUILD)/acpi.o $(BUILD)/sysfs.o \
          $(BUILD)/debugcon.o $(BUILD)/ext2.o $(BUILD)/panic.o \
          $(BUILD)/gdt.o $(BUILD)/idt.o $(BUILD)/isr.o \
          $(BUILD)/kstring.o $(BUILD)/vfs.o $(BUILD)/procfs.o $(BUILD)/debugfs.o $(BUILD)/tmpfs.o $(BUILD)/tty.o $(BUILD)/heap.o \
@@ -88,6 +93,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/cjkfont_data.o \
         $(BUILD)/input.o $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
         $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
+        $(BUILD)/pty.o \
         $(BUILD)/unix.o \
         $(BUILD)/sysvipc.o \
         $(BUILD)/seccomp.o \
@@ -110,7 +116,7 @@ MUSL_INC  := $(MUSL_PREFIX)/include
 MUSL_GCC  := $(MUSL_PREFIX)/bin/musl-gcc
 
 # Programs built against musl rather than ulib.
-MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest
+MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle
 MUSL_OBJS := $(addprefix $(BUILD)/user/,$(addsuffix .o,$(MUSLPROGS)))
 MUSL_ELFS := $(addprefix $(BUILD)/,$(addsuffix .elf,$(MUSLPROGS)))
 
@@ -719,6 +725,7 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# a compiled-in absolute path.
 	cp $(BUILD)/getty.elf $(BUILD)/initrd-root/sbin/getty
 	cp $(BUILD)/agetty.elf $(BUILD)/initrd-root/sbin/agetty
+	cp $(BUILD)/wiggle.elf $(BUILD)/initrd-root/sbin/wiggle
 	cp $(BUILD)/login.elf $(BUILD)/initrd-root/bin/login
 	cp $(BUILD)/bgidm.elf $(BUILD)/initrd-root/bin/bgidm
 	cp $(BUILD)/chvt.elf  $(BUILD)/initrd-root/usr/bin/chvt
@@ -749,6 +756,10 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# (or "ash") busybox dispatches to its ash applet, which is the system
 	# shell.  They live in /bin so #!/bin/sh shebangs and the init PATH find
 	# them.
+	# Alpine's busybox-binsh ships /bin/sh as an absolute symlink to
+	# /bin/busybox; copying over it would follow the link and try to write
+	# the *host's* /bin/busybox, so remove the link first.
+	rm -f $(BUILD)/initrd-root/bin/sh $(BUILD)/initrd-root/bin/ash
 	cp $(BB_BIN) $(BUILD)/initrd-root/bin/sh
 	cp $(BB_BIN) $(BUILD)/initrd-root/bin/ash
 	# ---- GNU Bash ----
@@ -1003,7 +1014,7 @@ guistart: $(ISO) $(DISK)
 	@echo "GNOS: booting in a window (audio backend: $(AUDIO_BACKEND));"
 	@echo "      boot log is also being written to $(BUILD)/dbg.log"
 	qemu-system-x86_64 -cdrom $(ISO) $(QEMU_MEM_ARG) \
-	  $(QEMU_NET) $(GUI_AUDIO) $(QEMU_DISK) \
+	  $(QEMU_NET) $(GUI_AUDIO) $(QEMU_DISK) $(QEMU_SMP) \
 	  -device isa-debugcon,chardev=dbg -chardev file,id=dbg,path=$(BUILD)/dbg.log \
 	  -display gtk -no-reboot
 

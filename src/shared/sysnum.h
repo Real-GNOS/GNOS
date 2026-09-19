@@ -422,6 +422,10 @@ typedef struct {
 #define TCSETSW     0x5403      /* == TCSETS + TCSADRAIN */
 #define TCSETSF     0x5404      /* == TCSETS + TCSAFLUSH */
 #define TIOCSCTTY   0x540E
+/* UNIX98 pty cloning (ptmx). */
+#define TIOCGPTN    0x80045430
+#define TIOCSPTLCK  0x40045431
+#define FIONREAD    0x541B
 #define TIOCGPGRP   0x540F
 #define TIOCSPGRP   0x5410
 #define TIOCGWINSZ  0x5413

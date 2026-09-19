@@ -42,6 +42,8 @@
 #include "fbdev.h"
 #include "input.h"
 #include "subsys.h"
+#include "sysfs.h"
+#include "pty.h"
 #include "module.h"
 #include "acpi.h"
 #include "lapic.h"
@@ -149,6 +151,8 @@ void kernel_entry(void)
     /* The driver registry has to exist before the first driver init runs,
      * because every one of them announces itself into it. */
     subsys_init();
+    sysfs_init();                      /* /sys built-in attributes */
+    pty_init();                        /* /dev/ptmx clone point */
 
     /* ---- console ------------------------------------------------------ */
     fbcon_init(&g_bi);

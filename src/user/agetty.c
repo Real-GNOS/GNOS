@@ -1,7 +1,7 @@
 /*
- * agetty.c — AEOS login shell with themed prompts. (GPLv2)
+ * agetty.c — GNOS login shell with themed prompts. (GPLv2)
  *
- * Combined login + shell, inspired by the original AEOS AGeTTy.
+ * Combined login + shell, inspired by the original GNOS AGeTTy.
  * Supports 5 prompt styles (Default, Posh, Linux SH, DOS, Kali).
  *
  * Usage: agetty [tty]
@@ -26,7 +26,7 @@
 #define CFG_FILE   "/etc/agetty.conf"
 #define PASSWD_DB  "/etc/shadow"
 #define VERSION    "0.9.5"
-#define OS_NAME    "AEOS v5.11"
+#define OS_NAME    "GNOS v5.11"
 
 /* ---- Prompt styles ---------------------------------------------------- */
 #define STYLE_DEFAULT 1
@@ -185,7 +185,7 @@ static void cmd_cdufetch(void)
     printf("/        \\ -----    \\---/   -----/ |  WM: BGIDM 1.11.0\n");
     printf(" _   _                      _      |  Shell: AGeTTy %s\n", VERSION);
     printf("|_| |_| |_  _ |_       |_| | |     |  Theme: %s\n", styles[s]);
-    printf("|   | | |_ |_ | |   \\/   |.|_|     |  Kernel: AEOS 0.1 (x86_64)\n");
+    printf("|   | | |_ |_ | |   \\/   |.|_|     |  Kernel: GNOS 0.1 (x86_64)\n");
 }
 
 static void cmd_style(const char *arg)
@@ -193,11 +193,11 @@ static void cmd_style(const char *arg)
     int s = atoi(arg);
     if (s < 1 || s > 5) {
         printf("Usage: style <1-5>\n");
-        printf("  1. Default:  root@AEOS:ROOTFS/ #\n");
+        printf("  1. Default:  root@GNOS:ROOTFS/ #\n");
         printf("  2. Posh:     root>ROOTFS/>\n");
         printf("  3. Linux SH: ROOTFS/ #\n");
         printf("  4. DOS:      ROOTFS:\\>\n");
-        printf("  5. Kali:     ----(root@AEOS)-[ROOTFS/]\n");
+        printf("  5. Kali:     ----(root@GNOS)-[ROOTFS/]\n");
         return;
     }
     prompt_style = s;
@@ -327,7 +327,7 @@ static void print_prompt(void)
 
     switch (prompt_style) {
     case STYLE_DEFAULT:
-        printf("\033[1;32mroot@AEOS51\033[0m:\033[1;34m%s\033[0m# ", display_cwd);
+        printf("\033[1;32mroot@GNOS51\033[0m:\033[1;34m%s\033[0m# ", display_cwd);
         break;
     case STYLE_POSH:
         printf("\033[47m\033[30m%s\033[0m>\033[1;34m%s\033[0m> ", username, display_cwd);
@@ -339,11 +339,11 @@ static void print_prompt(void)
         printf("%s\\>", display_cwd);
         break;
     case STYLE_KALI:
-        printf("\033[1;31m----(\033[0m\033[1;37m%s@AEOS\033[0m\033[1;31m)-[\033[0m\033[1;34m%s\033[0m\033[1;31m]\033[0m\n", username, display_cwd);
+        printf("\033[1;31m----(\033[0m\033[1;37m%s@GNOS\033[0m\033[1;31m)-[\033[0m\033[1;34m%s\033[0m\033[1;31m]\033[0m\n", username, display_cwd);
         printf("|--# ");
         break;
     default:
-        printf("root@AEOS:%s# ", display_cwd);
+        printf("root@GNOS:%s# ", display_cwd);
         break;
     }
     fflush(stdout);
@@ -370,7 +370,7 @@ static int run_external(const char *line)
         if (argc == 0) _exit(0);
 
         execvp(args[0], args);
-        fprintf(stderr, "aeos: %s: %s\n", args[0], strerror(errno));
+        fprintf(stderr, "gnos: %s: %s\n", args[0], strerror(errno));
         _exit(127);
     } else if (pid > 0) {
         int status;
@@ -437,9 +437,9 @@ static void shell_loop(void)
         } else if (strcmp(cmd, "help") == 0) {
             cmd_help();
         } else if (strcmp(cmd, "ver") == 0) {
-            printf("AEOS %s\n", OS_NAME);
+            printf("GNOS %s\n", OS_NAME);
             printf("AGeTTy %s\n", VERSION);
-            printf("Kernel: AEOS 0.1 (x86_64)\n");
+            printf("Kernel: GNOS 0.1 (x86_64)\n");
         } else if (strcmp(cmd, "whoami") == 0) {
             printf("%s\n", username);
         } else if (strcmp(cmd, "pwd") == 0) {
@@ -465,7 +465,7 @@ static void shell_loop(void)
             pid_t pid = fork();
             if (pid == 0) {
                 execl("/bin/bgidm", "bgidm", NULL);
-                fprintf(stderr, "aeos: bgidm: %s\n", strerror(errno));
+                fprintf(stderr, "gnos: bgidm: %s\n", strerror(errno));
                 _exit(1);
             } else if (pid > 0) {
                 waitpid(pid, NULL, 0);
@@ -517,7 +517,7 @@ int main(int argc, char **argv)
     printf(" A         A    .           O     O        S              5  OO   11      11  \n");
     printf("A           A   EEEEEEEE     OOOOO     SSSS          555555  OO ..11..  ..11..\n");
     printf("\n");
-    printf("AEOS %s Build 8070 Kernel Patch 4 — Community Edition\n", VERSION);
+    printf("GNOS %s Build 8070 Kernel Patch 4 — Community Edition\n", VERSION);
     printf("Based on GNOS kernel (x86_64)\n");
     printf("\n");
 

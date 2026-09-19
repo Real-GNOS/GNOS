@@ -28,6 +28,7 @@
 #include "proc.h"
 #include "procfs.h"
 #include "debugfs.h"
+#include "sysfs.h"
 #include "tmpfs.h"
 #include "sock.h"
 #include "unix.h"
@@ -750,6 +751,13 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     if (dr != -E_INVAL)
         return dr;
 
+    /* /sys is the kernel's object hierarchy, same family as /proc and
+     * /debug: attributes render on read, dirs materialise from the paths
+     * of registered attributes. */
+    int sr = sysfs_resolve(path, out);
+    if (sr != -E_INVAL)
+        return sr;
+
     /* A cgroup mount (the shared v2 hierarchy) is resolved against its own
      * tree, the same way a tmpfs mount shadows the ext2 image at its root. */
     char crel[GNUOS_PATH_MAX];
@@ -939,6 +947,28 @@ static int64_t debugfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
     return (int64_t)off;
 }
 
+/* The /sys half of getdents64: same index-based enumeration contract. */
+static int64_t sysfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
+{
+    uint8_t *p   = (uint8_t *)buf;
+    uint64_t off = 0;
+
+    for (;;) {
+        char    name[VFS_NAME_MAX];
+        uint8_t dt;
+        if (sysfs_readdir(f->path, (uint32_t)f->pos, name, &dt) < 0)
+            break;
+
+        uint32_t rec = emit_dirent(p, off, len, f->pos + 1, name, dt);
+        if (!rec)
+            break;
+        off += rec;
+        f->pos++;
+    }
+
+    return (int64_t)off;
+}
+
 /* The cgroupfs half of getdents64: enumerate the v2 hierarchy from the
  * directory's path, same contract as the other two. */
 static int64_t cgroupfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
@@ -1019,6 +1049,11 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
     if (strncmp(f->path, "/debug", 6) == 0 &&
         (f->path[6] == '\0' || f->path[6] == '/'))
         return debugfs_getdents64(f, buf, len);
+
+    /* /sys directories are enumerated from the registered attribute paths. */
+    if (strncmp(f->path, "/sys", 4) == 0 &&
+        (f->path[4] == '\0' || f->path[4] == '/'))
+        return sysfs_getdents64(f, buf, len);
 
     /* A cgroup mount is enumerated against the shared v2 hierarchy. */
     char cgrel[GNUOS_PATH_MAX];

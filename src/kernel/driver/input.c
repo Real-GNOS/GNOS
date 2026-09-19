@@ -98,10 +98,10 @@ typedef struct {
 
 static evdev_q_t  g_kbd_q, g_mouse_q;
 static evdev_dev_t g_kbd_dev = { .q = &g_kbd_q,
-                                 .name = "AEOS i8042 keyboard",
+                                 .name = "GNOS i8042 keyboard",
                                  .vendor = 0x0001, .product = 0x0001 };
 static evdev_dev_t g_mouse_dev = { .q = &g_mouse_q,
-                                   .name = "AEOS i8042 mouse",
+                                   .name = "GNOS i8042 mouse",
                                    .vendor = 0x0002, .product = 0x0002 };
 
 static void evdev_push(evdev_dev_t *d, uint16_t type, uint16_t code,
@@ -126,7 +126,12 @@ static void evdev_push(evdev_dev_t *d, uint16_t type, uint16_t code,
  * so waking that channel here is what makes blocking poll()/read() return. */
 static void evdev_signal(void)
 {
+    /* Xorg waits in epoll on event0/event1; a new packet must wake both
+     * the blocking readers (WAIT_PIPE) *and* the poll/epoll channels, or
+     * the pointer keeps its old position until some other fd happens to
+     * wake the server.  Same deal as unix.c's ring_wake. */
     sched_wake_reason(WAIT_PIPE);
+    sched_wake_poll_channels();
 }
 
 /* ---- scancode set 1 -> Linux KEY_* --------------------------------------
@@ -201,6 +206,19 @@ static int     g_mouse_n;
 
 static void mouse_byte(uint8_t b)
 {
+    /* TEMPORARY: does the PS/2 aux port deliver anything at all? */
+    static int seen;
+    if (seen < 12) {
+        seen++;
+        dbg_puts("MOUSEB: ");
+        dbg_puts_hex(b);
+        dbg_puts("\r\n");
+    }
+    /* Every first packet byte has bit 3 set; anything else (command ACKs
+     * like 0xFA that arrive after the init drain, resends) would shift the
+     * three-byte state machine out of phase forever, so resync here. */
+    if (g_mouse_n == 0 && !(b & 0x08))
+        return;
     g_mouse_pkt[g_mouse_n++] = b;
     if (g_mouse_n < 3)
         return;
@@ -214,7 +232,9 @@ static void mouse_byte(uint8_t b)
     evdev_push(&g_mouse_dev, EV_KEY, BTN_RIGHT,  (flags >> 1) & 0x01);
     evdev_push(&g_mouse_dev, EV_KEY, BTN_MIDDLE, (flags >> 2) & 0x01);
     evdev_push(&g_mouse_dev, EV_REL, REL_X, dx);
-    evdev_push(&g_mouse_dev, EV_REL, REL_Y, dy);
+    /* The PS/2 device reports "up = positive" while evdev's REL_Y follows
+     * the screen convention "down = positive", so the sign flips here. */
+    evdev_push(&g_mouse_dev, EV_REL, REL_Y, -dy);
     evdev_push(&g_mouse_dev, EV_SYN, SYN_REPORT, 0);
     evdev_signal();
 }
@@ -260,6 +280,12 @@ static int32_t evdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
         q->head = (q->head + 1) % 64;
         q->count--;
     }
+    /* TEMPORARY: who reads input events? */
+    dbg_puts("EVRD: n=");
+    dbg_puts_dec(nout);
+    dbg_puts(" remain=");
+    dbg_puts_dec(q->count);
+    dbg_puts("\r\n");
     asm volatile("sti");
     return (int32_t)(nout * sizeof(input_event_t));
 }
@@ -322,6 +348,16 @@ static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     case EVIOCSCLOCKID:
         return 0;                        /* we always report realtime */
     }
+    /* Repeat-rate get/set: Xorg's evdev driver programs these on every
+     * keyboard open; refusing them is logged as a device error. */
+    if ((cmd >> 30) == 1 /* _IOC_WRITE */ && (cmd & 0xFF) == 0x04)
+        return 0;                        /* EVIOCSREP */
+    if ((cmd >> 30) == 2 /* _IOC_READ */ && (cmd & 0xFF) == 0x03) {
+        uint16_t rep[2] = { 250, 33 };   /* delay ms, period ms */
+        if (!user_ptr_ok(u, sizeof(rep))) return -E_FAULT;
+        memcpy((void *)(uintptr_t)u, rep, sizeof(rep));
+        return 0;
+    }
     /* EVIOCGNAME(len) and EVIOCGBIT(ev,len) carry their length in the
      * command word; decode it like Linux's _IOC_SIZE.  EVIOCGBIT puts the
      * event type in the *nr* field: 0x20 + ev. */
@@ -339,14 +375,33 @@ static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
             memcpy((void *)(uintptr_t)u, name, n);
             return (int32_t)n;
         }
-        if (nr >= 0x20 && nr < 0x20 + EV_CNT) {   /* EVIOCGBIT(ev, len) */
+        /* GBIT covers every event type 0..EV_MAX, so nr runs 0x20..0x3F:
+         * libevdev probes each type in turn (including EV_FF at 0x35) and
+         * a rejected query aborts the whole device init. */
+        if (nr >= 0x20 && nr < 0x40) {            /* EVIOCGBIT(ev, len) */
             unsigned ev = nr - 0x20;
             uint32_t len = (uint32_t)size;
             if (!user_ptr_ok(u, len)) return -E_FAULT;
             memset((void *)(uintptr_t)u, 0, len);
             uint16_t *bits = NULL;
             uint32_t nbits = 0;
-            if (ev == EV_SYN) { bits = d->kind_bits; nbits = EV_CNT * 16; }
+            if (ev == EV_SYN) {
+                /* The SYN query asks "which event types does this device
+                 * emit?" as a plain Linux bitmap: bit T set = type T.  The
+                 * internal kind_bits[] marks type T in word T, so rebuild
+                 * the bitmap here -- handing the words back raw made every
+                 * type except EV_SYN invisible and Xorg's evdev driver
+                 * dropped both devices ("Don't know how to use device"). */
+                if (!user_ptr_ok(u, len)) return -E_FAULT;
+                memset((void *)(uintptr_t)u, 0, len);
+                uint32_t bytes = (EV_CNT + 7) / 8;
+                if (bytes > len) bytes = len;
+                for (unsigned t = 0; t < EV_CNT; t++)
+                    if (d->kind_bits[t] & (1u << t))
+                        ((uint8_t *)(uintptr_t)u)[t >> 3] |=
+                            (uint8_t)(1u << (t & 7));
+                return 0;
+            }
             else if (ev == EV_KEY) { bits = d->key_bits; nbits = 1024; }
             else if (ev == EV_REL) { bits = d->rel_bits; nbits = 32; }
             if (bits) {
@@ -356,9 +411,30 @@ static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
             }
             return 0;
         }
-        if (nr == 0x08)                  /* EVIOCGUNIQ: nothing to say */
+        if (nr == 0x07 || nr == 0x08) {  /* EVIOCGPHYS / EVIOCGUNIQ: none */
+            uint32_t len = (uint32_t)size;
+            if (!user_ptr_ok(u, len)) return -E_FAULT;
+            if (len) ((char *)(uintptr_t)u)[0] = 0;
             return 0;
+        }
+        if (nr == 0x09 || nr == 0x18 || nr == 0x19 ||
+            nr == 0x1a || nr == 0x1b) {
+            /* EVIOCGPROP / EVIOCGKEY / EVIOCGLED / EVIOCGSND / EVIOCGSW:
+             * state queries libevdev makes while initialising the device.
+             * We keep no state bits beyond the capability maps, so every
+             * answer is all-zero -- but the answer must exist, or the
+             * query fails and libevdev refuses the whole fd ("Unable to
+             * query fd") and Xorg's evdev driver drops the device. */
+            uint32_t len = (uint32_t)size;
+            if (!user_ptr_ok(u, len)) return -E_FAULT;
+            memset((void *)(uintptr_t)u, 0, len);
+            return 0;
+        }
     }
+    /* TEMPORARY: which ioctl does userspace probe that we still reject? */
+    dbg_puts("EVINVAL: cmd=");
+    dbg_puts_hex(cmd);
+    dbg_puts("\r\n");
     return -E_INVAL;
 }
 
@@ -398,6 +474,20 @@ static void kbd_enable_aux(void)
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
     outb(KBD_DATA, cmd);
+    while (inb(KBD_STATUS) & ST_INPT_BUF)
+        ;
+    /* Configure the aux DEVICE itself.  Bytes for the mouse must be
+     * prefixed with 0xD4 on the command port -- writing them straight to
+     * the data port delivers them to the keyboard instead, and the mouse
+     * silently never starts reporting (IRQ12 never fires, /dev/input/
+     * event1 stays empty, the X cursor cannot move). */
+    outb(KBD_CMD, 0xD4);
+    while (inb(KBD_STATUS) & ST_INPT_BUF)
+        ;
+    outb(KBD_DATA, 0xF6);                /* mouse: set defaults */
+    while (inb(KBD_STATUS) & 1)          /* drain its ack (0xFA) */
+        (void)inb(KBD_DATA);
+    outb(KBD_CMD, 0xD4);
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
     outb(KBD_DATA, 0xF4);                /* mouse: start reporting */
@@ -457,7 +547,20 @@ int64_t sys_inputinject(uint64_t type, uint64_t code, uint64_t value)
 {
     if (type > 0xFF || code > 0xFFFF)
         return -E_INVAL;
-    evdev_push(&g_kbd_dev, (uint16_t)type, (uint16_t)code, (int32_t)value);
+    /* Relative motion and button codes belong to the mouse device; the
+     * X server's pointer sprite only materialises once the pointer has
+     * actually moved, so headless tests inject REL events here. */
+    if (type == EV_REL || (code >= 0x110 && code <= 0x117)) {
+        evdev_push(&g_mouse_dev, (uint16_t)type, (uint16_t)code,
+                   (int32_t)value);
+        /* TEMPORARY: confirm injection lands and is consumed. */
+        dbg_puts("INJ: m count=");
+        dbg_puts_dec(g_mouse_dev.q->count);
+        dbg_puts("\r\n");
+    } else {
+        evdev_push(&g_kbd_dev, (uint16_t)type, (uint16_t)code,
+                   (int32_t)value);
+    }
     evdev_signal();
     return 0;
 }

@@ -36,6 +36,8 @@
 #include "heap.h"
 #include "kstring.h"
 #include "vfs.h"
+#include "sysfs.h"
+#include "../fbcon.h"
 
 /* proc.h: WAIT_SLEEP is 5 there; match the signature exactly rather than
  * pulling the header in here. */
@@ -203,6 +205,10 @@ static const struct drm_ioctl_desc drm_dummy_ioctls[] = {
     {DRM_IOCTL_MODE_GETCONNECTOR,      drm_mode_getconnector,            DRM_AUTH             },
     {DRM_IOCTL_MODE_GETPROPERTY,       drm_mode_getproperty_ioctl,       DRM_AUTH             },
     {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,       DRM_AUTH             },
+    {DRM_IOCTL_MODE_CREATEPROPBLOB,    drm_mode_createpropblob_ioctl,    DRM_AUTH             },
+    {DRM_IOCTL_MODE_DESTROYPROPBLOB,   drm_mode_destroypropblob_ioctl,   DRM_AUTH             },
+    {DRM_IOCTL_MODE_GETGAMMA,          drm_mode_getgamma_ioctl,          DRM_AUTH             },
+    {DRM_IOCTL_MODE_SETGAMMA,          drm_mode_setgamma_ioctl,          DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_GETFB,             drm_mode_getfb,                   DRM_AUTH             },
     {DRM_IOCTL_MODE_ADDFB,             drm_mode_addfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_RMFB,              drm_mode_rmfb,                    DRM_MASTER | DRM_AUTH},
@@ -275,6 +281,19 @@ static void drm_refresh_thread(void *arg);
 void        drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep);
 
 static unsigned long g_refresh_count;
+static volatile int g_cursor_on;   /* TEMPORARY: mirrors sw_cursor.on */
+
+/* /sys/class/drm/card0/{status,enabled}: the card reads enabled while a
+ * client framebuffer is scanned out, disabled when the console is back.
+ * File-scope because it reads g_scan_fb (declared below). */
+static void sysfs_gen_card0_status(char *buf, uint32_t cap, uint32_t *len)
+{
+    const char *s = (g_scan_fb != NULL) ? "enabled\n" : "disabled\n";
+    while (*s && (uint32_t)(*len) + 1 < cap)
+        buf[(*len)++] = *s++;
+    if ((uint32_t)(*len) < cap)
+        buf[*len] = '\0';
+}
 
 /* Copy the live buffer to the console framebuffer and stamp the cursor on
  * top.  Called from the timer tick as well as from the refresh thread. */
@@ -288,11 +307,24 @@ void drm_dummy_refresh(void)
     /* Heartbeat: once a client hands us a framebuffer this counts up every
      * frame.  A compositor that is up but showing nothing shows up here as
      * a count that never moves. */
-    if ((++g_refresh_count & 511) == 0) {
+    if ((++g_refresh_count & 63) == 0) {
         dbg_puts("REFRESH n=");
         dbg_puts_hex(g_refresh_count);
         dbg_puts(" fb=");
         dbg_puts_hex((uint64_t)(uintptr_t)g_scan_fb);
+        dbg_puts(" cur=");
+        dbg_puts_dec(g_cursor_on);
+        /* TEMPORARY Xorg debugging: checksum of the scanout source, so a
+         * black screen can be traced to an unpainted dumb buffer vs a
+         * broken copy path. */
+        if (g_scan_fb && g_scan_fb->obj[0] && g_scan_fb->obj[0]->backing) {
+            const uint8_t *bp = (const uint8_t *)g_scan_fb->obj[0]->backing;
+            uint32_t sum = 0, n = g_scan_fb->pitches[0] * g_scan_fb->height;
+            if (n > 262144) n = 262144;
+            for (uint32_t i = 0; i < n; i++) sum += bp[i];
+            dbg_puts(" srcsum=");
+            dbg_puts_hex(sum);
+        }
         dbg_puts("\n");
     }
 
@@ -346,6 +378,13 @@ static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb
     if (fb->obj[0] == NULL || fb->obj[0]->backing == NULL) { return -EINVAL; }
 
     g_scan_fb = fb;
+
+    /* While a client framebuffer owns the scanout, fbcon must not paint
+     * into the same memory the refresh thread keeps overwriting -- a stray
+     * login-prompt line or a "^C" echo used to flicker through for one
+     * refresh cycle.  Restore fbcon as soon as the console framebuffer is
+     * scanned out again. */
+    fbcon_suppress(fb->obj[0]->backing != (const uint8_t *)fbcon_fb());
 
     fbcon_geometry(&dw, &dh, &dpitch);
     dst = (uint32_t *)fbcon_fb();
@@ -417,6 +456,7 @@ static int drm_dummy_cursor_set(struct drm_crtc *crtc, struct drm_gem_object *bo
     sw_cursor.hot_x = hot_x;
     sw_cursor.hot_y = hot_y;
     sw_cursor.on    = (bo != NULL);
+    g_cursor_on     = sw_cursor.on;   /* TEMPORARY: heartbeat visibility */
     spin_unlock(&sw_cursor_lock);
 
     return 0;
@@ -836,10 +876,12 @@ int drm_dev_file_poll(void *ctx, void *private_data, uint64_t flags, size_t even
 
 int drm_dev_poll(void *file, size_t events)
 {
-    (void)file;
-    (void)events;
-
-    return 0;
+    /* Real readiness: readable only while a drm event (vblank/page flip)
+     * is queued for this open file description.  The stub that always
+     * returned 0 combined with the bridge's old revents logic made the
+     * card0 fd report readable forever, and Xorg spun reading it. */
+    extern unsigned int drm_poll(struct drm_file *file_priv, unsigned int events);
+    return (int)drm_poll((struct drm_file *)file, (unsigned int)events);
 }
 
 /* mmap: the offset handed out by MAP_DUMB identifies the buffer, and the
@@ -979,6 +1021,12 @@ int drm_init_fallback(void)
         free(dev);
         return ret;
     }
+
+    /* Publish the card under /sys/class/drm/card0 the way real KMS
+     * devices do: status/enabled answer udev's and libdrm's first
+     * questions about a connector. */
+    sysfs_add_file("class/drm/card0/status", sysfs_gen_card0_status, NULL);
+    sysfs_add_file("class/drm/card0/enabled", sysfs_gen_card0_status, NULL);
 
     drm_device_list_add(dev);
 

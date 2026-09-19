@@ -24,7 +24,9 @@
 set -e
 
 BRANCH=${ALPINE_BRANCH:-v3.20}
-REPO=${ALPINE_REPO:-main}
+# Packages are spread over more than one repository (xorg-server lives in
+# community, its dependencies in main), so the whole set is searched at once.
+REPOS=${ALPINE_REPOS:-${ALPINE_REPO:-main}}
 ARCH=${ALPINE_ARCH:-x86_64}
 MIRROR=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -51,35 +53,62 @@ fetch() { # url, dest
 echo "alpine $BRANCH/$REPO ($ARCH) -> $ROOT"
 mkdir -p "$CACHE" "$ROOT"
 
-# ---- repository index ----------------------------------------------------
-INDEX_TGZ=$CACHE/APKINDEX-$BRANCH-$REPO.tar.gz
-fetch "$MIRROR/$BRANCH/$REPO/$ARCH/APKINDEX.tar.gz" "$INDEX_TGZ"
-tar -xzf "$INDEX_TGZ" -C "$WORK"
-INDEX=$WORK/APKINDEX
-[ -f "$INDEX" ] || { echo "install-alpine: APKINDEX missing" >&2; exit 1; }
+# ---- repository indexes --------------------------------------------------
+for REPO in $REPOS; do
+    INDEX_TGZ=$CACHE/APKINDEX-$BRANCH-$REPO.tar.gz
+    fetch "$MIRROR/$BRANCH/$REPO/$ARCH/APKINDEX.tar.gz" "$INDEX_TGZ"
+    mkdir -p "$WORK/$REPO"
+    tar -xzf "$INDEX_TGZ" -C "$WORK/$REPO"
+    [ -f "$WORK/$REPO/APKINDEX" ] || { echo "install-alpine: APKINDEX missing for $REPO" >&2; exit 1; }
+done
 
 # ---- index queries -------------------------------------------------------
 # A stanza is a run of lines up to a blank line; fields are "X:value".
-latest_of() { # name -> best version
-    awk -v want="$1" '
-        /^P:/  { pkg=substr($0,3) }
-        /^V:/  { ver=substr($0,3) }
-        /^$/   { if (pkg==want) print ver; pkg=""; ver="" }
-        END    { if (pkg==want) print ver }
-    ' "$INDEX" | sort -Vu | tail -1
+# Indexes are per repository, so every lookup below takes a repo name and
+# matches against that repo's copy of the index.
+latest_of() { # name -> "<repo> <version>" of the newest match anywhere
+    for repo in $REPOS; do
+        awk -v want="$1" '
+            /^P:/  { pkg=substr($0,3) }
+            /^V:/  { ver=substr($0,3) }
+            /^$/   { if (pkg==want) print ver; pkg=""; ver="" }
+            END    { if (pkg==want) print ver }
+        ' "$WORK/$repo/APKINDEX" | sort -Vu | while read -r ver; do
+            printf '%s %s\n' "$repo" "$ver"
+        done
+    done | sort -k2,2V | tail -1
 }
 
-deps_of() { # name version -> depend lines, one per token
-    awk -v want="$1" '
+deps_of() { # repo name -> depend lines, one per token
+    awk -v want="$2" '
         /^P:/  { pkg=substr($0,3) }
         /^D:/  { deps=substr($0,3) }
         /^$/   { if (pkg==want) print deps; pkg=""; deps="" }
         END    { if (pkg==want) print deps }
-    ' "$INDEX" | tr ' ' '\n' | sed '/^$/d'
+    ' "$WORK/$1/APKINDEX" | tr ' ' '\n' | sed '/^$/d'
 }
 
 have_pkg() { # name -> 0/1
     latest_of "$1" | grep -q .
+}
+
+# Some dependencies are virtual names (e.g. "pkgconfig") that no package
+# declares as its own name -- they appear in the providing package's p: line.
+# The same lookup resolves so:/cmd: dependencies ("so:libdrm.so.2") to the
+# package that ships the file.
+provider_of() { # virtual -> "<package>" or empty
+    for repo in $REPOS; do
+        awk -v want="$1" '
+            /^P:/ { pkg=substr($0,3) }
+            /^p:/ {
+                n = split(substr($0,3), a, " ")
+                for (i = 1; i <= n; i++) {
+                    split(a[i], b, "=")
+                    if (b[1] == want) { print pkg; exit }
+                }
+            }
+        ' "$WORK/$repo/APKINDEX" | head -1
+    done | head -1
 }
 
 # Strip a version operator off a dependency token, keep only real packages
@@ -95,7 +124,7 @@ bare_name() {
 
 # ---- resolution ----------------------------------------------------------
 # BFS over the dependency tree; versions are pinned to the index's latest.
-resolved=""        # "name version" pairs, one per line
+resolved=""        # "name version repo" triples, one per line
 seen=""
 queue="$*"
 
@@ -105,16 +134,34 @@ while [ -n "$queue" ]; do
     case " $seen " in *" $want "*) continue ;; esac
     seen="$seen $want"
 
-    ver=$(latest_of "$want")
-    if [ -z "$ver" ]; then
-        echo "install-alpine: package '$want' not found in $BRANCH/$REPO" >&2
+    pick=$(latest_of "$want")
+    if [ -z "$pick" ]; then
+        # Not a real package name: try to find something that provides it.
+        prov=$(provider_of "$want")
+        if [ -n "$prov" ]; then
+            want=$prov
+            pick=$(latest_of "$want")
+        fi
+    fi
+    if [ -z "$pick" ]; then
+        echo "install-alpine: package '$want' not found in $BRANCH/$REPOS" >&2
         exit 1
     fi
+    repo=${pick%% *}
+    ver=${pick#* }
     resolved="$resolved
-$want $ver"
+$want $ver $repo"
 
-    for dep in $(deps_of "$want" "$ver"); do
-        child=$(bare_name "$dep") || continue
+    for dep in $(deps_of "$repo" "$want"); do
+        child=""
+        child=$(bare_name "$dep") || child=""
+        if [ -z "$child" ]; then
+            # so:/pc:/cmd: dependencies name a file or command, not a
+            # package; the package that provides it has to be looked up.
+            base=${dep%%[<>=!]*}
+            child=$(provider_of "$base") || child=""
+        fi
+        [ -n "$child" ] || continue
         case " $seen " in *" $child "*) continue ;; esac
         queue="$queue $child"
     done
@@ -123,9 +170,9 @@ done
 # ---- download + unpack ---------------------------------------------------
 echo "resolved:"
 echo "$resolved" | sed '/^$/d' | awk '{printf "  %s-%s\n", $1, $2}'
-echo "$resolved" | sed '/^$/d' | while read -r name ver; do
+echo "$resolved" | sed '/^$/d' | while read -r name ver repo; do
     apk="$CACHE/$name-$ver.apk"
-    fetch "$MIRROR/$BRANCH/$REPO/$ARCH/$name-$ver.apk" "$apk"
+    fetch "$MIRROR/$BRANCH/$repo/$ARCH/$name-$ver.apk" "$apk"
     # Control files sit at the top of the archive; exclude them so they do
     # not land in the filesystem root.  Payload extraction is additive, so
     # re-running with more packages merges cleanly.

@@ -38,5 +38,6 @@ void *pmm_virt(uint64_t phys);
 /* Statistics, in frames. */
 uint64_t pmm_total_frames(void);
 uint64_t pmm_free_frames(void);
+void pmm_dump_free_log(uint64_t lo, uint64_t hi);
 
 #endif

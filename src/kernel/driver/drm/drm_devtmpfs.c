@@ -128,10 +128,17 @@ static int32_t drm_bridge_read(vfs_node_t *n, uint64_t off, void *buf,
                                uint32_t len)
 {
     tmpfs_device_ops_t *ops = (tmpfs_device_ops_t *)n->priv;
+    struct drm_file    *fp  = drm_get_file();
 
     if (!ops || !ops->file_read)
         return 0;
-    return (int32_t)ops->file_read(ops->ctx, NULL, 0, buf, (size_t)off,
+    /* drm_read keeps its event queue per open file description; passing
+     * NULL here made every read fail with -EINVAL while poll still
+     * reported the fd readable -- Xorg's drmHandleEvent read loop then
+     * span at 4000 iterations a second. */
+    if (!fp)
+        return -E_NOMEM;
+    return (int32_t)ops->file_read(ops->ctx, fp, 0, buf, (size_t)off,
                                    (size_t)len);
 }
 
@@ -139,24 +146,32 @@ static int32_t drm_bridge_write(vfs_node_t *n, uint64_t off, const void *buf,
                                 uint32_t len)
 {
     tmpfs_device_ops_t *ops = (tmpfs_device_ops_t *)n->priv;
+    struct drm_file    *fp  = drm_get_file();
 
     if (!ops || !ops->file_write)
         return 0;
-    return (int32_t)ops->file_write(ops->ctx, NULL, 0, buf, (size_t)off,
+    if (!fp)
+        return -E_NOMEM;
+    return (int32_t)ops->file_write(ops->ctx, fp, 0, buf, (size_t)off,
                                     (size_t)len);
 }
 
 static int drm_bridge_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
     tmpfs_device_ops_t *ops = (tmpfs_device_ops_t *)n->priv;
-    int                 r;
+    struct drm_file    *fp  = drm_get_file();
+    int                 mask;
 
-    if (!ops || !ops->file_poll)
+    if (!ops || !ops->file_poll || !fp) {
+        if (revents) { *revents = 0; }
         return 0;
-    r = ops->file_poll(ops->ctx, NULL, 0, (size_t)events);
-    *revents = (int16_t)(events & (POLLIN | POLLOUT));
-    if (r != 0)
-        *revents = 0;
+    }
+    mask = ops->file_poll(ops->ctx, fp, 0, (size_t)events);
+    /* drm_poll answers in the same bit space as poll(2): POLLIN=0x1,
+     * POLLOUT=0x4.  revents must carry the READY bits, not the requested
+     * ones -- reporting the requested mask unconditionally (the old
+     * behaviour) made every epoll wait succeed instantly. */
+    if (revents) { *revents = (int16_t)(mask & ((int)events & (POLLIN | POLLOUT))); }
     return 0;
 }
 

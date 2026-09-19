@@ -26,7 +26,7 @@
 #include "ulib.h"
 
 #define GETTY_PATH  "/sbin/getty"  /* one per virtual terminal */
-#define AGETTY_PATH "/sbin/agetty" /* AEOS login shell on tty1 */
+#define AGETTY_PATH "/sbin/agetty" /* GNOS login shell on tty1 */
 #define FALLBACK_SH "/bin/bash"    /* if getty is missing entirely */
 #define RC_SHELL    "/bin/sh"      /* the one-shot startup script */
 #define RC_PATH     "/etc/rc"
@@ -121,7 +121,7 @@ static int spawn_getty(int n)
     name[3] = (char)('0' + n);
     name[4] = 0;
 
-    /* tty1 gets the AEOS login shell (AGeTTy) with themed prompts + BGIDM */
+    /* tty1 gets the GNOS login shell (AGeTTy) with themed prompts + BGIDM */
     const char *prog = (n == 1) ? AGETTY_PATH : GETTY_PATH;
 
     int pid = fork();
@@ -211,7 +211,7 @@ int main(int argc, char **argv)
 
     sys_dbgputs("INITDBG: main entered (new init)");
 
-    print("\nAEOS init: pid ");
+    print("\nGNOS init: pid ");
     printn(getpid());
     print(" - starting the session\n");
 

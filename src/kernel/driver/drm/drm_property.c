@@ -420,3 +420,60 @@ int drm_mode_getpropblob_ioctl(struct drm_device *dev, void *data, struct drm_fi
     drm_property_blob_put(blob);
     return 0;
 }
+
+/*
+ * DRM_IOCTL_MODE_CREATEPROPBLOB.  The payload arrives through the user
+ * pointer in the request; the kernel takes its own copy and hands back an
+ * id.  Length zero is legal (an empty blob) and still allocates an id.
+ */
+int drm_mode_createpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_mode_create_blob *req = (struct drm_mode_create_blob *)data;
+    struct drm_property_blob    *blob;
+    void                        *payload = NULL;
+
+    (void)file_priv;
+
+    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (req->length > 128 * 1024) { return -E2BIG; }
+
+    if (req->length > 0) {
+        payload = malloc(req->length);
+        if (payload == NULL) { return -ENOMEM; }
+        if (copy_from_user(payload, (const void *)(uintptr_t)req->data,
+                           req->length) != 0) {
+            free(payload);
+            return -EFAULT;
+        }
+    }
+
+    blob = drm_property_create_blob(dev, payload, req->length);
+    free(payload);
+    if (blob == NULL) { return -ENOMEM; }
+
+    req->blob_id = blob->base.id;
+    return 0;
+}
+
+/*
+ * DRM_IOCTL_MODE_DESTROYPROPBLOB.  Drops the creator's reference; the blob
+ * goes away once nothing else holds it.  The lookup takes a reference of
+ * its own (drm_mode_object_find), so two puts: one for the lookup, one for
+ * the reference drm_property_create_blob handed the creator.
+ */
+int drm_mode_destroypropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+{
+    struct drm_mode_destroy_blob *req = (struct drm_mode_destroy_blob *)data;
+    struct drm_property_blob     *blob;
+
+    (void)file_priv;
+
+    if (dev == NULL || req == NULL) { return -EINVAL; }
+
+    blob = drm_property_lookup_blob(dev, req->blob_id);
+    if (blob == NULL) { return -ENOENT; }
+
+    drm_property_blob_put(blob);      /* our lookup reference */
+    drm_property_blob_put(blob);      /* the creator's reference */
+    return 0;
+}

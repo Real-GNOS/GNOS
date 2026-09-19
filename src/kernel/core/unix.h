@@ -13,8 +13,8 @@
 int  unix_create(int type, int protocol);
 void unix_close(int u);
 
-int  unix_bind_sys(int u, const char *path, uint32_t len);
-int  unix_connect_sys(int u, const char *path, uint32_t len);
+int  unix_bind_sys(int u, const char *path, uint32_t len, int abstract);
+int  unix_connect_sys(int u, const char *path, uint32_t len, int abstract);
 int  unix_listen_sys(int u, int backlog);
 int  unix_accept_sys(int u);
 

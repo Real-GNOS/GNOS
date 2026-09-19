@@ -86,6 +86,10 @@ extern int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_
 /* KMS properties (drm_property.c, drm_mode_object.c) */
 extern int drm_mode_getproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_getpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_mode_createpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_mode_destroypropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_mode_setgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
@@ -345,6 +349,10 @@ static const struct drm_ioctl_desc drm_core_ioctls[] = {
     {DRM_IOCTL_MODE_GETPROPERTY,       drm_mode_getproperty_ioctl,       DRM_AUTH             },
     {DRM_IOCTL_MODE_SETPROPERTY,       drm_mode_setproperty_ioctl,       DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,       DRM_AUTH             },
+    {DRM_IOCTL_MODE_CREATEPROPBLOB,    drm_mode_createpropblob_ioctl,    DRM_AUTH             },
+    {DRM_IOCTL_MODE_DESTROYPROPBLOB,   drm_mode_destroypropblob_ioctl,   DRM_AUTH             },
+    {DRM_IOCTL_MODE_GETGAMMA,          drm_mode_getgamma_ioctl,          DRM_AUTH             },
+    {DRM_IOCTL_MODE_SETGAMMA,          drm_mode_setgamma_ioctl,          DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_GETFB,             drm_mode_getfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_ADDFB,             drm_mode_addfb,                   DRM_MASTER | DRM_AUTH},
     {DRM_IOCTL_MODE_RMFB,              drm_mode_rmfb,                    DRM_MASTER | DRM_AUTH},

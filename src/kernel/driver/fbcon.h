@@ -83,4 +83,10 @@ void fbcon_resize(uint32_t w, uint32_t h, uint32_t pitch);
  */
 void fbcon_panic(void);
 
+/* Stop (or resume) writing pixels into the framebuffer while a DRM client
+ * owns the scanout: the DRM refresh thread overwrites this memory every
+ * frame, so console drawing would only flicker through for one cycle.
+ * Console state keeps updating; `on` = 1 suppresses pixel writes only. */
+void fbcon_suppress(int on);
+
 #endif

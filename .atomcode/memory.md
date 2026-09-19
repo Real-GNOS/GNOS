@@ -1,1 +1,2 @@
 - --global
+- GNOS DRM 重写事故：drm_ioctl.c 里 drm_gem_dumb_create(dev, file_priv, args) 参数顺序写反（真实签名 (file_priv, dev, args)），编译器不报错但 dumb buffer 全废。教训：重写调用处必须逐参数对照头文件原型，且改动必须跑完 QEMU 功能回归才能提交（那次回归被中断后直接提交了）。drm_ioctl.c 已由用户方回退并由混元大神接管重写，我不再碰。

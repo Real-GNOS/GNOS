@@ -944,9 +944,14 @@ int drm_set_client_cap(struct drm_device *dev, void *data, struct drm_file *file
 /* KMS property ioctl handlers. */
 int                       drm_mode_getproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int                       drm_mode_getpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int                       drm_mode_createpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int                       drm_mode_destroypropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int                       drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int                       drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int                       drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+/* KMS gamma: the software display stores the LUTs and echoes them back. */
+int                       drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int                       drm_mode_setgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 struct drm_property      *drm_property_create(struct drm_device *dev, uint32_t flags, const char *name, int num_values);
 struct drm_property      *drm_property_create_range(struct drm_device *dev, uint32_t flags, const char *name, uint64_t min, uint64_t max);
 struct drm_property      *drm_property_create_enum(struct drm_device *dev, uint32_t flags, const char *name,

@@ -30,6 +30,7 @@ static addrspace_t g_spaces[MAX_ADDRSPACES];
 static int         g_used[MAX_ADDRSPACES];
 
 static uint64_t g_kernel_pml4_phys;
+static int g_watchmap_count;   /* TEMPORARY Xorg debugging */
 
 static uint64_t *table(uint64_t phys)
 {
@@ -220,6 +221,25 @@ int vmm_map(addrspace_t *as, uint64_t vaddr, uint64_t paddr, unsigned flags)
     uint64_t *pte = walk(as, vaddr & ~0xFFFULL, 1, flags);
     if (!pte)
         return 0;
+    /* TEMPORARY Xorg debugging: a remap of an already-present page is the
+     * anomaly we are hunting (normal flow never does this). */
+    if ((*pte & PTE_P) && (vaddr >> 44) == 5) {
+        dbg_puts("REMAP: va=");
+        dbg_puts_hex(vaddr & ~0xFFFULL);
+        dbg_puts(" oldpte=");
+        dbg_puts_hex(*pte);
+        dbg_puts(" newframe=");
+        dbg_puts_hex(paddr);
+        dbg_puts(" caller=");
+        dbg_puts_hex((uint64_t)__builtin_return_address(0));
+        dbg_puts("\r\n");
+    }
+    if ((vaddr >> 44) == 5 && g_watchmap_count < 24) {
+        g_watchmap_count++;
+        dbg_puts("VMMA: va=");
+        dbg_puts_hex(vaddr);
+        dbg_puts("\r\n");
+    }
     *pte = (paddr & PTE_ADDR) | pte_flags(flags);
     /* A SysV shared-memory page marks the PTE with the available bit so
      * unmap and address-space teardown clear it without freeing the frame
@@ -423,6 +443,14 @@ int vmm_unmap(addrspace_t *as, uint64_t vaddr, uint64_t size)
         uint64_t *pte = walk(as, va, 0, 0);
         if (!pte || !(*pte & PTE_P))
             continue;                   /* nothing mapped here */
+        /* TEMPORARY Xorg debugging: who clears the libpixman text page? */
+        if (va == 0x5000000047000ULL) {
+            dbg_puts("WATCH-UNMAP: va=0x5000000047000 oldpte=");
+            dbg_puts_hex(*pte);
+            dbg_puts(" caller=");
+            dbg_puts_hex((uint64_t)__builtin_return_address(0));
+            dbg_puts("\r\n");
+        }
         /* A SysV shm page is owned by its segment, not this address space:
          * clear the PTE but keep the frame (the segment frees it). */
         if (!(*pte & PTE_AVL)) {
@@ -455,6 +483,13 @@ int vmm_alloc_range(addrspace_t *as, uint64_t vaddr, uint64_t size,
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
         if (vmm_resolve(as, va))
             continue;                       /* already backed */
+        /* TEMPORARY Xorg debugging: does alloc_range run at all? */
+        if ((start >> 44) == 5 && g_watchmap_count < 24) {
+            g_watchmap_count++;
+            dbg_puts("AR: va=");
+            dbg_puts_hex(va);
+            dbg_puts("\r\n");
+        }
         /* Charge the cgroup before allocating; reject if over memory.max. */
         if (as->cg >= 0 && cg_mem_charge(as->cg, PAGE_SIZE) < 0)
             return 0;
@@ -629,6 +664,109 @@ addrspace_t *vmm_clone(addrspace_t *src)
         dst->mmaps[i] = src->mmaps[i];
     dst->cg = src->cg;          /* inherit the cgroup membership */
     return dst;
+}
+
+/* TEMPORARY Xorg debugging: on an unbacked fault, dump every address space's
+ * record head plus the raw words just below g_spaces, so whoever corrupts the
+ * table can be recognised by what it writes. */
+void vmm_as_debug_dump(void)
+{
+    dbg_puts("ASDUMP:\r\n");
+    for (int i = 0; i < MAX_ADDRSPACES; i++) {
+        if (!g_used[i])
+            continue;
+        dbg_puts("  AS");
+        dbg_puts_dec(i);
+        dbg_puts(" nmmaps=");
+        dbg_puts_dec(g_spaces[i].nmmaps);
+        dbg_puts(" rec0=(");
+        dbg_puts_hex(g_spaces[i].mmaps[0].base);
+        dbg_puts(",");
+        dbg_puts_hex(g_spaces[i].mmaps[0].size);
+        dbg_puts(",f");
+        dbg_puts_hex(g_spaces[i].mmaps[0].flags);
+        dbg_puts(")\r\n");
+    }
+    dbg_puts("  pre: ");
+    uint64_t *pre = (uint64_t *)((uint8_t *)g_spaces - 64);
+    for (int i = 0; i < 8; i++) {
+        dbg_puts_hex(pre[i]);
+        dbg_puts(" ");
+    }
+    dbg_puts("\r\n");
+}
+
+/* TEMPORARY Xorg debugging: byte-sum a mapped region (0 for pages that are
+ * not present).  Used to detect whether a mapping's content changed after
+ * the copy-in. */
+uint64_t vmm_region_checksum(addrspace_t *as, uint64_t base, uint64_t size)
+{
+    uint64_t sum = 0;
+    uint64_t end = base + size;
+
+    for (uint64_t va = base & ~0xFFFULL; va < end; va += PAGE_SIZE) {
+        uint64_t phys = vmm_resolve(as, va);
+        if (!phys)
+            continue;
+        uint8_t *p = (uint8_t *)pmm_virt(phys);
+        for (uint64_t o = 0; o < PAGE_SIZE && va + o < end; o++)
+            sum += p[o];
+    }
+    return sum;
+}
+
+/* TEMPORARY Xorg debugging: walk every address space's page tables and print
+ * each VA whose PTE maps @frame -- the frame-alias detector.  The kernel half
+ * (level-4 entries 256..511) is shared by all address spaces, so it is scanned
+ * once. */
+void vmm_alias_scan(uint64_t frame)
+{
+    int kernel_half_done = 0;
+
+    for (int s = 0; s < MAX_ADDRSPACES; s++) {
+        if (!g_used[s])
+            continue;
+        addrspace_t *as = &g_spaces[s];
+        if (!as->pml4_phys)
+            continue;
+        uint64_t *p4 = table(as->pml4_phys);
+        for (int a = 0; a < 512; a++) {
+            int kern = a >= 256;
+            if (kern && kernel_half_done)
+                continue;
+            if (!(p4[a] & PTE_P))
+                continue;
+            uint64_t *p3 = table(p4[a] & PTE_ADDR);
+            for (int b = 0; b < 512; b++) {
+                if (!(p3[b] & PTE_P))
+                    continue;
+                uint64_t *p2 = table(p3[b] & PTE_ADDR);
+                for (int c = 0; c < 512; c++) {
+                    if (!(p2[c] & PTE_P))
+                        continue;
+                    uint64_t *p1 = table(p2[c] & PTE_ADDR);
+                    for (int d = 0; d < 512; d++) {
+                        if (!(p1[d] & PTE_P))
+                            continue;
+                        if ((p1[d] & PTE_ADDR) == frame) {
+                            uint64_t va = ((uint64_t)a << 39) | ((uint64_t)b << 30) |
+                                          ((uint64_t)c << 21) | ((uint64_t)d << 12);
+                            dbg_puts("  ALIAS: ");
+                            dbg_puts(kern ? "KERN" : "as");
+                            if (!kern) dbg_puts_dec(s);
+                            dbg_puts(" va=");
+                            dbg_puts_hex(va);
+                            dbg_puts(" pte=");
+                            dbg_puts_hex(p1[d]);
+                            dbg_puts("\r\n");
+                        }
+                    }
+                }
+            }
+            if (kern)
+                kernel_half_done = 1;
+        }
+    }
 }
 
 void vmm_switch(addrspace_t *as)

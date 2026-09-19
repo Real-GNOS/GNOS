@@ -1,5 +1,5 @@
 /*
- * bgidm.c — AEOS BGIDM Desktop Manager for GNOS. (GPLv2)
+ * bgidm.c — GNOS BGIDM Desktop Manager for GNOS. (GPLv2)
  *
  * A framebuffer-based desktop inspired by the original BGIDM.
  * Draws to /dev/fb0 with mouse support from /dev/input/event1.
@@ -325,8 +325,8 @@ static void render_taskbar(void)
     snprintf(clock, sizeof clock, "%02d:%02d", tm->tm_hour, tm->tm_min);
     draw_string(fb_w - string_width(clock, 2) - 8, btn_y + 6, clock, COL_TEXT, 2);
 
-    /* AEOS label */
-    draw_string(btn_w + 12, btn_y + 8, "AEOS 5.11", COL_TEXT, 1);
+    /* GNOS label */
+    draw_string(btn_w + 12, btn_y + 8, "GNOS 5.11", COL_TEXT, 1);
 }
 
 static void render_start_menu(void)
@@ -341,7 +341,7 @@ static void render_start_menu(void)
 
     /* title */
     fill_rect(mx + 1, my + 1, mw - 2, 20, COL_ACCENT);
-    draw_string(mx + 6, my + 5, "AEOS Start Menu", COL_BLACK, 1);
+    draw_string(mx + 6, my + 5, "GNOS Start Menu", COL_BLACK, 1);
 
     for (int i = 0; i < MENU_ITEMS; i++) {
         int iy = my + 22 + i * 25;
@@ -394,11 +394,11 @@ static void render_about(void)
     fill_rect(cbx, cby, 20, 20, COL_RED);
     draw_string(cbx + 5, cby + 5, "X", COL_WHITE, 1);
 
-    draw_string(mx + 6, my + 5, "About AEOS", COL_BLACK, 1);
+    draw_string(mx + 6, my + 5, "About GNOS", COL_BLACK, 1);
 
-    draw_string(mx + 15, my + 30, "AEOS v5.11.2 Build 8070 Patch 4", COL_TEXT, 1);
+    draw_string(mx + 15, my + 30, "GNOS v5.11.2 Build 8070 Patch 4", COL_TEXT, 1);
     draw_string(mx + 15, my + 48, "BGIDM 1.11.0 for GNOS", COL_TEXT, 1);
-    draw_string(mx + 15, my + 66, "Kernel: AEOS 0.1 (x86_64)", COL_TEXT, 1);
+    draw_string(mx + 15, my + 66, "Kernel: GNOS 0.1 (x86_64)", COL_TEXT, 1);
     draw_string(mx + 15, my + 84, "Based on GNOS kernel project", COL_TEXT, 1);
     draw_string(mx + 15, my + 100, "By Lithium4141", COL_ACCENT, 1);
 }
@@ -570,7 +570,7 @@ int main(int argc, char **argv)
 
     memset(paint_grid, 0, sizeof paint_grid);
 
-    printf("BGIDM v1.11.0 starting on AEOS...\n");
+    printf("BGIDM v1.11.0 starting on GNOS...\n");
 
     /* main loop */
     while (1) {

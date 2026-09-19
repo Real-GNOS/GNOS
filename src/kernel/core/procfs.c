@@ -200,7 +200,7 @@ static void gen_meminfo(sbuf_t *s)
 
 static void gen_version(sbuf_t *s)
 {
-    sb_str(s, "AEOS version 0.1 (x86_64)\n");
+    sb_str(s, "GNOS version 0.1 (x86_64)\n");
 }
 
 /* The boot command line captured by kernel.c from the Limine cmdline tag. */
