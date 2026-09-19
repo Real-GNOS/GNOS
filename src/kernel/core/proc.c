@@ -1525,6 +1525,11 @@ int proc_execve(const char *path, char *const argv[], char *const envp[],
             p->sgid = f_gid;
         }
     }
+
+    /* /proc/self/exe: apk.static re-execs itself through it, so the path
+     * of the loaded image (after #! chasing) is what the link shows. */
+    strncpy(p->exe_path, pathbuf, sizeof(p->exe_path) - 1);
+    p->exe_path[sizeof(p->exe_path) - 1] = '\0';
     return 0;
 }
 

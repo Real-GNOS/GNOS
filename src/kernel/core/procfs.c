@@ -478,6 +478,19 @@ static int fd_node(int fd, vfs_node_t *out)
 
 int procfs_readlink(const char *path, char *buf, uint32_t cap)
 {
+    /* /proc/self/exe: the image the caller last exec'd. */
+    if (strcmp(path, "/proc/self/exe") == 0) {
+        proc_t *p = proc_current();
+        if (!p || !p->exe_path[0])
+            return -E_NOENT;
+        uint32_t n = (uint32_t)strlen(p->exe_path);
+        if (n > cap - 1)
+            n = cap - 1;
+        memcpy(buf, p->exe_path, n);
+        buf[n] = '\0';
+        return (int)n;
+    }
+
     const char *pfx = "/proc/self/fd/";
     int         len = (int)strlen(pfx);
     if (strncmp(path, pfx, (size_t)len) != 0 || !path[len])
@@ -496,6 +509,19 @@ int procfs_readlink(const char *path, char *buf, uint32_t cap)
 
 static int procfs_fd_resolve(const char *path, vfs_node_t *out)
 {
+    /* /proc/self/exe: a symlink-shaped node; readlink carries the target
+     * and execve special-cases the name, so the node itself is inert. */
+    if (strcmp(path, "/proc/self/exe") == 0) {
+        proc_t *p = proc_current();
+        memset(out, 0, sizeof(*out));
+        strncpy(out->name, "exe", VFS_NAME_MAX - 1);
+        out->kind = VFS_SYMLINK;
+        out->ops  = &g_fdlink_ops;
+        out->e2.ino = 0x9000;
+        (void)p;
+        return 0;
+    }
+
     const char *pfx = "/proc/self/fd/";
     if (strncmp(path, pfx, strlen(pfx)) != 0)
         return -E_NOENT;

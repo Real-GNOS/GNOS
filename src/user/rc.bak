@@ -1,0 +1,24 @@
+#!/bin/sh
+# Boot: login prompts on tty1/tty2, then the Xorg smoke test.
+# Xorg covers the console with its own scanout while it runs, so the
+# login prompt lives on the ttys until the server is shut down again.
+mkdir -p /var/log /tmp/run
+
+/usr/bin/getty tty1 &
+/usr/bin/getty tty2 &
+
+/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 \
+    -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
+sleep 15
+DISPLAY=:0 /usr/bin/xterm -geometry 80x25 -background white \
+    -foreground black >/tmp/xterm.out 2>&1 &
+sleep 8
+{
+    echo "=== XORG STDOUT ==="
+    cat /tmp/xorg.out
+    echo "=== XTERM STDOUT ==="
+    cat /tmp/xterm.out
+    echo "=== XORG LOG (tail) ==="
+    tail -40 /var/log/Xorg.0.log
+    echo "=== END ==="
+} > /dev/tty2 2>&1

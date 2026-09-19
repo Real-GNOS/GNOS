@@ -1,0 +1,34 @@
+#!/bin/sh
+# start-xfce — bring up an XFCE session on the running X server. (GPLv2)
+#
+# Usage: (from a shell with DISPLAY set, Xorg already running)
+#   /sbin/start-xfce
+#
+# XFCE needs a session D-Bus before xfce4-session will talk to anyone.
+X11RUN=/tmp/run
+DBUS_DAEMON=/usr/bin/dbus-daemon
+
+if [ -z "$DISPLAY" ]; then
+    echo "start-xfce: DISPLAY is not set"
+    exit 1
+fi
+
+mkdir -p $X11RUN
+
+# Session bus: the address lands in a file and in the environment of
+# everything we start afterwards.
+if [ ! -f $X11RUN/session-bus ]; then
+    $DBUS_DAEMON --session --fork \
+        --print-address > $X11RUN/session-bus 2>/dev/null
+fi
+DBUS_SESSION_BUS_ADDRESS=$(cat $X11RUN/session-bus)
+export DBUS_SESSION_BUS_ADDRESS
+
+# XFCE itself.  startxfce4 re-runs Xinit looking for an X server; with the
+# server already up we start the pieces by hand instead.
+xfwm4 --replace &
+xfce4-panel &
+xfdesktop &
+
+echo "start-xfce: session bus $DBUS_SESSION_BUS_ADDRESS"
+echo "start-xfce: xfwm4/panel/desktop started on $DISPLAY"

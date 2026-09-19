@@ -1,46 +1,26 @@
 #!/bin/sh
-# Boot: login prompts on tty1/tty2, then the Xorg smoke test.
-# Xorg covers the console with its own scanout while it runs, so the
-# login prompt lives on the ttys until the server is shut down again.
+# Boot: login prompts on tty1/tty2, then the smoke tests.
+# The Xorg/twm/xeyes block is kept (commented) for interactive runs;
+# the headless boot exercises apk over the slirp network.
 mkdir -p /var/log /tmp/run
 
 /sbin/getty tty1 &
 /sbin/getty tty2 &
 
-#/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 \
-    -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
+# apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
+/sbin/apk.static --version >/tmp/apk.out 2>&1
+/sbin/apk.static update >>/tmp/apk.out 2>&1
+/sbin/apk.static add clang xfce4 xfce4-terminal >>/tmp/apk.out 2>&1
+/bin/dbgcat.elf /tmp/apk.out
+
+# --- Xorg smoke test (uncomment for interactive runs) ---
+#/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
 #sleep 15
-# Paint the root window a visible gray: the client-free Xorg screen is the
-# black root window (-br), which is indistinguishable from a dead pipeline.
 #DISPLAY=:0 /usr/bin/xsetroot -solid gray40 -cursor_name left_ptr >/tmp/xsetroot.out 2>&1
-# Window manager first, so the clients come up managed (title bars, move,
-# resize).  twm's own output goes to tty-independent stderr for the log.
 #DISPLAY=:0 /usr/bin/twm >/tmp/twm.out 2>&1 &
 #DISPLAY=:0 /usr/bin/xeyes -geometry +100+100 >/tmp/xeyes.out 2>&1 &
-# Push the server log into the debugcon log (grep-able on the host).
-#/bin/dbgcat.elf /var/log/Xorg.0.log
-#/bin/dbgcat.elf /sys/kernel/ostype /sys/kernel/osrelease /sys/kernel/uptime \
-    /sys/class/drm/card0/status /sys/class/drm/card0/enabled
-#DISPLAY=:0 /usr/bin/xterm -geometry 80x25 -background white \
-    #-foreground black >/tmp/xterm.out 2>&1 &
+#DISPLAY=:0 /usr/bin/xterm -geometry 80x25 -background white -foreground black >/tmp/xterm.out 2>&1 &
 #sleep 8
-{
-    echo "=== XORG STDOUT ==="
-    cat /tmp/xorg.out
-    echo "=== XSETROOT STDOUT ==="
-    cat /tmp/xsetroot.out
-    echo "=== TWM STDOUT ==="
-    cat /tmp/twm.out
-    echo "=== XEYES STDOUT ==="
-    cat /tmp/xeyes.out
-    echo "=== XTERM STDOUT ==="
-    cat /tmp/xterm.out
-    echo "=== XORG LOG (tail) ==="
-    tail -40 /var/log/Xorg.0.log
-    echo "=== END ==="
-} > /dev/tty2 2>&1
-
-# Run late: the pointer sprite only materialises once a client window is
-# under the pointer, and the clients take a while to map their windows.
-sleep 5
+#/bin/dbgcat.elf /var/log/Xorg.0.log
+#sleep 5
 #/sbin/wiggle

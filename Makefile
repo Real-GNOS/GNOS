@@ -328,7 +328,7 @@ QEMU_DISK := -drive file=$(DISK),format=raw,if=ide,index=0,media=disk
 # exactly what must not happen: the kernel mounts this read-write in RAM and
 # every byte the filesystem grows at runtime comes out of this headroom.
 # fastfetch alone added ~4 MiB of binaries, so 96M.
-INITRD_MB ?= 256
+INITRD_MB ?= 2048
 
 # Number of virtual cores QEMU exposes.  The SMP bring-up path brings up
 # every core Limine reports, so changing this also changes what smpinfo.elf
@@ -649,6 +649,16 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	mkdir -p $(BUILD)/initrd-root/usr/sbin
 	mkdir -p $(BUILD)/initrd-root/usr/lib
 	mkdir -p $(BUILD)/initrd-root/lib
+	mkdir -p $(BUILD)/initrd-root/lib/apk/db
+	mkdir -p $(BUILD)/initrd-root/var/cache/apk
+	mkdir -p $(BUILD)/initrd-root/etc/apk/keys
+	# apk's state db must exist (an empty file): `apk update` opens it
+	# read-only and reports ENOENT instead of treating it as fresh.
+	# /etc/apk/world is the other half of the state: without it apk says
+	# "Unable to read database state" even with the db present.
+	touch $(BUILD)/initrd-root/lib/apk/db/installed
+	touch $(BUILD)/initrd-root/lib/apk/db/lock
+	touch $(BUILD)/initrd-root/etc/apk/world
 	mkdir -p $(BUILD)/initrd-root/root
 	mkdir -p $(BUILD)/initrd-root/home
 	mkdir -p $(BUILD)/initrd-root/mnt
@@ -885,6 +895,8 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# C resolver actually work: ping/wget do DNS via /etc/resolv.conf, getent
 	# reads /etc/passwd, and `hostname` uses /etc/hostname.
 	cp -a src/rootfs/etc/. $(BUILD)/initrd-root/etc/
+	# Guest-side helper scripts (start-xfce, ...).
+	cp -a src/rootfs/sbin/. $(BUILD)/initrd-root/sbin/
 	# Kernel command line carrier: `make KCMD="single"` drops the words into
 	# /cmdline at the initrd root; the kernel reads that file before PID 1
 	# (Limine does not forward conf cmdline: to direct-protocol kernels).

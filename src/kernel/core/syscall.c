@@ -5026,6 +5026,14 @@ void syscall_handler(regs_t *r)
         char abs[GNUOS_PATH_MAX];
         ret = path_abs(a1, abs);
         if (ret < 0) break;
+        /* /proc/self/exe: apk.static re-execs itself through this magic
+         * symlink -- the kernel knows the answer. */
+        if (strcmp(abs, "/proc/self/exe") == 0) {
+            proc_t *cp = proc_current();
+            if (!cp || !cp->exe_path[0]) { ret = -E_NOENT; break; }
+            strncpy(abs, cp->exe_path, sizeof(abs) - 1);
+            abs[sizeof(abs) - 1] = '\0';
+        }
 #ifdef SYSTRACE
         {   /* remember what each exec tried, so ENOENT loops name their
              * missing binary instead of hiding behind a bare return code */

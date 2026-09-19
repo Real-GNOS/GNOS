@@ -317,6 +317,10 @@ typedef struct proc {
 
     char          name[16];
 
+    /* The image this process last exec'd, after #! chasing: /proc/self/exe
+     * resolves (readlink and execve) through this. */
+    char          exe_path[96];
+
     /*
      * The full argument vector of the running image, NUL-separated and
      * NUL-terminated, in the layout /proc/<pid>/cmdline is defined to have.
