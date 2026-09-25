@@ -89,8 +89,21 @@ static int     g_next_pid = 1;
  * is held only for the few instructions of a heap step and never across a
  * context switch (see schedule()). */
 static spinlock_t g_proc_lock;
-static proc_t    *g_rq[MAX_PROCS];
-static unsigned   g_rq_size;
+
+/* ---- per-CPU run queues ------------------------------------------------
+ * One EEVDF run queue per core: a treap of runnable tasks keyed on
+ * (virtual deadline, pid), a private virtual clock, and a placement floor.
+ * Tasks are enqueued on the caller's CPU and stolen by an idle core when
+ * its own queue runs dry.  All queue operations run under g_proc_lock. */
+typedef struct {
+    proc_t   *root;         /* treap of runnable tasks                     */
+    uint64_t  vtime;        /* this queue's virtual clock, VIRT units      */
+    uint64_t  min_vtime;    /* placement floor: monotonic                  */
+    unsigned  count;
+} rq_t;
+
+#define NR_RQ 4
+static rq_t g_rqs[NR_RQ];
 
 /* ---- kthreadd work queue -----------------------------------------------
  * kthread_create() appends work items here; kthreadd (PID 2) drains the
@@ -116,6 +129,13 @@ static kthread_work_t *g_kthread_work_tail;
  * vruntime so a lagging heavyweight cgroup cannot starve fresh tasks. */
 static uint64_t g_vtime;
 
+/* Effective scheduling weight: the cgroup weight, or the PI-boosted floor
+ * when futex waiters demand more (see the FUTEX_LOCK_PI path). */
+uint32_t proc_eff_weight(proc_t *p)
+{
+    return p->pi_boost > p->sched_weight ? p->pi_boost : p->sched_weight;
+}
+
 /* Default slice in ticks (SCHED_HZ = 100, so 50 ms per pick), converted to
  * virtual-time units everywhere below. */
 #define EEVDF_SLICE_TICKS 5
@@ -127,20 +147,6 @@ static uint64_t virt_delta(uint64_t used, uint32_t w)
     if (w == 0)
         w = 1;
     return (used << (VIRT_SHIFT + 10)) / w;
-}
-
-/* The queue's current minimum vruntime: where a fresh task should join so
- * that it neither inherits a gift nor starves behind a lagging cgroup.
- * Caller holds g_proc_lock. */
-static uint64_t rq_min_vruntime(void)
-{
-    if (!g_rq_size)
-        return g_vtime;
-    uint64_t m = g_rq[0]->vruntime;
-    for (unsigned i = 1; i < g_rq_size; i++)
-        if (g_rq[i]->vruntime < m)
-            m = g_rq[i]->vruntime;
-    return m;
 }
 
 /* spawn_init/fork/clone all finish a fresh process the same way; the
@@ -193,7 +199,14 @@ static proc_t *proc_alloc(void)
         /* EEVDF: the slice is fixed; vruntime/deadline are set when the
          * process joins the run queue.  Fresh processes own no BKL and
          * run nowhere yet. */
-        p->rq_index     = -1;
+        p->vlag         = 0;
+        p->rq_cpu       = -1;
+        p->tprio        = 0;
+        p->pi_boost     = 0;
+        p->pi_waiters   = NULL;
+        p->pi_wnext     = NULL;
+        p->pi_owner     = NULL;
+        p->tl = p->tr   = NULL;
         p->bkl_held     = 0;
         p->on_cpu       = -1;
         p->slice        = EEVDF_SLICE_TICKS * VIRT_UNIT;
@@ -899,8 +912,11 @@ static void kthreadd_main(void *arg)
 int proc_spawn_kthreadd(void)
 {
     proc_t *p = proc_alloc();
-    if (!p)
+    if (!p) {
+        extern void dbg_puts(const char *);
+        dbg_puts("KTHRD: proc_alloc failed\r\n");
         return -1;
+    }
 
     p->as      = vmm_kernel_as();
     p->fs_base = 0;
@@ -933,6 +949,13 @@ int proc_spawn_kthreadd(void)
     p->saved_rsp = sp;
 
     if (cg_attach_new(p, CG_ROOT) < 0) {
+        extern void dbg_puts(const char *);
+        extern int cg_live(int);
+        dbg_puts("KTHRD: cg_attach_new failed cg=");
+        dbg_puts_dec((uint32_t)p->cg);
+        dbg_puts(" live=");
+        dbg_puts_dec((uint32_t)cg_live(0));
+        dbg_puts("\r\n");
         kfree(b);
         p->state = PROC_UNUSED;
         return -1;
@@ -2087,106 +2110,150 @@ p->sig_pending &= ~SIGMASK(sig);
     }
 }
 
-/* ---- EEVDF run queue -------------------------------------------------- */
-/* A binary min-heap of runnable processes keyed on virtual deadline.  All
- * queue operations run with g_proc_lock held (their callers say so). */
-
-static int rq_before(proc_t *a, proc_t *b)
+/* ---- EEVDF run queue: treap + vlag/eligibility ------------------------- */
+/* Tasks are ordered by (virtual deadline, pid).  A task is ELIGIBLE while
+ * its vlag (the queue's virtual clock minus its vruntime) is <= 0: it has
+ * consumed no more than its fair share.  pick() hands the CPU to the
+ * eligible task with the earliest deadline; when nothing is eligible the
+ * task closest to eligibility runs, exactly as EEVDF prescribes.  vlag is
+ * remembered across sleeps, so a task that overslept re-enters eligible
+ * and one that hogged the CPU re-enters owing time. */
+static int key_before(proc_t *a, proc_t *b)
 {
     if (a->deadline != b->deadline)
         return a->deadline < b->deadline;
     return a->pid < b->pid;                 /* deterministic tie-break */
 }
 
-static void rq_sift_up(unsigned i)
+static proc_t *tr_merge(proc_t *l, proc_t *r)
 {
-    while (i > 0) {
-        unsigned parent = (i - 1) / 2;
-        if (!rq_before(g_rq[i], g_rq[parent]))
-            break;
-        proc_t *t = g_rq[i];
-        g_rq[i] = g_rq[parent];
-        g_rq[parent] = t;
-        g_rq[i]->rq_index = (int)i;
-        g_rq[parent]->rq_index = (int)parent;
-        i = parent;
+    if (!l) return r;
+    if (!r) return l;
+    if (l->tprio > r->tprio) { l->tr = tr_merge(l->tr, r); return l; }
+    r->tl = tr_merge(l, r->tl);
+    return r;
+}
+
+static proc_t *tr_insert(proc_t *root, proc_t *p)
+{
+    if (!root) {
+        p->tl = p->tr = NULL;
+        return p;
     }
-}
-
-static void rq_sift_down(unsigned i)
-{
-    for (;;) {
-        unsigned l = 2 * i + 1;
-        unsigned r = 2 * i + 2;
-        unsigned best = i;
-        if (l < g_rq_size && rq_before(g_rq[l], g_rq[best]))
-            best = l;
-        if (r < g_rq_size && rq_before(g_rq[r], g_rq[best]))
-            best = r;
-        if (best == i)
-            break;
-        proc_t *t = g_rq[i];
-        g_rq[i] = g_rq[best];
-        g_rq[best] = t;
-        g_rq[i]->rq_index = (int)i;
-        g_rq[best]->rq_index = (int)best;
-        i = best;
+    if (key_before(p, root)) {
+        root->tl = tr_insert(root->tl, p);
+        if (root->tl->tprio > root->tprio) {
+            proc_t *l = root->tl;
+            root->tl = l->tr;
+            l->tr    = root;
+            root     = l;
+        }
+    } else {
+        root->tr = tr_insert(root->tr, p);
+        if (root->tr->tprio > root->tprio) {
+            proc_t *r = root->tr;
+            root->tr = r->tl;
+            r->tl    = root;
+            root     = r;
+        }
     }
+    return root;
 }
 
-static void rq_push(proc_t *p)
+static proc_t *tr_delete(proc_t *root, proc_t *p)
 {
-    p->rq_index = (int)g_rq_size;
-    g_rq[g_rq_size++] = p;
-    rq_sift_up(g_rq_size - 1);
-}
-
-static proc_t *rq_peek(void)
-{
-    return g_rq_size ? g_rq[0] : NULL;
-}
-
-static proc_t *rq_pop(void)
-{
-    if (!g_rq_size)
+    if (!root)
         return NULL;
-    proc_t *top = g_rq[0];
-    proc_t *last = g_rq[--g_rq_size];
-    top->rq_index = -1;
-    if (g_rq_size) {
-        g_rq[0] = last;
-        last->rq_index = 0;
-        rq_sift_down(0);
-    }
-    return top;
-}
-
-/* Take a process out of the heap, wherever it sits.  Caller holds
- * g_proc_lock; a no-op for a process that is not queued. */
-static void rq_remove(proc_t *p)
-{
-    if (p->rq_index < 0)
-        return;
-    unsigned i = (unsigned)p->rq_index;
-    proc_t *last = g_rq[--g_rq_size];
-    p->rq_index = -1;
-    if (i == g_rq_size)                 /* p was the last element */
-        return;
-    g_rq[i] = last;
-    last->rq_index = (int)i;
-    if (i > 0 && rq_before(last, g_rq[(i - 1) / 2]))
-        rq_sift_up(i);
+    if (root == p)
+        return tr_merge(p->tl, p->tr);
+    if (key_before(p, root))
+        root->tl = tr_delete(root->tl, p);
     else
-        rq_sift_down(i);
+        root->tr = tr_delete(root->tr, p);
+    return root;
 }
 
-/* Put a process on the run queue with a fresh slice.  Caller holds
- * g_proc_lock.  EEVDF: a waking, continued or brand-new task's lag is
- * reset -- it enters as if newly runnable, placed at the queue's minimum
- * vruntime (see rq_min_vruntime).  A task whose cgroup is throttled is
- * parked instead (WAIT_CGROUP); the cpu.max period rollover releases it.
- * This is the single choke point every wake/enqueue path funnels through,
- * which is what keeps throttled tasks off the queue. */
+static proc_t *tr_leftmost(proc_t *root)
+{
+    while (root && root->tl)
+        root = root->tl;
+    return root;
+}
+
+/* In-order walk = ascending deadline.  The first eligible node seen is the
+ * pick; ineligible nodes compete on vlag as the fallback. */
+static void tr_pick(proc_t *root, rq_t *q, proc_t **elig, proc_t **fb,
+                    int64_t *fb_vlag)
+{
+    if (!root || (*elig && *fb))
+        return;
+    tr_pick(root->tl, q, elig, fb, fb_vlag);
+    if (*elig && *fb)
+        return;
+    int64_t vlag = (int64_t)q->vtime - (int64_t)root->vruntime;
+    if (vlag <= 0) {
+        if (!*elig)
+            *elig = root;
+    } else if (!*fb || vlag < *fb_vlag) {
+        *fb = root;
+        *fb_vlag = vlag;
+    }
+    tr_pick(root->tr, q, elig, fb, fb_vlag);
+}
+
+static void rq_enqueue(rq_t *q, proc_t *p)
+{
+    /* EEVDF placement: the task re-enters with its remembered vlag,
+     * positioned relative to this queue's virtual clock.  Clamped to the
+     * placement floor so a task cannot buy its way ahead of its debt. */
+    p->vruntime = (uint64_t)((int64_t)q->vtime - p->vlag);
+    if ((int64_t)(p->vruntime - q->min_vtime) < 0) {
+        p->vruntime = q->min_vtime;
+        p->vlag = (int64_t)q->vtime - (int64_t)p->vruntime;
+    }
+    p->deadline = p->vruntime + p->slice;
+    q->root = tr_insert(q->root, p);
+    q->count++;
+    proc_t *lm = tr_leftmost(q->root);
+    if (lm && (int64_t)(lm->vruntime - q->min_vtime) > 0)
+        q->min_vtime = lm->vruntime;
+}
+
+static void rq_dequeue(rq_t *q, proc_t *p)
+{
+    q->root = tr_delete(q->root, p);
+    if (q->count)
+        q->count--;
+    proc_t *lm = tr_leftmost(q->root);
+    if (lm && (int64_t)(lm->vruntime - q->min_vtime) > 0)
+        q->min_vtime = lm->vruntime;
+}
+
+/* Pick the next task from one queue and take it off.  The task's vlag is
+ * finalised against THIS queue's clock before it leaves, so the dispatch
+ * path can re-base it onto another queue's clock if a steal moved it. */
+static proc_t *rq_pick_best(rq_t *q)
+{
+    proc_t *elig = NULL, *fb = NULL;
+    int64_t fb_vlag = 0;
+    tr_pick(q->root, q, &elig, &fb, &fb_vlag);
+    proc_t *pick = elig ? elig : fb;
+    if (!pick)
+        return NULL;
+    pick->vlag = (int64_t)q->vtime - (int64_t)pick->vruntime;
+    q->root = tr_delete(q->root, pick);
+    if (q->count)
+        q->count--;
+    proc_t *lm = tr_leftmost(q->root);
+    if (lm && (int64_t)(lm->vruntime - q->min_vtime) > 0)
+        q->min_vtime = lm->vruntime;
+    return pick;
+}
+
+/* Put a process on its run queue with a fresh slice.  Caller holds
+ * g_proc_lock.  A task whose cgroup is throttled is parked instead
+ * (WAIT_CGROUP); the cpu.max period rollover releases it.  This is the
+ * single choke point every wake/enqueue path funnels through. */
 static void enqueue_fresh(proc_t *p)
 {
 #ifdef SYSTRACE
@@ -2201,11 +2268,12 @@ static void enqueue_fresh(proc_t *p)
         cg_park(p);
         return;
     }
-    p->vruntime = rq_min_vruntime();
-    p->deadline = p->vruntime + p->slice;
-    p->state    = PROC_READY;
-    if (p->rq_index < 0)
-        rq_push(p);
+    if (p->rq_cpu < 0 || p->rq_cpu >= NR_RQ)
+        p->rq_cpu = (int)cpu_self()->id % NR_RQ;
+    if (!p->tprio)
+        p->tprio = (uint32_t)(p->pid * 0x9E3779B9u) ^ 0x85EBCA6Bu;
+    rq_enqueue(&g_rqs[p->rq_cpu], p);
+    p->state = PROC_READY;
 }
 
 /* Make a brand-new process runnable.  Used by fork/clone/init so all three
@@ -2215,6 +2283,17 @@ static void proc_make_runnable(proc_t *p)
     spin_lock_irq(&g_proc_lock);
     enqueue_fresh(p);
     spin_unlock_irq(&g_proc_lock);
+}
+
+/* Take a queued (READY) task off its run queue -- the exit/kill paths.
+ * Caller holds g_proc_lock; a no-op for anything not sitting on a queue. */
+static void rq_remove(proc_t *p)
+{
+    if (p->state != PROC_READY || p->rq_cpu < 0 || p->rq_cpu >= NR_RQ)
+        return;
+    p->vlag = (int64_t)g_rqs[p->rq_cpu].vtime - (int64_t)p->vruntime;
+    rq_dequeue(&g_rqs[p->rq_cpu], p);
+    p->rq_cpu = -1;
 }
 
 /* ---- cgroup-facing scheduler exports ------------------------------------
@@ -2272,8 +2351,12 @@ static int schedule(void)
     if (prev) {
         uint64_t now  = timer_ticks();
         uint64_t used = now - prev->last_run_tick;
-        prev->vruntime += virt_delta(used, prev->sched_weight);
-        g_vtime        += used * VIRT_UNIT;
+        int pc = (prev->on_cpu >= 0 && prev->on_cpu < NR_RQ) ? prev->on_cpu : 0;
+        rq_t *pq = &g_rqs[pc];
+        uint64_t dv = virt_delta(used, proc_eff_weight(prev));
+        prev->vruntime += dv;
+        pq->vtime      += used * VIRT_UNIT;
+        prev->vlag      = (int64_t)pq->vtime - (int64_t)prev->vruntime;
         prev->last_run_tick = now;
         if (prev->state == PROC_RUNNING) {
             prev->state = PROC_READY;
@@ -2287,11 +2370,35 @@ static int schedule(void)
             if (cg_charge_runtime(prev, used) || cg_chain_throttled(prev))
                 cg_park(prev);
             else
-                rq_push(prev);
+                rq_enqueue(pq, prev);
         }
     }
 
-    proc_t *next = rq_pop();
+    /* Pick from this core's queue; an idle queue steals from the fullest
+     * other one (per-CPU queues, work-stealing fallback). */
+    int mycpu = (int)cpu_self()->id % NR_RQ;
+    proc_t *next = rq_pick_best(&g_rqs[mycpu]);
+    if (next) {
+        next->rq_cpu = mycpu;
+    } else {
+        rq_t *best = NULL;
+        for (int i = 0; i < NR_RQ; i++) {
+            if (i == mycpu)
+                continue;
+            if (g_rqs[i].count && (!best || g_rqs[i].count > best->count))
+                best = &g_rqs[i];
+        }
+        if (best) {
+            next = rq_pick_best(best);
+            if (next) {
+                /* Re-base the stolen task onto this queue's clock: its
+                 * vlag was finalised against the source queue's clock. */
+                next->vruntime = (uint64_t)((int64_t)g_rqs[mycpu].vtime -
+                                            next->vlag);
+                next->rq_cpu = mycpu;
+            }
+        }
+    }
 #ifdef SYSTRACE
     if (next && next->name[0]=='d' && next->name[1]=='r' && next->name[2]=='m') {
         extern void dbg_puts(const char *);
@@ -2370,6 +2477,30 @@ static int schedule(void)
     return 1;
 }
 
+/* Drop a PI boost: the waiter left the owner's list and the owner's
+ * effective weight falls back to the strongest remaining waiter. */
+void futex_pi_unregister(proc_t *p)
+{
+    proc_t *owner = p->pi_owner;
+    if (!owner)
+        return;
+    if (owner->pi_waiters == p) {
+        owner->pi_waiters = p->pi_wnext;
+    } else {
+        proc_t *w = owner->pi_waiters;
+        while (w && w->pi_wnext != p)
+            w = w->pi_wnext;
+        if (w)
+            w->pi_wnext = p->pi_wnext;
+    }
+    p->pi_owner = p->pi_wnext = NULL;
+    uint32_t best = 0;
+    for (proc_t *w = owner->pi_waiters; w; w = w->pi_wnext)
+        if (proc_eff_weight(w) > best)
+            best = proc_eff_weight(w);
+    owner->pi_boost = best;
+}
+
 /* Drop the BKL before parking this process's kernel execution and re-take
  * it on resume, so the lock never rides a descheduled context. */
 static void bkl_leave_for_switch(proc_t *p)
@@ -2414,17 +2545,27 @@ void sched_tick(void)
     spin_lock_irq(&g_proc_lock);
     uint64_t now  = timer_ticks();
     uint64_t used = now - cur->last_run_tick;
-    cur->vruntime += virt_delta(used, cur->sched_weight);
-    g_vtime       += used * VIRT_UNIT;
+    int tc = (cur->on_cpu >= 0 && cur->on_cpu < NR_RQ) ? cur->on_cpu : 0;
+    rq_t *tq = &g_rqs[tc];
+    cur->vruntime += virt_delta(used, proc_eff_weight(cur));
+    tq->vtime     += used * VIRT_UNIT;
+    cur->vlag      = (int64_t)tq->vtime - (int64_t)cur->vruntime;
     cur->last_run_tick = now;
     /* Real CPU time is charged to the cgroup's cpu.max budget; the moment
      * the quota runs out the running task must give the CPU back so it can
      * be parked. */
     int throttled = cg_charge_runtime(cur, used);
-    proc_t *head  = rq_peek();
+    /* Preempt on quota/slice exhaustion, or when an eligible task owes
+     * the CPU (deadline earlier than ours) -- eligibility first, exactly
+     * as EEVDF picks. */
+    proc_t *owed = rq_pick_best(tq);
+    if (owed) {
+        rq_enqueue(tq, owed);
+    }
     int preempt   = throttled ||                                  /* quota gone */
                     (cur->vruntime >= cur->deadline) ||           /* slice gone */
-                    (head && head->deadline < cur->deadline);     /* owed task */
+                    (owed && owed->vlag <= 0 &&
+                     owed->deadline < cur->deadline);             /* eligible owed task */
     spin_unlock_irq(&g_proc_lock);
 
     if (preempt) {
@@ -2505,7 +2646,7 @@ void sched_expire_timeouts(void)
                     dbg_puts("RTHRD state=");
                     dbg_puts_dec((uint32_t)g_procs[i].state);
                     dbg_puts(" rq=");
-                    dbg_puts_dec((uint32_t)(g_procs[i].rq_index + 1));
+                    dbg_puts_dec((uint32_t)(g_procs[i].rq_cpu + 1));
                     dbg_puts("\n");
                 }
             }

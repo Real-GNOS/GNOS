@@ -233,11 +233,19 @@ typedef struct proc {
      * execution owns the big kernel lock, so the answer survives a context
      * switch; `on_cpu` is the core running it (or -1).  The block is 48
      * bytes so the whole struct stays a multiple of 16 (fpu's alignment). */
-    uint64_t      vruntime;       /* CPU time consumed, in ticks         */
+    uint64_t      vruntime;       /* normalized service, VIRT units      */
     uint64_t      deadline;       /* vruntime + slice when last granted  */
     uint64_t      slice;          /* slice granted per pick, in ticks    */
     uint64_t      last_run_tick;  /* tick the CPU was last handed over   */
-    int           rq_index;       /* heap slot, -1 when not queued       */
+    int64_t       vlag;           /* rq vtime - vruntime: <=0 = eligible */
+    int           rq_cpu;         /* home runqueue, -1 until first enq   */
+    uint32_t      tprio;          /* treap heap priority                 */
+    uint32_t      pi_boost;       /* inherited weight floor (futex PI)   */
+    struct proc  *pi_waiters;     /* tasks boosting us through a PI futex*/
+    struct proc  *pi_wnext;       /* next sibling waiter on the owner    */
+    struct proc  *pi_owner;       /* whose weight we are boosting        */
+    struct proc  *tl, *tr;        /* runqueue treap links                */
+    uint64_t      sched_pad;      /* keep the block 16-aligned (fpu)     */
     int           bkl_held;       /* this kernel execution owns the BKL  */
     int           on_cpu;         /* core this process runs on, or -1    */
     int           rsvd;
@@ -514,5 +522,10 @@ int proc_in_group(const proc_t *p, uint32_t gid);
  */
 int proc_permitted(uint32_t mode, uint32_t uid, uint32_t gid, int want,
                    int is_dir);
+
+/* Effective scheduling weight: the cgroup weight, or the PI-boosted floor
+ * when futex waiters demand more. */
+uint32_t proc_eff_weight(proc_t *p);
+void futex_pi_unregister(proc_t *p);
 
 #endif
