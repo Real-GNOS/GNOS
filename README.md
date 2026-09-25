@@ -85,7 +85,7 @@ GNOS/
 │   ├── kernel/          # 内核本体（约 5 万行）
 │   ├── shared/          # 内核/用户共享契约：sysnum.h（syscall 编号）
 │   ├── user/            # ulib 程序、crt0、rc 脚本
-│   ├── include/         # limine.h（引用自 Unixed-Kernel，Apache 2.0）
+│   ├── include/         # limine.h（引导协议布局，净室自研，GPLv2）
 │   └── rootfs/          # 打包进 initrd 的 /etc（测试脚本、fstab…）
 ├── lib/                 # termcap 等
 ├── limine/              # Limine 引导文件（limine-bios-cd.bin 等）
@@ -133,6 +133,7 @@ QEMU 配置：512 MiB 内存、e1000 网卡（user 网络）、音频设备（HD
 GPL-2.0（见 LICENSE）。代码头与文档中的分析报告同遵循该项目精神：自研部分
 GPLv2，第三方组件各自遵循上游许可。
 
-> **第三方组件来源**：`src/include/limine.h` 引用自 Unixed-Kernel（Apache 2.0，
-> 完整许可证文本见 `LICENSE.Unixed`，文件头保留上游版权声明）。其余第三方源码树
-> （musl、busybox、bash、coreutils、openrc 等）见上文「构建与运行」。
+> **第三方组件来源**：`src/include/limine.h` 为净室重写——仅依据 Limine 引导
+> 协议的公开行为规范重新实现结构布局，未复制任何 Apache-2.0 源文件，故整体为
+> GPLv2。其余第三方源码树（musl、busybox、bash、coreutils、openrc 等）各自遵循
+> 其上游许可，见上文「构建与运行」。
