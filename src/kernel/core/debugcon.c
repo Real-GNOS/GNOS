@@ -3,6 +3,7 @@
  */
 #include <stdint.h>
 #include "debugcon.h"
+#include "klog.h"
 
 static void outb(uint16_t port, uint8_t v)
 {
@@ -18,6 +19,7 @@ void dbg_putc(char c)
 
 void dbg_puts(const char *s)
 {
+    klog_dbg_line(s);
     for (; *s; s++)
         dbg_putc(*s);
 }
