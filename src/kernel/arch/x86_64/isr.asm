@@ -58,6 +58,14 @@ isr_common:
     pop rbx
     pop rax
     add rsp, 16             ; discard vector + error code
+
+    ; NT must be clear in the FLAGS THE IRETQ RESTORES: on a same-ring
+    ; return a restored NT makes the CPU attempt a task switch through the
+    ; TSS -- #GP with the TSS selector as the error code.  A frame can pick
+    ; NT up from sigreturn-restored flags or the AP trampoline's undefined
+    ; startup flags, so scrub the frame itself (which also fixes the CPU's
+    ; post-iret state in one step).
+    and qword [rsp], ~0x4000
     iretq
 
 align 16
@@ -106,6 +114,14 @@ section .text
 global syscall_entry
 syscall_entry:
     cli                         ; run the handler with interrupts off
+
+    ; `syscall` loads RFLAGS straight from the user's R11 -- NT included.
+    ; Running the kernel with NT set turns any CPL0 iretq into a task
+    ; switch (#GP/TSS), so clear it the moment we arrive.
+    pushfq
+    and qword [rsp], ~0x4000
+    popfq
+
     mov [gs:CPU_USER_RSP], rsp
     mov rsp, [gs:CPU_KERNEL_RSP0]    ; this process's kernel stack
 
@@ -113,6 +129,7 @@ syscall_entry:
     ; isr_stub_base pair does, so that the final RSP points at regs_t.r15.
     push qword 0x1B                  ; ss     = SEL_UDATA
     push qword [gs:CPU_USER_RSP]     ; rsp    = user RSP
+    and r11, ~0x4000                 ; scrub user NT out of the frame too
     push r11                         ; rflags = user RFLAGS (syscall put it here)
     push qword 0x23                  ; cs     = SEL_UCODE
     push rcx                         ; rip    = user RIP  (syscall put it here)
