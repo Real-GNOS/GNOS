@@ -65,7 +65,7 @@
 /* One page per buffer: 4096 bytes = 2048 samples = 1024 stereo frames,
  * about 21 ms of audio each.  Two of them is a tone long enough to hear and
  * short enough that the self-test does not stall the boot. */
-#define NBUF     2
+#define NBUF     16
 #define BUF_BYTES   4096
 #define BUF_SAMPLES (BUF_BYTES / 2)          /* the BDL counts 16-bit samples */
 
@@ -182,6 +182,7 @@ int ac97_init(void)
  * fills arm the engine without waiting. */
 static int g_w;                 /* next buffer to refill */
 static int g_started;
+static uint32_t g_total_frames;  /* frames written since the last reset */
 
 int audio_start(void)
 {
@@ -196,6 +197,16 @@ int audio_start(void)
     return 0;
 }
 
+/* How many descriptors are free for refilling: the DMA owns everything
+ * from CIV (playing) up to g_w (next to fill); keep one spare so the
+ * engine always has a descriptor queued ahead of it. */
+static int audio_free_buffers(void)
+{
+    uint8_t civ = inb(g_nabm + NABM_PO_CIV);
+    int in_flight = (g_w - (int)civ + NBUF) % NBUF;
+    return NBUF - 1 - in_flight;
+}
+
 int audio_write(const int16_t *src, uint32_t frames)
 {
     if (!g_ok)
@@ -204,22 +215,23 @@ int audio_write(const int16_t *src, uint32_t frames)
     uint32_t done = 0;
     while (done < frames) {
         uint32_t f = frames - done;
-        if (f > BUF_SAMPLES / CHANNELS)
-            f = BUF_SAMPLES / CHANNELS;
+        uint32_t fmax = BUF_SAMPLES / CHANNELS;
+        if (f > fmax)
+            f = fmax;
 
-        if (g_started) {
-            /* Wait for the DMA to move past buffer g_w: CIV naming the
-             * NEXT buffer means this one is fully consumed.  A few seconds
-             * of timeout keeps a wedged engine from hanging the writer. */
-            unsigned t;
-            for (t = 0; t < 4000000u; t++) {
-                uint8_t civ = inb(g_nabm + NABM_PO_CIV);
-                if (civ == (uint8_t)((g_w + 1) % NBUF))
-                    break;
-                io_delay();
-            }
-            if (t == 4000000u)
-                return (int)(done > 0 ? done : -1);
+        /* Wait for a free descriptor.  With 16 buffers (~344 ms of audio)
+         * a scheduling hiccup on the writer is absorbed instead of being
+         * heard: the old 2-buffer ring underran on every hiccup and the
+         * DMA wrapped onto stale samples -- the "一卡一卡" stutter. */
+        unsigned t;
+        for (t = 0; t < 4000000u; t++) {
+            if (audio_free_buffers() > 0)
+                break;
+            io_delay();
+        }
+        if (t == 4000000u) {
+            dbg_puts("AC97: write starved\r\n");
+            return (int)(done > 0 ? done : -1);
         }
 
         memcpy(g_buf[g_w], src + done * CHANNELS,
@@ -227,8 +239,10 @@ int audio_write(const int16_t *src, uint32_t frames)
         g_bdl[g_w].addr    = (uint32_t)g_buf_phys[g_w];
         g_bdl[g_w].samples = (uint16_t)(f * CHANNELS);
         g_bdl[g_w].flags   = 0;
-        outb(g_nabm + NABM_PO_LVI, g_w);
-        if (!g_started) {
+        outb(g_nabm + NABM_PO_LVI, g_w);      /* extend the valid ring */
+        g_total_frames += f;
+        if (!g_started || (inw(g_nabm + NABM_PO_SR) & PO_SR_DCH)) {
+            /* first start, or underrun halt: (re)kick the engine */
             outb(g_nabm + NABM_PO_CR, PO_CR_RPBM);
             g_started = 1;
         }
@@ -252,6 +266,60 @@ void audio_drain(void)
     }
     outb(g_nabm + NABM_PO_CR, 0);
     g_started = 0;
+}
+
+/* ---- ALSA PCM primitives (alsa.c drives these) -------------------------- */
+
+void audio_reset_ring(void)
+{
+    outb(g_nabm + NABM_PO_CR, PO_CR_RR);
+    for (int i = 0; i < 1000 && (inb(g_nabm + NABM_PO_CR) & PO_CR_RR); i++)
+        io_delay();
+    outl(g_nabm + NABM_PO_BDBAR, (uint32_t)g_bdl_phys);
+    g_w = 0;
+    g_started = 0;
+    g_total_frames = 0;
+}
+
+void audio_begin(void)
+{
+    outb(g_nabm + NABM_PO_CR, PO_CR_RPBM);
+    g_started = 1;
+}
+
+void audio_stop(void)
+{
+    outb(g_nabm + NABM_PO_CR, 0);
+    g_started = 0;
+}
+
+int audio_free_frames(void)
+{
+    return audio_free_buffers() * (BUF_SAMPLES / CHANNELS);
+}
+
+int audio_engine_halted(void)
+{
+    return g_started && (inw(g_nabm + NABM_PO_SR) & PO_SR_DCH);
+}
+
+uint32_t audio_frames_total(void)
+{
+    return g_total_frames;
+}
+
+/* Frames the DMA has not consumed yet (the filled tail of the ring). */
+uint32_t audio_in_flight_frames(void)
+{
+    uint8_t civ = inb(g_nabm + NABM_PO_CIV);
+    uint32_t in_flight = 0;
+    for (int i = 0; i < NBUF; i++) {
+        int rel = (i - (int)civ + NBUF) % NBUF;
+        int depth = (g_w - (int)civ + NBUF) % NBUF;
+        if (rel < depth)
+            in_flight += g_bdl[i].samples;
+    }
+    return in_flight / CHANNELS;
 }
 
 int ac97_selftest(void)

@@ -283,6 +283,8 @@
  * GNOS extension, not a Linux syscall.
  */
 #define SYS_dbgputs       441
+#define SYS_klog          443
+#define SYS_cpuid         444
 
 /*
  * struct sockaddr_in as it crosses the syscall boundary: 16 bytes, and the
@@ -314,6 +316,11 @@ typedef struct {
 /* futex() operations we recognise. */
 #define FUTEX_WAIT   0
 #define FUTEX_WAKE   1
+#define FUTEX_LOCK_PI        6
+#define FUTEX_UNLOCK_PI      7
+/* PI futex value conventions (uapi/futex.h). */
+#define FUTEX_TID_MASK    0x3FFFFFFFu
+#define FUTEX_WAITERS_BIT 0x40000000u
 
 /* signal() dispositions.  Anything else is the address of a handler. */
 #define SIG_DFL  0

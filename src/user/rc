@@ -19,7 +19,36 @@ mkdir -p /var/log /tmp/run
 #/bin/dbgcat.elf /tmp/pty.out
 
 # audio: decode the MP3 to raw PCM and feed /dev/dsp (AC97 48k stereo).
-/usr/bin/mpg123 -s -r 48000 --stereo /root/MAO.mp3 | /bin/cat > /dev/dsp &
+# The player must be allowed to tcsetattr the console even though getty's
+# session owns it: ignoring SIGTTOU here is inherited by every child.
+trap "" TTOU
+
+# --- audio: OSS sanity, decode, then ALSA playback ---
+/usr/bin/dd if=/dev/urandom of=/dev/dsp bs=4096 count=40 > /tmp/audio.out 2>&1
+echo "noise_exit=$?" >> /tmp/audio.out
+/usr/bin/mpg123 -w /tmp/mao.wav /root/MAO.mp3 > /tmp/audio.out 2>&1
+echo "decode_exit=$?" >> /tmp/audio.out
+/usr/bin/ls -l /tmp/mao.wav >> /tmp/audio.out 2>&1
+/usr/bin/aplay /tmp/mao.wav > /tmp/aplay.out 2>&1
+echo "play_exit=$?" >> /tmp/audio.out
+/bin/dbgcat.elf /tmp/audio.out
+/bin/dbgcat.elf /tmp/aplay.out
+
+# klog + cpuid syscall tests
+/bin/klogtest > /tmp/klog.out 2>&1
+/bin/dbgcat.elf /tmp/klog.out
+
+# --- OpenRC (Uinxed recipe: sysinit/boot/default runlevels) ---
+mkdir -p /run/openrc /run/lock /lib/rc/cache
+/sbin/openrc sysinit > /tmp/openrc-sysinit.out 2>&1
+echo "openrc_sysinit_exit=$?" >> /tmp/openrc-sysinit.out
+/sbin/openrc boot > /tmp/openrc-boot.out 2>&1
+echo "openrc_boot_exit=$?" >> /tmp/openrc-boot.out
+/sbin/openrc default > /tmp/openrc-default.out 2>&1
+echo "openrc_default_exit=$?" >> /tmp/openrc-default.out
+/bin/dbgcat.elf /tmp/openrc-sysinit.out
+/bin/dbgcat.elf /tmp/openrc-boot.out
+/bin/dbgcat.elf /tmp/openrc-default.out
 
 # apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
 /sbin/apk.static --version >/tmp/apk.out 2>&1
@@ -37,12 +66,16 @@ echo "RUN_EXIT=$?" >>/tmp/clang.out
 # --- Xorg smoke test (uncomment for interactive runs) ---
 # Xorg's core-font path needs fonts.dir indexes; without them the font
 # path entries are deleted and xterm renders an empty window.
+echo "rc: mkfontdir starting"
 /usr/bin/mkfontdir /usr/share/fonts/misc /usr/share/fonts/100dpi /usr/share/fonts/75dpi
+echo "rc: mkfontdir done"
 /usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
 sleep 15
+echo "rc: after Xorg sleep15"
 DISPLAY=:0 /usr/bin/xsetroot -solid gray40 -cursor_name left_ptr >/tmp/xsetroot.out 2>&1
 DISPLAY=:0 /usr/bin/twm >/tmp/twm.out 2>&1 &
 DISPLAY=:0 /usr/bin/xeyes -geometry +100+100 >/tmp/xeyes.out 2>&1 &
+echo "rc: launching xterm"
 DISPLAY=:0 /usr/bin/xterm -geometry 80x25 -background white -foreground black >/tmp/xterm.out 2>&1 &
 sleep 8
 /bin/dbgcat.elf /var/log/Xorg.0.log

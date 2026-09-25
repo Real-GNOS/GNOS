@@ -45,6 +45,9 @@
 #include "sysfs.h"
 #include "pty.h"
 #include "audio.h"
+#include "klog.h"
+#include "cpuid.h"
+#include "alsa.h"
 #include "module.h"
 #include "acpi.h"
 #include "lapic.h"
@@ -151,6 +154,7 @@ void kernel_entry(void)
 
     /* The driver registry has to exist before the first driver init runs,
      * because every one of them announces itself into it. */
+    klog_init();                       /* /dev-style kernel log ring */
     subsys_init();
     sysfs_init();                      /* /sys built-in attributes */
 
@@ -269,6 +273,7 @@ void kernel_entry(void)
      * anything registered before it is forgotten. */
     pty_init();
     audio_vfs_register();               /* /dev/dsp (AC97 PCM out) */
+    alsa_vfs_register();                /* /dev/snd/controlC0 + pcmC0D0p */
 
     tty_init();
 

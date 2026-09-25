@@ -344,8 +344,18 @@ static int pids_allow_one(int cg)
 {
     for (int c = cg; c != -1; c = g_cgs[c].parent) {
         if (g_cgs[c].pids_max >= 0 &&
-            subtree_tasks(c) >= g_cgs[c].pids_max)
+            subtree_tasks(c) >= g_cgs[c].pids_max) {
+            extern void dbg_puts(const char *);
+            extern void dbg_puts_dec(uint32_t);
+            dbg_puts("PIDS: deny c=");
+            dbg_puts_dec((uint32_t)c);
+            dbg_puts(" max=");
+            dbg_puts_dec((uint32_t)g_cgs[c].pids_max);
+            dbg_puts(" tasks=");
+            dbg_puts_dec((uint32_t)subtree_tasks(c));
+            dbg_puts("\r\n");
             return -E_AGAIN;
+        }
         if (c == CG_ROOT)
             break;
     }

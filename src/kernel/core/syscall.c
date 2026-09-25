@@ -39,6 +39,8 @@
 #include "timerfd.h"
 #include "signalfd.h"
 #include "pty.h"
+#include "klog.h"
+#include "cpuid.h"
 #include "epoll.h"
 #include "input.h"
 #include "unix.h"
@@ -3865,6 +3867,21 @@ static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
         uint32_t cur = *(volatile uint32_t *)(uintptr_t)uaddr;
         if (cur != (uint32_t)val)
             return -E_AGAIN;
+        /* PI: a waiter on a futex whose value names an owner (the
+         * FUTEX_WAITERS convention) boosts the owner's scheduling weight
+         * for as long as it waits. */
+        if (cur & 0x40000000u) {
+            uint32_t tid = cur & 0x3FFFFFFFu;
+            proc_t *owner = proc_by_pid((int)tid);
+            if (owner && owner != p) {
+                uint32_t w = proc_eff_weight(p);
+                if (w > owner->pi_boost)
+                    owner->pi_boost = w;
+                p->pi_owner = owner;
+                p->pi_wnext = owner->pi_waiters;
+                owner->pi_waiters = p;
+            }
+        }
 
         uint64_t deadline = utimeout ? timer_ticks() + (uint64_t)ticks : 0;
         /* A futex word on a shared page (POSIX named semaphore) must wake
@@ -3873,10 +3890,13 @@ static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
         p->futex_shared = vmm_page_shared(p->as, uaddr);
         p->futex_key    = p->futex_shared ? vmm_resolve(p->as, uaddr) : 0;
         p->futex_addr = uaddr;
-        if (utimeout)
+        if (utimeout) {
             sched_block_timeout(WAIT_FUTEX, (uint64_t)ticks);
-        else
+            futex_pi_unregister(p);
+        } else {
             sched_block(WAIT_FUTEX);
+            futex_pi_unregister(p);
+        }
         p->futex_addr = 0;
         p->futex_shared = 0;
         p->futex_key    = 0;
@@ -3890,6 +3910,47 @@ static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
         if (utimeout && deadline && timer_ticks() >= deadline)
             return -E_TIMEDOUT;
         return 0;
+    }
+    case FUTEX_LOCK_PI: {
+        /* glibc PI-mutex acquire: the value's upper 30 bits carry the
+         * owner TID; WAITERS marks contention.  Spins once, then blocks
+         * with a PI boost on the owner. */
+        if (!user_ptr_ok(uaddr, 4))
+            return -E_FAULT;
+        int32_t mypid = p ? p->pid : 0;
+        for (;;) {
+            uint32_t v = *(volatile uint32_t *)(uintptr_t)uaddr;
+            if ((v & 0xC0000000u) == 0 && (v & 0x3FFFFFFFu) == 0) {
+                *(volatile uint32_t *)(uintptr_t)uaddr = (uint32_t)mypid;
+                return 0;
+            }
+            uint32_t tid = v & 0x3FFFFFFFu;
+            if (tid == (uint32_t)mypid)
+                return -E_INVAL;   /* EDEADLK: the lock already belongs to us */
+            *(volatile uint32_t *)(uintptr_t)uaddr = v | 0x40000000u;
+            proc_t *owner = proc_by_pid((int)tid);
+            if (owner && owner != p) {
+                uint32_t w = proc_eff_weight(p);
+                if (w > owner->pi_boost)
+                    owner->pi_boost = w;
+                p->pi_owner = owner;
+                p->pi_wnext = owner->pi_waiters;
+                owner->pi_waiters = p;
+            }
+            sched_block(WAIT_FUTEX);
+            futex_pi_unregister(p);
+        }
+    }
+    case FUTEX_UNLOCK_PI: {
+        if (!user_ptr_ok(uaddr, 4))
+            return -E_FAULT;
+        uint32_t v = *(volatile uint32_t *)(uintptr_t)uaddr;
+        if ((v & 0x3FFFFFFFu) != (uint32_t)(p ? p->pid : 0))
+            return -E_PERM;
+        /* Hand the lock to nobody in particular: clear the owner and wake
+         * the waiters; the fastest CAS wins and re-marks WAITERS. */
+        *(volatile uint32_t *)(uintptr_t)uaddr = v & 0xC0000000u;
+        return proc_wake_futex(p->as, uaddr);
     }
     case FUTEX_WAKE:
         /* Waking everyone rather than honouring `val` is correct -- an
@@ -4881,6 +4942,16 @@ void syscall_handler(regs_t *r)
         ret = sys_dbgputs(a1);
         break;
 
+    /* klog(443): dmesg-style kernel log ring access. */
+    case SYS_klog:
+        ret = klog_syscall(a1, a2, a3);
+        break;
+
+    /* cpuid(444): CPUID(leaf, subleaf) with NULL-skippable out registers. */
+    case SYS_cpuid:
+        ret = cpuid_syscall(a1, a2, a3, r->r10, r->r8, r->r9);
+        break;
+
     case SYS_sched_yield:
         sched_yield();
         ret = 0;
@@ -5400,7 +5471,18 @@ void syscall_init(void)
           ((uint64_t)SEL_KCODE << 32) /* sysret CS field (unused here)    */
           | ((uint64_t)SEL_UCODE << 48));
     wrmsr(0xC0000082, (uint64_t)syscall_entry);   /* IA32_LSTAR */
-    wrmsr(0xC0000080, 0x00000801);    /* EFER.SCE = 1 | EFER.NXE = 1 */
+    /* TEMPORARY KVM debug: split the EFER write to see which bit #GP's. */
+    {
+        uint64_t efer = 0x1;          /* SCE */
+        uint32_t a, d;
+        asm volatile("cpuid" : "=a"(a), "=d"(d) : "a"(0x80000001), "c"(0));
+        if (d & (1u << 20))
+            efer |= 0x800;            /* NXE only if the CPU has NX */
+        dbg_puts("SYSGATE: efer=");
+        dbg_puts_hex(efer);
+        dbg_puts("\r\n");
+        wrmsr(0xC0000080, efer);      /* EFER.SCE (+ NXE if available) */
+    }
     /* IA32_FMASK left at 0: the stub clears IF itself, and leaving RFLAGS
      * untouched means the saved R11 still carries the user's IF for iretq. */
 
