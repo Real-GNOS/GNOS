@@ -116,7 +116,7 @@ MUSL_INC  := $(MUSL_PREFIX)/include
 MUSL_GCC  := $(MUSL_PREFIX)/bin/musl-gcc
 
 # Programs built against musl rather than ulib.
-MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle
+MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1
 MUSL_OBJS := $(addprefix $(BUILD)/user/,$(addsuffix .o,$(MUSLPROGS)))
 MUSL_ELFS := $(addprefix $(BUILD)/,$(addsuffix .elf,$(MUSLPROGS)))
 
@@ -736,6 +736,7 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	cp $(BUILD)/getty.elf $(BUILD)/initrd-root/sbin/getty
 	cp $(BUILD)/agetty.elf $(BUILD)/initrd-root/sbin/agetty
 	cp $(BUILD)/wiggle.elf $(BUILD)/initrd-root/sbin/wiggle
+	cp $(BUILD)/nep1.elf $(BUILD)/initrd-root/bin/nep1
 	cp $(BUILD)/login.elf $(BUILD)/initrd-root/bin/login
 	cp $(BUILD)/bgidm.elf $(BUILD)/initrd-root/bin/bgidm
 	cp $(BUILD)/chvt.elf  $(BUILD)/initrd-root/usr/bin/chvt
@@ -897,6 +898,7 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	cp -a src/rootfs/etc/. $(BUILD)/initrd-root/etc/
 	# Guest-side helper scripts (start-xfce, ...).
 	cp -a src/rootfs/sbin/. $(BUILD)/initrd-root/sbin/
+	cp -a src/rootfs/bin/. $(BUILD)/initrd-root/bin/
 	# Kernel command line carrier: `make KCMD="single"` drops the words into
 	# /cmdline at the initrd root; the kernel reads that file before PID 1
 	# (Limine does not forward conf cmdline: to direct-protocol kernels).

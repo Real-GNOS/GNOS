@@ -1,2 +1,3 @@
 - --global
 - GNOS DRM 重写事故：drm_ioctl.c 里 drm_gem_dumb_create(dev, file_priv, args) 参数顺序写反（真实签名 (file_priv, dev, args)），编译器不报错但 dumb buffer 全废。教训：重写调用处必须逐参数对照头文件原型，且改动必须跑完 QEMU 功能回归才能提交（那次回归被中断后直接提交了）。drm_ioctl.c 已由用户方回退并由混元大神接管重写，我不再碰。
+- NeoRunst（李汉睿 RTStudio 的 UEFI 桌面系统）兼容项目：PRD 在 gnos/prdneo.md（v2）。关键结论：NEP1 格式为纯 PIE 无重定位（+0x14 保留恒 0，反编译见到的重定位循环是死代码）；入口 nep_main(KernelApi*) 经 RDI 传 API 表；23 项 KernelApi 顺序以官方 devtools SDK 的 neorunst.h 为权威。官方 SDK 解压在 /home/elaina/Downloads/devtools-extracted/dev tools/（含 neorunst.h、示例源码、dist/app.nep）。Ghidra 反编译产物在 /tmp/runst_*.c，Ghidra 工程 /tmp/ghidra_proj/RunstProj（zh 版 12.1，analyzeHeadless 路径 /persistent/home/elaina/ghidra_zh/ghidra_12.1_DEV/support/）。

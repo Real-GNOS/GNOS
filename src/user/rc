@@ -7,6 +7,20 @@ mkdir -p /var/log /tmp/run
 /sbin/getty tty1 &
 /sbin/getty tty2 &
 
+# VT switch residue check: switch to an empty console (tty3).
+#/usr/bin/chvt 3
+
+# NEP1 (NeoRunst): the kernel execve path loads .nep images directly.
+#/bin/nep1 /root/app.nep >/tmp/nep.out 2>&1 &
+#/bin/dbgcat.elf /tmp/nep.out
+
+# pty subsystem self-test (line discipline, signals, ioctls).
+#/bin/pty_test >/tmp/pty.out 2>&1
+#/bin/dbgcat.elf /tmp/pty.out
+
+# audio: decode the MP3 to raw PCM and feed /dev/dsp (AC97 48k stereo).
+/usr/bin/mpg123 -s -r 48000 --stereo /root/MAO.mp3 | /bin/cat > /dev/dsp &
+
 # apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
 /sbin/apk.static --version >/tmp/apk.out 2>&1
 /sbin/apk.static update >>/tmp/apk.out 2>&1
@@ -21,13 +35,16 @@ echo "RUN_EXIT=$?" >>/tmp/clang.out
 /bin/dbgcat.elf /tmp/clang.out
 
 # --- Xorg smoke test (uncomment for interactive runs) ---
-#/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
-#sleep 15
-#DISPLAY=:0 /usr/bin/xsetroot -solid gray40 -cursor_name left_ptr >/tmp/xsetroot.out 2>&1
-#DISPLAY=:0 /usr/bin/twm >/tmp/twm.out 2>&1 &
-#DISPLAY=:0 /usr/bin/xeyes -geometry +100+100 >/tmp/xeyes.out 2>&1 &
-#DISPLAY=:0 /usr/bin/xterm -geometry 80x25 -background white -foreground black >/tmp/xterm.out 2>&1 &
-#sleep 8
-#/bin/dbgcat.elf /var/log/Xorg.0.log
-#sleep 5
-#/sbin/wiggle
+# Xorg's core-font path needs fonts.dir indexes; without them the font
+# path entries are deleted and xterm renders an empty window.
+/usr/bin/mkfontdir /usr/share/fonts/misc /usr/share/fonts/100dpi /usr/share/fonts/75dpi
+/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
+sleep 15
+DISPLAY=:0 /usr/bin/xsetroot -solid gray40 -cursor_name left_ptr >/tmp/xsetroot.out 2>&1
+DISPLAY=:0 /usr/bin/twm >/tmp/twm.out 2>&1 &
+DISPLAY=:0 /usr/bin/xeyes -geometry +100+100 >/tmp/xeyes.out 2>&1 &
+DISPLAY=:0 /usr/bin/xterm -geometry 80x25 -background white -foreground black >/tmp/xterm.out 2>&1 &
+sleep 8
+/bin/dbgcat.elf /var/log/Xorg.0.log
+sleep 5
+/sbin/wiggle
