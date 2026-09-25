@@ -44,6 +44,7 @@
 #include "subsys.h"
 #include "sysfs.h"
 #include "pty.h"
+#include "audio.h"
 #include "module.h"
 #include "acpi.h"
 #include "lapic.h"
@@ -152,7 +153,6 @@ void kernel_entry(void)
      * because every one of them announces itself into it. */
     subsys_init();
     sysfs_init();                      /* /sys built-in attributes */
-    pty_init();                        /* /dev/ptmx clone point */
 
     /* ---- console ------------------------------------------------------ */
     fbcon_init(&g_bi);
@@ -263,6 +263,12 @@ void kernel_entry(void)
     fbcon_puts("initrd: mounting EXT2 filesystem...\n");
     if (!vfs_init(root_img, root_size))
         panic("initrd is not a mountable ext2 volume");
+
+    /* /dev/ptmx is a /dev node, so it has to be registered after the VFS
+     * exists: vfs_init() starts the device table from scratch, and
+     * anything registered before it is forgotten. */
+    pty_init();
+    audio_vfs_register();               /* /dev/dsp (AC97 PCM out) */
 
     tty_init();
 

@@ -290,6 +290,30 @@ static int32_t evdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return (int32_t)(nout * sizeof(input_event_t));
 }
 
+/*
+ * Kernel-internal, non-blocking pop of one decoded event -- the API the
+ * NEP shim's get_event() uses to translate input into ApiEvents without
+ * going through the /dev/input chardev layer.
+ */
+int input_pull(int mouse, uint16_t *type, uint16_t *code, int32_t *value)
+{
+    evdev_dev_t *d = mouse ? &g_mouse_dev : &g_kbd_dev;
+    evdev_q_t   *q = d->q;
+    asm volatile("cli");
+    if (q->count == 0) {
+        asm volatile("sti");
+        return 0;
+    }
+    input_event_t e = q->ev[q->head];
+    q->head = (q->head + 1) % 64;
+    q->count--;
+    asm volatile("sti");
+    *type = e.type;
+    *code = e.code;
+    *value = e.value;
+    return 1;
+}
+
 static int evdev_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
     evdev_dev_t *d = (evdev_dev_t *)n->priv;

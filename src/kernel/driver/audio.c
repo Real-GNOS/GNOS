@@ -25,6 +25,8 @@
 #include "ac97.h"
 #include "pci.h"
 #include "io.h"
+#include "vfs.h"
+#include "audio.h"
 #include "pmm.h"
 #include "kstring.h"
 #include "debugcon.h"
@@ -171,6 +173,87 @@ int ac97_init(void)
     return 1;
 }
 
+/* ---- OSS-style PCM streaming (/dev/dsp) ---------------------------------
+ *
+ * S16LE stereo at the fixed 48 kHz codec rate, fed through the same two
+ * DMA buffers the self-test exercises.  audio_write() blocks until the DMA
+ * has moved past the buffer it is about to refill (CIV is polled -- the
+ * completion interrupt is not wired up), then extends LVI.  The first two
+ * fills arm the engine without waiting. */
+static int g_w;                 /* next buffer to refill */
+static int g_started;
+
+int audio_start(void)
+{
+    if (!g_ok)
+        return -1;
+    outb(g_nabm + NABM_PO_CR, PO_CR_RR);
+    for (int i = 0; i < 1000 && (inb(g_nabm + NABM_PO_CR) & PO_CR_RR); i++)
+        io_delay();
+    outl(g_nabm + NABM_PO_BDBAR, (uint32_t)g_bdl_phys);
+    g_w = 0;
+    g_started = 0;
+    return 0;
+}
+
+int audio_write(const int16_t *src, uint32_t frames)
+{
+    if (!g_ok)
+        return -1;
+
+    uint32_t done = 0;
+    while (done < frames) {
+        uint32_t f = frames - done;
+        if (f > BUF_SAMPLES / CHANNELS)
+            f = BUF_SAMPLES / CHANNELS;
+
+        if (g_started) {
+            /* Wait for the DMA to move past buffer g_w: CIV naming the
+             * NEXT buffer means this one is fully consumed.  A few seconds
+             * of timeout keeps a wedged engine from hanging the writer. */
+            unsigned t;
+            for (t = 0; t < 4000000u; t++) {
+                uint8_t civ = inb(g_nabm + NABM_PO_CIV);
+                if (civ == (uint8_t)((g_w + 1) % NBUF))
+                    break;
+                io_delay();
+            }
+            if (t == 4000000u)
+                return (int)(done > 0 ? done : -1);
+        }
+
+        memcpy(g_buf[g_w], src + done * CHANNELS,
+               f * CHANNELS * sizeof(int16_t));
+        g_bdl[g_w].addr    = (uint32_t)g_buf_phys[g_w];
+        g_bdl[g_w].samples = (uint16_t)(f * CHANNELS);
+        g_bdl[g_w].flags   = 0;
+        outb(g_nabm + NABM_PO_LVI, g_w);
+        if (!g_started) {
+            outb(g_nabm + NABM_PO_CR, PO_CR_RPBM);
+            g_started = 1;
+        }
+        g_w = (g_w + 1) % NBUF;
+        done += f;
+    }
+    return (int)done;
+}
+
+void audio_drain(void)
+{
+    if (!g_ok || !g_started)
+        return;
+    /* Let the engine play out what LVI already covers, then stop. */
+    for (unsigned t = 0; t < 4000000u; t++) {
+        uint8_t civ = inb(g_nabm + NABM_PO_CIV);
+        uint16_t picb = inw(g_nabm + NABM_PO_PICB);
+        if (civ == (uint8_t)g_w && picb < 64)
+            break;
+        io_delay();
+    }
+    outb(g_nabm + NABM_PO_CR, 0);
+    g_started = 0;
+}
+
 int ac97_selftest(void)
 {
     if (!g_ok)
@@ -239,4 +322,82 @@ int ac97_selftest(void)
     dbg_puts_dec(NBUF);
     dbg_puts(" DMA buffer(s)\r\n");
     return 1;
+}
+
+
+/* ---- /dev/dsp (OSS-lite) ------------------------------------------------ */
+
+#define SNDCTL_DSP_RESET    0x5000
+#define SNDCTL_DSP_SYNC     0x5001
+#define SNDCTL_DSP_SPEED    0x5004
+#define SNDCTL_DSP_CHANNELS 0x5006
+#define SNDCTL_DSP_SETFMT   0x5008
+#define AFMT_S16_LE         0x10
+
+static int32_t dsp_write(vfs_node_t *n, uint64_t off, const void *buf,
+                         uint32_t len)
+{
+    (void)n; (void)off;
+    uint32_t frames = len / (CHANNELS * 2);
+    if (frames == 0)
+        return 0;
+    if (!g_started)
+        audio_start();
+    int r = audio_write((const int16_t *)buf, frames);
+    if (r < 0)
+        return -E_IO;
+    return r * CHANNELS * 2;
+}
+
+static int32_t dsp_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
+{
+    (void)n; (void)off; (void)buf; (void)len;
+    return 0;                              /* capture not implemented */
+}
+
+static int32_t dsp_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
+{
+    (void)n;
+    switch (cmd) {
+    case SNDCTL_DSP_RESET:
+        audio_start();
+        return 0;
+    case SNDCTL_DSP_SYNC:
+        audio_drain();
+        return 0;
+    case SNDCTL_DSP_SPEED:
+        if (user_ptr_ok(arg, 4))
+            *(int32_t *)(uintptr_t)arg = SAMPLE_RATE;
+        return 0;
+    case SNDCTL_DSP_CHANNELS:
+        if (user_ptr_ok(arg, 4))
+            *(int32_t *)(uintptr_t)arg = CHANNELS;
+        return 0;
+    case SNDCTL_DSP_SETFMT:
+        if (user_ptr_ok(arg, 4))
+            *(int32_t *)(uintptr_t)arg = AFMT_S16_LE;
+        return 0;
+    default:
+        return -E_NOTTY;
+    }
+}
+
+static void dsp_release(vfs_node_t *n)
+{
+    (void)n;
+    audio_drain();
+}
+
+static const vfs_ops_t g_dsp_ops = {
+    .read    = dsp_read,
+    .write   = dsp_write,
+    .ioctl   = dsp_ioctl,
+    .release = dsp_release,
+};
+
+int audio_vfs_register(void)
+{
+    int r = vfs_register_devnum("dsp", &g_dsp_ops, NULL, 14, 3);
+    vfs_register_devnum("audio", &g_dsp_ops, NULL, 14, 4);
+    return r;
 }

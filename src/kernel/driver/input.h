@@ -31,6 +31,12 @@ void input_set_nonblock(vfs_node_t *n, int nb);
  * *results* -- a key code + pressed flag, or mouse deltas + button mask --
  * exactly the shape the PS/2 decoder produces, so libinput sees one
  * coherent device no matter which wire the event came over. */
+/* Non-blocking pop of one decoded event (kernel-internal consumers, e.g.
+ * the NEP shim's get_event).  mouse selects the device: 0 keyboard,
+ * 1 mouse.  Returns 1 and fills the out params, or 0 when the queue is
+ * empty. */
+int input_pull(int mouse, uint16_t *type, uint16_t *code, int32_t *value);
+
 void input_usb_kbd(uint16_t key, int pressed);
 void input_usb_mouse(uint16_t btn_mask, int dx, int dy);
 
