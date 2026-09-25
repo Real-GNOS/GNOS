@@ -5471,17 +5471,27 @@ void syscall_init(void)
           ((uint64_t)SEL_KCODE << 32) /* sysret CS field (unused here)    */
           | ((uint64_t)SEL_UCODE << 48));
     wrmsr(0xC0000082, (uint64_t)syscall_entry);   /* IA32_LSTAR */
-    /* TEMPORARY KVM debug: split the EFER write to see which bit #GP's. */
+    /* EFER must be a READ-MODIFY-WRITE: under KVM-SVM with NPT the
+     * hypervisor owns EFER.SVME (bit 12) and rejects a write that clears
+     * it -- a blind 0x801 store #GPs on KVM (TCG, where EFER reads as 0,
+     * never noticed).  Set SCE, add NXE when the CPU reports NX. */
     {
-        uint64_t efer = 0x1;          /* SCE */
-        uint32_t a, d;
-        asm volatile("cpuid" : "=a"(a), "=d"(d) : "a"(0x80000001), "c"(0));
-        if (d & (1u << 20))
-            efer |= 0x800;            /* NXE only if the CPU has NX */
+        uint64_t efer;
+        uint32_t a = 0, d = 0;
+        uint32_t maxext = 0;
+        asm volatile("cpuid" : "=a"(maxext) : "a"(0x80000000) : "ebx", "ecx", "edx");
+        if (maxext >= 0x80000001u)
+            asm volatile("cpuid" : "=a"(a), "=d"(d)
+                         : "a"(0x80000001), "c"(0u)
+                         : "ebx");
+        asm volatile("rdmsr" : "=A"(efer) : "c"(0xC0000080u));
+        efer |= 0x1;                          /* SCE: enable syscall */
+        if ((d & (1u << 20)) && maxext >= 0x80000001u)
+            efer |= 0x800;                    /* NXE when NX exists */
         dbg_puts("SYSGATE: efer=");
         dbg_puts_hex(efer);
         dbg_puts("\r\n");
-        wrmsr(0xC0000080, efer);      /* EFER.SCE (+ NXE if available) */
+        wrmsr(0xC0000080, efer);
     }
     /* IA32_FMASK left at 0: the stub clears IF itself, and leaving RFLAGS
      * untouched means the saved R11 still carries the user's IF for iretq. */

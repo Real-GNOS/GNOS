@@ -38,6 +38,14 @@ isr_common:
     push r14
     push r15
 
+    ; Scrub the CPU's own NT: an interrupt gate does NOT clear it, so an
+    ; AP whose trampoline left NT set runs the handler (and its iretq,
+    ; which KVM treats as a task return when current NT=1 -- #GP/TSS) with
+    ; the flag alive.  The frame's rflags slot is scrubbed at the exit.
+    pushfq
+    and qword [rsp], ~0x4000
+    popfq
+
     cld                     ; SysV ABI: DF must be clear on entry to C
     mov  rdi, rsp           ; rdi = regs_t *
     call isr_dispatch
@@ -61,11 +69,12 @@ isr_common:
 
     ; NT must be clear in the FLAGS THE IRETQ RESTORES: on a same-ring
     ; return a restored NT makes the CPU attempt a task switch through the
-    ; TSS -- #GP with the TSS selector as the error code.  A frame can pick
-    ; NT up from sigreturn-restored flags or the AP trampoline's undefined
-    ; startup flags, so scrub the frame itself (which also fixes the CPU's
-    ; post-iret state in one step).
-    and qword [rsp], ~0x4000
+    ; TSS -- #GP with the TSS selector as the error code (KVM enforces the
+    ; SDM here; TCG silently ignores it).  The rflags slot sits at [rsp+16]
+    ; -- rip, cs, rflags from the bottom -- and a frame can pick NT up from
+    ; sigreturn-restored flags or the AP trampoline's undefined startup
+    ; flags, so scrub the frame itself.
+    and qword [rsp + 16], ~0x4000
     iretq
 
 align 16
