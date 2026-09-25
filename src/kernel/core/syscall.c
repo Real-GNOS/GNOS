@@ -324,6 +324,10 @@ static int64_t open_resolved(const char *abs, int flags)
             return -E_NOMEM;
         }
     }
+    /* /dev/pts/N: another handle on an existing pair, but it has to be
+     * counted -- the master reads EOF while no slave is open. */
+    if (pty_is_pts(vfs_file_node(h)))
+        pty_reattach_slave(vfs_file_node(h));
 
     int fd = fd_alloc(p, h);
     if (fd < 0) {

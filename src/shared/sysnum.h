@@ -426,7 +426,33 @@ typedef struct {
 #define TIOCGPTN    0x80045430
 #define TIOCSPTLCK  0x40045431
 #define FIONREAD    0x541B
+#define SIGWINCH    28
+#define TIOCPKT     0x5420
 #define TIOCGPGRP   0x540F
+#define TIOCSPGRP   0x5410
+#define TIOCEXCL    0x540C
+#define TIOCNXCL    0x540D
+#define TCFLSH      0x540B
+#define TCXONC      0x540A
+#define TIOCOUTQ    0x5411
+#define TIOCSTI     0x5412
+#define TIOCSIG     0x40045436
+/* TCFLSH / TCXONC arguments. */
+#define TCIFLUSH    0
+#define TCOFLUSH    1
+#define TCIOFLUSH   2
+#define TCOOFF      0
+#define TCOON       1
+#define TCIOFF      2
+#define TCION       3
+/* TIOCPKT flags. */
+#define TIOCPKT_DATA       0x00
+#define TIOCPKT_FLUSHREAD  0x01
+#define TIOCPKT_FLUSHWRITE 0x02
+#define TIOCPKT_STOP       0x04
+#define TIOCPKT_START      0x08
+#define TIOCPKT_NOSTOP     0x10
+#define TIOCPKT_DOSTOP     0x20
 #define TIOCSPGRP   0x5410
 #define TIOCGWINSZ  0x5413
 #define TIOCSWINSZ  0x5414
