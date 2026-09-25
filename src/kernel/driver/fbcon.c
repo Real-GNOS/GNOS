@@ -1019,6 +1019,17 @@ void fbcon_activate(int con)
     dbg_puts("FBCON activate con="); dbg_puts_dec(con);
     dbg_puts(" from="); dbg_puts_dec(g_active); dbg_puts("\n");
     g_active = con;
+
+    /*
+     * Wipe first: repaint() only draws cells that hold a glyph (draw_cell
+     * returns early on an empty one), so switching to a mostly empty console
+     * used to leave the previous console's text stranded on the framebuffer.
+     */
+    if (g_fb.fb && !g_suppressed) {
+        for (uint32_t y = 0; y < g_fb.h; y++)
+            for (uint32_t x = 0; x < g_fb.stride; x++)
+                g_fb.fb[y * g_fb.stride + x] = g_con[con].def_bg;
+    }
     repaint(&g_con[con]);
 }
 
