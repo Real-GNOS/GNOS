@@ -10,8 +10,15 @@ mkdir -p /var/log /tmp/run
 # apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
 /sbin/apk.static --version >/tmp/apk.out 2>&1
 /sbin/apk.static update >>/tmp/apk.out 2>&1
-/sbin/apk.static add clang xfce4 xfce4-terminal >>/tmp/apk.out 2>&1
 /bin/dbgcat.elf /tmp/apk.out
+
+
+# clang smoke test: the driver spawns cc1/ld via posix_spawn (CLONE_VFORK).
+/usr/bin/clang /root/test.c -o /tmp/test >/tmp/clang.out 2>&1
+echo "CC_EXIT=$?" >>/tmp/clang.out
+/tmp/test >>/tmp/clang.out 2>&1
+echo "RUN_EXIT=$?" >>/tmp/clang.out
+/bin/dbgcat.elf /tmp/clang.out
 
 # --- Xorg smoke test (uncomment for interactive runs) ---
 #/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &

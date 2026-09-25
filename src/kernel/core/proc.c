@@ -1126,11 +1126,28 @@ int proc_fork(regs_t *r)
  * honoured so futex-based synchronisation at least has a real tid to aim at.
  */
 #define CLONE_VM           0x00000100
+#define CLONE_VFORK        0x00004000
 #define CLONE_THREAD       0x00010000
 #define CLONE_SETTLS       0x00040000
 #define CLONE_PARENT_SETTID 0x00080000
 #define CLONE_CHILD_CLEARTID 0x00100000
 #define CLONE_CHILD_SETTID 0x00200000
+
+/* Release the parent parked in WAIT_VFORK for this child (CLONE_VFORK's
+ * "parent resumes once the child execs or exits" contract).  musl's
+ * posix_spawn stages its exec arguments on the parent's own stack while
+ * both share one address space, so resuming the parent early corrupts the
+ * child's execve path mid-flight -- the reason clang's spawns failed with
+ * garbage-path EACCES. */
+static void vfork_wake_parent(proc_t *child)
+{
+    if (!child->vfork_parent)
+        return;
+    proc_t *pp = proc_by_pid(child->vfork_parent);
+    child->vfork_parent = 0;
+    if (pp && pp->state == PROC_BLOCKED && pp->wait_reason == WAIT_VFORK)
+        proc_make_runnable(pp);
+}
 
 int proc_clone(regs_t *r)
 {
@@ -1151,9 +1168,13 @@ int proc_clone(regs_t *r)
      * copy -- fork here is almost always followed by execve).  A thread
      * (CLONE_VM) shares it: both tasks keep running on the same page
      * tables, each holding one reference, and the last one out destroys
-     * it.
+     * it.  CLONE_VFORK also copies: musl's posix_spawn stages its execve
+     * arguments on the parent's stack and relies only on "the child sees
+     * the memory as of clone()" -- the frozen-parent contract -- and an
+     * eager copy satisfies that while sidestepping the shared-CR3
+     * visibility problem that made every clang spawn read an empty path.
      */
-    if (flags & CLONE_VM)
+    if ((flags & CLONE_VM) && !(flags & CLONE_VFORK))
         child->as = vmm_share(parent->as);
     else
         child->as = vmm_clone(parent->as);
@@ -1228,6 +1249,13 @@ int proc_clone(regs_t *r)
         f.rsp = (uint64_t)child_stack;
     child->saved_rsp = build_startup_stack(child, &f);
     proc_make_runnable(child);
+
+    /* vfork: park the caller until the child execs or exits.  The child is
+     * already runnable, so the order here is safe. */
+    if (flags & CLONE_VFORK) {
+        child->vfork_parent = parent->pid;
+        sched_block_irqoff(WAIT_VFORK);
+    }
 
     return child->pid;
 }
@@ -1530,6 +1558,10 @@ int proc_execve(const char *path, char *const argv[], char *const envp[],
      * of the loaded image (after #! chasing) is what the link shows. */
     strncpy(p->exe_path, pathbuf, sizeof(p->exe_path) - 1);
     p->exe_path[sizeof(p->exe_path) - 1] = '\0';
+
+    /* vfork: the address space is now private to the new image, so the
+     * parked parent may safely resume. */
+    vfork_wake_parent(p);
     return 0;
 }
 
@@ -1624,6 +1656,10 @@ void proc_exit(int status)
     }
 
     proc_teardown(p, 1);
+
+    /* vfork: a child that dies without execing (posix_spawn failure path)
+     * must still release its parked parent. */
+    vfork_wake_parent(p);
 
     p->exit_status = status;
     p->state       = PROC_ZOMBIE;

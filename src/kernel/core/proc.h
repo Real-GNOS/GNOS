@@ -61,6 +61,8 @@ typedef enum {
     WAIT_DRM,                       /* DRM wait_queue (vblank/commit/event) */
     WAIT_CGROUP,                    /* cpu.max quota exhausted: parked until the period rolls over */
     WAIT_IPC,                       /* System V IPC (semop/msg send/recv) */
+    WAIT_VFORK,                     /* CLONE_VFORK: parent parked until the
+                                     * child execs or exits */
 } wait_reason_t;
 
 /* Signal numbers, wait() flags and the rest of the user-visible constants
@@ -320,6 +322,10 @@ typedef struct proc {
     /* The image this process last exec'd, after #! chasing: /proc/self/exe
      * resolves (readlink and execve) through this. */
     char          exe_path[96];
+
+    /* CLONE_VFORK: pid of the parent parked in WAIT_VFORK until this task
+     * execs or exits.  0 = nobody is waiting. */
+    int           vfork_parent;
 
     /*
      * The full argument vector of the running image, NUL-separated and

@@ -1327,12 +1327,14 @@ int vfs_readlink(const char *path, char *buf, uint32_t cap)
     if (strncmp(path, "/dev/", 5) == 0)
         return -E_INVAL;
 
-    /* The procfs fd links first: procfs owns every node under /proc, and
-     * its readlink has to work even though the node is not on a mount.
-     * (14 chars, not 15: the prefix is "/proc/self/fd/" -- 14 incl. the
-     * trailing slash -- and strncmp with 15 would demand a NUL at path[14],
-     * which a real name like "/proc/self/fd/0" does not have.) */
-    if (strncmp(path, "/proc/self/fd/", 14) == 0)
+    /* procfs owns every link under /proc, and its readlink has to work even
+     * though the node is not on a mount: /proc/self/fd/N (libc's ttyname())
+     * and /proc/self/exe (llvm::sys::fs::getMainExecutable, apk.static's
+     * re-exec).  Letting these fall through to ext2_readlink returned
+     * ENOENT, which made clang compute an empty executable path and every
+     * spawned job exec "/" with EACCES.  ("/proc" itself, and not
+     * "/procfoo": check the boundary character.) */
+    if (strncmp(path, "/proc", 5) == 0 && (path[5] == '\0' || path[5] == '/'))
         return procfs_readlink(path, buf, cap);
 
     /* tmpfs first: vfs_symlink() has always been willing to create a link on
