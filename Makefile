@@ -30,8 +30,8 @@ OBJCOPY := objcopy
 # Architecture backend: src/arch/$(ARCH) supplies the descriptor tables, entry
 # assembly and context switch.  Must be set before BASEFLAGS, which puts the
 # arch tree on the include path.
-ARCH ?= x86_64
-ARCH_ROOT := src/kernel/arch
+ARCH ?= x86
+ARCH_ROOT := src/arch
 
 # The source tree follows the Linux top-level layout (arch/ drivers/ fs/
 # include/ init/ ipc/ kernel/ lib/ mm/ net/ samples/ scripts/ sound/ usr/), so
@@ -47,7 +47,7 @@ SRCDIRS := $(sort $(shell find src $(PRUNE) \
              \( -name '*.[chS]' -o -name '*.asm' \) -printf '%h\n' | sort -u))
 
 # Exactly one architecture backend is visible: an i386 build must never see
-# x86_64 sources, and the other way round.
+# x86 sources, and the other way round.
 ARCH_DIRS   := $(filter $(ARCH_ROOT)/%,$(SRCDIRS))
 ACTIVE_ARCH := $(filter $(ARCH_ROOT)/$(ARCH) $(ARCH_ROOT)/$(ARCH)/%,$(ARCH_DIRS))
 OTHER_ARCH  := $(filter-out $(ACTIVE_ARCH),$(ARCH_DIRS))
@@ -59,7 +59,7 @@ KINCS       := $(addprefix -I,$(KERNEL_DIRS))
 
 # The two trees with their own consumers: headers shared between kernel and
 # userland (sysnum.h, bootinfo.h), and the userland itself.
-SHARED_DIR := src/shared
+SHARED_DIR := src/include/uapi/linux
 USER_DIR   := src/user
 
 # Common freestanding flags.  -mgeneral-regs-only keeps gcc away from
@@ -564,10 +564,12 @@ DEPS := $(KOBJS:.o=.d) $(UOBJS:.o=.d) $(MUSL_OBJS:.o=.d) $(UCRT:.o=.d) \
 # ARCH selects the backend tree; only one is searched, so an i386 build never
 # sees x86 sources.
 #
-# Excluded on purpose: the userland (usr/ and init/ both contain an init.c --
-# via vpath one would silently win), the bootloader, the config tool and the
-# sample modules, all of which are built by their own explicit rules.
-VPATH_SRC := $(filter-out src/user/% src/init/% src/bootloader/% \
+# Excluded on purpose: the userland (its init.c would otherwise compete with
+# init/init.c for the bare name), the bootloader, the config tool and the
+# sample modules, all of which are built by their own explicit rules.  init/
+# itself stays in: kernel_entry (kernel.c) and the Limine request block live
+# there and are ordinary kernel objects.
+VPATH_SRC := $(filter-out src/user/% src/bootloader/% \
                           src/gnoscfg/% src/kernel/modules/%,$(KERNEL_DIRS))
 vpath %.c   $(VPATH_SRC)
 vpath %.asm $(VPATH_SRC)
