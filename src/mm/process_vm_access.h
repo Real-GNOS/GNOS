@@ -11,5 +11,7 @@ int64_t sys_process_vm_readv(uint64_t pid, uint64_t liov, uint64_t liovcnt,
                              uint64_t riov, uint64_t riovcnt, uint64_t flags);
 int64_t sys_process_vm_writev(uint64_t pid, uint64_t liov, uint64_t liovcnt,
                               uint64_t riov, uint64_t riovcnt, uint64_t flags);
+int64_t sys_process_madvise(uint64_t pidfd, uint64_t uiov, uint64_t vlen,
+                            uint64_t advice, uint64_t flags);
 
 #endif

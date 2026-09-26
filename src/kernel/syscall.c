@@ -4924,6 +4924,10 @@ void syscall_handler(regs_t *r)
         ret = sys_process_vm_writev(a1, a2, a3, r->r10, r->r8, r->r9);
         break;
 
+    case SYS_process_madvise:
+        ret = sys_process_madvise(a1, a2, a3, r->r10, r->r8);
+        break;
+
     case SYS_fcntl:
         ret = sys_fcntl((int)a1, (int)a2, a3);
         break;

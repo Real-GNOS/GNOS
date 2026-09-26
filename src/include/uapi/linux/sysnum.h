@@ -1076,3 +1076,5 @@ struct sock_filter {
 #define SYS_pwritev2 328
 
 #define SYS_mount_setattr 442
+
+#define SYS_process_madvise 440

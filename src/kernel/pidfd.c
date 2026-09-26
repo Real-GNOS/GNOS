@@ -55,8 +55,9 @@ static const vfs_ops_t g_pidfd_ops = {
     .release = pidfd_release,
 };
 
-/* Resolve a pidfd descriptor to the process it names. */
-static proc_t *pidfd_proc(int fd)
+/* Resolve a pidfd descriptor to the process it names.  Exported so the
+ * other "operate on someone else's memory" calls can share it. */
+proc_t *pidfd_proc_of(int fd)
 {
     int h = fd_handle(fd);
     if (h < 0)
@@ -96,7 +97,7 @@ int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t uinfo,
     (void)uinfo;                          /* siginfo delivery not supported */
     if (flags)
         return -E_INVAL;
-    proc_t *target = pidfd_proc((int)pidfd);
+    proc_t *target = pidfd_proc_of((int)pidfd);
     if (!target)
         return -E_BADF;
     return proc_signal(target, (int)sig) == 0 ? 0 : -E_INVAL;

@@ -11,6 +11,7 @@
 
 #include "process_vm_access.h"
 #include "proc.h"
+#include "pidfd.h"
 #include "vmm.h"
 #include "vfs.h"
 
@@ -98,6 +99,56 @@ static int64_t process_vm_common(uint64_t pid, uint64_t uliov, uint64_t liovcnt,
         if (roff >= riov[ri].len) { ri++; roff = 0; }
     }
     return total;
+}
+
+/* process_madvise(440): give another process the same hints madvise(2)
+ * gives your own.  Like madvise(28) here, GNOS has no page reclaim or
+ * swap to act on, so the advice is advisory: what IS enforced is the
+ * contract -- a pidfd, a sane vector, and a suggestion the kernel knows
+ * about.  Unknown suggestions get EINVAL rather than a silent success. */
+#define MADV_NORMAL     0
+#define MADV_RANDOM     1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED   3
+#define MADV_DONTNEED   4
+#define MADV_FREE       8
+#define MADV_COLD       20
+#define MADV_PAGEOUT    21
+#define USER_CEILING    0x0000800000000000ULL
+
+int64_t sys_process_madvise(uint64_t pidfd, uint64_t uiov, uint64_t vlen,
+                            uint64_t advice, uint64_t flags)
+{
+    if (flags)
+        return -E_INVAL;
+    if (!vlen || vlen > 1024)
+        return -E_INVAL;
+    switch (advice) {
+    case MADV_NORMAL: case MADV_RANDOM: case MADV_SEQUENTIAL:
+    case MADV_WILLNEED: case MADV_DONTNEED: case MADV_FREE:
+    case MADV_COLD: case MADV_PAGEOUT:
+        break;
+    default:
+        return -E_INVAL;
+    }
+
+    if (!user_ptr_ok(uiov, vlen * sizeof(iovec_t)))
+        return -E_FAULT;
+    /* A real target is required: unlike process_vm_*, this one arrives
+     * through a pidfd, and a stale one must read as EBADF. */
+    if (!pidfd_proc_of((int)pidfd))
+        return -E_BADF;
+
+    const iovec_t *iov = (const iovec_t *)(uintptr_t)uiov;
+    uint64_t total = 0;
+    for (uint64_t i = 0; i < vlen; i++) {
+        if (iov[i].base >= USER_CEILING)
+            return -E_INVAL;            /* kernel addresses are not adviceable */
+        if (iov[i].len > USER_CEILING - iov[i].base)
+            return -E_INVAL;
+        total += iov[i].len;
+    }
+    return (int64_t)total;
 }
 
 int64_t sys_process_vm_readv(uint64_t pid, uint64_t liov, uint64_t liovcnt,

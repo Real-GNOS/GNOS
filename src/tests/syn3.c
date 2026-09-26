@@ -15,6 +15,8 @@
 #define SYS_GNOS_BASE     1000
 #define SYS_dbgputs       (SYS_GNOS_BASE + 1)
 #define SYS_klog          (SYS_GNOS_BASE + 2)
+#define SYS_process_madvise 440
+#define SYS_pidfd_open    434
 
 #ifndef AT_STATX_SYNC_AS_STAT
 #define AT_STATX_SYNC_AS_STAT 0x0000
@@ -110,6 +112,31 @@ int main(void)
     CHECK(syscall(SYS_mount_setattr, (long)AT_FDCWD, (unsigned long)"/", 0UL,
                   (unsigned long)&mattr, 4UL) < 0,
           "mount_setattr rejects short struct");
+
+    /* process_madvise: pidfd target, advice validation, byte count */
+    pid_t me = getpid();
+    int myfd = (int)syscall(SYS_pidfd_open, (unsigned long)me, 0UL);
+    CHECK(myfd >= 0, "pmadvise: pidfd_open self");
+    struct iov pmi[2] = { { (void*)0x400000UL, 4096 }, { (void*)0x401000UL, 8192 } };
+    r = syscall(SYS_process_madvise, (unsigned long)myfd, (unsigned long)pmi,
+                2UL, 4UL, 0UL);
+    CHECK(r == 12288, "process_madvise returns bytes advised");
+    r = syscall(SYS_process_madvise, (unsigned long)myfd, (unsigned long)pmi,
+                2UL, 0UL, 0UL);
+    CHECK(r == 12288, "process_madvise MADV_NORMAL");
+    errno = 0;
+    CHECK(syscall(SYS_process_madvise, (unsigned long)myfd, (unsigned long)pmi,
+                  2UL, 999UL, 0UL) < 0 && errno == EINVAL,
+          "process_madvise rejects unknown advice");
+    CHECK(syscall(SYS_process_madvise, (unsigned long)myfd, (unsigned long)pmi,
+                  2UL, 4UL, 1UL) < 0, "process_madvise rejects flags");
+    CHECK(syscall(SYS_process_madvise, (unsigned long)9999, (unsigned long)pmi,
+                  2UL, 4UL, 0UL) < 0, "process_madvise rejects non-pidfd");
+    struct iov kernel_range = { (void*)0xFFFF800000000000UL, 4096 };
+    CHECK(syscall(SYS_process_madvise, (unsigned long)myfd,
+                  (unsigned long)&kernel_range, 1UL, 4UL, 0UL) < 0,
+          "process_madvise rejects kernel address");
+    close(myfd);
 
     printf("\n%d tests, %d failures\n", tests, fails);
     return fails ? 1 : 0;

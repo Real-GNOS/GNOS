@@ -13,6 +13,9 @@
 
 #include <stdint.h>
 
+struct proc;
+struct proc *pidfd_proc_of(int fd);      /* NULL if fd is not a pidfd */
+
 int64_t sys_pidfd_open(uint64_t pid, uint64_t flags);
 int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t uinfo,
                               uint64_t flags);
