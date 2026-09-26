@@ -18,6 +18,7 @@
 #define SYS_process_madvise 440
 #define SYS_pidfd_open    434
 #define SYS_quotactl_fd   443
+#define SYS_memfd_secret  447
 #define QCMD(cmd, type)   (((cmd) << 8) | ((type) & 0xff))
 #define Q_GETQUOTA        0x800007
 #define Q_SYNC            0x800001
@@ -167,6 +168,16 @@ int main(void)
                   (unsigned long)QCMD(Q_GETQUOTA, 0), 0UL, 0UL) < 0,
           "quotactl_fd rejects bad fd");
     close(qfd);
+
+    /* memfd_secret: refused (no way to hide pages from the direct map),
+     * and a non-zero flags word is a misuse */
+    errno = 0;
+    r = syscall(SYS_memfd_secret, 0UL);
+    printf("  memfd_secret r=%ld errno=%d (ENOSYS=%d)\n", r, errno, ENOSYS);
+    CHECK(r < 0 && errno == ENOSYS, "memfd_secret -> ENOSYS");
+    errno = 0;
+    CHECK(syscall(SYS_memfd_secret, 0x1UL) < 0 && errno == EINVAL,
+          "memfd_secret rejects flags");
 
     printf("\n%d tests, %d failures\n", tests, fails);
     return fails ? 1 : 0;

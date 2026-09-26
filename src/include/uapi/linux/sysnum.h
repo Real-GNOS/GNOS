@@ -1080,3 +1080,5 @@ struct sock_filter {
 #define SYS_process_madvise 440
 
 #define SYS_quotactl_fd  443
+
+#define SYS_memfd_secret  447
