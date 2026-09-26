@@ -125,11 +125,59 @@ uint64_t pci_map_bar(const pci_dev_t *d, int idx)
     return vmm_map_mmio(phys, size);
 }
 
-void pci_init(void)
+/* Walk the capability list at offset 0x34 and record the ids we find. */
+static void pci_read_caps(pci_dev_t *d)
 {
-    g_pci_count = 0;
+    uint32_t st = cfg_read32(d->bus, d->dev, d->fn, 0x04);
+    uint8_t  ptr = (uint8_t)(cfg_read32(d->bus, d->dev, d->fn, 0x34) & 0xFF);
+    int n = 0;
+    /* The list is only valid when the status register says it exists. */
+    if (!(st & (1u << 20)))
+        ptr = 0;
+    while (ptr && n < 8) {
+        uint32_t cw = cfg_read32(d->bus, d->dev, d->fn, ptr & 0xFC);
+        uint8_t id = (uint8_t)(cw & 0xFF);
+        d->caps[n++] = id;
+        ptr = (uint8_t)((cw >> 8) & 0xFF);
+        if (ptr == (uint8_t)(ptr & 0xFC) && id == 0)
+            break;                      /* malformed list: stop */
+    }
+    d->n_caps = (uint8_t)n;
+}
 
-    for (uint8_t bus = 0; bus < 1; bus++) {          /* bus 0 only */
+int pci_has_cap(const pci_dev_t *d, uint8_t cap_id)
+{
+    if (!d)
+        return 0;
+    for (int i = 0; i < d->n_caps; i++)
+        if (d->caps[i] == cap_id)
+            return 1;
+    return 0;
+}
+
+static void pci_scan_bus(uint8_t bus);
+
+/* A PCI-to-PCI bridge (header type 1) opens a new bus: its primary,
+ * secondary and subordinate bus numbers say which range hangs off it, and
+ * everything in that range has to be scanned too -- this is how a full
+ * topology (not just bus 0) is discovered. */
+static void pci_probe_bridge(pci_dev_t *d)
+{
+    uint32_t bl = cfg_read32(d->bus, d->dev, d->fn, 0x18);
+    uint8_t secondary   = (uint8_t)((bl >> 8) & 0xFF);
+    uint8_t subordinate = (uint8_t)((bl >> 16) & 0xFF);
+    if (!secondary)
+        return;                          /* not configured yet */
+    for (unsigned b = secondary; b <= subordinate && b < 256; b++)
+        pci_scan_bus((uint8_t)b);
+}
+
+static void pci_scan_bus(uint8_t bus)
+{
+    static int depth;
+    if (depth > 8)                       /* topology guard */
+        return;
+    depth++;
         for (uint8_t dev = 0; dev < 32; dev++) {
             for (uint8_t fn = 0; fn < 8; fn++) {
                 uint32_t id = cfg_read32(bus, dev, fn, 0x00);
@@ -158,6 +206,12 @@ void pci_init(void)
                 d->irq_pin  = (uint8_t)((il >> 8) & 0xFF);
                 g_pci_count++;
 
+                pci_read_caps(d);
+
+                /* A bridge opens a downstream bus: recurse into it. */
+                if ((d->hdr_type & 0x7F) == 0x01)
+                    pci_probe_bridge(d);
+
                 /* Stop after fn 0 if the device is not multifunction. */
                 if (fn == 0) {
                     uint8_t hdr = d->hdr_type;
@@ -167,9 +221,15 @@ void pci_init(void)
                 }
             }
         }
-    }
+    depth--;
+}
 
-    dbg_puts("PCI: scanned bus 0, ");
+void pci_init(void)
+{
+    g_pci_count = 0;
+    pci_scan_bus(0);
+
+    dbg_puts("PCI: scanned topology, ");
     dbg_puts_dec((uint32_t)g_pci_count);
     dbg_puts(" device(s):\r\n");
     for (int i = 0; i < g_pci_count; i++) {
@@ -181,6 +241,14 @@ void pci_init(void)
         dbg_puts_hexn(d->vendor, 4); dbg_puts(":");
         dbg_puts_hexn(d->device, 4); dbg_puts("  class ");
         dbg_puts_hexn(d->class_code, 2); dbg_puts("/");
-        dbg_puts_hexn(d->subclass, 2); dbg_puts("\r\n");
+        dbg_puts_hexn(d->subclass, 2);
+        if (d->n_caps) {
+            dbg_puts(" caps:");
+            for (int k = 0; k < d->n_caps; k++) {
+                dbg_puts(" ");
+                dbg_puts_hexn(d->caps[k], 2);
+            }
+        }
+        dbg_puts("\r\n");
     }
 }

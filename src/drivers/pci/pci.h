@@ -23,6 +23,11 @@ typedef struct {
     uint8_t  hdr_type;
     uint32_t bar[6];          /* raw BAR values as read from config space */
     uint8_t  irq_line, irq_pin;
+    /* Capability list (offset 0x34): which capability ids this function
+     * carries, so a driver can ask for MSI/MSI-X/PM without walking config
+     * space again. */
+    uint8_t  caps[8];
+    uint8_t  n_caps;
 } pci_dev_t;
 
 extern pci_dev_t g_pci_devs[PCI_MAX_DEVICES];
@@ -63,6 +68,16 @@ void pci_enable(const pci_dev_t *d);
  * register banks in I/O space, the way ICH chipsets always did.
  */
 uint16_t pci_bar_io(const pci_dev_t *d, int idx);
+
+/* Capability ids we recognise (include/uapi/linux/pci_regs.h). */
+#define PCI_CAP_ID_POWER_MANAGEMENT 0x01
+#define PCI_CAP_ID_MSI              0x05
+#define PCI_CAP_ID_VENDOR_SPECIFIC  0x09
+#define PCI_CAP_ID_MSIX             0x11
+#define PCI_CAP_ID_PCIE             0x10
+
+/* Does this function carry the given capability? */
+int pci_has_cap(const pci_dev_t *d, uint8_t cap_id);
 
 /* Class codes we care about. */
 #define PCI_CLASS_NETWORK   0x02
