@@ -1078,3 +1078,5 @@ struct sock_filter {
 #define SYS_mount_setattr 442
 
 #define SYS_process_madvise 440
+
+#define SYS_quotactl_fd  443

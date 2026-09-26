@@ -17,6 +17,10 @@
 #define SYS_klog          (SYS_GNOS_BASE + 2)
 #define SYS_process_madvise 440
 #define SYS_pidfd_open    434
+#define SYS_quotactl_fd   443
+#define QCMD(cmd, type)   (((cmd) << 8) | ((type) & 0xff))
+#define Q_GETQUOTA        0x800007
+#define Q_SYNC            0x800001
 
 #ifndef AT_STATX_SYNC_AS_STAT
 #define AT_STATX_SYNC_AS_STAT 0x0000
@@ -137,6 +141,32 @@ int main(void)
                   (unsigned long)&kernel_range, 1UL, 4UL, 0UL) < 0,
           "process_madvise rejects kernel address");
     close(myfd);
+
+    /* quotactl_fd: descriptor, subcommand and quota type are validated;
+     * the operation itself is refused (no quota accounting in GNOS) */
+    int qfd = open("/tmp/syn3file", O_RDONLY);
+    CHECK(qfd >= 0, "quotactl: open");
+    errno = 0;
+    r = syscall(SYS_quotactl_fd, (unsigned long)qfd,
+                (unsigned long)QCMD(Q_GETQUOTA, 0), 0UL, 0UL);
+    printf("  quotactl_fd r=%ld errno=%d (EOPNOTSUPP=%d ENOTSUP=%d)\n", r, errno,
+           EOPNOTSUPP, ENOTSUP);
+    CHECK(r < 0 && (errno == EOPNOTSUPP || errno == ENOTSUP),
+          "quotactl_fd Q_GETQUOTA -> not supported");
+    CHECK(syscall(SYS_quotactl_fd, (unsigned long)qfd,
+                  (unsigned long)QCMD(Q_SYNC, 1), 0UL, 0UL) < 0,
+          "quotactl_fd Q_SYNC -> refused");
+    errno = 0;
+    CHECK(syscall(SYS_quotactl_fd, (unsigned long)qfd, 0x1234UL, 0UL, 0UL) < 0 &&
+          errno == EINVAL, "quotactl_fd rejects unknown subcommand");
+    errno = 0;
+    CHECK(syscall(SYS_quotactl_fd, (unsigned long)qfd,
+                  (unsigned long)QCMD(Q_GETQUOTA, 7), 0UL, 0UL) < 0 &&
+          errno == EINVAL, "quotactl_fd rejects unknown quota type");
+    CHECK(syscall(SYS_quotactl_fd, (unsigned long)9999,
+                  (unsigned long)QCMD(Q_GETQUOTA, 0), 0UL, 0UL) < 0,
+          "quotactl_fd rejects bad fd");
+    close(qfd);
 
     printf("\n%d tests, %d failures\n", tests, fails);
     return fails ? 1 : 0;

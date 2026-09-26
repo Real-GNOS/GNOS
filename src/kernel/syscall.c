@@ -4856,6 +4856,10 @@ void syscall_handler(regs_t *r)
         ret = sys_rw_vec2((int)a1, a2, a3, (int64_t)r->r10, r->r8, 1);
         break;
 
+    case SYS_quotactl_fd:
+        ret = sys_quotactl_fd(a1, (uint32_t)a2, a3, r->r10);
+        break;
+
     case SYS_mount_setattr:
         ret = sys_mount_setattr(a1, a2, a3, r->r10, r->r8);
         break;
