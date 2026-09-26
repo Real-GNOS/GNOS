@@ -276,7 +276,15 @@
 
 /* Report how many cores came online (BSP + any APs Limine started).  Lets a
  * boot assertion program confirm SMP bring-up without parsing the boot log. */
-#define SYS_smp_count     440
+/* ---- GNOS-private syscalls --------------------------------------------
+ * These have no Linux equivalent and must not squat on Linux numbers:
+ * 440..450 are process_madvise / epoll_pwait2 / mount_setattr /
+ * quotactl_fd / landlock_* / memfd_secret / futex_waitv on x86-64, and a
+ * Linux binary that asks for one of those would get GNOS's instead.  The
+ * house numbers live at SYS_GNOS_BASE and above, which the Linux ABI
+ * leaves empty. */
+#define SYS_GNOS_BASE     1000
+#define SYS_smp_count     (SYS_GNOS_BASE + 0)
 
 /*
  * dbgputs(441) -- copy a NUL-terminated user string to the debug console
@@ -284,9 +292,9 @@
  * their verdicts through this so `make test` can grep build/dbg.log.  A
  * GNOS extension, not a Linux syscall.
  */
-#define SYS_dbgputs       441
-#define SYS_klog          443
-#define SYS_cpuid         444
+#define SYS_dbgputs       (SYS_GNOS_BASE + 1)
+#define SYS_klog          (SYS_GNOS_BASE + 2)
+#define SYS_cpuid         (SYS_GNOS_BASE + 3)
 
 /*
  * struct sockaddr_in as it crosses the syscall boundary: 16 bytes, and the
@@ -735,7 +743,11 @@ typedef struct {
     uint32_t stx_rdev_minor;
     uint32_t stx_dev_major;
     uint32_t stx_dev_minor;
-    uint64_t __pad1[14];
+    uint64_t __pad1[11];
+    uint64_t stx_mnt_id;
+    uint32_t stx_dio_mem_align;
+    uint32_t stx_dio_offset_align;
+    uint64_t stx_subvol;
 } kstatx_t;
 
 #define STATX_TYPE      0x0001
@@ -750,6 +762,8 @@ typedef struct {
 #define STATX_SIZE      0x0200
 #define STATX_BLOCKS    0x0400
 #define STATX_BASIC_STATS 0x07ff
+#define STATX_MNT_ID      0x1000
+#define STATX_DIOALIGN    0x2000
 #define STATX_BTIME     0x0800
 
 /*
@@ -1055,7 +1069,10 @@ struct sock_filter {
 
 #define SYS_rseq 386
 
-/* epoll_pwait2 is 441 in Linux; GNOS already uses 441 for its own
- * dbgputs, which several in-tree programs call by number, so it gets the
- * next free slot instead. */
-#define SYS_epoll_pwait2  442
+#define SYS_epoll_pwait2  441
+
+#define SYS_preadv2 327
+
+#define SYS_pwritev2 328
+
+#define SYS_mount_setattr 442

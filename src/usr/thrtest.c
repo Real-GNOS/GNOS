@@ -30,7 +30,7 @@
 
 static int g_failed;
 
-/* dbgputs(441): mirror a line to the debug console so the headless test
+/* dbgputs(GNOS private): mirror a line to the debug console so the headless test
  * harness can see it in build/dbg.log -- the framebuffer console is not
  * captured there.  A GNOS extension. */
 static void report(const char *fmt, ...)
@@ -42,7 +42,7 @@ static void report(const char *fmt, ...)
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(441, buf);                  /* SYS_dbgputs */
+    syscall(1001, buf);                  /* SYS_dbgputs */
 }
 
 static void check(int ok, int n, const char *what)

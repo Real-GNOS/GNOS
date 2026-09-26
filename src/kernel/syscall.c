@@ -970,7 +970,98 @@ static int64_t sys_statx(int dirfd, uint64_t upath, uint64_t flags,
     sx->stx_mtime_nsec  = tmp.st_mtim_nsec;
     sx->stx_ctime_sec   = (int64_t)tmp.st_ctim_sec;
     sx->stx_ctime_nsec  = tmp.st_ctim_nsec;
+    /* There is exactly one mount -- the built-in filesystem -- so the id
+     * is 1 and DIO has no alignment to report. */
+    sx->stx_mnt_id      = 1;
+    sx->stx_dio_mem_align    = 0;
+    sx->stx_dio_offset_align = 0;
+    sx->stx_mask       |= STATX_MNT_ID | STATX_DIOALIGN;
     return 0;
+}
+
+/* preadv2(327)/pwritev2(328): readv/writev with an explicit offset (or -1
+ * for "at the current position") and a flags word.  RWF_HIPRI/DSYNC/SYNC
+ * are hints about I/O we do not schedule; RWF_NOWAIT asks for a completion
+ * without blocking, which a synchronous VFS cannot do, so it is refused
+ * rather than silently honoured as a blocking read.  RWF_APPEND pins the
+ * write to the end of the file regardless of the offset. */
+#define RWF_HIPRI   0x00000001
+#define RWF_DSYNC   0x00000002
+#define RWF_SYNC    0x00000004
+#define RWF_NOWAIT  0x00000008
+#define RWF_APPEND  0x00000010
+
+/* Same layout as iovec_t, which is declared further down the file. */
+typedef struct { uint64_t v_base, v_len; } vec2_t;
+
+static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off,
+                           uint64_t flags, int writing)
+{
+    if (cnt > 1024 || !user_ptr_ok(uiov, cnt * sizeof(vec2_t)))
+        return -E_INVAL;
+    if (flags & ~(uint64_t)(RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT |
+                            RWF_APPEND))
+        return -E_OPNOTSUPP;
+    if (flags & RWF_NOWAIT)
+        return -E_OPNOTSUPP;
+
+    int h = fd_handle(fd);
+    if (h < 0)
+        return -E_BADF;
+
+    const vec2_t *iov = (const vec2_t *)(uintptr_t)uiov;
+    int64_t total = 0;
+    uint64_t pos = (off >= 0) ? (uint64_t)off : 0;
+
+    if (writing && (flags & RWF_APPEND)) {
+        lstat_t st;
+        if (vfs_fstat(h, &st) < 0)
+            return -E_BADF;
+        pos = st.st_size;
+        off = (int64_t)pos;              /* append pins the position */
+    }
+
+    for (uint64_t i = 0; i < cnt; i++) {
+        uint32_t len = (uint32_t)iov[i].v_len;
+        if (!len)
+            continue;
+        if (!user_ptr_ok(iov[i].v_base, len))
+            return total ? total : -E_INVAL;
+
+        int64_t n;
+        if (off >= 0) {
+            n = writing
+                ? vfs_file_pwrite(h, (const void *)(uintptr_t)iov[i].v_base,
+                                  len, pos)
+                : vfs_file_pread(h, (void *)(uintptr_t)iov[i].v_base, len, pos);
+        } else {
+            n = writing
+                ? vfs_file_write(h, (const void *)(uintptr_t)iov[i].v_base, len)
+                : vfs_file_read(h, (void *)(uintptr_t)iov[i].v_base, len);
+        }
+        if (n < 0)
+            return total ? total : n;
+        if (n == 0)
+            break;
+        total += n;
+        pos += (uint64_t)n;
+    }
+    return total;
+}
+
+/* mount_setattr(442): the new mount API's attribute setter.  GNOS has no
+ * mount table at all -- the filesystem is built in -- so the honest answer
+ * is ENOSYS, not a silent success that would fool a caller into believing
+ * its mount options had taken effect. */
+static int64_t sys_mount_setattr(uint64_t dfd, uint64_t upath, uint64_t flags,
+                                 uint64_t uattr, uint64_t usize)
+{
+    (void)dfd; (void)upath; (void)uattr;
+    if (flags & ~(uint64_t)0x7FF)        /* AT_* bits only */
+        return -E_INVAL;
+    if (usize < 24 || usize > 64)        /* sizeof(struct mount_attr) = 24 */
+        return -E_INVAL;
+    return -E_NOSYS;
 }
 
 /*
@@ -4755,6 +4846,18 @@ void syscall_handler(regs_t *r)
 
     case SYS_writev:
         ret = sys_rw_vec((int)a1, a2, a3, 1);
+        break;
+
+    case SYS_preadv2:
+        ret = sys_rw_vec2((int)a1, a2, a3, (int64_t)r->r10, r->r8, 0);
+        break;
+
+    case SYS_pwritev2:
+        ret = sys_rw_vec2((int)a1, a2, a3, (int64_t)r->r10, r->r8, 1);
+        break;
+
+    case SYS_mount_setattr:
+        ret = sys_mount_setattr(a1, a2, a3, r->r10, r->r8);
         break;
 
     case SYS_open:

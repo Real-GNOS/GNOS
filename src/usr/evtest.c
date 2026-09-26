@@ -7,7 +7,7 @@
  * key press/release driven through inputinject(405) -- the input twin of
  * ttyinject -- observed through poll() and read(), and finally the
  * O_NONBLOCK/EAGAIN behaviour libevdev relies on.  Every verdict goes to
- * the debug console via dbgputs(441) so `make test` can read it headlessly.
+ * the debug console via dbgputs(GNOS private) so `make test` can read it headlessly.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -55,7 +55,7 @@ static void report(const char *fmt, ...)
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(441, buf);
+    syscall(1001, buf);
 }
 
 static void check(int ok, int n, const char *what)

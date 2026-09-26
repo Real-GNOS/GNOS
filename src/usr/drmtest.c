@@ -7,7 +7,7 @@
  * (create/map/mmap/fill), an fb, and two SETCRTCs -- a real mode switch
  * through the bochs VBE registers and back to the boot mode, each followed
  * by a blit of a test pattern.  Every verdict goes to the debug console via
- * dbgputs(441) so `make test` can read it headlessly; the pattern itself
+ * dbgputs(GNOS private) so `make test` can read it headlessly; the pattern itself
  * is visible on the framebuffer for the two seconds each mode holds.
  */
 #include <fcntl.h>
@@ -141,7 +141,7 @@ static void report(const char *fmt, ...)
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(441, buf);
+    syscall(1001, buf);
 }
 
 static void check(int ok, int n, const char *what)

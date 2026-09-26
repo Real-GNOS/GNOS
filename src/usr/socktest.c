@@ -5,7 +5,7 @@
  * Boot-time proof of the wayland transport the kernel now speaks: stream
  * sockets over a pathname, socketpair, blocking and non-blocking I/O,
  * SCM_RIGHTS fd passing, and timerfd on the 100 Hz tick.  Every verdict
- * goes to the debug console via dbgputs(441) so `make test` can read it
+ * goes to the debug console via dbgputs(GNOS private) so `make test` can read it
  * headlessly.
  */
 #include <fcntl.h>
@@ -38,7 +38,7 @@ static void report(const char *fmt, ...)
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(441, buf);
+    syscall(1001, buf);
 }
 
 static void check(int ok, int n, const char *what)

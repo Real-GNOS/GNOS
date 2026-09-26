@@ -35,7 +35,7 @@ long sys_read(int fd, void *buf, long n)
     return syscall3(SYS_read, fd, (long)buf, n);
 }
 
-/* dbgputs(441): copy a NUL-terminated string to the debug console. */
+/* dbgputs(GNOS private): copy a NUL-terminated string to the debug console. */
 long sys_dbgputs(const char *s)
 {
     return syscall1(SYS_dbgputs, (long)s);

@@ -55,7 +55,7 @@ static void report(const char *fmt, ...)
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(441, buf);          /* SYS_dbgputs: mirror into build/dbg.log */
+    syscall(1001, buf);          /* SYS_dbgputs: mirror into build/dbg.log */
 }
 
 static void check(const char *what, int ok)

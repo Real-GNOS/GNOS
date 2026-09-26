@@ -4,7 +4,7 @@
  *
  * The headless-test counterpart of cat(1): it reads each file named on the
  * command line and pushes its contents to the isa-debugcon port through the
- * dbgputs(441) syscall, so `make test`'s captured build/dbg.log shows the
+ * dbgputs(GNOS private) syscall, so `make test`'s captured build/dbg.log shows the
  * test output that normally scrolls across the framebuffer where nobody
  * headless can see it.  Used from /etc/rc to report the boot-time tests.
  *

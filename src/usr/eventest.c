@@ -13,7 +13,7 @@
  *   - epoll: add/readiness/data round-trip and a timeout that returns
  *     zero, the exact behaviour libwayland's event loop depends on.
  *
- * Verdicts go to the debug console via dbgputs(441) for headless `make
+ * Verdicts go to the debug console via dbgputs(GNOS private) for headless `make
  * test` runs.
  */
 #define _GNU_SOURCE
@@ -39,7 +39,7 @@ static void report(const char *fmt, ...)
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(441, buf);
+    syscall(1001, buf);
 }
 
 static void check(int ok, int n, const char *what)

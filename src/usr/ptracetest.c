@@ -7,7 +7,7 @@
  * SIGCONT failing to resume a ptrace stop, PEEKDATA/POKEDATA across the
  * tracee's page tables, GETREGS, a TRACESYSGOOD syscall-entry stop under
  * PTRACE_SYSCALL, and the exit status the tracer lets through.  Every
- * verdict goes to the debug console via dbgputs(441) so a headless run
+ * verdict goes to the debug console via dbgputs(GNOS private) so a headless run
  * can read them, the same way drmtest does.
  */
 #include <signal.h>
@@ -32,7 +32,7 @@ static void report(const char *fmt, ...)
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(441, buf);
+    syscall(1001, buf);
 }
 
 static void check(int ok, int n, const char *what)
