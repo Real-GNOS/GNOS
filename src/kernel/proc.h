@@ -533,6 +533,8 @@ uint32_t proc_cpu_mask_of(proc_t *p);
 void     proc_set_cpu_mask(proc_t *p, uint32_t mask);
 int      proc_pick_cpu(proc_t *p);
 int      proc_rseq_register(uint64_t urseq, uint64_t sig);
+int      proc_futex_waitv_arm(const uint64_t *uaddr, uint32_t n);
+void     proc_futex_waitv_disarm(void);
 int      proc_rseq_unregister(uint64_t urseq, uint64_t sig);
 
 #endif

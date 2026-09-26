@@ -5,6 +5,9 @@
 #include <errno.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/mman.h>
+#include <pthread.h>
+#include <sys/wait.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 
@@ -19,6 +22,10 @@
 #define SYS_pidfd_open    434
 #define SYS_quotactl_fd   443
 #define SYS_memfd_secret  447
+#define SYS_futex_waitv   449
+#define FUTEX_WAIT        0
+#define FUTEX_WAKE        1
+#define FUTEX_PRIVATE_FLAG 0x80
 #define QCMD(cmd, type)   (((cmd) << 8) | ((type) & 0xff))
 #define Q_GETQUOTA        0x800007
 #define Q_SYNC            0x800001
@@ -40,6 +47,17 @@ struct statx {
 };
 
 static int tests, fails;
+static uint32_t *g_waitv_target;
+
+static void *waitv_bumper(void *unused)
+{
+    (void)unused;
+    usleep(150000);
+    *g_waitv_target = 100;
+    syscall(SYS_futex, (unsigned long)g_waitv_target,
+            (unsigned long)FUTEX_WAKE, 1UL, 0UL, 0UL, 0UL);
+    return 0;
+}
 #define CHECK(c, n) do { tests++; if (c) printf("ok  %s\n", n); \
     else { fails++; printf("FAIL %s\n", n); } } while (0)
 
@@ -178,6 +196,51 @@ int main(void)
     errno = 0;
     CHECK(syscall(SYS_memfd_secret, 0x1UL) < 0 && errno == EINVAL,
           "memfd_secret rejects flags");
+
+    /* futex_waitv: waits on several words, wakes on the one that moves */
+    struct futex_waitv { uint64_t val, uaddr; uint32_t flags, reserved; };
+    /* the words must live in memory a forked child can also change */
+    uint32_t *words = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    CHECK(words != MAP_FAILED, "futex_waitv: shared mapping");
+    if (words == MAP_FAILED) { printf("\n%d tests, %d failures\n", tests, fails); return 1; }
+    uint32_t *fw0p = &words[0], *fw1p = &words[1];
+    *fw0p = 7; *fw1p = 9;
+    struct futex_waitv fv[2];
+    memset(&fv, 0, sizeof fv);
+    fv[0].val = 7; fv[0].uaddr = (uint64_t)(uintptr_t)fw0p; fv[0].flags = 2;
+    fv[1].val = 9; fv[1].uaddr = (uint64_t)(uintptr_t)fw1p; fv[1].flags = 2;
+
+    /* already changed -> returns that index without sleeping */
+    *fw1p = 42;
+    r = syscall(SYS_futex_waitv, (unsigned long)fv, 2UL, 0UL, 0UL, 1UL);
+    CHECK(r == 1, "futex_waitv returns the already-changed index");
+    *fw1p = 9;
+
+    /* nothing changed, 200 ms timeout -> ETIMEDOUT */
+    errno = 0;
+    struct { int64_t sec, nsec; } fts = { 0, 200000000LL };
+    r = syscall(SYS_futex_waitv, (unsigned long)fv, 2UL, 0UL,
+                (unsigned long)&fts, 1UL);
+    CHECK(r < 0 && errno == ETIMEDOUT, "futex_waitv times out");
+
+    /* a thread in the same address space bumps fw0: the wait must come
+     * back with index 0 (cross-process wakes need a shared-mapped word,
+     * which anonymous MAP_SHARED does not give us here) */
+    g_waitv_target = fw0p;
+    {
+        pthread_t th;
+        pthread_create(&th, 0, waitv_bumper, 0);
+        r = syscall(SYS_futex_waitv, (unsigned long)fv, 2UL, 0UL, 0UL, 1UL);
+        CHECK(r == 0, "futex_waitv woke on the word that changed");
+        pthread_join(th, 0);
+    }
+
+    /* validation */
+    CHECK(syscall(SYS_futex_waitv, (unsigned long)fv, 0UL, 0UL, 0UL, 1UL) < 0,
+          "futex_waitv rejects nr=0");
+    CHECK(syscall(SYS_futex_waitv, (unsigned long)fv, 2UL, 1UL, 0UL, 1UL) < 0,
+          "futex_waitv rejects flags");
 
     printf("\n%d tests, %d failures\n", tests, fails);
     return fails ? 1 : 0;

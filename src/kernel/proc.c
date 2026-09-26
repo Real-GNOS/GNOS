@@ -1838,6 +1838,63 @@ void proc_exit_group(int status)
  * scan and a WAIT parking itself: a WAIT checks the word, blocks, and only
  * then can anyone else run.
  */
+/* ---- futex_waitv(449) multi-key wait -----------------------------------
+ * A waitv sleeper parks on several words at once and must be released by a
+ * wake on ANY of them.  The set lives beside the process table (not in
+ * proc_t, whose layout the FPU save area constrains) and is disarmed the
+ * moment one of the words matches. */
+typedef struct { uint64_t uaddr, key; int shared; } wv_ent_t;
+static struct { wv_ent_t *v; uint32_t n; } g_futex_waitv[MAX_PROCS];
+
+int proc_futex_waitv_arm(const uint64_t *uaddr, uint32_t n)
+{
+    proc_t *p = proc_current();
+    int idx = (int)(p - g_procs);
+    if (idx < 0 || idx >= MAX_PROCS || !n || n > 128)
+        return -E_INVAL;
+
+    wv_ent_t *v = kmalloc(sizeof(wv_ent_t) * n);
+    if (!v)
+        return -E_NOMEM;
+    for (uint32_t i = 0; i < n; i++) {
+        v[i].uaddr  = uaddr[i];
+        v[i].shared = p->as ? vmm_page_shared(p->as, uaddr[i]) : 0;
+        v[i].key    = v[i].shared ? vmm_resolve(p->as, uaddr[i]) : 0;
+    }
+    g_futex_waitv[idx].v = v;
+    g_futex_waitv[idx].n = n;
+    return 0;
+}
+
+void proc_futex_waitv_disarm(void)
+{
+    proc_t *p = proc_current();
+    int idx = (int)(p - g_procs);
+    if (idx < 0 || idx >= MAX_PROCS)
+        return;
+    if (g_futex_waitv[idx].v)
+        kfree(g_futex_waitv[idx].v);
+    g_futex_waitv[idx].v = NULL;
+    g_futex_waitv[idx].n = 0;
+}
+
+/* Called from proc_wake_futex: does this sleeper's waitv set contain the
+ * word being woken? */
+static int proc_futex_waitv_matches(int slot, addrspace_t *as, uint64_t addr,
+                                   int shared, uint64_t key)
+{
+    struct { wv_ent_t *v; uint32_t n; } *s = &g_futex_waitv[slot];
+    if (!s->v || !s->n)
+        return 0;
+    proc_t *q = &g_procs[slot];
+    for (uint32_t k = 0; k < s->n; k++) {
+        if (shared ? (s->v[k].shared && s->v[k].key == key)
+                   : (!s->v[k].shared && q->as == as && s->v[k].uaddr == addr))
+            return 1;
+    }
+    return 0;
+}
+
 int proc_wake_futex(addrspace_t *as, uint64_t addr)
 {
     /* Wake waiters by the same rule they slept under: a word on a shared
@@ -1854,6 +1911,13 @@ int proc_wake_futex(addrspace_t *as, uint64_t addr)
         int match = shared ? (q->futex_shared && q->futex_key == key)
                            : (!q->futex_shared && q->as == as &&
                               q->futex_addr == addr);
+        if (!match && proc_futex_waitv_matches(i, as, addr, shared, key)) {
+            if (g_futex_waitv[i].v)
+                kfree(g_futex_waitv[i].v);
+            g_futex_waitv[i].v = NULL;
+            g_futex_waitv[i].n = 0;
+            match = 1;
+        }
         if (match) {
             sched_wake(q);
             n++;

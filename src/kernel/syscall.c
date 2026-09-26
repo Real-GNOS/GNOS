@@ -1049,6 +1049,89 @@ static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off,
     return total;
 }
 
+/* futex_waitv(449): sleep on a whole vector of futexes and wake when ANY of
+ * them changes.  struct futex_waitv is { u64 val; u64 uaddr; u32 flags;
+ * u32 __reserved; } -- 24 bytes -- and the only defined bits in `flags` are
+ * FUTEX_32 (32-bit word) and FUTEX_PRIVATE_FLAG (process-private word).
+ * Returns the index of the futex that changed, or -1/ETIMEDOUT. */
+#define FUTEX_WAITV_MAX     128
+#define FUTEX_32            0x02
+#define FUTEX_PRIVATE_FLAG  0x80
+
+typedef struct { uint64_t val, uaddr; uint32_t flags, reserved; } futex_waitv_t;
+
+static int64_t sys_futex_waitv(uint64_t uwaiters, uint64_t nr, uint64_t flags,
+                               uint64_t utimeout, uint64_t clockid)
+{
+    if (flags)
+        return -E_INVAL;                 /* no flags are defined */
+    if (!nr || nr > FUTEX_WAITV_MAX)
+        return -E_INVAL;
+    if (clockid > 7)                     /* MONOTONIC/REALTIME/BOOTTIME only */
+        return -E_INVAL;
+    if (!user_ptr_ok(uwaiters, nr * sizeof(futex_waitv_t)))
+        return -E_FAULT;
+
+    const futex_waitv_t *w = (const futex_waitv_t *)(uintptr_t)uwaiters;
+    static uint64_t addrs[FUTEX_WAITV_MAX];
+
+    for (uint32_t i = 0; i < nr; i++) {
+        if (w[i].flags & ~(uint32_t)(FUTEX_32 | FUTEX_PRIVATE_FLAG))
+            return -E_INVAL;
+        if (!user_ptr_ok(w[i].uaddr, 4))
+            return -E_FAULT;
+        addrs[i] = w[i].uaddr;
+    }
+
+    /* First pass: if any word already differs from its expected value the
+     * wait is satisfied immediately and we report that index. */
+    for (uint32_t i = 0; i < nr; i++) {
+        uint32_t cur = *(volatile uint32_t *)(uintptr_t)w[i].uaddr;
+        if (cur != (uint32_t)w[i].val)
+            return (int64_t)i;
+    }
+
+    int64_t ticks = -1;
+    if (utimeout) {
+        if (!user_ptr_ok(utimeout, 16))
+            return -E_FAULT;
+        struct { int64_t tv_sec; int64_t tv_nsec; } ts;
+        memcpy(&ts, (const void *)(uintptr_t)utimeout, sizeof ts);
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+            return -E_INVAL;
+        int64_t base = (clockid == 0)
+            ? (int64_t)(timer_ticks() / SCHED_HZ + timer_boot_epoch())
+            : (int64_t)(timer_ticks() / SCHED_HZ);
+        ticks = (ts.tv_sec - base) * SCHED_HZ + ts.tv_nsec / 10000000;
+        if (ticks < 0)
+            ticks = 0;
+    }
+
+    proc_t *p = proc_current();
+    if (!p)
+        return -E_BADF;
+    int r = proc_futex_waitv_arm(addrs, (uint32_t)nr);
+    if (r < 0)
+        return r;
+
+    p->state       = PROC_BLOCKED;
+    p->wait_reason = WAIT_FUTEX;
+    if (ticks >= 0)
+        sched_block_timeout(WAIT_FUTEX, (uint64_t)ticks);
+    else
+        sched_block(WAIT_FUTEX);
+    proc_futex_waitv_disarm();
+
+    /* Second pass: report whichever word moved.  Nothing moved means the
+     * timeout expired (or we were woken without a change). */
+    for (uint32_t i = 0; i < nr; i++) {
+        uint32_t cur = *(volatile uint32_t *)(uintptr_t)w[i].uaddr;
+        if (cur != (uint32_t)w[i].val)
+            return (int64_t)i;
+    }
+    return -E_TIMEDOUT;
+}
+
 /* mount_setattr(442): the new mount API's attribute setter.  GNOS has no
  * mount table at all -- the filesystem is built in -- so the honest answer
  * is ENOSYS, not a silent success that would fool a caller into believing
@@ -4862,6 +4945,10 @@ void syscall_handler(regs_t *r)
 
     case SYS_quotactl_fd:
         ret = sys_quotactl_fd(a1, (uint32_t)a2, a3, r->r10);
+        break;
+
+    case SYS_futex_waitv:
+        ret = sys_futex_waitv(a1, a2, a3, r->r10, r->r8);
         break;
 
     case SYS_mount_setattr:

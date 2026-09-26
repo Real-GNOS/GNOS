@@ -1082,3 +1082,5 @@ struct sock_filter {
 #define SYS_quotactl_fd  443
 
 #define SYS_memfd_secret  447
+
+#define SYS_futex_waitv   449
