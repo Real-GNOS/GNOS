@@ -50,6 +50,7 @@
 #include "cpuid.h"
 #include "alsa.h"
 #include "pagecache.h"
+#include "slab.h"
 #include "module.h"
 #include "acpi.h"
 #include "lapic.h"
@@ -348,8 +349,10 @@ void kernel_entry(void)
     cgroup_init();
     vfs_mount_cgroupfs("/sys/fs/cgroup");
 
+    slab_init();
     pagecache_init();
     pagecache_selftest();
+    slab_selftest();
     kheap_self_test();
     gfx_self_test();
     fbdev_self_test();

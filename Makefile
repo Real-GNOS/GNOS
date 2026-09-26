@@ -111,7 +111,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/debugcon.o $(BUILD)/ext2.o $(BUILD)/panic.o \
          $(BUILD)/gdt.o $(BUILD)/idt.o $(BUILD)/isr.o \
          $(BUILD)/kstring.o $(BUILD)/vfs.o $(BUILD)/procfs.o $(BUILD)/debugfs.o $(BUILD)/tmpfs.o $(BUILD)/tty.o $(BUILD)/heap.o \
-         $(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/proc.o $(BUILD)/cgroup.o $(BUILD)/ptrace.o \
+         $(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/slab.o $(BUILD)/proc.o $(BUILD)/cgroup.o $(BUILD)/ptrace.o \
         $(BUILD)/signal.o $(BUILD)/switch.o $(BUILD)/timer.o \
         $(BUILD)/syscall.o \
         $(BUILD)/smp.o $(BUILD)/ap_trampoline.o \

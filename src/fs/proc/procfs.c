@@ -30,6 +30,7 @@
 #include "subsys.h"
 #include "module.h"
 #include "idt.h"       /* irqstat_snapshot, MSI_VECTOR_BASE */
+#include "slab.h"
 
 /* One render never exceeds this; /proc/net/dev with two interfaces is the
  * largest and comes to a few hundred bytes. */
@@ -415,6 +416,39 @@ static void gen_interrupts(sbuf_t *s)
     sb_str(s, "  Local timer interrupt\n");
 }
 
+/* /proc/slabinfo: one line per object cache, Linux's column layout --
+ * tools and humans both read the (name, active, num, objs/slab) prefix. */
+static void gen_slabinfo(sbuf_t *s)
+{
+    sb_str(s, "slabinfo - version: 2.1 (GNOS)\n");
+    sb_str(s, "# name            <active_objs> <num_objs> <objsize> "
+              "<objperslab> <pagesperslab> : tunables : slabdata\n");
+    int it = 0;
+    kmem_slabinfo_t si;
+    while (kmem_slabinfo_next(&it, &si) == 0) {
+        sb_str(s, si.name);
+        sb_str(s, ":  ");
+        sb_dec(s, si.active_objs, 0);
+        sb_char(s, ' ');
+        sb_dec(s, si.num_objs, 0);
+        sb_char(s, ' ');
+        sb_dec(s, si.obj_size, 0);
+        sb_char(s, ' ');
+        sb_dec(s, si.objs_per_slab, 0);
+        sb_str(s, " : ");
+        sb_dec(s, si.ac_hits, 0);
+        sb_char(s, ' ');
+        sb_dec(s, si.slab_hits, 0);
+        sb_str(s, " : ");
+        sb_dec(s, si.num_slabs, 0);
+        sb_char(s, ' ');
+        sb_dec(s, si.num_full, 0);
+        sb_char(s, ' ');
+        sb_dec(s, si.num_partial, 0);
+        sb_char(s, '\n');
+    }
+}
+
 typedef void (*proc_gen_t)(sbuf_t *s);
 
 typedef struct {
@@ -429,6 +463,7 @@ static const procfile_t g_files[] = {
     { "/proc/uptime",       gen_uptime        },
     { "/proc/meminfo",      gen_meminfo       },
     { "/proc/interrupts",   gen_interrupts    },
+    { "/proc/slabinfo",     gen_slabinfo      },
     { "/proc/version",      gen_version       },
     { "/proc/cmdline",      gen_cmdline       },
     { "/proc/filesystems",  gen_filesystems   },

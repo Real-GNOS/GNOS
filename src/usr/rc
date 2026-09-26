@@ -63,6 +63,9 @@ sleep 1
 /usr/bin/cat /proc/interrupts >> /tmp/intr.out
 /bin/dbgcat.elf /tmp/intr.out
 
+/usr/bin/cat /proc/slabinfo > /tmp/slab.out 2>&1
+/bin/dbgcat.elf /tmp/slab.out
+
 # apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
 /sbin/apk.static --version >/tmp/apk.out 2>&1
 /sbin/apk.static update >>/tmp/apk.out 2>&1
