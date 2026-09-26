@@ -260,3 +260,26 @@ int64_t sys_epoll_pwait(int epfd, uint64_t uevents, int maxevents, int ms,
     (void)usigmask;
     return epoll_wait_common(epfd, uevents, maxevents, ms);
 }
+
+/* epoll_pwait2(441): epoll_pwait with a nanosecond-resolution timeout in a
+ * struct timespec instead of a millisecond int.  NULL means "wait forever",
+ * as it does for epoll_wait. */
+int64_t sys_epoll_pwait2(int epfd, uint64_t uevents, int maxevents,
+                         uint64_t uts, uint64_t usigmask)
+{
+    (void)usigmask;
+    struct { int64_t tv_sec, tv_nsec; } ts;
+
+    if (!uts)
+        return epoll_wait_common(epfd, uevents, maxevents, -1);
+    if (!user_ptr_ok(uts, sizeof ts))
+        return -E_FAULT;
+    memcpy(&ts, (const void *)(uintptr_t)uts, sizeof ts);
+    if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+        return -E_INVAL;
+
+    int64_t ms = ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+    if (ms > 0x7FFFFFFFLL)
+        ms = 0x7FFFFFFFLL;               /* saturate rather than overflow */
+    return epoll_wait_common(epfd, uevents, maxevents, ms);
+}

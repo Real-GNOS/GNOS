@@ -977,11 +977,25 @@ static int64_t sys_statx(int dirfd, uint64_t upath, uint64_t flags,
  * fadvise64(221): (fd, offset, len, advice).  GNOS keeps no page cache to
  * prefetch into, so this is a no-op beyond validating the descriptor.
  */
+/* fadvise64(221): a hint about how a file will be touched.  None of it is
+ * wired to anything yet -- there is no readahead window to resize and the
+ * page cache has no drop-on-demand path -- but an unknown advice must still
+ * be refused, or a caller that asked for something we cannot do would
+ * believe it had been done. */
+#define POSIX_FADV_NORMAL     0
+#define POSIX_FADV_RANDOM     1
+#define POSIX_FADV_SEQUENTIAL 2
+#define POSIX_FADV_WILLNEED   3
+#define POSIX_FADV_DONTNEED   4
+#define POSIX_FADV_NOREUSE    5
+
 static int64_t sys_fadvise64(int fd, uint64_t off, uint64_t len, uint64_t advice)
 {
-    (void)off; (void)len; (void)advice;
+    (void)off; (void)len;
     if (fd_handle(fd) < 0)
         return -E_BADF;
+    if (advice > POSIX_FADV_NOREUSE)
+        return -E_INVAL;
     return 0;
 }
 
@@ -5368,6 +5382,10 @@ void syscall_handler(regs_t *r)
         break;
     case SYS_epoll_pwait:
         ret = sys_epoll_pwait((int)a1, a2, (int)a3, (int)r->r10, r->r8);
+        break;
+
+    case SYS_epoll_pwait2:
+        ret = sys_epoll_pwait2((int)a1, a2, (int)a3, r->r10, r->r8);
         break;
 
     case SYS_timerfd_create:

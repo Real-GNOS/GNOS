@@ -1054,3 +1054,8 @@ struct sock_filter {
 #define SYS_fallocate 285
 
 #define SYS_rseq 386
+
+/* epoll_pwait2 is 441 in Linux; GNOS already uses 441 for its own
+ * dbgputs, which several in-tree programs call by number, so it gets the
+ * next free slot instead. */
+#define SYS_epoll_pwait2  442

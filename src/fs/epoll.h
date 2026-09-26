@@ -11,6 +11,8 @@ int64_t sys_epoll_create(uint64_t flags);
 int64_t sys_epoll_create1(uint64_t flags);
 int64_t sys_epoll_ctl(int epfd, int op, int fd, uint64_t up_event);
 int64_t sys_epoll_wait(int epfd, uint64_t uevents, int maxevents, int ms);
+int64_t sys_epoll_pwait2(int epfd, uint64_t uevents, int maxevents,
+                         uint64_t uts, uint64_t usigmask);
 int64_t sys_epoll_pwait(int epfd, uint64_t uevents, int maxevents, int ms,
                         uint64_t usigmask);
 
