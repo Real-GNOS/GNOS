@@ -42,8 +42,7 @@ ARCH_ROOT := src/kernel/arch
 #
 # -prune, not -not -path: find must not descend into the vendored trees at all
 # (src/LeonOS-4 alone is 164 MB) or they would land on the include path too.
-PRUNE := -name vendor -prune -o -name LeonOS-4 -prune -o -name elf2linux -prune -o \
-         -name third_party -prune -o -name rootfs -prune -o -name d -prune -o
+PRUNE := -name vendor -prune -o -name rootfs -prune -o -name d -prune -o
 SRCDIRS := $(sort $(shell find src $(PRUNE) \
              \( -name '*.[chS]' -o -name '*.asm' \) -printf '%h\n' | sort -u))
 
@@ -201,7 +200,7 @@ BASH_BIN := $(BASH_SRC)/bash
 CURL_BIN := $(BUILD)/curlsrc/curl-8.9.1/src/curl
 
 # mbedtls 2.28.9 -- the TLS library curl links against, vendored in-tree
-# (src/user/third_party/mbedtls, Apache-2.0).  It is compiled against
+# (src/vendor/mbedtls, Apache-2.0).  It is compiled against
 # musl's headers exactly like the musl programs, with the GNOS
 # configuration: include/mbedtls/mbedtls_config.h *is* config-gnos.h (a
 # client-only TLS 1.2 with ECDHE + AES-GCM + SHA-256 suites, entropy fed
@@ -209,7 +208,7 @@ CURL_BIN := $(BUILD)/curlsrc/curl-8.9.1/src/curl
 # library Makefile builds the three split archives curl's configure probes
 # for (libmbedtls/x509/crypto.a), and the result is copied into an
 # installed prefix (include/ + lib/) curl's configure understands.
-MBEDTLS_SRC    := src/user/third_party/mbedtls
+MBEDTLS_SRC    := src/vendor/mbedtls
 MBEDTLS_INC    := $(MBEDTLS_SRC)/include
 MBEDTLS_PREFIX := $(BUILD)/mbedtls-inst
 MBEDTLS_LIBS   := $(MBEDTLS_PREFIX)/lib/libmbedtls.a \
