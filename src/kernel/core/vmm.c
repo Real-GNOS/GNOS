@@ -136,6 +136,22 @@ void vmm_map_kernel_bss(void)
         asm volatile("invlpg (%0)" :: "r"(va) : "memory");
     }
 
+    /* Guard page at _kernel_end: the loop above stops at the last byte of
+     * the image, so the page the end symbol lands on is not mapped.  Some
+     * arenas are sized by symbols rather than by their own length, and a
+     * BSS that grows (a big static pool, say) can move _kernel_end onto a
+     * page boundary that then gets touched.  One extra page costs nothing
+     * and removes that whole class of off-by-one. */
+    {
+        uint64_t guard = end & ~0xFFFULL;
+        uint64_t *gpte = walk(&k, guard, 0, 0);
+        if (!gpte || !(*gpte & PTE_P)) {
+            uint64_t gframe = pmm_alloc_zeroed();
+            if (gframe)
+                vmm_map(&k, guard, gframe, VM_WRITE);
+        }
+    }
+
     dbg_puts("VMM: kernel BSS mapped OK\r\n");
 }
 

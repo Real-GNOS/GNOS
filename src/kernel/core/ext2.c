@@ -25,6 +25,7 @@
 #include <stdint.h>
 
 #include "ext2.h"
+#include "pagecache.h"
 #include "kstring.h"
 
 /* ---- superblock field offsets ----------------------------------------- */
@@ -132,16 +133,22 @@ static void wr32(uint8_t *p, uint32_t v)
  *   - EXT2_CACHE_SLOTS must exceed the deepest simultaneous borrow
  *     nesting; the worst walker is rename, which pins seven blocks.
  */
+/* Every device access goes through the page cache: a block is fetched
+ * from the disk once and served from memory after that (see
+ * pagecache.c).  Writes stay write-through, so a failure here is a
+ * failure the caller can see. */
 static int blkio_rd(ext2_fs_t *fs, uint32_t blk, void *buf)
 {
-    return fs->blkio.read(fs->blkio.ctx, (uint64_t)blk * fs->block_size,
-                          buf, fs->block_size);
+    return pagecache_read(fs->blkio.ctx, fs->blkio.read,
+                          (uint64_t)blk * fs->block_size, buf,
+                          fs->block_size);
 }
 
 static int blkio_wr(ext2_fs_t *fs, uint32_t blk, const void *buf)
 {
-    return fs->blkio.write(fs->blkio.ctx, (uint64_t)blk * fs->block_size,
-                           buf, fs->block_size);
+    return pagecache_write(fs->blkio.ctx, fs->blkio.read, fs->blkio.write,
+                           (uint64_t)blk * fs->block_size, buf,
+                           fs->block_size);
 }
 
 /* Borrow the whole block `blk`, loading it if it is not cached.  Returns a

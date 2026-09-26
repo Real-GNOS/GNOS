@@ -48,6 +48,7 @@
 #include "klog.h"
 #include "cpuid.h"
 #include "alsa.h"
+#include "pagecache.h"
 #include "module.h"
 #include "acpi.h"
 #include "lapic.h"
@@ -346,6 +347,8 @@ void kernel_entry(void)
     cgroup_init();
     vfs_mount_cgroupfs("/sys/fs/cgroup");
 
+    pagecache_init();
+    pagecache_selftest();
     kheap_self_test();
     gfx_self_test();
     fbdev_self_test();
