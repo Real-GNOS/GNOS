@@ -3857,6 +3857,41 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
             return -ENOMEM;
     }
 
+    /* MAP_SHARED anonymous memory must be shared, so it cannot be lazy:
+     * a lazily-allocated frame belongs to whichever process touched it
+     * first, and the other side would get its own private copy.  Populate
+     * the frames now, mark them shared (PTE_AVL via VM_EXTSHM) and let the
+     * refcount table own them -- that is what makes a fork's child see the
+     * same words, and what lets a futex parked here be woken across
+     * processes. */
+    if (flags & MAP_SHARED) {
+        unsigned sv = vflags | VM_EXTSHM;
+        uint32_t npages = (uint32_t)(size >> 12);
+        for (uint32_t i = 0; i < npages; i++) {
+            uint64_t frame = pmm_alloc_zeroed();
+            if (!frame) {
+                vmm_unmap(p->as, base, (uint64_t)i << 12);
+                return -ENOMEM;
+            }
+            if (vmm_share_frame(frame) < 0) {
+                pmm_free(frame);
+                vmm_unmap(p->as, base, (uint64_t)i << 12);
+                return -ENOMEM;
+            }
+            if (!vmm_map(p->as, base + ((uint64_t)i << 12), frame, sv)) {
+                vmm_share_unref(frame);
+                vmm_unmap(p->as, base, (uint64_t)i << 12);
+                return -ENOMEM;
+            }
+            if (p->as->cg >= 0)
+                cg_mem_charge(p->as->cg, PAGE_SIZE);
+            p->as->pages++;
+        }
+        if (!mmap_record(p, base, size, sv))
+            return -ENOMEM;
+        return (int64_t)base;
+    }
+
     /*
      * Anonymous memory is backed LAZILY: the record alone is enough here and
      * the #PF handler (idt.c) allocates a zeroed frame on first touch.  The

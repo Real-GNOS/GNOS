@@ -30,6 +30,77 @@
 static addrspace_t g_spaces[MAX_ADDRSPACES];
 static int         g_used[MAX_ADDRSPACES];
 
+/* ---- shared-anonymous-memory frame refcounts ---------------------------
+ * mmap(MAP_SHARED|MAP_ANONYMOUS) must hand every mapper the SAME frames,
+ * or POSIX shared memory (and the futexes/锁 people park on it) silently
+ * becomes per-process private memory.  Frames reached that way are marked
+ * PTE_AVL so unmap and teardown stop freeing them; this table is what
+ * decides when they are finally released. */
+#define SHM_SLOTS 4096
+static struct { uint64_t frame; uint32_t refs; int used; } g_shm[SHM_SLOTS];
+
+static unsigned shm_hash(uint64_t frame)
+{
+    uint64_t h = (frame >> 12) * 0x9E3779B97F4A7C15ULL;
+    return (unsigned)((h >> 32) & (SHM_SLOTS - 1));
+}
+
+static struct { uint64_t frame; uint32_t refs; int used; } *shm_find(uint64_t frame)
+{
+    unsigned i = shm_hash(frame);
+    for (unsigned n = 0; n < SHM_SLOTS; n++) {
+        struct { uint64_t frame; uint32_t refs; int used; } *s =
+            &g_shm[(i + n) & (SHM_SLOTS - 1)];
+        if (!s->used)
+            return NULL;
+        if (s->frame == frame)
+            return s;
+    }
+    return NULL;
+}
+
+/* Record a frame as shared with one owner. */
+int vmm_share_frame(uint64_t frame)
+{
+    struct { uint64_t frame; uint32_t refs; int used; } *s = shm_find(frame);
+    if (s)
+        return 0;                       /* already tracked */
+    unsigned i = shm_hash(frame);
+    for (unsigned n = 0; n < SHM_SLOTS; n++) {
+        s = &g_shm[(i + n) & (SHM_SLOTS - 1)];
+        if (!s->used) {
+            s->frame = frame;
+            s->refs  = 1;
+            s->used  = 1;
+            return 1;
+        }
+    }
+    return -1;                          /* table full: caller must fail */
+}
+
+int vmm_share_ref(uint64_t frame)
+{
+    struct { uint64_t frame; uint32_t refs; int used; } *s = shm_find(frame);
+    if (!s)
+        return -1;
+    s->refs++;
+    return 0;
+}
+
+/* Drop one mapper; the last one frees the frame. */
+int vmm_share_unref(uint64_t frame)
+{
+    struct { uint64_t frame; uint32_t refs; int used; } *s = shm_find(frame);
+    if (!s)
+        return -1;
+    if (--s->refs == 0) {
+        s->used = 0;
+        s->frame = 0;
+        pmm_free(frame);
+    }
+    return 0;
+}
+
 static uint64_t g_kernel_pml4_phys;
 static int g_watchmap_count;   /* TEMPORARY Xorg debugging */
 
@@ -470,7 +541,13 @@ int vmm_unmap(addrspace_t *as, uint64_t vaddr, uint64_t size)
         }
         /* A SysV shm page is owned by its segment, not this address space:
          * clear the PTE but keep the frame (the segment frees it). */
-        if (!(*pte & PTE_AVL)) {
+        if (*pte & PTE_AVL) {
+            vmm_share_unref(*pte & PTE_ADDR);
+            if (as->pages > 0)
+                as->pages--;
+            if (as->cg >= 0)
+                cg_mem_discharge(as->cg, PAGE_SIZE);
+        } else {
             pmm_free(*pte & PTE_ADDR);
             if (as->pages > 0)
                 as->pages--;    /* resident-page accounting (cgroup memory) */
@@ -570,9 +647,10 @@ static void free_level(uint64_t table_phys, int level)
         uint64_t child = t[i] & PTE_ADDR;
         if (level > 1) {
             free_level(child, level - 1);
-        } else if (!(t[i] & PTE_AVL)) {
-            /* A SysV shm frame belongs to its segment, not this address
-             * space: drop the PTE without freeing the frame. */
+        } else if (t[i] & PTE_AVL) {
+            /* Shared frame: release this mapper's reference. */
+            vmm_share_unref(child);
+        } else {
             pmm_free(child);
         }
         t[i] = 0;
@@ -648,6 +726,20 @@ static int clone_level(addrspace_t *dst, uint64_t src_table, int level,
         unsigned flags = VM_USER | VM_EXEC;
         if (t[i] & PTE_RW)
             flags |= VM_WRITE;
+
+        if (t[i] & PTE_AVL) {
+            /* Shared-anonymous (or SysV shm) page: the child maps the very
+             * same frame -- copying it would give each side private memory
+             * and break every futex parked on it. */
+            uint64_t sframe = t[i] & PTE_ADDR;
+            if (vmm_share_ref(sframe) < 0)
+                return 0;
+            if (!vmm_map(dst, va, sframe, flags | VM_EXTSHM)) {
+                vmm_share_unref(sframe);
+                return 0;
+            }
+            continue;
+        }
 
         uint64_t frame = pmm_alloc();
         if (!frame)

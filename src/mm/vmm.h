@@ -206,6 +206,9 @@ int vmm_protect(addrspace_t *as, uint64_t vaddr, uint64_t size, unsigned prot);
 
 /* Deep-copy the lower half of `src` into a brand new address space (fork). */
 addrspace_t *vmm_clone(addrspace_t *src);
+int vmm_share_frame(uint64_t frame);      /* mark shared, one owner */
+int vmm_share_ref(uint64_t frame);        /* another mapper arrives */
+int vmm_share_unref(uint64_t frame);      /* a mapper leaves; last frees */
 
 /* Load this address space into CR3. */
 void vmm_switch(addrspace_t *as);

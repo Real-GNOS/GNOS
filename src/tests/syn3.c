@@ -242,6 +242,47 @@ int main(void)
     CHECK(syscall(SYS_futex_waitv, (unsigned long)fv, 2UL, 1UL, 0UL, 1UL) < 0,
           "futex_waitv rejects flags");
 
+    /* anonymous MAP_SHARED must really be shared across a fork */
+    {
+        uint32_t *sh = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        CHECK(sh != MAP_FAILED, "shared anon: mmap");
+        sh[0] = 0xA5A5;
+        pid_t c2 = fork();
+        if (c2 == 0) {
+            /* the child must see the parent's word through the same frame */
+            _exit(sh[0] == 0xA5A5 ? 3 : 4);
+        }
+        int st2 = 0;
+        waitpid(c2, &st2, 0);
+        CHECK(WIFEXITED(st2) && WEXITSTATUS(st2) == 3,
+              "shared anon: child sees the parent's write");
+        munmap(sh, 4096);
+    }
+
+    /* a futex in shared anon memory must be woken across processes */
+    {
+        uint32_t *fw = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        CHECK(fw != MAP_FAILED, "shared futex: mmap");
+        *fw = 5;
+        struct futex_waitv wv1;
+        memset(&wv1, 0, sizeof wv1);
+        wv1.val = 5; wv1.uaddr = (uint64_t)(uintptr_t)fw; wv1.flags = 2;
+        pid_t c3 = fork();
+        if (c3 == 0) {
+            usleep(150000);
+            *fw = 6;
+            syscall(SYS_futex, (unsigned long)fw, (unsigned long)FUTEX_WAKE,
+                    1UL, 0UL, 0UL, 0UL);
+            _exit(0);
+        }
+        r = syscall(SYS_futex_waitv, (unsigned long)&wv1, 1UL, 0UL, 0UL, 1UL);
+        CHECK(r == 0, "shared futex: cross-process wake");
+        int st3 = 0; waitpid(c3, &st3, 0);
+        munmap(fw, 4096);
+    }
+
     printf("\n%d tests, %d failures\n", tests, fails);
     return fails ? 1 : 0;
 }
