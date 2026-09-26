@@ -1092,3 +1092,5 @@ struct sock_filter {
 #define SYS_landlock_restrict_self 446
 
 #define SYS_process_mrelease 448
+
+#define SYS_sync          162

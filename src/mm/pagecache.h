@@ -22,9 +22,15 @@ int      pagecache_read(void *ctx, pc_dev_read_t rd, uint64_t off,
                         void *buf, uint32_t len);
 int      pagecache_write(void *ctx, pc_dev_read_t rd, pc_dev_write_t wr,
                          uint64_t off, const void *buf, uint32_t len);
-void     pagecache_invalidate(void *ctx);
+/* Invalidate a device's cached pages.  Dirty pages are flushed first; a
+ * page whose flush fails is kept and -1 returned. */
+int      pagecache_invalidate(void *ctx);
+/* Write-back: flush dirty pages.  sync(2) uses the _all form. */
+int      pagecache_flush_ctx(void *ctx);
+int      pagecache_flush_all(void);
 void     pagecache_stats(uint32_t *hits, uint32_t *misses, uint32_t *evicts,
                          uint32_t *pages);
+void     pagecache_wb_stats(uint32_t *dirty_now, uint32_t *writebacks);
 void     pagecache_selftest(void);
 
 #endif

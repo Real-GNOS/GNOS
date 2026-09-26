@@ -48,6 +48,7 @@
 #include "sysvipc.h"
 #include "seccomp.h"
 #include "pidfd.h"
+#include "pagecache.h"
 #include "process_vm_access.h"
 
 /* reboot(169) command codes; the Linux ABI as musl's reboot() passes them. */
@@ -5036,6 +5037,10 @@ void syscall_handler(regs_t *r)
 
     case SYS_sched_getaffinity:
         ret = sys_sched_getaffinity(a1, a2, a3);
+        break;
+
+    case SYS_sync:                       /* 162: flush every dirty page */
+        ret = pagecache_flush_all();
         break;
 
     case SYS_fallocate:
