@@ -551,7 +551,7 @@ void input_init(void)
     g_mouse_dev.rel_bits[REL_Y >> 4] |= (uint16_t)(1u << (REL_Y & 15));
 
     kbd_enable_aux();
-    irq_install(12, mouse_irq);
+    irq_install(12, mouse_irq, "mouse");
 
     if (vfs_register_devnum("input/event0", &g_evdev_ops, &g_kbd_dev, 13, 64) != 0 ||
         vfs_register_devnum("input/event1", &g_evdev_ops, &g_mouse_dev, 13, 65) != 0) {

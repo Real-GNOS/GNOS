@@ -792,7 +792,7 @@ int xhci_init(void)
     xhci.initialized = XHCI_STATE_READY;
 
     if (xhci.irq < 16)
-        irq_install(xhci.irq, xhci_irq);
+        irq_install(xhci.irq, xhci_irq, "xhci");
 
     dbg_puts("XHCI: controller up, slots ");
     dbg_puts_dec(xhci.max_slots);

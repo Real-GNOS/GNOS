@@ -11,6 +11,8 @@
 #include "io.h"
 #include "vmm.h"
 #include "debugcon.h"
+#include "idt.h"
+#define PCI_PAGE_SIZE 4096       /* irq_handler_t, irq_install */
 
 #define PCI_ADDR_PORT 0xCF8
 #define PCI_DATA_PORT 0xCFC
@@ -125,6 +127,160 @@ uint64_t pci_map_bar(const pci_dev_t *d, int idx)
     return vmm_map_mmio(phys, size);
 }
 
+/* Offset of the MSI capability in this function's config space, or 0. */
+static uint8_t pci_msi_cap_offset(const pci_dev_t *d)
+{
+    uint32_t st = cfg_read32(d->bus, d->dev, d->fn, 0x04);
+    uint8_t  ptr = (uint8_t)(cfg_read32(d->bus, d->dev, d->fn, 0x34) & 0xFF);
+    if (!(st & (1u << 20)))
+        return 0;
+    while (ptr) {
+        uint32_t cw = cfg_read32(d->bus, d->dev, d->fn, ptr & 0xFC);
+        if ((uint8_t)(cw & 0xFF) == PCI_CAP_ID_MSI)
+            return ptr;
+        ptr = (uint8_t)((cw >> 8) & 0xFF);
+    }
+    return 0;
+}
+
+/* MSI vectors come from the dedicated 0xE0..0xEF pool. */
+static uint8_t g_msi_next = 0xE0;
+
+/* A name slot per vector for /proc/interrupts: "PCI-MSI 00:03.0" etc. */
+static char g_vec_name[16][24];
+
+static void vec_set_name(unsigned slot, const char *kind, const pci_dev_t *d)
+{
+    char *p = g_vec_name[slot];
+    const char *q = kind;
+    while (*q)
+        *p++ = *q++;
+    *p++ = ' ';
+    static const char hexd[] = "0123456789abcdef";
+    *p++ = hexd[d->bus >> 4];
+    *p++ = hexd[d->bus & 0xF];
+    *p++ = ':';
+    *p++ = hexd[d->dev >> 4];
+    *p++ = hexd[d->dev & 0xF];
+    *p++ = '.';
+    *p++ = (char)('0' + d->fn);
+    *p = 0;
+}
+
+static uint8_t pci_msi_alloc_vector(void)
+{
+    uint8_t v = g_msi_next;
+    g_msi_next++;
+    if (g_msi_next > 0xEF)
+        g_msi_next = 0xE0;               /* wrap: callers are few */
+    return v;
+}
+
+#define MSI_ADDR_APIC 0xFEE00000ULL      /* the BSP's LAPIC, destination 0 */
+
+/* Put `d` on message-signalled interrupts: allocate a vector, point the
+ * device's MSI capability at the BSP LAPIC, enable it and turn INTx off.
+ * A device without an MSI capability falls back to its INTx line, which is
+ * what Linux does for old hardware too.  Returns the vector in *out_vec. */
+int pci_enable_msi(const pci_dev_t *d, pci_msi_handler_t handler, uint8_t *out_vec)
+{
+    uint8_t ptr = pci_msi_cap_offset(d);
+    if (!ptr) {
+        /* No MSI: try MSI-X (QEMU's NVMe carries only that one), then the
+         * INTx line as the last resort for old hardware. */
+        if (pci_enable_msix(d, handler, out_vec) == 0)
+            return 0;
+        vec_set_name(d->irq_line, "PCI-INTx", d);
+        irq_install(d->irq_line, (irq_handler_t)handler,
+                    g_vec_name[d->irq_line]);
+        *out_vec = (uint8_t)(0x20 + d->irq_line);
+        return 0;
+    }
+
+    uint32_t ctrl_w = cfg_read32(d->bus, d->dev, d->fn, ptr + 0x0);
+    uint16_t ctrl = (uint16_t)((ctrl_w >> 16) & 0xFFFF);
+    int msi64 = (ctrl >> 7) & 1;
+
+    uint8_t vector = pci_msi_alloc_vector();
+    vec_set_name(vector - MSI_VECTOR_BASE, "PCI-MSI", d);
+    msi_install(vector, (irq_handler_t)handler, g_vec_name[vector - MSI_VECTOR_BASE]);
+
+    cfg_write32(d->bus, d->dev, d->fn, ptr + 0x4, MSI_ADDR_APIC);
+    if (msi64)
+        cfg_write32(d->bus, d->dev, d->fn, ptr + 0x8, 0);
+    cfg_write32(d->bus, d->dev, d->fn,
+                ptr + (msi64 ? 0xC : 0x8), (uint32_t)vector);
+
+    ctrl |= 0x0001;                      /* MSI enable */
+    cfg_write32(d->bus, d->dev, d->fn, ptr + 0x0,
+                (ctrl_w & 0xFFFF) | ((uint32_t)ctrl << 16));
+
+    /* INTx disable (bit 10) on top of the usual enables. */
+    uint32_t cmd = cfg_read32(d->bus, d->dev, d->fn, 0x04);
+    cmd |= 0x7 | (1u << 10);
+    cfg_write32(d->bus, d->dev, d->fn, 0x04, cmd);
+
+    *out_vec = vector;
+    return 0;
+}
+
+/* MSI-X: the table lives inside one of the device's own BARs (BIR says
+ * which, the offset comes with it), and each entry is 16 bytes of
+ * message-address/-data/vector-control.  The BAR is already assigned by
+ * the firmware; map the page holding the table and write entry 0. */
+int pci_enable_msix(const pci_dev_t *d, pci_msi_handler_t handler,
+                    uint8_t *out_vec)
+{
+    uint8_t ptr = 0;
+    uint32_t st = cfg_read32(d->bus, d->dev, d->fn, 0x04);
+    uint8_t  cp = (uint8_t)(cfg_read32(d->bus, d->dev, d->fn, 0x34) & 0xFF);
+    if (!(st & (1u << 20)))
+        return -1;
+    while (cp) {
+        uint32_t cw = cfg_read32(d->bus, d->dev, d->fn, cp & 0xFC);
+        if ((uint8_t)(cw & 0xFF) == PCI_CAP_ID_MSIX) {
+            ptr = cp;
+            break;
+        }
+        cp = (uint8_t)((cw >> 8) & 0xFF);
+    }
+    if (!ptr)
+        return -1;
+
+    uint32_t ctrl_w = cfg_read32(d->bus, d->dev, d->fn, ptr + 0x0);
+    uint16_t ctrl = (uint16_t)((ctrl_w >> 16) & 0xFFFF);
+    uint32_t toff = cfg_read32(d->bus, d->dev, d->fn, ptr + 0x4);
+    uint8_t  bir = (uint8_t)(toff & 0x7);
+    uint64_t toff_bytes = toff & ~0x7ULL;
+
+    uint64_t bar_phys = d->bar[bir] & ~0xFULL;
+    uint64_t table_va = vmm_map_mmio(bar_phys + toff_bytes, PCI_PAGE_SIZE);
+    if (!table_va)
+        return -1;
+
+    uint8_t vector = pci_msi_alloc_vector();
+    vec_set_name(vector - MSI_VECTOR_BASE, "PCI-MSI-X", d);
+    msi_install(vector, handler, g_vec_name[vector - MSI_VECTOR_BASE]);
+
+    volatile uint32_t *entry = (volatile uint32_t *)(uintptr_t)table_va;
+    entry[0] = 0xFEE00000u;              /* message address: the BSP LAPIC */
+    entry[1] = 0;                        /* upper address (32-bit dest)    */
+    entry[2] = (uint32_t)vector;         /* message data: the vector       */
+    entry[3] = 0;                        /* vector control: unmasked       */
+
+    ctrl |= (1u << 15);                  /* MSI-X enable                   */
+    ctrl &= ~(1u << 14);                 /* clear function mask            */
+    cfg_write32(d->bus, d->dev, d->fn, ptr + 0x0,
+                (ctrl_w & 0xFFFF) | ((uint32_t)ctrl << 16));
+
+    uint32_t cmd = cfg_read32(d->bus, d->dev, d->fn, 0x04);
+    cmd |= 0x7 | (1u << 10);             /* enable spaces, disable INTx    */
+    cfg_write32(d->bus, d->dev, d->fn, 0x04, cmd);
+
+    *out_vec = vector;
+    return 0;
+}
+
 /* Walk the capability list at offset 0x34 and record the ids we find. */
 static void pci_read_caps(pci_dev_t *d)
 {
@@ -207,6 +363,22 @@ static void pci_scan_bus(uint8_t bus)
                 g_pci_count++;
 
                 pci_read_caps(d);
+
+                /* A device with an MSI capability goes onto message
+                 * interrupts right away: the handler is a stub for now,
+                 * the point is that the config writes stick and the
+                 * vector pool allocates. */
+                if (pci_msi_cap_offset(d) || pci_enable_msix(d, 0, &(uint8_t){0}) == 0) {
+                    uint8_t vec = 0;
+                    if (pci_enable_msi(d, 0, &vec) == 0) {
+                        dbg_puts("PCI: MSI enabled on ");
+                        dbg_puts_hexn(d->bus, 2); dbg_puts(":");
+                        dbg_puts_hexn(d->dev, 2); dbg_puts(".");
+                        dbg_puts_hexn(d->fn, 1);  dbg_puts(" vec=");
+                        dbg_puts_hexn(vec, 2);
+                        dbg_puts("\r\n");
+                    }
+                }
 
                 /* A bridge opens a downstream bus: recurse into it. */
                 if ((d->hdr_type & 0x7F) == 0x01)

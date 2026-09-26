@@ -76,6 +76,13 @@ uint16_t pci_bar_io(const pci_dev_t *d, int idx);
 #define PCI_CAP_ID_MSIX             0x11
 #define PCI_CAP_ID_PCIE             0x10
 
+/* Move `d` onto MSI (falls back to its INTx line when the function has no
+ * MSI capability); the chosen vector is stored in *out_vec. */
+struct regs;
+typedef void (*pci_msi_handler_t)(struct regs *r);
+int pci_enable_msi(const pci_dev_t *d, pci_msi_handler_t handler, uint8_t *out_vec);
+int pci_enable_msix(const pci_dev_t *d, pci_msi_handler_t handler, uint8_t *out_vec);
+
 /* Does this function carry the given capability? */
 int pci_has_cap(const pci_dev_t *d, uint8_t cap_id);
 

@@ -1102,7 +1102,7 @@ void tty_init(void)
     while (inb(KBD_STATUS) & 1)
         (void)inb(KBD_DATA);
 
-    irq_install(1, kbd_irq);
+    irq_install(1, kbd_irq, "keyboard");
 
     /*
      * /dev/tty1 .. /dev/tty6 name one terminal each; /dev/tty is "mine",

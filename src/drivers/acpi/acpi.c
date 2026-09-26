@@ -354,7 +354,7 @@ void acpi_pm1_init(void)
 
     outw(g_pm1a_evt, PM1_PWRBTN);           /* clear a stale status bit */
     outw(g_pm1a_evt + 2, PM1_PWRBTN);       /* arm PWRBTN_EN */
-    irq_install(9, pm1a_sci);               /* SCI is GSI 9 */
+    irq_install(9, pm1a_sci, "acpi");               /* SCI is GSI 9 */
     dbg_puts("ACPI: power button armed (SCI on IRQ 9)\r\n");
 }
 

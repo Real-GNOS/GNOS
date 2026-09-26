@@ -29,6 +29,7 @@
 #include "cgroup.h"
 #include "subsys.h"
 #include "module.h"
+#include "idt.h"       /* irqstat_snapshot, MSI_VECTOR_BASE */
 
 /* One render never exceeds this; /proc/net/dev with two interfaces is the
  * largest and comes to a few hundred bytes. */
@@ -357,6 +358,63 @@ static void gen_self_cgroup(sbuf_t *s)
 }
 
 /* ---- the file table ---------------------------------------------------- */
+/* /proc/interrupts: one row per interrupt source, one count column per
+ * CPU, then the handler's name -- Linux's layout, which tools like
+ * mpstat(1) and `watch cat` expect.  Rows with no handler registered are
+ * skipped: a line claiming an interrupt is served when nothing is attached
+ * would be worse than omitting it. */
+static void gen_interrupts(sbuf_t *s)
+{
+    irqstat_t st;
+    irqstat_snapshot(&st);
+
+    sb_str(s, "            ");
+    for (int c = 0; c < IRQSTAT_CPUS; c++) {
+        sb_str(s, "CPU");
+        sb_dec(s, (uint64_t)c, 0);
+        for (int pad = 0; pad < 8; pad++)
+            sb_char(s, ' ');
+    }
+    sb_char(s, '\n');
+
+    for (unsigned i = 0; i < 16; i++) {
+        if (!st.pic_name[i])
+            continue;
+        uint32_t vec = (uint32_t)(0x20 + i);
+        sb_dec(s, vec, 4);
+        sb_str(s, ":  ");
+        for (int c = 0; c < IRQSTAT_CPUS; c++) {
+            sb_dec(s, st.pic[i][c], 10);
+            sb_char(s, ' ');
+        }
+        sb_str(s, "  ");
+        sb_str(s, st.pic_name[i]);
+        sb_char(s, '\n');
+    }
+
+    for (unsigned i = 0; i < 16; i++) {
+        if (!st.msi_name[i])
+            continue;
+        uint32_t vec = (uint32_t)(MSI_VECTOR_BASE + i);
+        sb_dec(s, vec, 4);
+        sb_str(s, ":  ");
+        for (int c = 0; c < IRQSTAT_CPUS; c++) {
+            sb_dec(s, st.msi[i][c], 10);
+            sb_char(s, ' ');
+        }
+        sb_str(s, "  ");
+        sb_str(s, st.msi_name[i]);
+        sb_char(s, '\n');
+    }
+
+    sb_str(s, "LOC:  ");
+    for (int c = 0; c < IRQSTAT_CPUS; c++) {
+        sb_dec(s, st.lapic_timer[c], 10);
+        sb_char(s, ' ');
+    }
+    sb_str(s, "  Local timer interrupt\n");
+}
+
 typedef void (*proc_gen_t)(sbuf_t *s);
 
 typedef struct {
@@ -370,6 +428,7 @@ static const procfile_t g_files[] = {
     { "/proc/net/if_inet6", gen_net_if_inet6  },
     { "/proc/uptime",       gen_uptime        },
     { "/proc/meminfo",      gen_meminfo       },
+    { "/proc/interrupts",   gen_interrupts    },
     { "/proc/version",      gen_version       },
     { "/proc/cmdline",      gen_cmdline       },
     { "/proc/filesystems",  gen_filesystems   },

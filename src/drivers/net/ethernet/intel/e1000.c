@@ -404,7 +404,7 @@ int e1000_init(void)
 
     /* Only now that a ring exists is it safe to let the card interrupt us. */
     if (g_irq < 16) {
-        irq_install(g_irq, e1000_irq);
+        irq_install(g_irq, e1000_irq, "e1000");
         reg_write(E1000_IMS, ICR_TXDW | ICR_LSC | ICR_RXDMT0 | ICR_RXO |
                              ICR_RXT0);
     }

@@ -128,7 +128,7 @@ void timer_init(unsigned hz)
     outb(PIT_CH0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CH0, (uint8_t)(divisor >> 8));
 
-    irq_install(0, timer_irq);
+    irq_install(0, timer_irq, "timer");
     lapic_timer_install(ap_timer_irq);
     rtc_read_boot_epoch();
 

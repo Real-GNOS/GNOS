@@ -46,6 +46,46 @@ extern uint8_t isr_stub_base[];   /* isr.asm, 16 bytes per vector */
 
 static struct idt_entry g_idt[256];
 static irq_handler_t    g_irq[16];
+static const char      *g_irq_name[16];
+/* MSI/MSI-X messages land on vectors from the dedicated pool below; the
+ * LAPIC raises them like any other interrupt and each needs its own EOI. */
+static irq_handler_t    g_msi[16];
+static const char      *g_msi_name[16];
+
+/* /proc/interrupts bookkeeping: which core took which interrupt how many
+ * times.  Counted outside any lock -- a torn count is fine for a stat that
+ * is only read, and the dispatch path must stay lock-free. */
+static uint32_t g_pic_stat[16][IRQSTAT_CPUS];
+static uint32_t g_msi_stat[16][IRQSTAT_CPUS];
+static uint32_t g_timer_stat[IRQSTAT_CPUS];
+
+static unsigned irqstat_cpu(void)
+{
+    unsigned id = (unsigned)cpu_self()->id;
+    return id < IRQSTAT_CPUS ? id : 0;
+}
+
+void irqstat_snapshot(irqstat_t *out)
+{
+    for (int i = 0; i < 16; i++) {
+        for (int c = 0; c < IRQSTAT_CPUS; c++) {
+            out->pic[i][c] = g_pic_stat[i][c];
+            out->msi[i][c] = g_msi_stat[i][c];
+        }
+        out->pic_name[i] = g_irq_name[i];
+        out->msi_name[i] = g_msi_name[i];
+    }
+    for (int c = 0; c < IRQSTAT_CPUS; c++)
+        out->lapic_timer[c] = g_timer_stat[c];
+}
+
+void msi_install(unsigned vec, irq_handler_t fn, const char *name)
+{
+    if (vec < MSI_VECTOR_BASE || vec >= MSI_VECTOR_BASE + 16)
+        return;
+    g_msi[vec - MSI_VECTOR_BASE] = fn;
+    g_msi_name[vec - MSI_VECTOR_BASE] = name;
+}
 static irq_handler_t    g_syscall;
 
 static inline void outb(uint16_t port, uint8_t v)
@@ -111,11 +151,12 @@ static void idt_set(unsigned vec, uint64_t handler, uint8_t dpl)
     g_idt[vec].zero      = 0;
 }
 
-void irq_install(unsigned irq, irq_handler_t fn)
+void irq_install(unsigned irq, irq_handler_t fn, const char *name)
 {
     if (irq >= 16)
         return;
     g_irq[irq] = fn;
+    g_irq_name[irq] = name;
     pic_unmask(irq);
 }
 
@@ -546,6 +587,7 @@ void isr_dispatch(regs_t *r)
      * the same reason the PIC path does -- the handler may switch tasks. */
     if (r->vector == LAPIC_TIMER_VECTOR) {
         lapic_eoi();
+        g_timer_stat[irqstat_cpu()]++;
 #ifdef SYSTRACE
         {
             static unsigned lt;
@@ -562,6 +604,16 @@ void isr_dispatch(regs_t *r)
         goto out;
     }
 
+    if (r->vector >= MSI_VECTOR_BASE && r->vector < MSI_VECTOR_BASE + 16) {
+        unsigned i = (unsigned)(r->vector - MSI_VECTOR_BASE);
+        g_msi_stat[i][irqstat_cpu()]++;
+        if (g_msi[i])
+            g_msi[i](r);
+        lapic_eoi();                     /* an MSI is an LAPIC interrupt */
+        proc_check_signals(r);
+        goto out;
+    }
+
     if (r->vector >= IRQ_BASE && r->vector < IRQ_BASE + 16) {
         unsigned irq = (unsigned)(r->vector - IRQ_BASE);
 
@@ -569,6 +621,7 @@ void isr_dispatch(regs_t *r)
          * for a long time; leaving the PIC un-acked would stop every further
          * interrupt on that line, the timer included. */
         pic_eoi(irq);
+        g_pic_stat[irq][irqstat_cpu()]++;
         if (g_irq[irq])
             g_irq[irq](r);
         proc_check_signals(r);
