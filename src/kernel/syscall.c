@@ -4986,6 +4986,22 @@ void syscall_handler(regs_t *r)
         ret = sys_futex_waitv(a1, a2, a3, r->r10, r->r8);
         break;
 
+    case SYS_landlock_create_ruleset:
+        ret = sys_landlock_create_ruleset(a1, a2, a3);
+        break;
+
+    case SYS_landlock_add_rule:
+        ret = sys_landlock_add_rule(a1, a2, a3, r->r10);
+        break;
+
+    case SYS_landlock_restrict_self:
+        ret = sys_landlock_restrict_self(a1, a2);
+        break;
+
+    case SYS_process_mrelease:
+        ret = sys_process_mrelease(a1, a2);
+        break;
+
     case SYS_mount_setattr:
         ret = sys_mount_setattr(a1, a2, a3, r->r10, r->r8);
         break;

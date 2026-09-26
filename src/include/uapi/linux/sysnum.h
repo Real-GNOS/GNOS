@@ -1084,3 +1084,11 @@ struct sock_filter {
 #define SYS_memfd_secret  447
 
 #define SYS_futex_waitv   449
+
+#define SYS_landlock_create_ruleset 444
+
+#define SYS_landlock_add_rule 445
+
+#define SYS_landlock_restrict_self 446
+
+#define SYS_process_mrelease 448

@@ -23,6 +23,10 @@
 #define SYS_quotactl_fd   443
 #define SYS_memfd_secret  447
 #define SYS_futex_waitv   449
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule       445
+#define SYS_landlock_restrict_self  446
+#define SYS_process_mrelease        448
 #define FUTEX_WAIT        0
 #define FUTEX_WAKE        1
 #define FUTEX_PRIVATE_FLAG 0x80
@@ -281,6 +285,38 @@ int main(void)
         CHECK(r == 0, "shared futex: cross-process wake");
         int st3 = 0; waitpid(c3, &st3, 0);
         munmap(fw, 4096);
+    }
+
+    /* landlock + process_mrelease: refused (no LSM, no OOM reaper), but the
+     * argument contract is real */
+    struct { uint64_t handled; } lla;
+    memset(&lla, 0, sizeof lla);
+    errno = 0;
+    CHECK(syscall(SYS_landlock_create_ruleset, (unsigned long)&lla,
+                  sizeof lla, 0UL) < 0 && errno == ENOSYS,
+          "landlock_create_ruleset -> ENOSYS");
+    errno = 0;
+    CHECK(syscall(SYS_landlock_create_ruleset, (unsigned long)&lla, 0UL, 0UL) < 0 &&
+          errno == EINVAL, "landlock_create_ruleset rejects size 0");
+    errno = 0;
+    CHECK(syscall(SYS_landlock_add_rule, (unsigned long)9999, 1UL, 0UL, 0UL) < 0 &&
+          errno == EBADF, "landlock_add_rule rejects bad fd");
+    errno = 0;
+    CHECK(syscall(SYS_landlock_add_rule, (unsigned long)9999, 99UL, 0UL, 0UL) < 0 &&
+          errno == EINVAL, "landlock_add_rule rejects unknown rule type");
+    errno = 0;
+    CHECK(syscall(SYS_landlock_restrict_self, (unsigned long)9999, 1UL) < 0 &&
+          errno == EINVAL, "landlock_restrict_self rejects flags");
+    errno = 0;
+    CHECK(syscall(SYS_process_mrelease, (unsigned long)9999, 0UL) < 0 &&
+          errno == EBADF, "process_mrelease rejects non-pidfd");
+    {
+        int selffd = (int)syscall(SYS_pidfd_open, (unsigned long)getpid(), 0UL);
+        CHECK(selffd >= 0, "process_mrelease: pidfd_open self");
+        errno = 0;
+        CHECK(syscall(SYS_process_mrelease, (unsigned long)selffd, 0UL) < 0 &&
+              errno == ENOSYS, "process_mrelease -> ENOSYS (no reaper)");
+        close(selffd);
     }
 
     printf("\n%d tests, %d failures\n", tests, fails);
