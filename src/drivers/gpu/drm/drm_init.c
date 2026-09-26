@@ -37,7 +37,7 @@
 #include "kstring.h"
 #include "vfs.h"
 #include "sysfs.h"
-#include "../fbcon.h"
+#include "fbcon.h"
 
 /* proc.h: WAIT_SLEEP is 5 there; match the signature exactly rather than
  * pulling the header in here. */
@@ -272,7 +272,7 @@ struct dummy_mode_cfg {
 /* The scanout bridge: the pixel copy at the end goes through the console
  * framebuffer -- the same one text mode draws into, so a successful commit
  * visibly replaces the tty. */
-#include "../fbcon.h"
+#include "fbcon.h"
 
 /* Whatever is being scanned out right now. */
 static struct drm_framebuffer *g_scan_fb;

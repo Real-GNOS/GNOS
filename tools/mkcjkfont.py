@@ -7,7 +7,7 @@ outlines, so rasterising it back at exactly 16 pixels reproduces the original
 pixels bit for bit -- no hinting, no antialiasing, no guessing.  That is why
 this script rasterises a TTF and still calls the result a bitmap font.
 
-Output is src/kernel/driver/cjkfont.bin, which the kernel embeds with .incbin and
+Output is src/drivers/video/fbdev/cjkfont.bin, which the kernel embeds with .incbin and
 parses at boot.  The file is checked into the repository on purpose: building
 GNOS must not require Python, Pillow or a font package to be installed.  Run
 this by hand (`make cjkfont`) only when the coverage below changes.
@@ -40,7 +40,7 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 FONT = "/usr/share/fonts/truetype/unifont/unifont.ttf"
-OUT = "src/kernel/driver/cjkfont.bin"
+OUT = "src/drivers/video/fbdev/cjkfont.bin"
 
 HEIGHT = 16
 STRIDE = 2

@@ -16,7 +16,7 @@
 
 	.globl cjkfont_blob
 cjkfont_blob:
-	.incbin "src/kernel/driver/cjkfont.bin"
+	.incbin "src/drivers/video/fbdev/cjkfont.bin"
 	.globl cjkfont_blob_end
 cjkfont_blob_end:
 

@@ -597,13 +597,13 @@ $(BUILD)/%.o: %.S | $(BUILD)
 
 # The font blob is checked in, so this is a dependency rather than a rule that
 # fires: `make cjkfont` regenerates it deliberately, a normal build never does.
-$(BUILD)/cjkfont_data.o: src/kernel/driver/cjkfont.bin
+$(BUILD)/cjkfont_data.o: src/drivers/video/fbdev/cjkfont.bin
 
 # The CJK bitmap is stapled into the kernel image by GNU-as (.incbin of a 1 MiB
 # binary the C compiler must never see).  It is assembled into its own object,
 # cjkfont_data.o; cjkfont.c compiles to cjkfont.o.  Keeping them separate is
 # what stops the two competing for the same cjkfont.o target.
-$(BUILD)/cjkfont_data.o: src/kernel/driver/cjkfont_data.S | $(BUILD)
+$(BUILD)/cjkfont_data.o: src/drivers/video/fbdev/cjkfont_data.S | $(BUILD)
 	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 .PHONY: cjkfont
