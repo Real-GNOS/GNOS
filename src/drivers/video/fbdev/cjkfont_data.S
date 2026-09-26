@@ -1,4 +1,4 @@
-; SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: GPL-2.0 */
 
 /*
  * cjkfont.S — the CJK bitmap font, stapled into the kernel image. (GPLv2)

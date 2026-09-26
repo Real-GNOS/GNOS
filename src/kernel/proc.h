@@ -532,5 +532,7 @@ uint32_t proc_cpu_mask_all(void);
 uint32_t proc_cpu_mask_of(proc_t *p);
 void     proc_set_cpu_mask(proc_t *p, uint32_t mask);
 int      proc_pick_cpu(proc_t *p);
+int      proc_rseq_register(uint64_t urseq, uint64_t sig);
+int      proc_rseq_unregister(uint64_t urseq, uint64_t sig);
 
 #endif

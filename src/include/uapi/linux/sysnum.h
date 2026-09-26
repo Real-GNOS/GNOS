@@ -1048,3 +1048,9 @@ struct sock_filter {
 #define SYS_openat2 437
 
 #define SYS_pidfd_getfd 438
+
+#define SYS_syslog 103
+
+#define SYS_fallocate 285
+
+#define SYS_rseq 386

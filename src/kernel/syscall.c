@@ -384,6 +384,103 @@ static int64_t sys_openat(int dfd, uint64_t upath, int flags)
  */
 static int64_t sys_close(int fd);       /* defined further down */
 
+/* fallocate(285): reserve/punch file space.  Without an extent-based
+ * allocator the honest implementations are the zero-filling ones:
+ *   mode 0                 extend the file with zeros to offset+len
+ *   KEEP_SIZE              zero [offset, min(offset+len, EOF)), size kept
+ *   PUNCH_HOLE|KEEP_SIZE   same as KEEP_SIZE (an ext2 hole reads as zeros)
+ * anything else -> EOPNOTSUPP, like a filesystem without ->fallocate. */
+#define FALLOC_FL_KEEP_SIZE     0x01
+#define FALLOC_FL_PUNCH_HOLE    0x02
+
+static int64_t sys_fallocate(uint64_t fd, uint64_t mode, uint64_t off,
+                             uint64_t len)
+{
+    if (len == 0)
+        return 0;
+    if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
+        return -E_OPNOTSUPP;
+    if (mode & FALLOC_FL_PUNCH_HOLE && !(mode & FALLOC_FL_KEEP_SIZE))
+        return -E_OPNOTSUPP;
+
+    int h = fd_handle((int)fd);
+    if (h < 0)
+        return -E_BADF;
+    lstat_t st;
+    if (vfs_fstat(h, &st) < 0)
+        return -E_BADF;
+    uint64_t size = st.st_size;
+
+    static uint8_t zeros[4096];
+    memset(zeros, 0, sizeof zeros);
+
+    uint64_t wstart, wend;
+    if (mode & FALLOC_FL_KEEP_SIZE) {
+        wstart = off;
+        wend = off + len;
+        if (wend > size)
+            wend = size;                 /* beyond EOF: nothing to punch */
+    } else {
+        wstart = size;                   /* fill the gap, then grow */
+        wend = off + len;
+        if (wend <= size)
+            return 0;                    /* fully inside: size unchanged */
+        wstart = size;
+    }
+    for (uint64_t p = wstart; p < wend; p += sizeof zeros) {
+        uint32_t n = (uint32_t)((wend - p) < sizeof zeros ? (wend - p)
+                                                         : sizeof zeros);
+        int32_t w = vfs_file_pwrite(h, zeros, n, p);
+        if (w < 0)
+            return w;
+    }
+    return 0;
+}
+
+/* syslog(103): the dmesg door.  GNOS keeps the whole kernel log in the
+ * klog ring, so this is a thin reshuffle of klog_syscall ops. */
+static int64_t sys_syslog(uint64_t type, uint64_t bufp, uint64_t len)
+{
+    switch (type) {
+    case 0: case 1:                      /* open/close: no state to change */
+        return 0;
+    case 2:                              /* read + drain */
+    case 3:                              /* read without draining */
+        if (!user_ptr_ok(bufp, len))
+            return -E_FAULT;
+        return klog_syscall(type == 2 ? 0 : 2, bufp, len);
+    case 4:                              /* clear the unread tail */
+        return klog_syscall(3, 0, 0);
+    case 5:                              /* clear the whole ring */
+        return klog_syscall(6, 0, 0);
+    case 8:                              /* set console log level: accepted */
+        return 0;
+    default:                             /* 6/7 console control: no-op */
+        return 0;
+    }
+}
+
+/* rseq(386): restartable sequences.  Registration is what glibc needs to
+ * see (it falls back to plain atomics when rseq is absent); the per-task
+ * cpu_id words are filled at registration.  Preemption-abort delivery is
+ * not implemented -- userspace that needs aborts checks its own fallback
+ * path, which is exactly what the rseq ABI prescribes. */
+#define RSEQ_FLAG_UNREGISTER 1
+
+static int64_t sys_rseq(uint64_t urseq, uint64_t len, uint64_t flags,
+                        uint64_t sig)
+{
+    if (len != 32)                       /* sizeof(struct rseq) on x86-64 */
+        return -E_INVAL;
+    if (flags & ~RSEQ_FLAG_UNREGISTER)
+        return -E_INVAL;
+    if (flags & RSEQ_FLAG_UNREGISTER)
+        return proc_rseq_unregister(urseq, sig);
+    return proc_rseq_register(urseq, sig);
+}
+
+static int64_t sys_close(int fd);       /* defined further down */
+
 /* close_range(436): close every fd in [first, last].  A shell or a service
  * manager hands a child a clean set of descriptors with one call instead of
  * looping over close() (or, worse, over /proc/self/fd). */
@@ -4676,6 +4773,18 @@ void syscall_handler(regs_t *r)
 
     case SYS_sched_getaffinity:
         ret = sys_sched_getaffinity(a1, a2, a3);
+        break;
+
+    case SYS_fallocate:
+        ret = sys_fallocate(a1, a2, a3, r->r10);
+        break;
+
+    case SYS_syslog:
+        ret = sys_syslog(a1, a2, a3);
+        break;
+
+    case SYS_rseq:
+        ret = sys_rseq(a1, a2, a3, r->r10);
         break;
 
     case SYS_pidfd_open:

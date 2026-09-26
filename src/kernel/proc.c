@@ -167,6 +167,47 @@ void proc_set_cpu_mask(proc_t *p, uint32_t mask)
     g_cpu_allowed[idx] = mask & proc_cpu_mask_all();
 }
 
+/* ---- rseq (386) registration state --------------------------------------
+ * Kept beside the process table for the same alignment reason as the
+ * affinity mask.  Registration writes the per-task cpu words once; the
+ * preemption-abort delivery is not implemented (userspace falls back). */
+static struct { uint64_t ptr, len, sig; } g_rseq_tab[MAX_PROCS];
+
+int proc_rseq_register(uint64_t urseq, uint64_t sig)
+{
+    proc_t *p = proc_current();
+    int idx = (int)(p - g_procs);
+    if (idx < 0 || idx >= MAX_PROCS)
+        return -E_INVAL;
+    if (g_rseq_tab[idx].ptr)
+        return -E_BUSY;
+
+    uint32_t cpu_words[2] = { (uint32_t)proc_pick_cpu(p),
+                              (uint32_t)proc_pick_cpu(p) };
+    if (!user_ptr_ok(urseq, 8))
+        return -E_FAULT;
+    memcpy((void *)(uintptr_t)urseq, cpu_words, 8);
+
+    g_rseq_tab[idx].ptr = urseq;
+    g_rseq_tab[idx].len = 32;
+    g_rseq_tab[idx].sig = sig;
+    return 0;
+}
+
+int proc_rseq_unregister(uint64_t urseq, uint64_t sig)
+{
+    proc_t *p = proc_current();
+    int idx = (int)(p - g_procs);
+    if (idx < 0 || idx >= MAX_PROCS)
+        return -E_INVAL;
+    if (g_rseq_tab[idx].ptr != urseq || g_rseq_tab[idx].sig != sig)
+        return -E_INVAL;
+    g_rseq_tab[idx].ptr = 0;
+    g_rseq_tab[idx].len = 0;
+    g_rseq_tab[idx].sig = 0;
+    return 0;
+}
+
 /* The lowest allowed core -- enqueue_fresh uses it to keep an affinity-
  * restricted task on a core it may actually run on. */
 int proc_pick_cpu(proc_t *p)

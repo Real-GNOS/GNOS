@@ -1,4 +1,4 @@
-; SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: GPL-2.0 */
 
 // syscalls + crt0 (aarch64)
 // sys6(n, a,b,c,d,e): x8=n; x0..x5=a..e; svc#0
