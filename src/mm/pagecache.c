@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * pagecache.c — the block-device page cache. (GPLv2)
  *
@@ -44,6 +45,7 @@ static pc_page_t *g_bucket[PC_BUCKETS];
 static pc_page_t *g_active_head, *g_active_tail;
 static pc_page_t *g_inactive_head, *g_inactive_tail;
 static uint32_t   g_hits, g_misses, g_evicts, g_promote, g_demote;
+static uint32_t   g_active_n, g_inactive_n;      /* list lengths */
 
 extern uint64_t g_hhdm;
 
@@ -63,12 +65,23 @@ static void lru_push(pc_page_t **head, pc_page_t **tail, pc_page_t *p)
     *tail = p;
     if (!*head)
         *head = p;
+    if (p->active)
+        g_active_n++;
+    else
+        g_inactive_n++;
 }
 
 static void lru_unlink(pc_page_t *p)
 {
     pc_page_t **head = p->active ? &g_active_head : &g_inactive_head;
     pc_page_t **tail = p->active ? &g_active_tail : &g_inactive_tail;
+    if (p->active) {
+        if (g_active_n)
+            g_active_n--;
+    } else {
+        if (g_inactive_n)
+            g_inactive_n--;
+    }
     if (p->lru_prev)
         p->lru_prev->lru_next = p->lru_next;
     else if (*head == p)
@@ -133,16 +146,22 @@ static pc_page_t *page_alloc(void *ctx, uint64_t off)
             return NULL;
         p->data = (uint8_t *)(uintptr_t)(p->frame + g_hhdm);
     } else {
-        if (!g_inactive_head) {
-            /* Nothing cold left: give an active page its second chance by
-             * demoting the least recently used one and taking that. */
-            p = g_active_head;
-            if (!p)
-                return NULL;
-            lru_unlink(p);
-            p->active = 0;
-            lru_push(&g_inactive_head, &g_inactive_tail, p);
-            g_demote++;
+        if (g_inactive_n < g_active_n / 2) {
+            /* The working set has tipped over: most of the pool is pinned
+             * on the active list while fresh pages churn through a thin
+             * inactive one.  Demote HALF the active list to the tail
+             * of the inactive one (Linux's balance step, in miniature):
+             * demoting a single page would be immediately re-evicted, and
+             * never demoting would let a promoted page live forever while
+             * the pool starves. */
+            unsigned n = g_active_n / 2;
+            while (n-- && g_active_head) {
+                pc_page_t *p2 = g_active_head;
+                lru_unlink(p2);
+                p2->active = 0;
+                lru_push(&g_inactive_head, &g_inactive_tail, p2);
+                g_demote++;
+            }
         }
         p = g_inactive_head;
         if (!p)
@@ -165,6 +184,7 @@ void pagecache_init(void)
     memset(g_bucket, 0, sizeof g_bucket);
     g_used = g_hits = g_misses = g_evicts = 0;
     g_promote = g_demote = 0;
+    g_active_n = g_inactive_n = 0;
     g_active_head = g_active_tail = g_inactive_head = g_inactive_tail = NULL;
 }
 
@@ -300,16 +320,37 @@ void pagecache_selftest(void)
         dbg_puts("PCACHE: FAIL (repeat spanning read re-fetched)\r\n");
         return;
     }
-    /* Fill the pool and check that recycling happens rather than failing.
-     * The distinct keys come from the DEVICE, not from the offset: the fake
-     * device is only eight pages long, and walking offsets past its end
-     * would fault inside memcpy instead of testing anything. */
-    for (unsigned i = 0; i < PC_PAGES + 64; i++) {
+    /* Two-list scenario: fill half the pool, re-read every page (they must
+     * all be promoted), then push enough NEW pages through to force the
+     * recycling to eat the inactive list and start demoting active ones. */
+    for (unsigned i = 0; i < PC_PAGES * 3 / 4; i++) {
         void *c = (void *)(uintptr_t)(0x1000u + i * 0x10u);
+        if (pagecache_read(c, fake_read, 0, out, 16) != 16) {
+            dbg_puts("PCACHE: FAIL (fill)\r\n");
+            return;
+        }
+    }
+    for (unsigned i = 0; i < PC_PAGES * 3 / 4; i++) {
+        void *c = (void *)(uintptr_t)(0x1000u + i * 0x10u);
+        if (pagecache_read(c, fake_read, 0, out, 16) != 16) {
+            dbg_puts("PCACHE: FAIL (re-read)\r\n");
+            return;
+        }
+    }
+    if (g_promote < PC_PAGES * 3 / 4) {
+        dbg_puts("PCACHE: FAIL (second hits did not promote)\r\n");
+        return;
+    }
+    for (unsigned i = 0; i < PC_PAGES + 64; i++) {
+        void *c = (void *)(uintptr_t)(0x50000u + i * 0x10u);
         if (pagecache_read(c, fake_read, 0, out, 16) != 16) {
             dbg_puts("PCACHE: FAIL (allocation under pressure)\r\n");
             return;
         }
+    }
+    if (!g_demote) {
+        dbg_puts("PCACHE: FAIL (no demotion under pressure)\r\n");
+        return;
     }
     uint32_t hits, misses, evicts, pages;
     pagecache_stats(&hits, &misses, &evicts, &pages);
