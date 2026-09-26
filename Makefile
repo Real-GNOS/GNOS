@@ -106,7 +106,8 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/drm_atomic_uapi.o $(BUILD)/drm_vblank.o \
          $(BUILD)/drm_gem.o $(BUILD)/drm_framebuffer.o \
          $(BUILD)/drm_property.o $(BUILD)/drm_libc.o \
-         $(BUILD)/subsys.o $(BUILD)/acpi.o $(BUILD)/sysfs.o \
+         $(BUILD)/drm_vbe.o \
+                  $(BUILD)/subsys.o $(BUILD)/acpi.o $(BUILD)/sysfs.o \
          $(BUILD)/debugcon.o $(BUILD)/ext2.o $(BUILD)/panic.o \
          $(BUILD)/gdt.o $(BUILD)/idt.o $(BUILD)/isr.o \
          $(BUILD)/kstring.o $(BUILD)/vfs.o $(BUILD)/procfs.o $(BUILD)/debugfs.o $(BUILD)/tmpfs.o $(BUILD)/tty.o $(BUILD)/heap.o \
@@ -364,8 +365,10 @@ QEMU_DISK := -drive file=$(DISK),format=raw,if=ide,index=0,media=disk
 # The initrd's explicit size.  mke2fs -d auto-sizes to the content, which is
 # exactly what must not happen: the kernel mounts this read-write in RAM and
 # every byte the filesystem grows at runtime comes out of this headroom.
-# fastfetch alone added ~4 MiB of binaries, so 96M.
-INITRD_MB ?= 2048
+# The pruned rootfs is ~760 MiB (the Xfce/WebKit/codec stack is gone), so
+# 1 GiB leaves the machine ~260 MiB of runtime headroom while halving the
+# CD load time -- Limine reads every byte of this through the BIOS path.
+INITRD_MB ?= 1024
 
 # Number of virtual cores QEMU exposes.  The SMP bring-up path brings up
 # every core Limine reports, so changing this also changes what smpinfo.elf
@@ -775,6 +778,34 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	if [ -d $(BUILD)/alpine-rootfs ]; then \
 	    cp -a $(BUILD)/alpine-rootfs/. $(BUILD)/initrd-root/; \
 	fi
+	# ---- prune the desktop/media dead weight ---------------------------
+	# Xfce/Xorg cannot run on this kernel, and WebKit, the media codecs
+	# and the X data files exist only to serve that stack.  Limine loads
+	# the whole initrd through the BIOS CD path, so every megabyte cut
+	# here is seconds of boot time.
+	rm -rf $(BUILD)/initrd-root/usr/lib/libwebkit2gtk-4.1* \
+	       $(BUILD)/initrd-root/usr/lib/libjavascriptcoregtk-4.1* \
+	       $(BUILD)/initrd-root/usr/libexec/webkit2gtk-4.1 \
+	       $(BUILD)/initrd-root/usr/lib/libx265* \
+	       $(BUILD)/initrd-root/usr/lib/libavcodec* \
+	       $(BUILD)/initrd-root/usr/lib/libavformat* \
+	       $(BUILD)/initrd-root/usr/lib/libavutil* \
+	       $(BUILD)/initrd-root/usr/lib/libswresample* \
+	       $(BUILD)/initrd-root/usr/lib/libswscale* \
+	       $(BUILD)/initrd-root/usr/lib/libpostproc* \
+	       $(BUILD)/initrd-root/usr/lib/libgtk-3* \
+	       $(BUILD)/initrd-root/usr/lib/libgdk* \
+	       $(BUILD)/initrd-root/usr/libexec/Xorg* \
+	       $(BUILD)/initrd-root/usr/libexec/upower* \
+	       $(BUILD)/initrd-root/usr/share/X11 \
+	       $(BUILD)/initrd-root/usr/share/icons \
+	       $(BUILD)/initrd-root/usr/share/themes \
+	       $(BUILD)/initrd-root/usr/share/fonts \
+	       $(BUILD)/initrd-root/etc/xdg/xfce4 \
+	       $(BUILD)/initrd-root/usr/bin/xfce4-* \
+	       $(BUILD)/initrd-root/usr/bin/startxfce4
+	find $(BUILD)/initrd-root/usr/bin -name "xfce4-*" -delete 2>/dev/null || true
+	find $(BUILD)/initrd-root -name "*.Xauthority" -delete 2>/dev/null || true
 	# `mount` is invoked by its bare name from OpenRC's init.sh and service
 	# scripts, so it must sit on PATH as /bin/mount (not /bin/mount.elf).  The
 	# rest of the musl programs are only ever called by absolute path.

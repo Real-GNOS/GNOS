@@ -29,9 +29,9 @@ typedef struct {
 extern const mode_t g_modes[N_MODES];
 
 int  boot_mode_known(uint32_t *index);
-void fill_modeinfo(drm_mode_modeinfo_t *m, const mode_t *src);
+void fill_modeinfo(struct drm_mode_modeinfo *m, const mode_t *src);
 const mode_t *mode_by_size(uint32_t w, uint32_t h);
-void current_modeinfo(drm_mode_modeinfo_t *m);
+void current_modeinfo(struct drm_mode_modeinfo *m);
 
 /* ---- VBE_DISPI register interface (drm_vbe.c) ------------------------------ */
 #define VBE_PORT_IDX  0x01CE
@@ -45,6 +45,10 @@ void current_modeinfo(drm_mode_modeinfo_t *m);
 
 void vbe_write(uint16_t idx, uint16_t val);
 uint16_t vbe_read(uint16_t idx);
+/* Find the display device via the PCI scan, enable it and probe the VBE
+ * register bank (MMIO BAR first, I/O ports as the fallback).  Returns the
+ * ID register value when the interface answered, else 0. */
+int vbe_pci_probe(void);
 
 /* ---- dumb buffers (drm_dumb.c) --------------------------------------------- */
 #define MAX_DUMB 8

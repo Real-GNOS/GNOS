@@ -660,6 +660,18 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     memset(&pipeline_encoder, 0, sizeof(pipeline_encoder));
     memset(&pipeline_connector, 0, sizeof(pipeline_connector));
 
+    /* Reach the hardware through PCI before building the pipeline: find
+     * the display device, switch its spaces on and probe VBE.  Without an
+     * answer mode changes must stay refused rather than half-apply. */
+    {
+        int vid = vbe_pci_probe();
+        if (vid) {
+            DRM_INFO("vbe interface version 0x%x: mode changes enabled\n", vid);
+        } else {
+            DRM_INFO("no VBE device: modes stay as the bootloader set them\n");
+        }
+    }
+
     /* The primary plane, bound to CRTC 0. */
     ret = drm_plane_init(dev, &pipeline_primary_plane, 1, /* possible_crtcs = bit 0 */
                          NULL, primary_formats, sizeof(primary_formats) / sizeof(primary_formats[0]), NULL,

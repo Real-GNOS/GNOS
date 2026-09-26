@@ -76,21 +76,8 @@ echo "CC_EXIT=$?" >>/tmp/clang.out
 echo "RUN_EXIT=$?" >>/tmp/clang.out
 /bin/dbgcat.elf /tmp/clang.out
 
-# --- Xorg smoke test (uncomment for interactive runs) ---
-# Xorg's core-font path needs fonts.dir indexes; without them the font
-# path entries are deleted and xterm renders an empty window.
-echo "rc: mkfontdir starting"
-/usr/bin/mkfontdir /usr/share/fonts/misc /usr/share/fonts/100dpi /usr/share/fonts/75dpi
-echo "rc: mkfontdir done"
-/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
-sleep 15
-echo "rc: after Xorg sleep15"
-DISPLAY=:0 /usr/bin/xsetroot -solid gray40 -cursor_name left_ptr >/tmp/xsetroot.out 2>&1
-DISPLAY=:0 /usr/bin/twm >/tmp/twm.out 2>&1 &
-DISPLAY=:0 /usr/bin/xeyes -geometry +100+100 >/tmp/xeyes.out 2>&1 &
-echo "rc: launching xterm"
-DISPLAY=:0 /usr/bin/xterm -geometry 80x25 -background white -foreground black >/tmp/xterm.out 2>&1 &
-sleep 8
-/bin/dbgcat.elf /var/log/Xorg.0.log
-sleep 5
+# --- Xorg/xfce desktop: DISABLED ------------------------------------------------
+# The X stack (Xorg/twm/xterm/xfce4) cannot run on this kernel and was
+# removed from the image; uncomment only with those packages restored.
+
 /sbin/wiggle
