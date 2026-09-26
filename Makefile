@@ -27,10 +27,41 @@ AS      := nasm
 LD      := ld
 OBJCOPY := objcopy
 
-# Architecture backend: src/kernel/arch/$(ARCH) supplies the descriptor
-# tables, entry assembly and context switch.  Must be set before BASEFLAGS,
-# which puts the arch tree on the include path.
+# Architecture backend: src/arch/$(ARCH) supplies the descriptor tables, entry
+# assembly and context switch.  Must be set before BASEFLAGS, which puts the
+# arch tree on the include path.
 ARCH ?= x86_64
+ARCH_ROOT := src/kernel/arch
+
+# The source tree follows the Linux top-level layout (arch/ drivers/ fs/
+# include/ init/ ipc/ kernel/ lib/ mm/ net/ samples/ scripts/ sound/ usr/), so
+# the include path and the vpath are derived from the directory list instead of
+# being spelled out: every directory that holds a source or a header is on the
+# search path.  This is only safe because header basenames are unique across
+# the whole tree -- `make check-hdrs` asserts that.
+#
+# -prune, not -not -path: find must not descend into the vendored trees at all
+# (src/LeonOS-4 alone is 164 MB) or they would land on the include path too.
+PRUNE := -name vendor -prune -o -name LeonOS-4 -prune -o -name elf2linux -prune -o \
+         -name third_party -prune -o -name rootfs -prune -o -name d -prune -o
+SRCDIRS := $(sort $(shell find src $(PRUNE) \
+             \( -name '*.[chS]' -o -name '*.asm' \) -printf '%h\n' | sort -u))
+
+# Exactly one architecture backend is visible: an i386 build must never see
+# x86_64 sources, and the other way round.
+ARCH_DIRS   := $(filter $(ARCH_ROOT)/%,$(SRCDIRS))
+ACTIVE_ARCH := $(filter $(ARCH_ROOT)/$(ARCH) $(ARCH_ROOT)/$(ARCH)/%,$(ARCH_DIRS))
+OTHER_ARCH  := $(filter-out $(ACTIVE_ARCH),$(ARCH_DIRS))
+
+# Kernel include path: everything except the foreign architectures and the
+# userland, whose headers would otherwise leak into kernel objects.
+KERNEL_DIRS := $(filter-out $(OTHER_ARCH) src/user src/user/%,$(SRCDIRS))
+KINCS       := $(addprefix -I,$(KERNEL_DIRS))
+
+# The two trees with their own consumers: headers shared between kernel and
+# userland (sysnum.h, bootinfo.h), and the userland itself.
+SHARED_DIR := src/shared
+USER_DIR   := src/user
 
 # Common freestanding flags.  -mgeneral-regs-only keeps gcc away from
 # SSE/MMX/x87 registers: the CPU arrives from Limine with CR4.OSFXSR clear,
@@ -39,9 +70,7 @@ ARCH ?= x86_64
 BASEFLAGS := -m64 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
              -nostdinc -std=gnu11 -mno-red-zone -mgeneral-regs-only \
              -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fvisibility=hidden \
-             -Wall -Wextra -O2 -g -Isrc/include -Isrc/shared \
-             -Isrc/kernel/core -Isrc/kernel/arch/$(ARCH) -Isrc/kernel/driver \
-             -Isrc/kernel/driver/drm
+             -Wall -Wextra -O2 -g $(KINCS)
 
 # kernel: PIE so Limine can relocate it into the higher half
 # build/.config (produced by `make config`) defines CONFIG_* macros.
@@ -50,8 +79,8 @@ KCFLAGS := $(BASEFLAGS) -fpie -DSYSTRACE \
             $(shell if [ -f build/.config ]; then \
               sed -n 's/^CONFIG_\(.*\)=y/-DCONFIG_\1=1/p; s/^CONFIG_\(.*\)="\([^"]*\)"/-DCONFIG_\1=\"\2\"/p; s/^CONFIG_\(.*\)=\([0-9][0-9]*\)/-DCONFIG_\1=\2/p' build/.config; \
             fi)
-# user programs: linked at a fixed address by src/user/user.ld
-UCFLAGS := $(BASEFLAGS) -Isrc/user -fno-pie -fno-pic
+# user programs: linked at a fixed address by $(USER_DIR)/user.ld
+UCFLAGS := $(BASEFLAGS) -I$(USER_DIR) -fno-pie -fno-pic
 
 # Limine binaries (copied from a local Limine install)
 LIMINE_BIOS := limine/limine-bios-cd.bin
@@ -277,9 +306,15 @@ BU_SRC := $(BUILD)/busrcc/binutils-2.47
 
 # musl programs see musl's headers and nothing else.  Two things matter here:
 #   -nostdinc stays (BASEFLAGS already has it) so glibc's /usr/include cannot
-#   leak in, and -Isrc/include / -Isrc/kernel are dropped because they shadow
+#   leak in, and every kernel header directory is dropped because they shadow
 #   musl's <stdint.h>, <stddef.h> and <syscall.h> -- plain -I beats -isystem.
-# -Isrc/shared survives: sysnum.h and bootinfo.h collide with nothing.
+# Two directories survive on purpose: the kernel/userland ABI headers
+# (sysnum.h, bootinfo.h) and the arch backend headers (gdt.h, idt.h, lapic.h).
+# Neither collides with anything musl ships.
+#
+# The list is derived from KINCS rather than spelled out, so it keeps working
+# when directories move: MUSL_DROP is "every kernel include dir except the two
+# that are allowed to survive".
 #
 # The SSE bans in BASEFLAGS come off too.  They exist so the *kernel* never
 # touches xmm registers (it does not save its own FPU state across interrupts),
@@ -287,11 +322,12 @@ BU_SRC := $(BUILD)/busrcc/binutils-2.47
 # doubles over under a different convention than printf expects and the value
 # silently reads back as zero.  User mode is safe here -- vmm.c sets
 # CR4.OSFXSR and proc.c fxsaves/fxrstors per process.
-MUSLCFLAGS := $(filter-out -Isrc/include -Isrc/kernel/core -Isrc/kernel/driver \
-                           -Isrc/kernel/driver/drm \
+MUSL_KEEP := -I$(SHARED_DIR) $(addprefix -I,$(ACTIVE_ARCH))
+MUSL_DROP := $(filter-out $(MUSL_KEEP),$(KINCS))
+MUSLCFLAGS := $(filter-out $(MUSL_DROP) \
                            -mgeneral-regs-only \
                            -mno-sse -mno-sse2 -mno-mmx -mno-80387,$(BASEFLAGS)) \
-              -isystem $(abspath $(MUSL_INC)) -Isrc/user -fno-pie -fno-pic
+              -isystem $(abspath $(MUSL_INC)) -I$(USER_DIR) -fno-pie -fno-pic
 
 # Hardware handed to the guest beyond the PC platform minimum.  The e1000 is
 # the NIC src/kernel/e1000.c drives; the AC97 is the codec src/kernel/audio.c
@@ -522,20 +558,31 @@ DEPS := $(KOBJS:.o=.d) $(UOBJS:.o=.d) $(MUSL_OBJS:.o=.d) $(UCRT:.o=.d) \
 -include $(DEPS)
 
 # ---------- kernel (Limine entry point) ----------
-# Sources live in four trees -- core (mem/fs/proc), arch (per-CPU entry,
-# descriptor tables, context switch), driver (hardware-facing) subdirectories
-# plus the root for the two entry-point files -- while every .o lands flat in
-# $(BUILD).  vpath lets the %.o rules below find a source by bare name no
-# matter which directory it is in.  ARCH selects the backend tree; only one
-# is searched, so an i386 build never sees x86_64 sources.
-ARCH ?= x86_64
+# Sources are spread over the Linux-style subsystem trees (arch/ drivers/ fs/
+# kernel/ mm/ net/ sound/ ...) while every .o lands flat in $(BUILD).  vpath
+# lets the %.o rules below find a source by bare name no matter which directory
+# it is in, which is why the directory list is derived from the tree itself.
+# ARCH selects the backend tree; only one is searched, so an i386 build never
+# sees x86 sources.
+#
+# Excluded on purpose: the userland (usr/ and init/ both contain an init.c --
+# via vpath one would silently win), the bootloader, the config tool and the
+# sample modules, all of which are built by their own explicit rules.
+VPATH_SRC := $(filter-out src/user/% src/init/% src/bootloader/% \
+                          src/gnoscfg/% src/kernel/modules/%,$(KERNEL_DIRS))
+vpath %.c   $(VPATH_SRC)
+vpath %.asm $(VPATH_SRC)
+vpath %.S   $(VPATH_SRC)
 
-vpath %.c src/kernel src/kernel/core src/kernel/driver src/kernel/driver/drm \
-        src/kernel/arch/$(ARCH)
-vpath %.asm src/kernel src/kernel/core src/kernel/driver \
-        src/kernel/arch/$(ARCH)
-vpath %.S src/kernel src/kernel/core src/kernel/driver \
-        src/kernel/arch/$(ARCH)
+# The flat include path only works while header basenames are unique across the
+# tree: two drv.h in different directories would let the include order decide
+# which one wins, silently.
+.PHONY: check-hdrs
+check-hdrs:
+	@dup=$$(find src $(PRUNE) -name '*.h' -printf '%f\n' | sort | uniq -d); \
+	if [ -n "$$dup" ]; then echo "FATAL: duplicate header basename(s):"; \
+	  echo "$$dup"; exit 1; fi; \
+	echo "check-hdrs: header basenames are unique"
 
 $(BUILD)/%.o: %.c | $(BUILD)
 	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<
