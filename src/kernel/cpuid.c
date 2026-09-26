@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * cpuid.c — SYS_cpuid: run the CPUID instruction for user space. (GPLv2)
  *

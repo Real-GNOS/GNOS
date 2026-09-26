@@ -1,3 +1,5 @@
+; SPDX-License-Identifier: GPL-2.0
+
 ; crt0.asm — the user-space entry stub. (GPLv2)
 ;
 ; The kernel starts a process with RSP pointing at the SysV startup block it

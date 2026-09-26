@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * scan.c — tiny diagnostic: open each /dev/sdX and report. (GPLv2)
  */

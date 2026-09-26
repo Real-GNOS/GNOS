@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * timerfd.h — timerfd syscall layer. (GPLv2)
  */

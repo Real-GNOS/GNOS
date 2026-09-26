@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * coldplug.c — the device manager, in the mdev/udev-trigger sense. (GPLv2)
  *

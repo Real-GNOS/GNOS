@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * seccomp.c — seccomp-BPF syscall filtering for GNOS. (GPLv2)
  *

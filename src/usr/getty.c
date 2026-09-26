@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * getty.c — open a terminal, greet whoever is at it, and hand it to login.
  * (GPLv2)

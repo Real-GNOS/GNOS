@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_hashtab.h — keyed lookups over a fixed bucket array. (GPLv2)
  *

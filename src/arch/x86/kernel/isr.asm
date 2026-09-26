@@ -1,3 +1,5 @@
+; SPDX-License-Identifier: GPL-2.0
+
 ; isr.asm — interrupt/exception entry stubs. (GPLv2)
 ;
 ; One stub per vector, all of them padded to a fixed 16-byte stride so that

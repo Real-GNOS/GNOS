@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_idr.c ¡ª id -> pointer table behind the DRM object handles. (GPLv2)
  *

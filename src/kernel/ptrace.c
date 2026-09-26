@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* ptrace.c -- ptrace(2) adapted to GNOS's process model.
  *
  * The one structural simplification over Linux: the tracer must be the

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * timer.c — PIT channel 0 driving the scheduler. (GPLv2)
  */

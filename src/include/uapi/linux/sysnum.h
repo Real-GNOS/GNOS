@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * sysnum.h — the kernel/user contract: syscall numbers, signals, flags.
  * (GPLv2)
@@ -200,6 +201,7 @@
 #define SYS_init_module  175
 #define SYS_delete_module 176
 #define SYS_finit_module 313
+#define SYS_sched_setaffinity 203
 #define SYS_sched_getaffinity 204
 
 /* Anonymous-fd syscalls for the Wayland plumbing (wl_shm pools, the
@@ -1028,3 +1030,21 @@ struct sock_filter {
 #define SECCOMP_RET_ACTION_MASK  0xffff0000
 
 #endif
+
+#define SYS_process_vm_readv 310
+
+#define SYS_process_vm_writev 311
+
+#define SYS_membarrier 324
+
+#define SYS_copy_file_range 326
+
+#define SYS_pidfd_send_signal 424
+
+#define SYS_pidfd_open 434
+
+#define SYS_close_range 436
+
+#define SYS_openat2 437
+
+#define SYS_pidfd_getfd 438

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 // hudos-run loader (aarch64 freestanding) — 在 qemu-user guest 内加载 hudos ELF
 // 用法: loader <guest.elf> <gw_vaddr_hex> <main_vaddr_hex> [entry_code_blob_path]
 // 布局: GB=0x20000000 (guest 段), 0x20020000 (分发器代码页 RWX), 0x21000000 (guest 栈)

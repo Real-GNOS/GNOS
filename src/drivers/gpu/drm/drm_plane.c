@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_plane.c - the layers a picture is made of. (GPLv2)
  *

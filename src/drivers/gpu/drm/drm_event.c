@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_event.c — the kernel->user event queue. (GPLv2)
  *

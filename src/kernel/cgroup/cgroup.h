@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * cgroup.h — Linux-style control groups, v2 (unified) layout. (GPLv2)
  *

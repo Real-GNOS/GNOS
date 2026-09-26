@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * procfs.c — /proc, generated on read. (GPLv2)
  *

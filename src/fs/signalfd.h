@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * signalfd.h — signalfd4 syscall layer. (GPLv2)
  */

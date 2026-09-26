@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * module.h -- loadable kernel modules: registry, loader, lifecycle. (GPLv2)
  *

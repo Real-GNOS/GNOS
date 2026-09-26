@@ -50,6 +50,10 @@ echo "openrc_default_exit=$?" >> /tmp/openrc-default.out
 /bin/dbgcat.elf /tmp/openrc-boot.out
 /bin/dbgcat.elf /tmp/openrc-default.out
 
+# syscall batch-1 verification
+/bin/syntest > /tmp/syn.out 2>&1
+/bin/dbgcat.elf /tmp/syn.out
+
 # apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
 /sbin/apk.static --version >/tmp/apk.out 2>&1
 /sbin/apk.static update >>/tmp/apk.out 2>&1

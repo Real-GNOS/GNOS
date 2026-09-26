@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * heap.c — the kernel heap: kmalloc/kfree over a contiguous PMM region. (GPLv2)
  *

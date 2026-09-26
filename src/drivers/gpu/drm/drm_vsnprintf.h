@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_vsnprintf.h — declarations for the ported DRM formatting layer.
  * (GPLv2)

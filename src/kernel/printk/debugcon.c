@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * debugcon.c — QEMU debug console output (port 0xE9). (GPLv2)
  */

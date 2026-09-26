@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_dumb.c — dumb buffer allocation for /dev/dri. (GPLv2)
  *

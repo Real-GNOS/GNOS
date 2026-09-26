@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * moddemo.c -- demo loadable kernel module for GNOS. (GPLv2)
  *

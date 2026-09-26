@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * lapic.c — local APIC driver: enable, EOI, and the per-CPU timer. (GPLv2)
  *

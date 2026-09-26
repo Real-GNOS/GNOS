@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm.h - the ioctl interface between user space and the display driver.
  * (GPLv2)

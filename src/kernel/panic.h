@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * panic.h — kernel panic / fatal fault handling. (GPLv2)
  *

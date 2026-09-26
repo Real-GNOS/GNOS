@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * panic.c — kernel panic implementation. (GPLv2)
  */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ptracetest.c — ptrace(2) self-test. (GPLv2, musl)
  *

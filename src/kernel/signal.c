@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * signal.c — the rt_sigframe: how a signal reaches a user handler. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * net.h — the link and internet layers: ethernet, ARP, IPv4, ICMP. (GPLv2)
  *

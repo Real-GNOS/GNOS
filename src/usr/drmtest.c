@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drmtest.c — /dev/dri/card0 self-test. (GPLv2, musl)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * asm/byteorder.h — x86_64 is little endian. (GPLv2)
  */

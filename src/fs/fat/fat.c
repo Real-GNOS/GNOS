@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * fat.c — read/write FAT12/16/32 driver over an in-memory image. (GPLv2)
  *

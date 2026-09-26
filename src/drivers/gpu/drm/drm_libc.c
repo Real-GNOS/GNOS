@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_libc.c — freestanding libc bits the Uinxed DRM core assumes exist.
  * (GPLv2)

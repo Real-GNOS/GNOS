@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ata.h — legacy ATA (IDE) disks over programmed I/O. (GPLv2)
  *

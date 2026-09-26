@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * smp.h — SMP support for GNOS. (GPLv2)
  *

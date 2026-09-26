@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * usb_msc.c — USB mass-storage class over Bulk-Only Transport. (GPLv2)
  *

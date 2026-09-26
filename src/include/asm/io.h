@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * io.h — x86 port I/O primitives. (GPLv2)
  *

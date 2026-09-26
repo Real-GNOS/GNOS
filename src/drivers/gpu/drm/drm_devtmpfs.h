@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_devtmpfs.h — GNOS shim for Uinxed's device-model headers.
  * (GPLv2)

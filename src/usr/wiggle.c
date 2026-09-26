@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * wiggle.c — inject a small mouse movement (GPLv2, musl).
  *

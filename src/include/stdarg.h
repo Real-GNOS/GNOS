@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* stdarg.h — freestanding varargs for the kernel (GCC builtins). (GPLv2)
  * The kernel compiles with -nostdinc, so the compiler's <stdarg.h> is not
  * on the include path; map the C89 varargs interface onto GCC's builtins

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * tcp.c — the state machine tcp.h promised. (GPLv2)
  *

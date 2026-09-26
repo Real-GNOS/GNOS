@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * bootloader.c — GNOS UEFI bootloader (x86-64, gnu-efi). (GPLv2)
  *

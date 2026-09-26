@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_init.h — DRM subsystem bootstrap interface.
  *

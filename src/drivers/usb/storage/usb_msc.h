@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * usb_msc.h — USB mass-storage (BOT) driver interface. (GPLv2)
  */

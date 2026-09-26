@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_mm.c - ranges carved out of a fixed span, for very small spans. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * gdt.h — 64-bit GDT + TSS. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * cat.c — copy files, or standard input, to standard output. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_vbe.c — the bochs VBE_DISPI register interface and current scanout
  * state. (GPLv2)

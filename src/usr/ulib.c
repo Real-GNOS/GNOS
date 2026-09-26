@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ulib.c — user-space runtime. (GPLv2)
  *

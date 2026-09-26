@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * sysfs.h — /sys, the kernel's exported object hierarchy. (GPLv2)
  *

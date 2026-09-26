@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * init.c — GNOS init, PID 1. (GPLv2)
  *

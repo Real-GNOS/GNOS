@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * installer.c — the GNOS disk installer. (GPLv2)
  *

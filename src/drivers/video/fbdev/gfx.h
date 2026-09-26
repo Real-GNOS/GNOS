@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * gfx.h — kernel-side framebuffer graphics primitives. (GPLv2)
  *

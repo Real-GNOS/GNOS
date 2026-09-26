@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * klog.h — the kernel log ring (dmesg-style), readable from user space.
  * (GPLv2)

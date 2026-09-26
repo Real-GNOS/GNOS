@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * cjkfont.h — glyph lookup in the embedded Unifont bitmaps. (GPLv2)
  *

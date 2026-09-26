@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * usb_hid.c — USB HID boot-protocol keyboard and mouse. (GPLv2)
  *

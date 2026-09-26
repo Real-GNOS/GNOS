@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * input.c — the Linux evdev UAPI on the i8042 keyboard and mouse. (GPLv2)
  *

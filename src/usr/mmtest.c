@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* mmtest.c - TEMPORARY diagnostic: compare file-backed mappings byte for
  * byte against pread() of the same file, both for the whole-file mapping and
  * for musl-style per-segment MAP_FIXED mappings.  Any mismatch means the

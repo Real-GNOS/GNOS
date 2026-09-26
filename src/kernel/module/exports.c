@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * exports.c -- symbols the kernel makes available to loadable modules.
  * (GPLv2)

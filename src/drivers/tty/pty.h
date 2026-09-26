@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * pty.h — UNIX98 pseudo-terminals. (GPLv2)
  *

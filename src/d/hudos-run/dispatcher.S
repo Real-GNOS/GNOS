@@ -1,3 +1,5 @@
+; SPDX-License-Identifier: GPL-2.0
+
 // hudos-run 服务分发器 v5 (aarch64) — 帧缓冲 + BMP 导出
 // 头部(loader 拷贝后填入): +0 W(u32) +4 H(u32) +8 FB_BASE(u64), 代码入口 +0x10
 // 状态字(loader 映射 8192B, 代码之后): +0x400 dirty +0x404 acc_ms +0x408 dumps

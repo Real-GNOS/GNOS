@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * input.h — the evdev UAPI driver interface. (GPLv2)
  *

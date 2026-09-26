@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * socktest.c — AF_UNIX + timerfd self-test. (GPLv2, musl)
  *

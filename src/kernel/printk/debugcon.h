@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * debugcon.h — text output to the QEMU debug console (port 0xE9).
  * Useful for headless testing; bytes written here land in the file given

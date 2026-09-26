@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * mount.c — a small mount(8) for the GNOS userland. (GPLv2)
  *

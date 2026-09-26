@@ -1,3 +1,5 @@
+; SPDX-License-Identifier: GPL-2.0
+
 ; ap_trampoline.asm — AP start for GNOS SMP bring-up. (GPLv2)
 ;
 ; Limine starts each AP in 64-bit long mode and calls the goto_address we

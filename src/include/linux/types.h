@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/types.h — minimal shim so the vendored UAPI headers (sound/asound.h)
  * compile inside the freestanding kernel build. (GPLv2)

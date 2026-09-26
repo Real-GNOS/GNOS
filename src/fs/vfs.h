@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * vfs.h — virtual file system. (GPLv2)
  *

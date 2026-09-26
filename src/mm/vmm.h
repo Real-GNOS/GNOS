@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * vmm.h — per-process virtual address spaces. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ipctest.c — System V + POSIX IPC self-test. (GPLv2, musl)
  *

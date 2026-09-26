@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ext2.h — read/write ext2 driver over an in-memory image, or a block device.
  * (GPLv2)

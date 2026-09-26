@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * proc.h — processes, scheduling and signals. (GPLv2)
  *
@@ -527,5 +528,9 @@ int proc_permitted(uint32_t mode, uint32_t uid, uint32_t gid, int want,
  * when futex waiters demand more. */
 uint32_t proc_eff_weight(proc_t *p);
 void futex_pi_unregister(proc_t *p);
+uint32_t proc_cpu_mask_all(void);
+uint32_t proc_cpu_mask_of(proc_t *p);
+void     proc_set_cpu_mask(proc_t *p, uint32_t mask);
+int      proc_pick_cpu(proc_t *p);
 
 #endif

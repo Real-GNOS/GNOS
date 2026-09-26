@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * nep1.c — NeoRunst compatibility loader for GNOS. (GPLv2)
  *

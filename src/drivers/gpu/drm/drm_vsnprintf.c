@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_vsnprintf.c — minimal vsnprintf/snprintf for the ported DRM core.
  * (GPLv2)

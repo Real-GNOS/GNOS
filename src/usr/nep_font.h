@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* nep_font.h — runstker's built-in 5x7 glyph table, extracted from
  * DAT_14002af28 (95 printable ASCII glyphs, 5 bytes per column, bit0 =
  * top row).  Generated from runstker.nep; do not edit by hand. */

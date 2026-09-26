@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * xhci.h — the xHCI (USB 3.0) host controller driver. (GPLv2)
  *

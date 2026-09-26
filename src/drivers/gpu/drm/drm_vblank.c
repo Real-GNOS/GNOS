@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_vblank.c - counting frames, and telling people when one happened.
  * (GPLv2)

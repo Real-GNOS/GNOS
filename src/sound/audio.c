@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * audio.c — Intel 82801AA AC'97 audio driver. (GPLv2)
  *

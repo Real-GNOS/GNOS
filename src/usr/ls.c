@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ls.c — list directory contents. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * shell.c — GNOS shell: job control, pipelines and redirection. (GPLv2)
  *

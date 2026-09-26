@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * tmpfs.c — in-memory filesystem backing mount(2). (GPLv2)
  *

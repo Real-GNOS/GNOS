@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * e1000.h — Intel 82540EM ("e1000") gigabit ethernet driver. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_mode_config.c - the device's display bookkeeping. (GPLv2)
  *

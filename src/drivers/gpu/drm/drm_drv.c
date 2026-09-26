@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_drv.c - the life of a DRM device and of an open file on it. (GPLv2)
  *

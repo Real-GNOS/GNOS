@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * sock.h — BSD sockets on top of net.c and tcp.c. (GPLv2)
  *

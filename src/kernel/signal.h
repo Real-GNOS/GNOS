@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * signal.h — delivering a signal to a user-installed handler. (GPLv2)
  */

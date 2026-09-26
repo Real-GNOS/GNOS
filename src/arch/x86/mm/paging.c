@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * paging.c — flip page-table permissions so user mode can reach a range.
  * (GPLv2)

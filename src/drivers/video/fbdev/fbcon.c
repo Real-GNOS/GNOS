@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * fbcon.c — framebuffer text consoles (VGA 8x16 + Unifont 16x16). (GPLv2)
  *

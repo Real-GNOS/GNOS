@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_connector.c - the socket the monitor is plugged into. (GPLv2)
  *

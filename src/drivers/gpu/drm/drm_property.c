@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_property.c - named settings on display objects. (GPLv2)
  *

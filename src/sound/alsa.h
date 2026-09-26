@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * alsa.h — the ALSA kernel ABI (/dev/snd/*) over the AC97 engine. (GPLv2)
  */

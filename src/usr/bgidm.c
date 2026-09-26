@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * bgidm.c — GNOS BGIDM Desktop Manager for GNOS. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * hda.c — Intel High Definition Audio controller + codec driver. (GPLv2)
  *

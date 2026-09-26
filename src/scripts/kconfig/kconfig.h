@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * kconfig.h — GNOS kernel configuration system.  C++20 + ncursesw.
  *

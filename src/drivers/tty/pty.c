@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * pty.c — UNIX98 pseudo-terminals: /dev/ptmx + /dev/pts/N. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * syscall.h — POSIX system-call layer reached through int 0x80. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_atomic_uapi.c - where user space's description of a display becomes
  * kernel state. (GPLv2)

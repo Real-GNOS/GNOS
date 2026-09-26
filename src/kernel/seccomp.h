@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * seccomp.h — seccomp-BPF filtering. (GPLv2)
  */

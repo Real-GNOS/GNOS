@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * pmm.h — physical page-frame allocator. (GPLv2)
  *

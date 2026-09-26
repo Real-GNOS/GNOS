@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * sysvipc.c — System V IPC: message queues, semaphores, shared memory.
  * (GPLv2)

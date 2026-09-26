@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_port.h — porting shim for the Uinxed DRM core files under ported/.
  * (GPLv2)

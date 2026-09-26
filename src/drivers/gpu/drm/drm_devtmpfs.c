@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_devtmpfs.c — GNOS bridge for Uinxed's devtmpfs_register_char_device.
  * (GPLv2)

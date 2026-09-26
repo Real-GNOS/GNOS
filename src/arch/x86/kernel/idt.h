@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * idt.h — 64-bit interrupt descriptor table. (GPLv2)
  */

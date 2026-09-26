@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * evtest.c — /dev/input/event0 self-test. (GPLv2, musl)
  *

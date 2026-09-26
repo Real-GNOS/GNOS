@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * signalfd.c — signalfd4 (Linux UAPI). (GPLv2)
  *

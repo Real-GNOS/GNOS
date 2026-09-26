@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * unix.h — AF_UNIX stream sockets. (GPLv2)
  *

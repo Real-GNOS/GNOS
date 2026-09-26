@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * klog.c — the kernel log ring: every debugcon line is recorded here and
  * readable from user space (dmesg-style). (GPLv2)

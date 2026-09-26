@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * login.c — authenticate a user and become them. (GPLv2)
  *

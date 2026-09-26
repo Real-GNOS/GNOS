@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * audio.h — AC97 PCM-out streaming and the /dev/dsp device. (GPLv2)
  */

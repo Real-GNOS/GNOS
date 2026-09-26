@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * acpi.h — ACPI table discovery. (GPLv2)
  *

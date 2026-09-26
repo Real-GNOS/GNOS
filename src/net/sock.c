@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * sock.c — the socket object: three wire behaviours behind one fd. (GPLv2)
  *

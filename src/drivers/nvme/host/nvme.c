@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * nvme.c — NVMe 1.x block transport over PCI MMIO. (GPLv2)
  *

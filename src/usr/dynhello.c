@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * dynhello.c — dynamically linked hello for GNOS. (GPLv2)
  *

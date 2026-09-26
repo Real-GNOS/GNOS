@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * net.c — ethernet, ARP, IPv4 and ICMP. (GPLv2)
  *

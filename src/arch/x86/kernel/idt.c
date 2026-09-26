@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * idt.c — interrupt descriptor table, PIC remap and trap dispatch. (GPLv2)
  *

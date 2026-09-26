@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * pmm.c — physical page-frame allocator (bitmap). (GPLv2)
  *

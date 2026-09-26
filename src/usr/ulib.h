@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ulib.h — the user-space runtime: syscall wrappers and a few string helpers.
  * (GPLv2)

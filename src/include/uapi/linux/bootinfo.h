@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * bootinfo.h — shared between UEFI bootloader and kernel. (GPLv2)
  *

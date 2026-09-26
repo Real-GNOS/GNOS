@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * paging.h — page-table surgery on the address space Limine handed us.
  * (GPLv2)

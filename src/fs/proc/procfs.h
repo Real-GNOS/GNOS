@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * procfs.h — /proc, the synthetic filesystem user space reads state out of.
  * (GPLv2)

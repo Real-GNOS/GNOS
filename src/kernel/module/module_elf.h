@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * module_elf.h -- ELF-64 structures and views for loadable kernel modules.
  * (GPLv2)

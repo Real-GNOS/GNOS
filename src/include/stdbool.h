@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* stdbool.h — freestanding bool for the kernel (C11 _Bool). (GPLv2)
  * The kernel compiles with -nostdinc, so the compiler's <stdbool.h> is not
  * on the include path; provide the three macros over C11's builtin _Bool. */

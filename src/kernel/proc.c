@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * proc.c — processes, round-robin scheduling, fork/exec/wait and signals.
  * (GPLv2)
@@ -134,6 +135,47 @@ static uint64_t g_vtime;
 uint32_t proc_eff_weight(proc_t *p)
 {
     return p->pi_boost > p->sched_weight ? p->pi_boost : p->sched_weight;
+}
+
+/* ---- CPU affinity (sched_setaffinity/getaffinity) -----------------------
+ * Kept beside the process table rather than inside proc_t: growing the
+ * struct again would threaten the 16-byte alignment its embedded FPU save
+ * area depends on.  A zero mask means "every core". */
+static uint32_t g_cpu_allowed[MAX_PROCS];   /* 0 = unrestricted */
+
+uint32_t proc_cpu_mask_all(void)
+{
+    uint32_t m = 0;
+    for (int i = 0; i < NR_RQ; i++)
+        m |= 1u << i;
+    return m;
+}
+
+uint32_t proc_cpu_mask_of(proc_t *p)
+{
+    int idx = (int)(p - g_procs);
+    if (idx < 0 || idx >= MAX_PROCS || !g_cpu_allowed[idx])
+        return proc_cpu_mask_all();
+    return g_cpu_allowed[idx];
+}
+
+void proc_set_cpu_mask(proc_t *p, uint32_t mask)
+{
+    int idx = (int)(p - g_procs);
+    if (idx < 0 || idx >= MAX_PROCS)
+        return;
+    g_cpu_allowed[idx] = mask & proc_cpu_mask_all();
+}
+
+/* The lowest allowed core -- enqueue_fresh uses it to keep an affinity-
+ * restricted task on a core it may actually run on. */
+int proc_pick_cpu(proc_t *p)
+{
+    uint32_t m = proc_cpu_mask_of(p);
+    for (int i = 0; i < NR_RQ; i++)
+        if (m & (1u << i))
+            return i;
+    return 0;
 }
 
 /* Default slice in ticks (SCHED_HZ = 100, so 50 ms per pick), converted to
@@ -2268,8 +2310,10 @@ static void enqueue_fresh(proc_t *p)
         cg_park(p);
         return;
     }
-    if (p->rq_cpu < 0 || p->rq_cpu >= NR_RQ)
-        p->rq_cpu = (int)cpu_self()->id % NR_RQ;
+    int want = proc_pick_cpu(p);
+    if (p->rq_cpu < 0 || p->rq_cpu >= NR_RQ ||
+        !(proc_cpu_mask_of(p) & (1u << p->rq_cpu)))
+        p->rq_cpu = want;
     if (!p->tprio)
         p->tprio = (uint32_t)(p->pid * 0x9E3779B9u) ^ 0x85EBCA6Bu;
     rq_enqueue(&g_rqs[p->rq_cpu], p);

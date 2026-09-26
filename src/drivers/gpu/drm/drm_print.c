@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_print.c - how the DRM core talks to the console. (GPLv2)
  *

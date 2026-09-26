@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * limine_requests.c — Limine boot-protocol requests for GnOSKr.elf. (GPLv2)
  *

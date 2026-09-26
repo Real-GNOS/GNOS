@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef GNUCOS_PTRACE_H
 #define GNUCOS_PTRACE_H
 

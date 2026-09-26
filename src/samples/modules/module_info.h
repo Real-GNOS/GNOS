@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * module_info.h -- shared bits for GNOS kernel modules. (GPLv2)
  *

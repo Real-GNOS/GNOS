@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * heap.h — the kernel heap: a general-purpose kmalloc/kfree. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * eventest.c — memfd_create(319), eventfd(290) and epoll(291) self-test.
  * (GPLv2, musl)

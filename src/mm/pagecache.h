@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * pagecache.h — a block-device page cache below the filesystems. (GPLv2)
  *

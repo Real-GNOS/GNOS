@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * tty.h — the virtual terminals: framebuffer out, PS/2 keyboard in. (GPLv2)
  *

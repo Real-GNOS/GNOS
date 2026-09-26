@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_file.c - what each open file descriptor owns. (GPLv2)
  *

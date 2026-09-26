@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_color_mgmt.h - colour management, as far as the UAPI goes. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * modpair.c -- second demo module: imports moddemo_ticks() from moddemo.ko.
  * (GPLv2)

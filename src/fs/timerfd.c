@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * timerfd.c — timerfd_create/settime/gettime (Linux UAPI). (GPLv2)
  *

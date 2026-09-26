@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * hello.c — the smallest possible musl-linked program.
  *

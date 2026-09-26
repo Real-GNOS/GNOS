@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * gdt.c — build and load our own GDT + TSS, one copy per CPU. (GPLv2)
  */

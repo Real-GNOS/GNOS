@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_rect.h - half-open rectangles, the units display hardware thinks in.
  * (GPLv2)

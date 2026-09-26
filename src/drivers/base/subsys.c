@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * subsys.c — the built-in subsystem (driver) registry. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * debugfs.h — /debug, a read-only filesystem for kernel debugging. (GPLv2)
  *

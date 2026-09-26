@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_mode_object.c - the id table behind every KMS object. (GPLv2)
  *

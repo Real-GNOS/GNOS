@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * rbtree.c - augmented red-black tree over intrusive nodes. (GPLv2)
  *

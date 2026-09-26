@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_crtc.c - the hardware that reads a framebuffer and makes a signal.
  * (GPLv2)

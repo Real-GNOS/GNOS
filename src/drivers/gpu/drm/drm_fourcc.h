@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_fourcc.h - pixel formats on the wire. (GPLv2)
  *

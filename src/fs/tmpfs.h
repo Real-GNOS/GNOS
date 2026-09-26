@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * tmpfs.h — an in-memory filesystem for the mount(2) syscall. (GPLv2)
  *

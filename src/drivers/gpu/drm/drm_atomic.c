@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_atomic.c - changing the whole display configuration at once. (GPLv2)
  *

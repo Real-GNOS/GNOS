@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * timer.h — the 8253/8254 programmable interval timer on IRQ 0. (GPLv2)
  *

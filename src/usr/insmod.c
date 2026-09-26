@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * insmod.c -- load a kernel module via finit_module(2). (GPLv2)
  *

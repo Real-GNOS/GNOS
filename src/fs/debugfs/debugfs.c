@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * debugfs.c — /debug, generated on read. (GPLv2)
  *

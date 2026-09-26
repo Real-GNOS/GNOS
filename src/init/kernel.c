@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * kernel.c — GNOS 64-bit kernel (GNOSKr.elf), booted by Limine. (GPLv2)
  *

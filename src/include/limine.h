@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * limine.h — the Limine boot request/response layout as GNOS uses it. (GPLv2)
  *

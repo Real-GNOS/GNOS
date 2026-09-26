@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * dbgcat.c — copy files to the debug console (GPLv2, ulib).
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * usb_hid.h — USB HID keyboard/mouse driver interface. (GPLv2)
  */

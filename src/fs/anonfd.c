@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * anonfd.c — memfd_create(319) and eventfd(284/290), the two anonymous fds
  * the Wayland plumbing cannot do without. (GPLv2)

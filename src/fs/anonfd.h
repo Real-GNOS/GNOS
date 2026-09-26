@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * anonfd.h — memfd/eventfd syscall layer. (GPLv2)
  */

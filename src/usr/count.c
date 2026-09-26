@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * count.c — a long-running program to try job control against. (GPLv2)
  *

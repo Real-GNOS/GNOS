@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * fbdev.c — /dev/fb0, a Linux-compatible framebuffer device. (GPLv2)
  *

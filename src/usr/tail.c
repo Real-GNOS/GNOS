@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * tail.c — print the last few lines of a file or of standard input. (GPLv2)
  *

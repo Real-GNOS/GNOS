@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * rm.c — remove files and empty directories. (GPLv2)
  */

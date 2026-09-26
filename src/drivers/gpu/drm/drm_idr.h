@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_idr.h — small integer ID allocator used by the DRM core. (GPLv2)
  *

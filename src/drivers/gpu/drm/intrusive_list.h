@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * intrusive_list.h — circular doubly-linked lists of embedded nodes. (GPLv2)
  *

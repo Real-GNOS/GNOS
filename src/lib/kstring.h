@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * kstring.h — the handful of libc string/memory routines a freestanding
  * kernel still needs.  GCC is allowed to emit calls to memcpy, memmove,

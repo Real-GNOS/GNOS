@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * tac.c — print lines in reverse order. (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ext2.c — an ext2/ext3 driver that works on a RAM image or a block device.
  * (GPLv2)

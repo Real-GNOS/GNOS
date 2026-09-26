@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * tty.c — virtual terminals with a termios line discipline. (GPLv2)
  *

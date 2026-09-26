@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * smp.c — multi-core bring-up for GNOS. (GPLv2)
  *

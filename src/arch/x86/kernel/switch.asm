@@ -1,3 +1,5 @@
+; SPDX-License-Identifier: GPL-2.0
+
 ; switch.asm — kernel context switch and the new-task trampoline. (GPLv2)
 ;
 ; switch_context() is the only place where one task's kernel stack is swapped

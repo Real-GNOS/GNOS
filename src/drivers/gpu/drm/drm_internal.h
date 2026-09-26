@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_internal.h — shared state and prototypes for the GNOS DRM driver,
  * split across the drm/ modules. (GPLv2)

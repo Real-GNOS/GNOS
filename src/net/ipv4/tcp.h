@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * tcp.h — a small, honest TCP. (GPLv2)
  *

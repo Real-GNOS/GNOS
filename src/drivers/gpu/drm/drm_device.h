@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_device.h - the shapes every DRM module agrees on. (GPLv2)
  *

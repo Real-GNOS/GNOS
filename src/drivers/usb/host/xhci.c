@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * xhci.c — xHCI host controller driver. (GPLv2)
  *

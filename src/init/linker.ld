@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* src/init/linker.ld — init.elf: 64-bit, linked/loaded at 0x600000. */
 ENTRY(_start)
 

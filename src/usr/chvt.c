@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * chvt.c — switch the console the screen is showing. (GPLv2)
  *

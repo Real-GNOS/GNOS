@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * vfs.c — one ext2 root mount, /dev character devices, and anonymous pipes.
  * (GPLv2)

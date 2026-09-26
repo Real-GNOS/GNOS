@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * loader.c — ELF64 / a.out image loader. (GPLv2)
  *

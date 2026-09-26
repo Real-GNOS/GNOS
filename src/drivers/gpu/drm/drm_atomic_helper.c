@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_atomic_helper.c - the steps a driver would otherwise write itself.
  * (GPLv2)

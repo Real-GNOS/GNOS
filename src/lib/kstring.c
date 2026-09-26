@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * kstring.c — freestanding string/memory primitives. (GPLv2)
  */

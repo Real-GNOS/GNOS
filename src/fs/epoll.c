@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * epoll.c — epoll_create1(291)/epoll_ctl(233)/epoll_wait(232)/
  * epoll_pwait(281). (GPLv2)

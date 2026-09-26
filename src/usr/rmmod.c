@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * rmmod.c -- unload a kernel module via delete_module(2). (GPLv2)
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* src/user/user.ld — every user program is linked at 0x400000.
  *
  * They can all share one address because they never share an address space:

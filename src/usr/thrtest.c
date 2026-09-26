@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * thrtest.c — pthread bring-up self-test. (GPLv2, musl)
  *

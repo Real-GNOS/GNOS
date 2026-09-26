@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * drm_framebuffer.c - the thing a CRTC scans out. (GPLv2)
  *

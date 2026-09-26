@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * syscall.c — the int 0x80 POSIX gate. (GPLv2)
  *
@@ -46,6 +47,8 @@
 #include "unix.h"
 #include "sysvipc.h"
 #include "seccomp.h"
+#include "pidfd.h"
+#include "process_vm_access.h"
 
 /* reboot(169) command codes; the Linux ABI as musl's reboot() passes them. */
 #define LINUX_REBOOT_CMD_RESTART    0x01234567
@@ -379,6 +382,202 @@ static int64_t sys_openat(int dfd, uint64_t upath, int flags)
  * second one that is *not* cloexec, which is exactly how a shell moves a
  * descriptor out of the way before exec.
  */
+static int64_t sys_close(int fd);       /* defined further down */
+
+/* close_range(436): close every fd in [first, last].  A shell or a service
+ * manager hands a child a clean set of descriptors with one call instead of
+ * looping over close() (or, worse, over /proc/self/fd). */
+static int64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags)
+{
+    if (flags & ~1u)                     /* CLOSE_RANGE_CLOEXEC is bit 0 */
+        return -E_INVAL;
+    proc_t *p = proc_current();
+    if (!p)
+        return -E_BADF;
+    if (first > last)
+        return -E_INVAL;
+    if (last >= PROC_MAX_FD)             /* Linux clamps, so do we */
+        last = PROC_MAX_FD - 1;
+
+    for (uint64_t fd = first; fd <= last; fd++) {
+        if (p->fds[fd] < 0)
+            continue;
+        if (flags & 1u) {
+            p->fd_cloexec |= (1ULL << fd);
+            continue;
+        }
+        int64_t r = sys_close((int)fd);
+        if (r < 0)
+            return r;
+    }
+    return 0;
+}
+
+/* membarrier(324): a process-wide memory barrier.  GNOS serialises kernel
+ * entry with the big kernel lock and runs its interrupt handlers on the
+ * interrupted core, so there is nothing to issue an IPI for -- the barrier
+ * is already there.  QUERY reports the commands we can honour. */
+#define MEMBARRIER_CMD_QUERY              0
+#define MEMBARRIER_CMD_GLOBAL             1
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED  8
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED 16
+
+static int64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t cpu_id)
+{
+    (void)cpu_id;
+    if (flags)
+        return -E_INVAL;
+    switch (cmd) {
+    case MEMBARRIER_CMD_QUERY:
+        return MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_PRIVATE_EXPEDITED |
+               MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+    case MEMBARRIER_CMD_GLOBAL:
+    case MEMBARRIER_CMD_PRIVATE_EXPEDITED:
+    case MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED:
+        asm volatile("mfence" ::: "memory");
+        return 0;
+    default:
+        return -E_INVAL;
+    }
+}
+
+/* copy_file_range(326): splice bytes between two files without a user-side
+ * buffer round trip.  No page-cache splice here, so it is a pread/pwrite
+ * loop -- the observable behaviour is what matters to the caller. */
+static int64_t sys_copy_file_range(uint64_t fd_in, uint64_t uoff_in,
+                                   uint64_t fd_out, uint64_t uoff_out,
+                                   uint64_t len, uint64_t flags)
+{
+    if (flags)
+        return -E_INVAL;
+    if (!len)
+        return 0;
+
+    int hin = fd_handle((int)fd_in);
+    int hout = fd_handle((int)fd_out);
+    if (hin < 0 || hout < 0)
+        return -E_BADF;
+
+    uint64_t off_in = 0, off_out = 0;
+    int have_in = 0, have_out = 0;
+    if (uoff_in) {
+        if (!user_ptr_ok(uoff_in, 8))
+            return -E_FAULT;
+        off_in = *(uint64_t *)(uintptr_t)uoff_in;
+        have_in = 1;
+    }
+    if (uoff_out) {
+        if (!user_ptr_ok(uoff_out, 8))
+            return -E_FAULT;
+        off_out = *(uint64_t *)(uintptr_t)uoff_out;
+        have_out = 1;
+    }
+
+    static uint8_t cfr_buf[4096];
+    uint64_t done = 0;
+    while (done < len) {
+        uint32_t n = (uint32_t)((len - done) < sizeof cfr_buf ? (len - done)
+                                                             : sizeof cfr_buf);
+        int32_t got, wrote;
+        if (have_in) {
+            got = vfs_file_pread(hin, cfr_buf, n, off_in + done);
+        } else {
+            got = vfs_file_read(hin, cfr_buf, n);
+        }
+        if (got <= 0)
+            break;
+        if (have_out) {
+            wrote = vfs_file_pwrite(hout, cfr_buf, (uint32_t)got, off_out + done);
+        } else {
+            wrote = vfs_file_write(hout, cfr_buf, (uint32_t)got);
+        }
+        if (wrote <= 0)
+            return done ? (int64_t)done : wrote;
+        done += (uint32_t)wrote;
+        if ((uint32_t)wrote < (uint32_t)got)
+            break;                       /* short write: stop like Linux does */
+    }
+    if (have_in)
+        *(uint64_t *)(uintptr_t)uoff_in = off_in + done;
+    if (have_out)
+        *(uint64_t *)(uintptr_t)uoff_out = off_out + done;
+    return (int64_t)done;
+}
+
+/* openat2(437): openat with the arguments moved into a struct so they can
+ * be extended.  `resolve` (RESOLVE_BENEATH and friends) is rejected rather
+ * than silently ignored -- a caller that asks for a guarantee it is not
+ * getting is worse off than one that gets EINVAL. */
+struct open_how { uint64_t flags, mode, resolve; };
+
+static int64_t sys_openat2(uint64_t dfd, uint64_t upath, uint64_t uhow,
+                           uint64_t size)
+{
+    if (size < sizeof(struct open_how))
+        return -E_INVAL;
+    if (!user_ptr_ok(uhow, sizeof(struct open_how)))
+        return -E_FAULT;
+    const struct open_how *how = (const struct open_how *)(uintptr_t)uhow;
+    if (how->resolve)
+        return -E_INVAL;                 /* no RESOLVE_* support yet */
+    if (how->flags & O_CREAT) {
+        /* open_resolved() takes no mode; create through the plain path. */
+        return sys_openat((int)dfd, upath, (int)how->flags);
+    }
+    char abs[GNUOS_PATH_MAX];
+    int r = path_at((int)dfd, upath, abs);
+    if (r < 0)
+        return r;
+    return open_resolved(abs, (int)how->flags);
+}
+
+/* sched_setaffinity(203)/sched_getaffinity(204): which cores a task may run
+ * on.  The mask lives beside the process table rather than inside proc_t so
+ * that growing it cannot disturb the struct's 16-byte alignment (the FPU
+ * save area depends on it). */
+static int64_t sys_sched_setaffinity(uint64_t pid, uint64_t cpusetsize,
+                                     uint64_t umask)
+{
+    if (cpusetsize < 8 || cpusetsize > 64)
+        return -E_INVAL;
+    if (!user_ptr_ok(umask, cpusetsize))
+        return -E_FAULT;
+
+    uint64_t mask = 0;
+    memcpy(&mask, (const void *)(uintptr_t)umask,
+           cpusetsize < 8 ? cpusetsize : 8);
+    if (!mask)
+        return -E_INVAL;
+
+    proc_t *target = (pid == 0) ? proc_current() : proc_by_pid((int)pid);
+    if (!target)
+        return -E_SRCH;
+    mask &= (uint64_t)proc_cpu_mask_all();
+    if (!mask)
+        return -E_INVAL;
+    proc_set_cpu_mask(target, (uint32_t)mask);
+    target->rq_cpu = proc_pick_cpu(target);
+    return 0;
+}
+
+static int64_t sys_sched_getaffinity(uint64_t pid, uint64_t cpusetsize,
+                                     uint64_t umask)
+{
+    if (cpusetsize < 8 || cpusetsize > 64)
+        return -E_INVAL;
+    if (!user_ptr_ok(umask, cpusetsize))
+        return -E_FAULT;
+
+    proc_t *target = (pid == 0) ? proc_current() : proc_by_pid((int)pid);
+    if (!target)
+        return -E_SRCH;
+
+    uint64_t mask = proc_cpu_mask_of(target);
+    memset((void *)(uintptr_t)umask, 0, cpusetsize);
+    memcpy((void *)(uintptr_t)umask, &mask, 8);
+    return 8;
+}
+
 static int64_t sys_fcntl(int fd, int cmd, uint64_t arg)
 {
     int h = fd_handle(fd);
@@ -4453,6 +4652,50 @@ void syscall_handler(regs_t *r)
 
     case SYS_openat:
         ret = sys_openat((int)a1, a2, (int)a3);
+        break;
+
+    case SYS_close_range:
+        ret = sys_close_range(a1, a2, a3);
+        break;
+
+    case SYS_membarrier:
+        ret = sys_membarrier(a1, a2, a3);
+        break;
+
+    case SYS_copy_file_range:
+        ret = sys_copy_file_range(a1, a2, a3, r->r10, r->r8, r->r9);
+        break;
+
+    case SYS_openat2:
+        ret = sys_openat2(a1, a2, a3, r->r10);
+        break;
+
+    case SYS_sched_setaffinity:
+        ret = sys_sched_setaffinity(a1, a2, a3);
+        break;
+
+    case SYS_sched_getaffinity:
+        ret = sys_sched_getaffinity(a1, a2, a3);
+        break;
+
+    case SYS_pidfd_open:
+        ret = sys_pidfd_open(a1, a2);
+        break;
+
+    case SYS_pidfd_send_signal:
+        ret = sys_pidfd_send_signal(a1, a2, a3, r->r10);
+        break;
+
+    case SYS_pidfd_getfd:
+        ret = sys_pidfd_getfd(a1, a2, a3);
+        break;
+
+    case SYS_process_vm_readv:
+        ret = sys_process_vm_readv(a1, a2, a3, r->r10, r->r8, r->r9);
+        break;
+
+    case SYS_process_vm_writev:
+        ret = sys_process_vm_writev(a1, a2, a3, r->r10, r->r8, r->r9);
         break;
 
     case SYS_fcntl:
