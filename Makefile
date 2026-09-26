@@ -54,13 +54,13 @@ OTHER_ARCH  := $(filter-out $(ACTIVE_ARCH),$(ARCH_DIRS))
 
 # Kernel include path: everything except the foreign architectures and the
 # userland, whose headers would otherwise leak into kernel objects.
-KERNEL_DIRS := $(filter-out $(OTHER_ARCH) src/user src/user/%,$(SRCDIRS))
+KERNEL_DIRS := $(filter-out $(OTHER_ARCH) src/usr src/usr/%,$(SRCDIRS))
 KINCS       := $(addprefix -I,$(KERNEL_DIRS))
 
 # The two trees with their own consumers: headers shared between kernel and
 # userland (sysnum.h, bootinfo.h), and the userland itself.
 SHARED_DIR := src/include/uapi/linux
-USER_DIR   := src/user
+USER_DIR   := src/usr
 
 # Common freestanding flags.  -mgeneral-regs-only keeps gcc away from
 # SSE/MMX/x87 registers: the CPU arrives from Limine with CR4.OSFXSR clear,
@@ -393,10 +393,10 @@ all: $(ISO)
 
 # ---------- gnoscfg: C++20 Kconfig configuration tool (host native) -----
 # The gnoscfg binary is a *host* tool (runs on the build machine, not inside
-# the guest) that parses src/gnoscfg/Kconfig and drives a menuconfig TUI
+# the guest) that parses src/Kconfig and drives a menuconfig TUI
 # using ncursesw.  It produces build/.config which `make` sources to set
 # KCFLAGS for the kernel build.
-GNOSCFG_SRC  := src/gnoscfg
+GNOSCFG_SRC  := src/scripts/kconfig
 GNOSCFG_BIN  := $(BUILD)/gnoscfg
 GNOSCFG_OBJS := $(BUILD)/gnoscfg_kconfig.o $(BUILD)/gnoscfg_menu.o \
                 $(BUILD)/gnoscfg_main.o
@@ -416,7 +416,7 @@ $(GNOSCFG_BIN): $(GNOSCFG_OBJS) $(NC_LIBS) | $(BUILD)
 	g++-13 -std=c++20 -static -no-pie -L$(NC_STAGE)/lib -o $@ $(GNOSCFG_OBJS) \
 	  $(NC_LIBS) -ltinfow -lm
 
-config menuconfig: $(GNOSCFG_BIN) src/gnoscfg/Kconfig
+config menuconfig: $(GNOSCFG_BIN) src/Kconfig
 	$(GNOSCFG_BIN)
 # ---------- Alpine software autoinstall -----------------------------------------
 # `make autoinstall ALPINE_PKGS="htop curl"` pulls the named Alpine musl
@@ -569,8 +569,8 @@ DEPS := $(KOBJS:.o=.d) $(UOBJS:.o=.d) $(MUSL_OBJS:.o=.d) $(UCRT:.o=.d) \
 # sample modules, all of which are built by their own explicit rules.  init/
 # itself stays in: kernel_entry (kernel.c) and the Limine request block live
 # there and are ordinary kernel objects.
-VPATH_SRC := $(filter-out src/user/% src/bootloader/% \
-                          src/gnoscfg/% src/kernel/modules/%,$(KERNEL_DIRS))
+VPATH_SRC := $(filter-out src/usr/% src/bootloader/% \
+                          src/scripts/kconfig/% src/samples/modules/%,$(KERNEL_DIRS))
 vpath %.c   $(VPATH_SRC)
 vpath %.asm $(VPATH_SRC)
 vpath %.S   $(VPATH_SRC)
@@ -617,16 +617,16 @@ $(KRNL): $(KOBJS) linker.ld
 	  -Wl,--build-id=none -o $@ $(KOBJS)
 
 # ---------- loadable kernel modules (.ko) ----------
-# src/kernel/modules/*.c -> build/modules/*.ko.  These are plain ET_REL
+# src/samples/modules/*.c -> build/modules/*.ko.  These are plain ET_REL
 # objects (no -fpie, no -fpic): the loader maps and relocates them itself.
 # The module toolchain is the kernel's minus the PIE codegen; -fno-pie /
 # -fno-pic undo what BASEFLAGS -fpie would otherwise add.
-KMSRC := $(wildcard src/kernel/modules/*.c)
-KMODS := $(patsubst src/kernel/modules/%.c,$(BUILD)/modules/%.ko,$(KMSRC))
+KMSRC := $(wildcard src/samples/modules/*.c)
+KMODS := $(patsubst src/samples/modules/%.c,$(BUILD)/modules/%.ko,$(KMSRC))
 
-$(BUILD)/modules/%.o: src/kernel/modules/%.c \
-	  src/kernel/modules/module_info.h src/kernel/core/module.h \
-	  src/kernel/core/kstring.h | $(BUILD)/modules
+$(BUILD)/modules/%.o: src/samples/modules/%.c \
+	  src/samples/modules/module_info.h src/kernel/module/module.h \
+	  src/lib/kstring.h | $(BUILD)/modules
 	$(CC) $(BASEFLAGS) -fno-pie -fno-pic -fno-stack-protector \
 	  -fno-asynchronous-unwind-tables -fno-omit-frame-pointer \
 	  $(DEPFLAGS) -c -o $@ $<
@@ -635,20 +635,20 @@ $(BUILD)/modules/%.ko: $(BUILD)/modules/%.o
 	$(LD) -m elf_x86_64 -r --build-id=none -o $@ $<
 
 # ---------- user programs ----------
-$(BUILD)/user/%.o: src/user/%.c | $(BUILD)/user
+$(BUILD)/user/%.o: src/usr/%.c | $(BUILD)/user
 	$(CC) $(UCFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # musl programs compile against musl's headers (see MUSLCFLAGS).  These are
 # static pattern rules, which beat the generic ulib ones above for exactly the
 # targets named in MUSL_OBJS / MUSL_ELFS and leave every other program alone.
-$(MUSL_OBJS): $(BUILD)/user/%.o: src/user/%.c $(MUSL_LIB)/libc.a | $(BUILD)/user
+$(MUSL_OBJS): $(BUILD)/user/%.o: src/usr/%.c $(MUSL_LIB)/libc.a | $(BUILD)/user
 	$(CC) $(MUSLCFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(BUILD)/user/%.o: src/user/%.asm | $(BUILD)/user
+$(BUILD)/user/%.o: src/usr/%.asm | $(BUILD)/user
 	$(AS) -f elf64 -o $@ $<
 
-$(BUILD)/%.elf: $(BUILD)/user/%.o $(UCRT) src/user/user.ld
-	$(LD) -m elf_x86_64 -T src/user/user.ld -z max-page-size=0x1000 \
+$(BUILD)/%.elf: $(BUILD)/user/%.o $(UCRT) src/usr/user.ld
+	$(LD) -m elf_x86_64 -T src/usr/user.ld -z max-page-size=0x1000 \
 	  --build-id=none -o $@ $(UCRT) $<
 
 # musl-linked program: crt1.o, libc.a, and the .init/.fini glue from crti/crtn.
@@ -657,8 +657,8 @@ $(BUILD)/%.elf: $(BUILD)/user/%.o $(UCRT) src/user/user.ld
 # closes the .init/.fini sections opened by crti.o, so it is last.
 $(MUSL_ELFS): $(BUILD)/%.elf: $(BUILD)/user/%.o \
               $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $(MUSL_CRT)/crtn.o \
-              $(MUSL_LIB)/libc.a src/user/user.ld
-	$(LD) -m elf_x86_64 -T src/user/user.ld -z max-page-size=0x1000 \
+              $(MUSL_LIB)/libc.a src/usr/user.ld
+	$(LD) -m elf_x86_64 -T src/usr/user.ld -z max-page-size=0x1000 \
 	  --build-id=none -static -nostdlib -o $@ \
 	  $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $< \
 	  $(MUSL_LIB)/libc.a $(MUSL_CRT)/crtn.o
@@ -669,7 +669,7 @@ $(MUSL_ELFS): $(BUILD)/%.elf: $(BUILD)/user/%.o \
 # interpreter path, loads the linker, and hands the entry point to it, the
 # way a Linux loader would.  Everything else stays -static: this file exists
 # to prove the ET_DYN + PT_INTERP path, not to be a production choice.
-$(BUILD)/dynhello.elf: src/user/dynhello.c $(MUSL_GCC)
+$(BUILD)/dynhello.elf: src/usr/dynhello.c $(MUSL_GCC)
 	REALGCC=gcc-13 $(MUSL_GCC) -O2 -g -o $@ $<
 	file $@
 
@@ -680,7 +680,7 @@ $(BUILD)/dynhello.elf: src/user/dynhello.c $(MUSL_GCC)
 # kernel driver knows how to rewrite.
 $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
            $(CC_BIN) $(KRNL) $(FF_BIN) $(KMODS) $(CURL_BIN) $(NANO_BIN) \
-           $(PY_BIN) $(ALPINE_ROOT) $(BUILD)/.kcmd src/user/rc | $(BUILD)
+           $(PY_BIN) $(ALPINE_ROOT) $(BUILD)/.kcmd src/usr/rc | $(BUILD)
 	rm -rf $(BUILD)/initrd-root
 	mkdir -p $(BUILD)/initrd-root
 	# ---- FHS skeleton (empty dirs are harmless placeholders for now) ----
@@ -934,10 +934,10 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# ---- desktop stack (labwc/xfce) DISABLED for headless ISO -----------
 	# To re-enable: un-comment the labwc/xfce sections above this line.
 	
-	cp src/user/rc $(BUILD)/initrd-root/etc/rc            # run once at boot by init
+	cp src/usr/rc $(BUILD)/initrd-root/etc/rc            # run once at boot by init
 	# startxfce: post-login desktop launcher (see /root/.profile).  Installed
 	# executable because the kernel honours the #! line only on a real exec.
-	cp src/user/startxfce $(BUILD)/initrd-root/usr/bin/startxfce
+	cp src/usr/startxfce $(BUILD)/initrd-root/usr/bin/startxfce
 	chmod 755 $(BUILD)/initrd-root/usr/bin/startxfce
 	# Static system config (hosts, resolv.conf, nsswitch, services, protocols,
 	# passwd/group, hostname).  These make the BusyBox network tools and the

@@ -25,9 +25,9 @@ static void usage() {
 
 int main(int argc, char **argv) {
     gnoscfg::KconfigParser parser;
-    auto root = parser.parse("src/gnoscfg/Kconfig");
+    auto root = parser.parse("src/Kconfig");
     if (!root) {
-        fprintf(stderr, "错误: 无法解析 src/gnoscfg/Kconfig\n");
+        fprintf(stderr, "错误: 无法解析 src/Kconfig\n");
         return 1;
     }
 

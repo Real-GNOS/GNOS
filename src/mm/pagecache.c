@@ -28,6 +28,7 @@ typedef struct pc_page {
     struct pc_page *lru_prev, *lru_next;   /* recency list                */
     void           *ctx;                   /* the device it belongs to    */
     uint64_t        off;                   /* device offset, page-aligned */
+    int             active;                /* on the active list (2nd hit)*/
     uint64_t        frame;                 /* physical frame              */
     uint8_t        *data;                  /* kernel-view pointer         */
 } pc_page_t;
@@ -35,8 +36,14 @@ typedef struct pc_page {
 static pc_page_t  g_pool[PC_PAGES];
 static unsigned   g_used;
 static pc_page_t *g_bucket[PC_BUCKETS];
-static pc_page_t *g_lru_head, *g_lru_tail;
-static uint32_t   g_hits, g_misses, g_evicts;
+/* Two-list (active/inactive) LRU, after Linux mm/swap.c: new pages land on
+ * the inactive list, a second reference promotes them to active, and
+ * reclaim takes the inactive head -- demoting an active page first when the
+ * inactive list has run dry, so a page only dies after two passes miss it.
+ * A single LRU lets one sequential scan push every hot page out. */
+static pc_page_t *g_active_head, *g_active_tail;
+static pc_page_t *g_inactive_head, *g_inactive_tail;
+static uint32_t   g_hits, g_misses, g_evicts, g_promote, g_demote;
 
 extern uint64_t g_hhdm;
 
@@ -47,37 +54,47 @@ static unsigned bucket_of(void *ctx, uint64_t off)
     return (unsigned)((h >> 32) & (PC_BUCKETS - 1));
 }
 
-/* Move `p` to the most-recently-used end of the list. */
-static void lru_touch(pc_page_t *p)
+static void lru_push(pc_page_t **head, pc_page_t **tail, pc_page_t *p)
 {
-    if (g_lru_tail == p)
-        return;
-    if (p->lru_prev)
-        p->lru_prev->lru_next = p->lru_next;
-    else if (g_lru_head == p)
-        g_lru_head = p->lru_next;
-    if (p->lru_next)
-        p->lru_next->lru_prev = p->lru_prev;
-    p->lru_prev = g_lru_tail;
+    p->lru_prev = *tail;
     p->lru_next = NULL;
-    if (g_lru_tail)
-        g_lru_tail->lru_next = p;
-    g_lru_tail = p;
-    if (!g_lru_head)
-        g_lru_head = p;
+    if (*tail)
+        (*tail)->lru_next = p;
+    *tail = p;
+    if (!*head)
+        *head = p;
 }
 
 static void lru_unlink(pc_page_t *p)
 {
+    pc_page_t **head = p->active ? &g_active_head : &g_inactive_head;
+    pc_page_t **tail = p->active ? &g_active_tail : &g_inactive_tail;
     if (p->lru_prev)
         p->lru_prev->lru_next = p->lru_next;
+    else if (*head == p)
+        *head = p->lru_next;
     if (p->lru_next)
         p->lru_next->lru_prev = p->lru_prev;
-    if (g_lru_head == p)
-        g_lru_head = p->lru_next;
-    if (g_lru_tail == p)
-        g_lru_tail = p->lru_prev;
+    else if (*tail == p)
+        *tail = p->lru_prev;
     p->lru_prev = p->lru_next = NULL;
+}
+
+/* A hit: an inactive page earns its way onto the active list; an active
+ * one just moves to the most-recently-used end. */
+static void lru_touch(pc_page_t *p)
+{
+    if (!p->active) {
+        lru_unlink(p);
+        p->active = 1;
+        lru_push(&g_active_head, &g_active_tail, p);
+        g_promote++;
+        return;
+    }
+    if (g_active_tail == p)
+        return;
+    lru_unlink(p);
+    lru_push(&g_active_head, &g_active_tail, p);
 }
 
 static void hash_insert(pc_page_t *p)
@@ -116,7 +133,18 @@ static pc_page_t *page_alloc(void *ctx, uint64_t off)
             return NULL;
         p->data = (uint8_t *)(uintptr_t)(p->frame + g_hhdm);
     } else {
-        p = g_lru_head;
+        if (!g_inactive_head) {
+            /* Nothing cold left: give an active page its second chance by
+             * demoting the least recently used one and taking that. */
+            p = g_active_head;
+            if (!p)
+                return NULL;
+            lru_unlink(p);
+            p->active = 0;
+            lru_push(&g_inactive_head, &g_inactive_tail, p);
+            g_demote++;
+        }
+        p = g_inactive_head;
         if (!p)
             return NULL;
         g_evicts++;
@@ -125,9 +153,10 @@ static pc_page_t *page_alloc(void *ctx, uint64_t off)
     }
     p->ctx = ctx;
     p->off = off;
+    p->active = 0;
     p->next = NULL;
     hash_insert(p);
-    lru_touch(p);
+    lru_push(&g_inactive_head, &g_inactive_tail, p);
     return p;
 }
 
@@ -135,7 +164,8 @@ void pagecache_init(void)
 {
     memset(g_bucket, 0, sizeof g_bucket);
     g_used = g_hits = g_misses = g_evicts = 0;
-    g_lru_head = g_lru_tail = NULL;
+    g_promote = g_demote = 0;
+    g_active_head = g_active_tail = g_inactive_head = g_inactive_tail = NULL;
 }
 
 int pagecache_read(void *ctx, pc_dev_read_t rd, uint64_t off, void *buf,
@@ -287,6 +317,10 @@ void pagecache_selftest(void)
         dbg_puts("PCACHE: FAIL (counters)\r\n");
         return;
     }
+    if (!g_promote || !g_demote) {
+        dbg_puts("PCACHE: FAIL (two-list LRU never promoted/demoted)\r\n");
+        return;
+    }
     dbg_puts("PCACHE: self-test PASS, ");
     dbg_puts_dec(pages);
     dbg_puts(" pages, ");
@@ -295,6 +329,10 @@ void pagecache_selftest(void)
     dbg_puts_dec(misses);
     dbg_puts(" misses / ");
     dbg_puts_dec(evicts);
-    dbg_puts(" evictions\r\n");
+    dbg_puts(" evictions / ");
+    dbg_puts_dec(g_promote);
+    dbg_puts(" promoted / ");
+    dbg_puts_dec(g_demote);
+    dbg_puts(" demoted\r\n");
     pagecache_init();
 }
