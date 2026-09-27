@@ -84,3 +84,17 @@ char *strncpy(char *dst, const char *src, size_t n)
         dst[i] = 0;
     return dst;
 }
+
+/* The first occurrence of `c` in `s`, or NULL.  FatFs takes or leaves a
+ * path separator with this, and the kernel had never needed to look for a
+ * single character inside a string before. */
+char *strchr(const char *s, int c)
+{
+    if (!s)
+        return NULL;
+    char ch = (char)c;
+    for (; *s; s++)
+        if (*s == ch)
+            return (char *)s;
+    return ch == 0 ? (char *)s : NULL;
+}

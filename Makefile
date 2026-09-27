@@ -57,6 +57,11 @@ OTHER_ARCH  := $(filter-out $(ACTIVE_ARCH),$(ARCH_DIRS))
 KERNEL_DIRS := $(filter-out $(OTHER_ARCH) src/usr src/usr/%,$(SRCDIRS))
 KINCS       := $(addprefix -I,$(KERNEL_DIRS))
 
+# FatFs (src/vendor/fatfs/source) is third-party and pruned from the auto
+# -I list, but its own headers must be visible to ff.c and to the GNOS
+# port layer in src/fs/fatfs.
+KINCS       += -Isrc/vendor/fatfs/source
+
 # The two trees with their own consumers: headers shared between kernel and
 # userland (sysnum.h, bootinfo.h), and the userland itself.
 SHARED_DIR := src/include/uapi/linux
@@ -123,7 +128,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/input.o $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
         $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
         $(BUILD)/pty.o $(BUILD)/alsa.o $(BUILD)/klog.o $(BUILD)/cpuid.o $(BUILD)/pagecache.o \
-        $(BUILD)/pidfd.o $(BUILD)/process_vm_access.o $(BUILD)/quota.o \
+        $(BUILD)/pidfd.o $(BUILD)/process_vm_access.o $(BUILD)/quota.o $(BUILD)/ff.o $(BUILD)/diskio.o $(BUILD)/ffsystem.o \
         $(BUILD)/secretmem.o $(BUILD)/landlock.o \
         $(BUILD)/unix.o \
         $(BUILD)/sysvipc.o \
@@ -589,6 +594,11 @@ check-hdrs:
 	if [ -n "$$dup" ]; then echo "FATAL: duplicate header basename(s):"; \
 	  echo "$$dup"; exit 1; fi; \
 	echo "check-hdrs: header basenames are unique"
+
+# FatFs core: vendored (pruned from the auto vpath), so it needs an explicit
+# rule.  The port layer beside it (src/fs/fatfs) is ordinary kernel code.
+$(BUILD)/ff.o: src/vendor/fatfs/source/ff.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(BUILD)/%.o: %.c | $(BUILD)
 	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<
