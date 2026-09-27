@@ -1121,6 +1121,7 @@ void tty_init(void)
     }
     vfs_register_dev("tty", &g_tty_ops, NULL);
     vfs_register_dev("console", &g_tty_ops, &g_vt[0]);
+    vcs_init();   /* /dev/vcs, /dev/vcsa: the active screen as a file */
     subsys_set_state(subsys_register("tty", "tty", SUBSYS_CLASS_TTY, 5, 0),
                      SUBSYS_STATE_LIVE);
     subsys_set_state(subsys_register("console", "console", SUBSYS_CLASS_TTY, 5, 1),

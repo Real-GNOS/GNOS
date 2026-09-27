@@ -65,6 +65,8 @@
 #define C_FLUSH         0xE7
 #define C_FLUSH_EXT     0xEA
 #define C_IDENTIFY      0xEC
+#define C_ID_PACKET     0xA1
+#define C_PACKET        0xA0
 
 /* Device control register (the control block's only byte we write). */
 #define DCR_NIEN  0x02     /* stop the drive asserting its IRQ line */
@@ -85,7 +87,9 @@ typedef struct {
     uint16_t ctrl;         /* control block base    */
     uint8_t  slave;        /* 0 = master, 1 = slave */
     uint8_t  lba48;
-    uint64_t sectors;      /* capacity, in 512-byte sectors */
+    uint8_t  atapi;        /* PACKET-device (CD-ROM): scsi over ATA */
+    uint32_t secsize;      /* bytes per sector: 512 ATA, 2048 ATAPI */
+    uint64_t sectors;      /* capacity, in secsize-byte sectors     */
     char     model[41];
 } ata_disk_t;
 
@@ -176,6 +180,9 @@ static void ata_select(const ata_disk_t *d, uint8_t head_bits)
  *   word  83 b10  "supports 48-bit addressing"
  *   words 100..103 capacity in LBA48 sectors
  */
+static int atapi_packet_read(const ata_disk_t *d, uint8_t *pkt,
+                             uint16_t nbytes, uint8_t *buf);
+
 static int ata_identify(ata_disk_t *d)
 {
     /* Interrupts off for this channel: the driver polls, and a drive that
@@ -200,16 +207,18 @@ static int ata_identify(ata_disk_t *d)
         return 0;
 
     /* ATAPI (a CD-ROM) refuses IDENTIFY and leaves its signature behind in
-     * the LBA mid/high registers: 0x14/0xEB for ATAPI, 0x69/0x96 for SATAPI.
-     * There is no point continuing; this driver speaks ATA, not the SCSI
-     * command set tunnelled over ATAPI. */
+     * the LBA mid/high registers: 0x14/0xEB for ATAPI.  Send IDENTIFY
+     * PACKET DEVICE instead and keep going -- the drive is worth having
+     * (it is the boot media). */
     uint8_t lba1 = inb(d->io + R_LBA1);
     uint8_t lba2 = inb(d->io + R_LBA2);
-    if ((lba1 == 0x14 && lba2 == 0xEB) || (lba1 == 0x69 && lba2 == 0x96))
-        return 0;
-    if (lba1 || lba2)                  /* some other non-ATA signature */
+    uint8_t is_packet = 0;
+    if (lba1 == 0x14 && lba2 == 0xEB)
+        is_packet = 1;
+    else if (lba1 || lba2)             /* some other non-ATA signature */
         return 0;
 
+    outb(d->io + R_COMMAND, is_packet ? C_ID_PACKET : C_IDENTIFY);
     if (ata_wait_drq(d) < 0)
         return 0;
 
@@ -217,12 +226,25 @@ static int ata_identify(ata_disk_t *d)
     for (int i = 0; i < 256; i++)
         id[i] = inw(d->io + R_DATA);
 
+    d->atapi = is_packet;
+    d->secsize = is_packet ? 2048u : 512u;
     d->lba48 = (id[83] & (1u << 10)) != 0;
 
     uint64_t lba28 = (uint64_t)id[60] | ((uint64_t)id[61] << 16);
     uint64_t lba48 = (uint64_t)id[100]        | ((uint64_t)id[101] << 16) |
                      ((uint64_t)id[102] << 32) | ((uint64_t)id[103] << 48);
     d->sectors = (d->lba48 && lba48) ? lba48 : lba28;
+    if (d->atapi && !d->sectors) {
+        /* Removable media: IDENTIFY PACKET carries no capacity -- ask the
+         * drive with READ CAPACITY (10). */
+        uint8_t cap[12] = { 0x25, 0 };
+        uint8_t r[8];
+        if (atapi_packet_read(d, cap, 8, r) == 0) {
+            uint64_t last = ((uint64_t)r[0] << 24) | ((uint64_t)r[1] << 16) |
+                            ((uint64_t)r[2] << 8) | (uint64_t)r[3];
+            d->sectors = last + 1;
+        }
+    }
     if (!d->sectors)
         return 0;
 
@@ -468,12 +490,135 @@ static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     }
 }
 
+/* ATAPI CD-ROM devices: one 2048-byte sector per LBA, read-only. */
+static int atapi_read(const ata_disk_t *d, uint64_t lba, uint32_t nsect,
+                      uint8_t *buf);
+
+static int32_t sr_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
+{
+    ata_bdev_t *b = (ata_bdev_t *)n->priv;
+    if (!b || !b->used)
+        return -E_IO;
+
+    uint64_t end = off + len;
+    if (end > b->nsect * 2048u)
+        end = b->nsect * 2048u;
+    if (off >= end)
+        return 0;
+    if (off % 2048 || len % 2048)
+        return -E_INVAL;                 /* whole-sector access only */
+
+    return atapi_read(b->disk, off / 2048 + b->lba0,
+                      (uint32_t)((end - off) / 2048), buf) < 0
+               ? -E_IO : (int32_t)(end - off);
+}
+
+static const vfs_ops_t g_sr_ops = {
+    .read = sr_read,
+};
+
 static const vfs_ops_t g_bdev_ops = {
     .read  = bdev_read,
     .write = bdev_write,
     .ioctl = bdev_ioctl,
     .mmap  = 0,
 };
+
+/* ---- ATAPI: the SCSI command set tunnelled over an ATA channel --------- */
+
+/* Send a 12-byte packet command and read `nbytes` of PIO data back.
+ * Phases per the T13 spec: select, wait not-BSY, feature/bytecount,
+ * PACKET command, wait for the CDB-delivery DRQ, write the CDB, then wait
+ * for the data DRQ (a CD spin-up can take seconds on first access). */
+static int atapi_packet_read(const ata_disk_t *d, uint8_t *pkt,
+                             uint16_t nbytes, uint8_t *buf)
+{
+    outb(d->io + R_DRIVE, (uint8_t)(0xA0 | (d->slave << 4)));
+    ata_delay400(d);
+    if (ata_wait_ready(d) < 0)
+        return -1;
+
+    outb(d->io + R_FEATURES, 0);                 /* PIO, no overlap/DMA */
+    outb(d->io + R_SECCOUNT, (uint8_t)(nbytes & 0xFF));
+    outb(d->io + R_LBA0, (uint8_t)(nbytes >> 8));
+    outb(d->io + R_COMMAND, C_PACKET);
+
+    /* CDB delivery: the drive raises DRQ (with BSY clear) for it */
+    int have_drq = 0;
+    for (uint32_t i = 0; i < WAIT_SPINS; i++) {
+        uint8_t st = inb(d->io + R_STATUS);
+        if (st & S_BSY)
+            continue;
+        if (st & S_ERR)
+            goto abort;
+        if (st & S_DRQ) {
+            have_drq = 1;
+            break;
+        }
+    }
+    if (!have_drq)
+        goto timeout;
+
+    for (int i = 0; i < 6; i++)                  /* the packet, as words */
+        outw(d->io, (uint16_t)(pkt[i * 2] | (pkt[i * 2 + 1] << 8)));
+
+    /* Data phase */
+    for (uint32_t i = 0; i < WAIT_SPINS * 200; i++) {
+        uint8_t st = inb(d->io + R_STATUS);
+        if (st & S_BSY)
+            continue;
+        if (st & S_ERR)
+            goto abort;
+        if (st & S_DRQ) {
+            uint16_t *w = (uint16_t *)buf;
+            for (uint16_t j = 0; j < nbytes / 2; j++)
+                w[j] = inw(d->io + R_DATA);
+            ata_wait_ready(d);
+            return 0;
+        }
+        /* neither BSY nor DRQ: the command finished without data */
+        break;
+    }
+    goto timeout;
+
+abort:
+    dbg_puts("ATAPI: ABRT st=");
+    dbg_puts_hexn(inb(d->io + R_STATUS), 2);
+    dbg_puts(" err=");
+    dbg_puts_hexn(inb(d->io + R_ERROR), 2);
+    dbg_puts(" cmd=");
+    dbg_puts_hexn(pkt[0], 2);
+    dbg_puts("\r\n");
+    return -1;
+timeout:
+    dbg_puts("ATAPI: timeout cmd=");
+    dbg_puts_hexn(pkt[0], 2);
+    dbg_puts("\r\n");
+    return -1;
+}
+
+/* READ(12) over ATAPI: `nsect` 2048-byte sectors starting at `lba`. */
+static int atapi_read(const ata_disk_t *d, uint64_t lba, uint32_t nsect,
+                      uint8_t *buf)
+{
+    while (nsect) {
+        uint32_t now = nsect > 32u ? 32u : nsect;   /* one big transfer */
+        /* READ(10): LBA big-endian at bytes 2-5, transfer length (16-bit,
+         * in blocks) at 7-8.  The old packet used a READ(12) length layout
+         * with opcode 0x28 -- a zero transfer length, which the drive
+         * correctly aborts. */
+        uint8_t pkt[12] = { 0x28, 0,
+                            (uint8_t)(lba >> 24), (uint8_t)(lba >> 16),
+                            (uint8_t)(lba >> 8),  (uint8_t)lba,
+                            0, (uint8_t)(now >> 8), (uint8_t)now, 0, 0, 0 };
+        if (atapi_packet_read(d, pkt, now * (uint16_t)d->secsize, buf) < 0)
+            return -1;
+        buf += now * d->secsize;
+        lba += now;
+        nsect -= now;
+    }
+    return 0;
+}
 
 /* ---- the partition table ----------------------------------------------- */
 /*
@@ -757,6 +902,28 @@ int ata_init(void)
             b->nsect   = d->sectors;
             b->is_part = 0;
             b->used    = 1;
+
+            static int g_sr_count;
+            if (d->atapi) {
+                /* A PACKET device: publish it as a read-only 2048-byte
+                 * sector CD-ROM (sr0, sr1, ...) with no partition table. */
+                b->name[0] = 's'; b->name[1] = 'r';
+                b->name[2] = (char)('0' + g_sr_count++);
+                b->name[3] = 0;
+                if (vfs_register_blkdev(b->name, &g_sr_ops, b,
+                                        b->nsect * 2048u) != 0) {
+                    b->used = 0;
+                    g_ndisks--;
+                    continue;
+                }
+                dbg_puts("ATA: /dev/");
+                dbg_puts(b->name);
+                dbg_puts(" CD-ROM \"");
+                dbg_puts(d->model);
+                dbg_puts("\"\n");
+                continue;
+            }
+
             b->name[0] = 's'; b->name[1] = 'd';
             b->name[2] = (char)('a' + idx); b->name[3] = 0;
 
@@ -785,7 +952,8 @@ int ata_init(void)
             dbg_puts(d->model);
             dbg_puts("\"\n");
 
-            ata_scan_partitions(idx);
+            if (!d->atapi)
+                ata_scan_partitions(idx);
         }
     }
 

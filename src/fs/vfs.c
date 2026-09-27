@@ -27,6 +27,7 @@
 #include "cgroup.h"
 #include "ext2.h"
 #include "fatfs_vfs.h"
+#include "iso9660/iso9660.h"
 #include "proc.h"
 #include "procfs.h"
 #include "debugfs.h"
@@ -425,6 +426,7 @@ static vfs_node_t *dev_lookup(const char *name)
 #define MT_CGROUP  2
 #define MT_EXT2    3    /* an ext2/ext4 volume from a block device */
 #define MT_FAT     4    /* a FAT12/16/32 volume from a block device */
+#define MT_ISO     5    /* a read-only ISO9660 volume (CD-ROM) */
 struct mount_entry {
     char     mnt[GNUOS_PATH_MAX];
     int      type;
@@ -652,6 +654,15 @@ int vfs_mount_bdev(const char *path, const char *devname)
             g_mount_count++;
             return 0;
         }
+        /* Last resort: an ISO9660 volume (the boot CD). */
+        if (iso9660_mount_bdev(path, d, d->size / 2048) == 0) {
+            strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
+            g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
+            g_mounts[g_mount_count].type = MT_ISO;
+            g_mounts[g_mount_count].fs   = NULL;
+            g_mount_count++;
+            return 0;
+        }
         dbg_puts("VFS: ");
         dbg_puts(devname);
         dbg_puts(" holds neither ext2/ext4 nor FAT\r\n");
@@ -725,6 +736,17 @@ static int umount_rest(const char *path);
 
 int vfs_umount(const char *path)
 {
+    if (iso9660_umount(path) == 0) {
+        for (int i = 0; i < g_mount_count; i++)
+            if (g_mounts[i].type == MT_ISO &&
+                strcmp(g_mounts[i].mnt, path) == 0) {
+                memmove(&g_mounts[i], &g_mounts[i + 1],
+                        (unsigned)(g_mount_count - i - 1) * sizeof(g_mounts[0]));
+                g_mount_count--;
+                return 0;
+            }
+        return 0;
+    }
     if (fatfs_umount(path) == 0) {
         for (int i = 0; i < g_mount_count; i++)
             if (g_mounts[i].type == MT_FAT &&
@@ -810,6 +832,10 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     char fat_rel[GNUOS_PATH_MAX];
     if (fatfs_route(path, fat_rel))
         return fatfs_resolve(fat_rel, out);
+
+    char iso_rel[GNUOS_PATH_MAX];
+    if (iso9660_route(path, iso_rel))
+        return iso9660_resolve(iso_rel, out);
 
     char bfs_rel[GNUOS_PATH_MAX];
     if (vfs_route_bfs(path, bfs_rel)) {

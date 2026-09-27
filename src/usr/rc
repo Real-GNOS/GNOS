@@ -88,6 +88,13 @@ echo "mount_exit=$?" >> /tmp/fat.out
 echo "vcs_exit=$?" >> /tmp/vcs.out
 /bin/dbgcat.elf /tmp/vcs.out
 
+# ISO9660: mount the boot CD via ATAPI
+mkdir -p /mnt/cdrom
+/bin/mount -t iso9660 /dev/sr0 /mnt/cdrom > /tmp/cd.out 2>&1
+echo "cd_exit=$?" >> /tmp/cd.out
+/usr/bin/ls /mnt/cdrom >> /tmp/cd.out 2>&1
+/bin/dbgcat.elf /tmp/cd.out
+
 # apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
 /sbin/apk.static --version >/tmp/apk.out 2>&1
 /sbin/apk.static update >>/tmp/apk.out 2>&1
