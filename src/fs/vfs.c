@@ -427,6 +427,7 @@ static vfs_node_t *dev_lookup(const char *name)
 #define MT_EXT2    3    /* an ext2/ext4 volume from a block device */
 #define MT_FAT     4    /* a FAT12/16/32 volume from a block device */
 #define MT_ISO     5    /* a read-only ISO9660 volume (CD-ROM) */
+#define MT_DEV     6    /* devtmpfs: /dev backed by the live device registry */
 struct mount_entry {
     char     mnt[GNUOS_PATH_MAX];
     int      type;
@@ -537,6 +538,49 @@ static const vfs_ops_t g_bfs_dir_ops = {
  * matching mount prefix, and write the path relative to that instance's root
  * into `rel` (always begins with '/').  Returns NULL when `abs` is on no
  * mount. */
+/* devtmpfs: is `abs` under a mounted devtmpfs?  Writes the path relative
+ * to the mount point.  /dev/shm keeps falling through to its own tmpfs
+ * mount (longer prefix wins), and so does anything under it. */
+static int vfs_route_dev(const char *abs, char *rel)
+{
+    for (int i = 0; i < g_mount_count; i++) {
+        if (g_mounts[i].type != MT_DEV)
+            continue;
+        size_t ml = strlen(g_mounts[i].mnt);
+        if (strncmp(abs, g_mounts[i].mnt, ml))
+            continue;
+        const char *rest = abs + ml;
+        if (rest[0] == 0)
+            rest = "/";
+        if (rest[0] != '/')
+            continue;
+        if (strncmp(rest, "/shm", 4) == 0 &&
+            (rest[4] == 0 || rest[4] == '/'))
+            return 0;                /* POSIX shm owns its subtree */
+        strcpy(rel, rest);
+        return 1;
+    }
+    return 0;
+}
+
+/* devtmpfs readdir: enumerate the live registry by index -- every device
+ * the drivers registered is visible, nothing else is. */
+int devtmpfs_readdir(const char *mntrel, uint32_t pos, char *name, uint8_t *dt)
+{
+    uint32_t idx = 0;
+    for (unsigned i = 0; i < g_dev_count; i++) {
+        if (idx++ < pos)
+            continue;
+        strncpy(name, g_dev[i].name, VFS_NAME_MAX - 1);
+        name[VFS_NAME_MAX - 1] = 0;
+        *dt = g_dev[i].kind == VFS_BLOCKDEV ? 6 /* DT_BLK */
+            : g_dev[i].kind == VFS_DIR         ? 4 /* DT_DIR */
+                                               : 2 /* DT_CHR */;
+        return 0;
+    }
+    return -1;
+}
+
 static tmpfs_t *vfs_route_tmpfs(const char *abs, char *rel)
 {
     tmpfs_t *best = NULL;
@@ -595,6 +639,22 @@ int vfs_mount_tmpfs(const char *path)
     g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
     g_mounts[g_mount_count].type = MT_TMPFS;
     g_mounts[g_mount_count].fs = fs;
+    g_mount_count++;
+    return 0;
+}
+
+int vfs_mount_devtmpfs(const char *path)
+{
+    if (g_mount_count >= MAX_MOUNTS)
+        return -E_NFILE;
+    for (int i = 0; i < g_mount_count; i++)
+        if (strcmp(g_mounts[i].mnt, path) == 0)
+            return -E_EXIST;
+
+    strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
+    g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
+    g_mounts[g_mount_count].type = MT_DEV;
+    g_mounts[g_mount_count].fs   = NULL;
     g_mount_count++;
     return 0;
 }
@@ -784,13 +844,31 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
      * shared memory (shm_open) creates files in it.  It must fall through to
      * the tmpfs routing below, or every open under it bounces off dev_lookup
      * and dies with ENOENT. */
-    if (strncmp(path, "/dev/shm/", 9) != 0 &&
-        strncmp(path, "/dev/", 5) == 0) {
-        vfs_node_t *d = dev_lookup(path + 5);
-        if (!d)
-            return -E_NOENT;
-        *out = *d;
-        return 0;
+    {
+        /* devtmpfs: a mounted /dev routes to the live registry.  /dev/shm
+         * keeps falling through so its tmpfs mount wins. */
+        char devrel[GNUOS_PATH_MAX];
+        if (vfs_route_dev(path, devrel)) {
+            if (strcmp(devrel, "/") == 0) {
+                /* the mount point itself is a directory */
+                memset(out, 0, sizeof(*out));
+                strncpy(out->name, "dev", VFS_NAME_MAX - 1);
+                out->kind = VFS_DIR;
+                return 0;
+            }
+            vfs_node_t *d = dev_lookup(devrel + 1);
+            if (!d)
+                return -E_NOENT;
+            *out = *d;
+            return 0;
+        }
+        if (strncmp(path, "/dev/", 5) == 0) {
+            vfs_node_t *d = dev_lookup(path + 5);
+            if (!d)
+                return -E_NOENT;
+            *out = *d;
+            return 0;
+        }
     }
 
     /* /proc shadows whatever the ext2 image has at that path -- the image
@@ -1104,6 +1182,26 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
 
     /* A /proc directory has no inode to walk, so it is enumerated by index
      * from the generated table instead of by reading blocks off the disk. */
+    {
+        char devrel[GNUOS_PATH_MAX];
+        if (vfs_route_dev(f->path, devrel) && strcmp(devrel, "/") == 0) {
+            /* the devtmpfs mount point: enumerate the registry */
+            uint8_t *p   = (uint8_t *)buf;
+            uint64_t off = 0;
+            for (;;) {
+                char    name[VFS_NAME_MAX];
+                uint8_t dt;
+                if (devtmpfs_readdir(devrel, (uint32_t)f->pos, name, &dt) < 0)
+                    break;
+                uint32_t rec = emit_dirent(p, off, len, f->pos + 1, name, dt);
+                if (!rec)
+                    break;
+                off += rec;
+                f->pos++;
+            }
+            return (int64_t)off;
+        }
+    }
     if (strncmp(f->path, "/proc", 5) == 0 &&
         (f->path[5] == '\0' || f->path[5] == '/'))
         return proc_getdents64(f, buf, len);

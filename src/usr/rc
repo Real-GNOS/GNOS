@@ -88,6 +88,12 @@ echo "mount_exit=$?" >> /tmp/fat.out
 echo "vcs_exit=$?" >> /tmp/vcs.out
 /bin/dbgcat.elf /tmp/vcs.out
 
+# devtmpfs: /dev backed by the live registry
+/bin/mount -t devtmpfs none /dev > /tmp/dt.out 2>&1
+echo "devtmpfs_exit=$?" >> /tmp/dt.out
+/usr/bin/ls /dev >> /tmp/dt.out 2>&1
+/bin/dbgcat.elf /tmp/dt.out
+
 # ISO9660: mount the boot CD via ATAPI
 mkdir -p /mnt/cdrom
 /bin/mount -t iso9660 /dev/sr0 /mnt/cdrom > /tmp/cd.out 2>&1

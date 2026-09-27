@@ -1403,6 +1403,8 @@ static int64_t sys_mount(uint64_t usrc, uint64_t utgt, uint64_t ufs,
 
     if (strcmp(fst, "tmpfs") == 0)
         return vfs_mount_tmpfs(abs);
+    if (strcmp(fst, "devtmpfs") == 0)
+        return vfs_mount_devtmpfs(abs);
     if (strcmp(fst, "cgroup2") == 0 || strcmp(fst, "cgroup") == 0)
         return vfs_mount_cgroupfs(abs);
     /* ext2/ext3/ext4 all name the same on-disk family this kernel reads;
