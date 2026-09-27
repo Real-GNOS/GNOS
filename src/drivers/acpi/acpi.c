@@ -20,7 +20,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "acpi.h"
+#include "acpi_drv.h"
 #include "pmm.h"
 #include "kstring.h"
 #include "debugcon.h"

@@ -65,11 +65,12 @@ KINCS       += -Isrc/vendor/fatfs/source
 # ACPICA: the OS services layer (src/drivers/acpi/acpica_osl.c) includes the
 # vendored headers directly.
 KINCS       += -Isrc/vendor/acpica/source/include -Isrc/vendor/acpica/source/include/platform
+KINCS       += -Isrc/include/gnoslibc
 
 # gcc defines __linux__ on this host, which makes acenv.h pick ACPICA's
 # Linux glue (unistd.h and friends).  We are not Linux: drop the macro so it
 # falls back to the generic gcc environment.
-ACPICA_CFLAGS := -U__linux__ -Ulinux -U__unix__ -U_LINUX -DACPI_MACHINE_WIDTH=64
+ACPICA_CFLAGS := -U__linux__ -Ulinux -U__unix__ -U_LINUX -D_GNOS_ -DACPI_MACHINE_WIDTH=64
 
 # The two trees with their own consumers: headers shared between kernel and
 # userland (sysnum.h, bootinfo.h), and the userland itself.
@@ -143,7 +144,171 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/sysvipc.o \
         $(BUILD)/seccomp.o \
         $(BUILD)/module.o $(BUILD)/module_elf.o $(BUILD)/exports.o \
-        $(BUILD)/limine_requests.o
+        $(BUILD)/limine_requests.o \
+        $(BUILD)/acpica_osl.o \
+        $(BUILD)/acpica_dispatcher_dsargs.o \
+        $(BUILD)/acpica_dispatcher_dscontrol.o \
+        $(BUILD)/acpica_dispatcher_dsdebug.o \
+        $(BUILD)/acpica_dispatcher_dsfield.o \
+        $(BUILD)/acpica_dispatcher_dsinit.o \
+        $(BUILD)/acpica_dispatcher_dsmethod.o \
+        $(BUILD)/acpica_dispatcher_dsmthdat.o \
+        $(BUILD)/acpica_dispatcher_dsobject.o \
+        $(BUILD)/acpica_dispatcher_dsopcode.o \
+        $(BUILD)/acpica_dispatcher_dspkginit.o \
+        $(BUILD)/acpica_dispatcher_dsutils.o \
+        $(BUILD)/acpica_dispatcher_dswexec.o \
+        $(BUILD)/acpica_dispatcher_dswload.o \
+        $(BUILD)/acpica_dispatcher_dswload2.o \
+        $(BUILD)/acpica_dispatcher_dswscope.o \
+        $(BUILD)/acpica_dispatcher_dswstate.o \
+        $(BUILD)/acpica_events_evevent.o \
+        $(BUILD)/acpica_events_evglock.o \
+        $(BUILD)/acpica_events_evgpe.o \
+        $(BUILD)/acpica_events_evgpeblk.o \
+        $(BUILD)/acpica_events_evgpeinit.o \
+        $(BUILD)/acpica_events_evgpeutil.o \
+        $(BUILD)/acpica_events_evhandler.o \
+        $(BUILD)/acpica_events_evmisc.o \
+        $(BUILD)/acpica_events_evregion.o \
+        $(BUILD)/acpica_events_evrgnini.o \
+        $(BUILD)/acpica_events_evsci.o \
+        $(BUILD)/acpica_events_evxface.o \
+        $(BUILD)/acpica_events_evxfevnt.o \
+        $(BUILD)/acpica_events_evxfgpe.o \
+        $(BUILD)/acpica_events_evxfregn.o \
+        $(BUILD)/acpica_executer_exconcat.o \
+        $(BUILD)/acpica_executer_exconfig.o \
+        $(BUILD)/acpica_executer_exconvrt.o \
+        $(BUILD)/acpica_executer_excreate.o \
+        $(BUILD)/acpica_executer_exdebug.o \
+        $(BUILD)/acpica_executer_exdump.o \
+        $(BUILD)/acpica_executer_exfield.o \
+        $(BUILD)/acpica_executer_exfldio.o \
+        $(BUILD)/acpica_executer_exmisc.o \
+        $(BUILD)/acpica_executer_exmutex.o \
+        $(BUILD)/acpica_executer_exnames.o \
+        $(BUILD)/acpica_executer_exoparg1.o \
+        $(BUILD)/acpica_executer_exoparg2.o \
+        $(BUILD)/acpica_executer_exoparg3.o \
+        $(BUILD)/acpica_executer_exoparg6.o \
+        $(BUILD)/acpica_executer_exprep.o \
+        $(BUILD)/acpica_executer_exregion.o \
+        $(BUILD)/acpica_executer_exresnte.o \
+        $(BUILD)/acpica_executer_exresolv.o \
+        $(BUILD)/acpica_executer_exresop.o \
+        $(BUILD)/acpica_executer_exserial.o \
+        $(BUILD)/acpica_executer_exstore.o \
+        $(BUILD)/acpica_executer_exstoren.o \
+        $(BUILD)/acpica_executer_exstorob.o \
+        $(BUILD)/acpica_executer_exsystem.o \
+        $(BUILD)/acpica_executer_extrace.o \
+        $(BUILD)/acpica_executer_exutils.o \
+        $(BUILD)/acpica_hardware_hwacpi.o \
+        $(BUILD)/acpica_hardware_hwesleep.o \
+        $(BUILD)/acpica_hardware_hwgpe.o \
+        $(BUILD)/acpica_hardware_hwpci.o \
+        $(BUILD)/acpica_hardware_hwregs.o \
+        $(BUILD)/acpica_hardware_hwsleep.o \
+        $(BUILD)/acpica_hardware_hwtimer.o \
+        $(BUILD)/acpica_hardware_hwvalid.o \
+        $(BUILD)/acpica_hardware_hwxface.o \
+        $(BUILD)/acpica_hardware_hwxfsleep.o \
+        $(BUILD)/acpica_namespace_nsaccess.o \
+        $(BUILD)/acpica_namespace_nsalloc.o \
+        $(BUILD)/acpica_namespace_nsarguments.o \
+        $(BUILD)/acpica_namespace_nsconvert.o \
+        $(BUILD)/acpica_namespace_nsdump.o \
+        $(BUILD)/acpica_namespace_nsdumpdv.o \
+        $(BUILD)/acpica_namespace_nseval.o \
+        $(BUILD)/acpica_namespace_nsinit.o \
+        $(BUILD)/acpica_namespace_nsload.o \
+        $(BUILD)/acpica_namespace_nsnames.o \
+        $(BUILD)/acpica_namespace_nsobject.o \
+        $(BUILD)/acpica_namespace_nsparse.o \
+        $(BUILD)/acpica_namespace_nspredef.o \
+        $(BUILD)/acpica_namespace_nsprepkg.o \
+        $(BUILD)/acpica_namespace_nsrepair.o \
+        $(BUILD)/acpica_namespace_nsrepair2.o \
+        $(BUILD)/acpica_namespace_nssearch.o \
+        $(BUILD)/acpica_namespace_nsutils.o \
+        $(BUILD)/acpica_namespace_nswalk.o \
+        $(BUILD)/acpica_namespace_nsxfeval.o \
+        $(BUILD)/acpica_namespace_nsxfname.o \
+        $(BUILD)/acpica_namespace_nsxfobj.o \
+        $(BUILD)/acpica_parser_psargs.o \
+        $(BUILD)/acpica_parser_psloop.o \
+        $(BUILD)/acpica_parser_psobject.o \
+        $(BUILD)/acpica_parser_psopcode.o \
+        $(BUILD)/acpica_parser_psopinfo.o \
+        $(BUILD)/acpica_parser_psparse.o \
+        $(BUILD)/acpica_parser_psscope.o \
+        $(BUILD)/acpica_parser_pstree.o \
+        $(BUILD)/acpica_parser_psutils.o \
+        $(BUILD)/acpica_parser_pswalk.o \
+        $(BUILD)/acpica_parser_psxface.o \
+        $(BUILD)/acpica_resources_rsaddr.o \
+        $(BUILD)/acpica_resources_rscalc.o \
+        $(BUILD)/acpica_resources_rscreate.o \
+        $(BUILD)/acpica_resources_rsdump.o \
+        $(BUILD)/acpica_resources_rsdumpinfo.o \
+        $(BUILD)/acpica_resources_rsinfo.o \
+        $(BUILD)/acpica_resources_rsio.o \
+        $(BUILD)/acpica_resources_rsirq.o \
+        $(BUILD)/acpica_resources_rslist.o \
+        $(BUILD)/acpica_resources_rsmemory.o \
+        $(BUILD)/acpica_resources_rsmisc.o \
+        $(BUILD)/acpica_resources_rsserial.o \
+        $(BUILD)/acpica_resources_rsutils.o \
+        $(BUILD)/acpica_resources_rsxface.o \
+        $(BUILD)/acpica_tables_tbdata.o \
+        $(BUILD)/acpica_tables_tbfadt.o \
+        $(BUILD)/acpica_tables_tbfind.o \
+        $(BUILD)/acpica_tables_tbinstal.o \
+        $(BUILD)/acpica_tables_tbprint.o \
+        $(BUILD)/acpica_tables_tbutils.o \
+        $(BUILD)/acpica_tables_tbxface.o \
+        $(BUILD)/acpica_tables_tbxfload.o \
+        $(BUILD)/acpica_tables_tbxfroot.o \
+        $(BUILD)/acpica_utilities_utaddress.o \
+        $(BUILD)/acpica_utilities_utalloc.o \
+        $(BUILD)/acpica_utilities_utascii.o \
+        $(BUILD)/acpica_utilities_utbuffer.o \
+        $(BUILD)/acpica_utilities_utcache.o \
+        $(BUILD)/acpica_utilities_utcksum.o \
+        $(BUILD)/acpica_utilities_utclib.o \
+        $(BUILD)/acpica_utilities_utcopy.o \
+        $(BUILD)/acpica_utilities_utdebug.o \
+        $(BUILD)/acpica_utilities_utdecode.o \
+        $(BUILD)/acpica_utilities_utdelete.o \
+        $(BUILD)/acpica_utilities_uterror.o \
+        $(BUILD)/acpica_utilities_uteval.o \
+        $(BUILD)/acpica_utilities_utexcep.o \
+        $(BUILD)/acpica_utilities_utglobal.o \
+        $(BUILD)/acpica_utilities_uthex.o \
+        $(BUILD)/acpica_utilities_utids.o \
+        $(BUILD)/acpica_utilities_utinit.o \
+        $(BUILD)/acpica_utilities_utlock.o \
+        $(BUILD)/acpica_utilities_utmath.o \
+        $(BUILD)/acpica_utilities_utmisc.o \
+        $(BUILD)/acpica_utilities_utmutex.o \
+        $(BUILD)/acpica_utilities_utnonansi.o \
+        $(BUILD)/acpica_utilities_utobject.o \
+        $(BUILD)/acpica_utilities_utosi.o \
+        $(BUILD)/acpica_utilities_utownerid.o \
+        $(BUILD)/acpica_utilities_utpredef.o \
+        $(BUILD)/acpica_utilities_utresdecode.o \
+        $(BUILD)/acpica_utilities_utresrc.o \
+        $(BUILD)/acpica_utilities_utstate.o \
+        $(BUILD)/acpica_utilities_utstring.o \
+        $(BUILD)/acpica_utilities_utstrsuppt.o \
+        $(BUILD)/acpica_utilities_utstrtoul64.o \
+        $(BUILD)/acpica_utilities_uttrack.o \
+        $(BUILD)/acpica_utilities_utuuid.o \
+        $(BUILD)/acpica_utilities_utxface.o \
+        $(BUILD)/acpica_utilities_utxferror.o \
+        $(BUILD)/acpica_utilities_utxfinit.o \
+        $(BUILD)/acpica_utilities_utxfmutex.o \
 
 # User programs: name -> build/<name>.elf, all linked from crt0 + ulib.
 UPROGS  := init shell count ls cat tail tac rm mkdir touch scan dbgcat envtest
@@ -604,14 +769,349 @@ check-hdrs:
 	  echo "$$dup"; exit 1; fi; \
 	echo "check-hdrs: header basenames are unique"
 
+
 # The ACPICA OSL needs its own flags (see ACPICA_CFLAGS above).
-$(BUILD)/acpica_osl.o: src/drivers/acpi/acpica_osl.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
 	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # FatFs core: vendored (pruned from the auto vpath), so it needs an explicit
 # rule.  The port layer beside it (src/fs/fatfs) is ordinary kernel code.
 $(BUILD)/ff.o: src/vendor/fatfs/source/ff.c | $(BUILD)
 	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+# ACPICA core: vendored (pruned from vpath), one explicit rule per file.
+$(BUILD)/acpica_dispatcher_dsargs.o: src/vendor/acpica/source/components/dispatcher/dsargs.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dscontrol.o: src/vendor/acpica/source/components/dispatcher/dscontrol.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dsdebug.o: src/vendor/acpica/source/components/dispatcher/dsdebug.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dsfield.o: src/vendor/acpica/source/components/dispatcher/dsfield.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dsinit.o: src/vendor/acpica/source/components/dispatcher/dsinit.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dsmethod.o: src/vendor/acpica/source/components/dispatcher/dsmethod.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dsmthdat.o: src/vendor/acpica/source/components/dispatcher/dsmthdat.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dsobject.o: src/vendor/acpica/source/components/dispatcher/dsobject.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dsopcode.o: src/vendor/acpica/source/components/dispatcher/dsopcode.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dspkginit.o: src/vendor/acpica/source/components/dispatcher/dspkginit.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dsutils.o: src/vendor/acpica/source/components/dispatcher/dsutils.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dswexec.o: src/vendor/acpica/source/components/dispatcher/dswexec.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dswload.o: src/vendor/acpica/source/components/dispatcher/dswload.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dswload2.o: src/vendor/acpica/source/components/dispatcher/dswload2.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dswscope.o: src/vendor/acpica/source/components/dispatcher/dswscope.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_dispatcher_dswstate.o: src/vendor/acpica/source/components/dispatcher/dswstate.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evevent.o: src/vendor/acpica/source/components/events/evevent.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evglock.o: src/vendor/acpica/source/components/events/evglock.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evgpe.o: src/vendor/acpica/source/components/events/evgpe.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evgpeblk.o: src/vendor/acpica/source/components/events/evgpeblk.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evgpeinit.o: src/vendor/acpica/source/components/events/evgpeinit.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evgpeutil.o: src/vendor/acpica/source/components/events/evgpeutil.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evhandler.o: src/vendor/acpica/source/components/events/evhandler.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evmisc.o: src/vendor/acpica/source/components/events/evmisc.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evregion.o: src/vendor/acpica/source/components/events/evregion.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evrgnini.o: src/vendor/acpica/source/components/events/evrgnini.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evsci.o: src/vendor/acpica/source/components/events/evsci.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evxface.o: src/vendor/acpica/source/components/events/evxface.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evxfevnt.o: src/vendor/acpica/source/components/events/evxfevnt.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evxfgpe.o: src/vendor/acpica/source/components/events/evxfgpe.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_events_evxfregn.o: src/vendor/acpica/source/components/events/evxfregn.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exconcat.o: src/vendor/acpica/source/components/executer/exconcat.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exconfig.o: src/vendor/acpica/source/components/executer/exconfig.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exconvrt.o: src/vendor/acpica/source/components/executer/exconvrt.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_excreate.o: src/vendor/acpica/source/components/executer/excreate.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exdebug.o: src/vendor/acpica/source/components/executer/exdebug.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exdump.o: src/vendor/acpica/source/components/executer/exdump.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exfield.o: src/vendor/acpica/source/components/executer/exfield.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exfldio.o: src/vendor/acpica/source/components/executer/exfldio.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exmisc.o: src/vendor/acpica/source/components/executer/exmisc.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exmutex.o: src/vendor/acpica/source/components/executer/exmutex.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exnames.o: src/vendor/acpica/source/components/executer/exnames.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exoparg1.o: src/vendor/acpica/source/components/executer/exoparg1.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exoparg2.o: src/vendor/acpica/source/components/executer/exoparg2.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exoparg3.o: src/vendor/acpica/source/components/executer/exoparg3.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exoparg6.o: src/vendor/acpica/source/components/executer/exoparg6.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exprep.o: src/vendor/acpica/source/components/executer/exprep.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exregion.o: src/vendor/acpica/source/components/executer/exregion.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exresnte.o: src/vendor/acpica/source/components/executer/exresnte.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exresolv.o: src/vendor/acpica/source/components/executer/exresolv.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exresop.o: src/vendor/acpica/source/components/executer/exresop.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exserial.o: src/vendor/acpica/source/components/executer/exserial.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exstore.o: src/vendor/acpica/source/components/executer/exstore.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exstoren.o: src/vendor/acpica/source/components/executer/exstoren.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exstorob.o: src/vendor/acpica/source/components/executer/exstorob.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exsystem.o: src/vendor/acpica/source/components/executer/exsystem.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_extrace.o: src/vendor/acpica/source/components/executer/extrace.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_executer_exutils.o: src/vendor/acpica/source/components/executer/exutils.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwacpi.o: src/vendor/acpica/source/components/hardware/hwacpi.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwesleep.o: src/vendor/acpica/source/components/hardware/hwesleep.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwgpe.o: src/vendor/acpica/source/components/hardware/hwgpe.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwpci.o: src/vendor/acpica/source/components/hardware/hwpci.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwregs.o: src/vendor/acpica/source/components/hardware/hwregs.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwsleep.o: src/vendor/acpica/source/components/hardware/hwsleep.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwtimer.o: src/vendor/acpica/source/components/hardware/hwtimer.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwvalid.o: src/vendor/acpica/source/components/hardware/hwvalid.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwxface.o: src/vendor/acpica/source/components/hardware/hwxface.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_hardware_hwxfsleep.o: src/vendor/acpica/source/components/hardware/hwxfsleep.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsaccess.o: src/vendor/acpica/source/components/namespace/nsaccess.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsalloc.o: src/vendor/acpica/source/components/namespace/nsalloc.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsarguments.o: src/vendor/acpica/source/components/namespace/nsarguments.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsconvert.o: src/vendor/acpica/source/components/namespace/nsconvert.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsdump.o: src/vendor/acpica/source/components/namespace/nsdump.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsdumpdv.o: src/vendor/acpica/source/components/namespace/nsdumpdv.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nseval.o: src/vendor/acpica/source/components/namespace/nseval.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsinit.o: src/vendor/acpica/source/components/namespace/nsinit.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsload.o: src/vendor/acpica/source/components/namespace/nsload.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsnames.o: src/vendor/acpica/source/components/namespace/nsnames.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsobject.o: src/vendor/acpica/source/components/namespace/nsobject.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsparse.o: src/vendor/acpica/source/components/namespace/nsparse.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nspredef.o: src/vendor/acpica/source/components/namespace/nspredef.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsprepkg.o: src/vendor/acpica/source/components/namespace/nsprepkg.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsrepair.o: src/vendor/acpica/source/components/namespace/nsrepair.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsrepair2.o: src/vendor/acpica/source/components/namespace/nsrepair2.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nssearch.o: src/vendor/acpica/source/components/namespace/nssearch.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsutils.o: src/vendor/acpica/source/components/namespace/nsutils.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nswalk.o: src/vendor/acpica/source/components/namespace/nswalk.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsxfeval.o: src/vendor/acpica/source/components/namespace/nsxfeval.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsxfname.o: src/vendor/acpica/source/components/namespace/nsxfname.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_namespace_nsxfobj.o: src/vendor/acpica/source/components/namespace/nsxfobj.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psargs.o: src/vendor/acpica/source/components/parser/psargs.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psloop.o: src/vendor/acpica/source/components/parser/psloop.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psobject.o: src/vendor/acpica/source/components/parser/psobject.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psopcode.o: src/vendor/acpica/source/components/parser/psopcode.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psopinfo.o: src/vendor/acpica/source/components/parser/psopinfo.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psparse.o: src/vendor/acpica/source/components/parser/psparse.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psscope.o: src/vendor/acpica/source/components/parser/psscope.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_pstree.o: src/vendor/acpica/source/components/parser/pstree.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psutils.o: src/vendor/acpica/source/components/parser/psutils.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_pswalk.o: src/vendor/acpica/source/components/parser/pswalk.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_parser_psxface.o: src/vendor/acpica/source/components/parser/psxface.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsaddr.o: src/vendor/acpica/source/components/resources/rsaddr.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rscalc.o: src/vendor/acpica/source/components/resources/rscalc.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rscreate.o: src/vendor/acpica/source/components/resources/rscreate.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsdump.o: src/vendor/acpica/source/components/resources/rsdump.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsdumpinfo.o: src/vendor/acpica/source/components/resources/rsdumpinfo.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsinfo.o: src/vendor/acpica/source/components/resources/rsinfo.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsio.o: src/vendor/acpica/source/components/resources/rsio.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsirq.o: src/vendor/acpica/source/components/resources/rsirq.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rslist.o: src/vendor/acpica/source/components/resources/rslist.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsmemory.o: src/vendor/acpica/source/components/resources/rsmemory.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsmisc.o: src/vendor/acpica/source/components/resources/rsmisc.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsserial.o: src/vendor/acpica/source/components/resources/rsserial.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsutils.o: src/vendor/acpica/source/components/resources/rsutils.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_resources_rsxface.o: src/vendor/acpica/source/components/resources/rsxface.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbdata.o: src/vendor/acpica/source/components/tables/tbdata.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbfadt.o: src/vendor/acpica/source/components/tables/tbfadt.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbfind.o: src/vendor/acpica/source/components/tables/tbfind.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbinstal.o: src/vendor/acpica/source/components/tables/tbinstal.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbprint.o: src/vendor/acpica/source/components/tables/tbprint.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbutils.o: src/vendor/acpica/source/components/tables/tbutils.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbxface.o: src/vendor/acpica/source/components/tables/tbxface.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbxfload.o: src/vendor/acpica/source/components/tables/tbxfload.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_tables_tbxfroot.o: src/vendor/acpica/source/components/tables/tbxfroot.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utaddress.o: src/vendor/acpica/source/components/utilities/utaddress.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utalloc.o: src/vendor/acpica/source/components/utilities/utalloc.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utascii.o: src/vendor/acpica/source/components/utilities/utascii.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utbuffer.o: src/vendor/acpica/source/components/utilities/utbuffer.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utcache.o: src/vendor/acpica/source/components/utilities/utcache.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utcksum.o: src/vendor/acpica/source/components/utilities/utcksum.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utclib.o: src/vendor/acpica/source/components/utilities/utclib.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utcopy.o: src/vendor/acpica/source/components/utilities/utcopy.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utdebug.o: src/vendor/acpica/source/components/utilities/utdebug.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utdecode.o: src/vendor/acpica/source/components/utilities/utdecode.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utdelete.o: src/vendor/acpica/source/components/utilities/utdelete.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_uterror.o: src/vendor/acpica/source/components/utilities/uterror.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_uteval.o: src/vendor/acpica/source/components/utilities/uteval.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utexcep.o: src/vendor/acpica/source/components/utilities/utexcep.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utglobal.o: src/vendor/acpica/source/components/utilities/utglobal.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_uthex.o: src/vendor/acpica/source/components/utilities/uthex.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utids.o: src/vendor/acpica/source/components/utilities/utids.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utinit.o: src/vendor/acpica/source/components/utilities/utinit.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utlock.o: src/vendor/acpica/source/components/utilities/utlock.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utmath.o: src/vendor/acpica/source/components/utilities/utmath.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utmisc.o: src/vendor/acpica/source/components/utilities/utmisc.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utmutex.o: src/vendor/acpica/source/components/utilities/utmutex.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utnonansi.o: src/vendor/acpica/source/components/utilities/utnonansi.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utobject.o: src/vendor/acpica/source/components/utilities/utobject.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utosi.o: src/vendor/acpica/source/components/utilities/utosi.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utownerid.o: src/vendor/acpica/source/components/utilities/utownerid.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utpredef.o: src/vendor/acpica/source/components/utilities/utpredef.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utprint.o: src/vendor/acpica/source/components/utilities/utprint.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utresdecode.o: src/vendor/acpica/source/components/utilities/utresdecode.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utresrc.o: src/vendor/acpica/source/components/utilities/utresrc.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utstate.o: src/vendor/acpica/source/components/utilities/utstate.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utstring.o: src/vendor/acpica/source/components/utilities/utstring.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utstrsuppt.o: src/vendor/acpica/source/components/utilities/utstrsuppt.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utstrtoul64.o: src/vendor/acpica/source/components/utilities/utstrtoul64.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_uttrack.o: src/vendor/acpica/source/components/utilities/uttrack.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utuuid.o: src/vendor/acpica/source/components/utilities/utuuid.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utxface.o: src/vendor/acpica/source/components/utilities/utxface.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utxferror.o: src/vendor/acpica/source/components/utilities/utxferror.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utxfinit.o: src/vendor/acpica/source/components/utilities/utxfinit.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+$(BUILD)/acpica_utilities_utxfmutex.o: src/vendor/acpica/source/components/utilities/utxfmutex.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+$(BUILD)/acpica_osl.o: src/drivers/acpi/acpica_osl.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(BUILD)/%.o: %.c | $(BUILD)
 	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<

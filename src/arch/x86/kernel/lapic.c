@@ -17,7 +17,7 @@
 #include <stdint.h>
 
 #include "lapic.h"
-#include "acpi.h"
+#include "acpi_drv.h"
 #include "timer.h"
 #include "idt.h"
 #include "debugcon.h"

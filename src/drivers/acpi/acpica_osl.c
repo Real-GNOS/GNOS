@@ -22,10 +22,13 @@
 #include <stdarg.h>
 #include <stdint.h>
 
-#include "acpi.h"
+/* ACPICA's acpi.h must be its own -- the kernel's table-half driver is
+ * also named acpi.h and sits earlier on the include path, so this file
+ * reaches the vendored one by relative path. */
+#include "../../vendor/acpica/source/include/acpi.h"
 #include "acpiosxf.h"
 
-#include "acpi.h"          /* GNOS's own table-half driver: acpi_rsdp_phys */
+#include "acpi_drv.h"      /* GNOS's table-half driver: acpi_rsdp_phys */
 #include "heap.h"
 #include "io.h"
 #include "kstring.h"
@@ -33,6 +36,8 @@
 #include "timer.h"
 #include "debugcon.h"
 #include "vmm.h"
+
+extern uint64_t g_hhdm;      /* HHDM base: pmm.h exports it kernel-wide */
 
 /* ---- lifecycle -------------------------------------------------------- */
 
@@ -94,13 +99,7 @@ void *AcpiOsAllocate(ACPI_SIZE Size)
     return kmalloc((uint32_t)Size);
 }
 
-void *AcpiOsAllocateZeroed(ACPI_SIZE Size)
-{
-    void *p = kmalloc((uint32_t)Size);
-    if (p)
-        memset(p, 0, Size);
-    return p;
-}
+/* AcpiOsAllocateZeroed is provided by utalloc.c (allocate + memset). */
 
 void AcpiOsFree(void *Memory)
 {
@@ -412,6 +411,59 @@ ACPI_STATUS AcpiOsRemoveInterruptHandler(UINT32 InterruptNumber,
 {
     (void)InterruptNumber; (void)Handler;
     return AE_NOT_IMPLEMENTED;
+}
+
+/* ---- physical memory access -------------------------------------------- */
+
+ACPI_STATUS AcpiOsReadMemory(ACPI_PHYSICAL_ADDRESS Address, UINT64 *Value,
+                             UINT32 Width)
+{
+    if (!Value)
+        return AE_BAD_PARAMETER;
+    volatile void *p = (volatile void *)(uintptr_t)(Address + g_hhdm);
+    switch (Width) {
+    case 8:  *Value = *(volatile uint8_t *)p;  return AE_OK;
+    case 16: *Value = *(volatile uint16_t *)p; return AE_OK;
+    case 32: *Value = *(volatile uint32_t *)p; return AE_OK;
+    case 64: *Value = *(volatile uint64_t *)p; return AE_OK;
+    default: return AE_BAD_PARAMETER;
+    }
+}
+
+ACPI_STATUS AcpiOsWriteMemory(ACPI_PHYSICAL_ADDRESS Address, UINT64 Value,
+                              UINT32 Width)
+{
+    volatile void *p = (volatile void *)(uintptr_t)(Address + g_hhdm);
+    switch (Width) {
+    case 8:  *(volatile uint8_t *)p  = (uint8_t)Value;  return AE_OK;
+    case 16: *(volatile uint16_t *)p = (uint16_t)Value; return AE_OK;
+    case 32: *(volatile uint32_t *)p = (uint32_t)Value; return AE_OK;
+    case 64: *(volatile uint64_t *)p = Value;           return AE_OK;
+    default: return AE_BAD_PARAMETER;
+    }
+}
+
+/* AML break/fatal: a fatal signal halts, breakpoints just report. */
+ACPI_STATUS AcpiOsSignal(UINT32 Function, void *Info)
+{
+    if (Function == ACPI_SIGNAL_FATAL) {
+        ACPI_SIGNAL_FATAL_INFO *info = Info;
+        dbg_puts("ACPI: FATAL signal code=");
+        dbg_puts_dec(info ? info->Code : 0);
+        dbg_puts("\r\n");
+        return AE_OK;                    /* let the interpreter decide */
+    }
+    dbg_puts("ACPI: breakpoint signal\r\n");
+    return AE_OK;
+}
+
+/* Hook before the firmware sleep registers are written; GNOS does not
+ * veto S-states. */
+ACPI_STATUS AcpiOsEnterSleep(UINT8 SleepState, UINT32 RegaValue,
+                             UINT32 RegbValue)
+{
+    (void)SleepState; (void)RegaValue; (void)RegbValue;
+    return AE_OK;
 }
 
 /* ---- output ------------------------------------------------------------ */

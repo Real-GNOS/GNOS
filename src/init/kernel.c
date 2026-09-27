@@ -52,7 +52,18 @@
 #include "pagecache.h"
 #include "slab.h"
 #include "module.h"
-#include "acpi.h"
+#include "acpi_drv.h"
+/* ACPICA entry points: declared by hand because including the vendored
+ * acpi.h here would drag the platform selection into a file compiled
+ * without ACPICA_CFLAGS.  ACPI_STATUS is UINT32. */
+extern unsigned int AcpiInitializeSubsystem(void);
+extern unsigned int AcpiInitializeTables(void *Table, unsigned int n, unsigned char f);
+extern unsigned int AcpiLoadTables(void);
+extern unsigned int AcpiEnableSubsystem(unsigned int Flags);
+extern unsigned int AcpiInitializeObjects(unsigned int Flags);
+#define ACPI_SUCCESS(st)   ((st) == 0)
+#define ACPI_FULL_INITIALIZATION 0u
+typedef unsigned int ACPI_STATUS_K;
 #include "lapic.h"
 #include "proc.h"
 #include "timer.h"
@@ -180,6 +191,44 @@ void kernel_entry(void)
                   ? (uint64_t)(uintptr_t)rsdp_request.response->address : 0);
     acpi_dump();
     acpi_pm1_init();
+
+    /* ---- the ACPICA subsystem (interpreter, namespace, events) ---------
+     * The table half above stays the boot-time source of MADT/FADT/HPET;
+     * ACPICA adds the AML half: load every table, walk the namespace and
+     * run _INI methods so devices the firmware hid behind _STA come out.
+     * The OSL routes hardware access through the same primitives the rest
+     * of the kernel uses. */
+    {
+        ACPI_STATUS_K st;
+        st = AcpiInitializeSubsystem();
+        dbg_puts("ACPI: InitializeSubsystem ");
+        dbg_puts_dec((uint32_t)st);
+        dbg_puts("\r\n");
+        if (ACPI_SUCCESS(st)) {
+            st = AcpiInitializeTables(NULL, 16, 0);
+            dbg_puts("ACPI: InitializeTables ");
+            dbg_puts_dec((uint32_t)st);
+            dbg_puts("\r\n");
+        }
+        if (ACPI_SUCCESS(st)) {
+            st = AcpiLoadTables();
+            dbg_puts("ACPI: LoadTables ");
+            dbg_puts_dec((uint32_t)st);
+            dbg_puts("\r\n");
+        }
+        if (ACPI_SUCCESS(st)) {
+            st = AcpiEnableSubsystem(ACPI_FULL_INITIALIZATION);
+            dbg_puts("ACPI: EnableSubsystem ");
+            dbg_puts_dec((uint32_t)st);
+            dbg_puts("\r\n");
+        }
+        if (ACPI_SUCCESS(st)) {
+            st = AcpiInitializeObjects(ACPI_FULL_INITIALIZATION);
+            dbg_puts("ACPI: InitializeObjects ");
+            dbg_puts_dec((uint32_t)st);
+            dbg_puts("\r\n");
+        }
+    }
 
     /* ---- SMP and the local APIC -----------------------------------------
      * After ACPI (the MADT is where each LAPIC's MMIO base and the APs'

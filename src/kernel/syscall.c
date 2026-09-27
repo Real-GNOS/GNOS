@@ -35,7 +35,7 @@
 #include "kstring.h"
 #include "debugcon.h"
 #include "io.h"
-#include "acpi.h"
+#include "acpi_drv.h"
 #include "anonfd.h"
 #include "timerfd.h"
 #include "signalfd.h"

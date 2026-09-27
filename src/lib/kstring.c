@@ -98,3 +98,35 @@ char *strchr(const char *s, int c)
             return (char *)s;
     return ch == 0 ? (char *)s : NULL;
 }
+
+/* Append `src` to the end of `dst`; `dst` must have room.  FatFs and the
+ * ACPICA core both build path names this way. */
+char *strcat(char *dst, const char *src)
+{
+    char *d = dst;
+    while (*d)
+        d++;
+    while ((*d++ = *src++))
+        ;
+    return dst;
+}
+
+char *strcpy(char *dst, const char *src)
+{
+    char *d = dst;
+    while ((*d++ = *src++))
+        ;
+    return dst;
+}
+
+/* Append at most n characters plus a terminator. */
+char *strncat(char *dst, const char *src, size_t n)
+{
+    char *d = dst;
+    while (*d)
+        d++;
+    while (n-- && *src)
+        *d++ = *src++;
+    *d = 0;
+    return dst;
+}
