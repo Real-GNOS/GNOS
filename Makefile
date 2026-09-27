@@ -128,7 +128,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/input.o $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
         $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
         $(BUILD)/pty.o $(BUILD)/alsa.o $(BUILD)/klog.o $(BUILD)/cpuid.o $(BUILD)/pagecache.o \
-        $(BUILD)/pidfd.o $(BUILD)/process_vm_access.o $(BUILD)/quota.o $(BUILD)/ff.o $(BUILD)/diskio.o $(BUILD)/ffsystem.o \
+        $(BUILD)/pidfd.o $(BUILD)/process_vm_access.o $(BUILD)/quota.o $(BUILD)/ff.o $(BUILD)/diskio.o $(BUILD)/ffsystem.o $(BUILD)/fatfs_vfs.o \
         $(BUILD)/secretmem.o $(BUILD)/landlock.o \
         $(BUILD)/unix.o \
         $(BUILD)/sysvipc.o \

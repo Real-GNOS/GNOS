@@ -26,6 +26,7 @@
 #include "vfs.h"
 #include "cgroup.h"
 #include "ext2.h"
+#include "fatfs_vfs.h"
 #include "proc.h"
 #include "procfs.h"
 #include "debugfs.h"
@@ -423,6 +424,7 @@ static vfs_node_t *dev_lookup(const char *name)
 #define MT_TMPFS   1
 #define MT_CGROUP  2
 #define MT_EXT2    3    /* an ext2/ext4 volume from a block device */
+#define MT_FAT     4    /* a FAT12/16/32 volume from a block device */
 struct mount_entry {
     char     mnt[GNUOS_PATH_MAX];
     int      type;
@@ -638,9 +640,21 @@ int vfs_mount_bdev(const char *path, const char *devname)
     memset(&g_bfs, 0, sizeof(g_bfs));
     g_bfs_dev = *d;
     if (!ext2_mount_bdev(&g_bfs, &blkio)) {
+        /* Not ext2.  Try FAT before giving up: a USB stick is far more
+         * likely to be FAT32 than anything else, and the same block
+         * device node serves either. */
+        int fr = fatfs_mount_bdev(path, d, d->size / 512);
+        if (fr == 0) {
+            strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
+            g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
+            g_mounts[g_mount_count].type = MT_FAT;
+            g_mounts[g_mount_count].fs   = NULL;
+            g_mount_count++;
+            return 0;
+        }
         dbg_puts("VFS: ");
         dbg_puts(devname);
-        dbg_puts(" holds no ext2/ext4 volume\r\n");
+        dbg_puts(" holds neither ext2/ext4 nor FAT\r\n");
         return -E_INVAL;
     }
 
@@ -707,7 +721,25 @@ const char *vfs_mount_path(int i)
     return g_mounts[i].mnt;
 }
 
+static int umount_rest(const char *path);
+
 int vfs_umount(const char *path)
+{
+    if (fatfs_umount(path) == 0) {
+        for (int i = 0; i < g_mount_count; i++)
+            if (g_mounts[i].type == MT_FAT &&
+                strcmp(g_mounts[i].mnt, path) == 0) {
+                memmove(&g_mounts[i], &g_mounts[i + 1],
+                        (unsigned)(g_mount_count - i - 1) * sizeof(g_mounts[0]));
+                g_mount_count--;
+                return 0;
+            }
+        return 0;
+    }
+    return umount_rest(path);
+}
+
+static int umount_rest(const char *path)
 {
     for (int i = 0; i < g_mount_count; i++) {
         if (strcmp(g_mounts[i].mnt, path) == 0) {
@@ -775,6 +807,10 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     /* A disk-mounted ext2/ext4 volume shadows the root image below its
      * mount point.  The relative path is always '/'-rooted, which is what
      * ext2_lookup expects. */
+    char fat_rel[GNUOS_PATH_MAX];
+    if (fatfs_route(path, fat_rel))
+        return fatfs_resolve(fat_rel, out);
+
     char bfs_rel[GNUOS_PATH_MAX];
     if (vfs_route_bfs(path, bfs_rel)) {
         if (!g_bfs_ok)
