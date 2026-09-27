@@ -590,6 +590,21 @@ abort:
     dbg_puts_hexn(pkt[0], 2);
     dbg_puts("\r\n");
     return -1;
+    {
+        /* REQUEST SENSE: the ASC/ASCQ pair names the reason exactly */
+        uint8_t spkt[12] = { 0x03, 0, 0, 0, 18, 0 };
+        uint8_t sense[18];
+        memset(sense, 0, sizeof sense);
+        if (atapi_packet_read(d, spkt, 18, sense) == 0) {
+            dbg_puts("ATAPI: sense SK=");
+            dbg_puts_hexn(sense[2] & 0x0F, 2);
+            dbg_puts(" ASC=");
+            dbg_puts_hexn(sense[12], 2);
+            dbg_puts(" ASCQ=");
+            dbg_puts_hexn(sense[13], 2);
+            dbg_puts("\r\n");
+        }
+    }
 timeout:
     dbg_puts("ATAPI: timeout cmd=");
     dbg_puts_hexn(pkt[0], 2);
