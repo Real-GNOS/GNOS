@@ -53,6 +53,7 @@
 #include "slab.h"
 #include "module.h"
 #include "acpi_drv.h"
+#include "../../crypto/crypto.h"
 /* ACPICA entry points: declared by hand because including the vendored
  * acpi.h here would drag the platform selection into a file compiled
  * without ACPICA_CFLAGS.  ACPI_STATUS is UINT32. */
@@ -406,6 +407,7 @@ void kernel_entry(void)
     cgroup_init();
     vfs_mount_cgroupfs("/sys/fs/cgroup");
 
+    crypto_selftest();
     slab_init();
     pagecache_init();
     pagecache_selftest();

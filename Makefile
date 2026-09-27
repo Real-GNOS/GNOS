@@ -144,6 +144,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/sysvipc.o \
         $(BUILD)/seccomp.o \
         $(BUILD)/module.o $(BUILD)/module_elf.o $(BUILD)/exports.o \
+        $(BUILD)/crypto.o \
         $(BUILD)/vcs.o \
         $(BUILD)/iso9660.o \
         $(BUILD)/limine_requests.o \
