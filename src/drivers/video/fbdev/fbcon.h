@@ -66,6 +66,15 @@ void fbcon_set_color(uint32_t fg, uint32_t bg);
  * size of the framebuffer, so this needs no id.  Either pointer may be NULL. */
 void fbcon_size(uint32_t *cols, uint32_t *rows);
 
+/* /dev/vcs support: read one cell (code point + attribute byte in the
+ * Linux vcsa sense: attr = (bg << 4) | fg), or overwrite one.  Setting a
+ * cell repaints it on screen when the console is active.  Returns 0 or
+ * -EINVAL for out-of-range coordinates. */
+int  fbcon_get_cell(int con, uint32_t row, uint32_t col,
+                    uint32_t *cp, uint8_t *attr);
+int  fbcon_set_cell(int con, uint32_t row, uint32_t col, uint32_t cp,
+                    uint8_t attr);
+
 /* The pixel geometry of the current mode (any pointer may be NULL). */
 void fbcon_geometry(uint32_t *w, uint32_t *h, uint32_t *pitch);
 /* The framebuffer base pointer and scanline pitch in bytes, for drivers

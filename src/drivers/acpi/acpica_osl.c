@@ -389,8 +389,12 @@ void AcpiOsStall(UINT32 Microseconds)
 
 ACPI_THREAD_ID AcpiOsGetThreadId(void)
 {
+    /* Unique and NONZERO per execution context: ACPICA keys its mutex
+     * ownership bookkeeping on this value, and a 0 would make unrelated
+     * callers look like the same thread. */
     proc_t *p = proc_current();
-    return (ACPI_THREAD_ID)(p ? (uint64_t)p->pid : 0);
+    uint64_t id = p ? (uint64_t)p->pid : 0;
+    return (ACPI_THREAD_ID)(id ? id : 1);
 }
 
 ACPI_STATUS AcpiOsExecute(ACPI_EXECUTE_TYPE Type,

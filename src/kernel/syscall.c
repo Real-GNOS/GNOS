@@ -1141,10 +1141,17 @@ static int64_t sys_mount_setattr(uint64_t dfd, uint64_t upath, uint64_t flags,
                                  uint64_t uattr, uint64_t usize)
 {
     (void)dfd; (void)upath; (void)uattr;
-    if (flags & ~(uint64_t)0x7FF)        /* AT_* bits only */
+    /* Linux accepts AT_SYMLINK_NOFOLLOW (0x100), AT_NO_AUTOMOUNT (0x800),
+     * AT_EMPTY_PATH (0x1000) and AT_RECURSIVE (0x8000) here -- the 0x7FF
+     * mask this used to apply wrongly refused three of the four. */
+    if (flags & ~(uint64_t)0x9900)
         return -E_INVAL;
-    if (usize < 24 || usize > 64)        /* sizeof(struct mount_attr) = 24 */
+    /* struct mount_attr is the floor; anything above one page is E2BIG,
+     * matching mount_setattr(2). */
+    if (usize < 24)
         return -E_INVAL;
+    if (usize > 4096)
+        return -E2BIG;
     return -E_NOSYS;
 }
 

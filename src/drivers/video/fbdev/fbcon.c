@@ -106,6 +106,45 @@ typedef struct {
 static console_t g_con[FBCON_MAX_CONS];
 static int       g_active;
 
+/* ---- /dev/vcs access ---------------------------------------------------- */
+
+static void draw_cell(console_t *c, uint32_t col, uint32_t row);
+
+int fbcon_get_cell(int con, uint32_t row, uint32_t col,
+                   uint32_t *cp, uint8_t *attr)
+{
+    if (con < 0 || con >= FBCON_MAX_CONS || !g_con[con].live)
+        return -1;
+    console_t *c = &g_con[con];
+    if (row >= g_fb.rows || col >= g_fb.cols)
+        return -1;
+    const cell_t *cell = &c->cells[row * g_fb.cols + col];
+    if (cp)
+        *cp = cell->cp;
+    if (attr)
+        *attr = (uint8_t)(((cell->bg & 0x7) << 4) | (cell->fg & 0x7) |
+                          (cell->flags & CELL_BOLD ? 0x08 : 0));
+    return 0;
+}
+
+int fbcon_set_cell(int con, uint32_t row, uint32_t col, uint32_t cp,
+                   uint8_t attr)
+{
+    if (con < 0 || con >= FBCON_MAX_CONS || !g_con[con].live)
+        return -1;
+    console_t *c = &g_con[con];
+    if (row >= g_fb.rows || col >= g_fb.cols)
+        return -1;
+    cell_t *cell = &c->cells[row * g_fb.cols + col];
+    cell->cp = cp;
+    cell->flags = (attr & 0x08) ? CELL_BOLD : 0;
+    cell->fg = attr & 0x7;
+    cell->bg = (attr >> 4) & 0x7;
+    if (con == g_active)
+        draw_cell(c, col, row);
+    return 0;
+}
+
 /* ---- the ANSI colour palette (x8r8g8b8) --------------------------------- */
 /* Index 0 of each is the "default" slot and is never used directly; fg/bg of
  * 0 mean "the console's own colour", resolved at draw time. */
