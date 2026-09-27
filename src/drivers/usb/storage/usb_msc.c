@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include "xhci.h"
+#include "../../scsi/scsi.h"
 #include "vfs.h"
 #include "kstring.h"
 #include "heap.h"
@@ -124,50 +125,25 @@ static int msc_command(msc_dev_t *dev, const uint8_t *cdb, uint8_t cdb_len,
     return (int)transferred;
 }
 
-/* ---- SCSI commands ---------------------------------------------------------- */
-
-static int msc_read_capacity(msc_dev_t *dev)
+/* ---- the SCSI transport ---------------------------------------------------
+ * The bus layer (src/drivers/scsi) builds the CDBs; this adapter only
+ * moves them over the BOT protocol. */
+static int msc_transport_execute(void *host, const uint8_t *cdb,
+                                 uint8_t cdb_len, void *data,
+                                 uint32_t data_len, int dir_in)
 {
-    uint8_t cdb[10];
-    memset(cdb, 0, sizeof(cdb));
-    cdb[0] = SCSI_READ_CAPACITY;
-    cdb[8] = 0x08;                       /* return 8 bytes */
-
-    uint8_t resp[8];
-    if (msc_command(dev, cdb, 10, resp, sizeof(resp), 1) < 0)
-        return -1;
-    dev->nblocks = rd32be(resp) + 1;     /* last LBA + 1 */
-    return 0;
+    return msc_command((msc_dev_t *)host, cdb, cdb_len, data, data_len,
+                       dir_in);
 }
 
-static int msc_read_blocks(msc_dev_t *dev, uint64_t lba, void *buf,
-                           uint32_t nblocks)
-{
-    while (nblocks > 0) {
-        uint32_t chunk = nblocks > 64 ? 64 : nblocks;
-        uint8_t cdb[10];
-        memset(cdb, 0, sizeof(cdb));
-        cdb[0] = SCSI_READ_10;
-        cdb[2] = (uint8_t)(lba >> 24);
-        cdb[3] = (uint8_t)(lba >> 16);
-        cdb[4] = (uint8_t)(lba >> 8);
-        cdb[5] = (uint8_t)lba;
-        cdb[7] = (uint8_t)(chunk >> 8);
-        cdb[8] = (uint8_t)chunk;
-
-        if (msc_command(dev, cdb, 10, buf, chunk * MSC_SECTOR, 1) < 0)
-            return -1;
-        buf += chunk * MSC_SECTOR;
-        lba += chunk;
-        nblocks -= chunk;
-    }
-    return 0;
-}
+static scsi_transport_t g_msc_transport = { .execute = msc_transport_execute };
+static scsi_device_t   *g_scsi;        /* the scanned scsi device */
 
 /* ---- the block-device layer --------------------------------------------------- */
 
 typedef struct {
-    msc_dev_t *dev;
+    msc_dev_t     *dev;
+    scsi_device_t *sd;   /* the bus-layer device this bdev serves */
 } msc_bdev_t;
 
 static msc_bdev_t g_msc_bdevs[MSC_MAX_DEVICES];
@@ -176,37 +152,34 @@ static int32_t msc_bdev_read(vfs_node_t *n, uint64_t off, void *buf,
                              uint32_t len)
 {
     msc_bdev_t *b = (msc_bdev_t *)n->priv;
-    if (!b || !b->dev || !b->dev->active)
+    if (!b || !b->sd || !b->sd->live)
         return -E_IO;
 
-    uint64_t end = off + len;
+    /* The bus layer reads in whole device sectors; the unaligned head and
+     * tail bounce through a bounce sector. */
+    uint32_t ss   = b->sd->sector_size;
+    uint64_t first = off / ss;
+    uint64_t last  = (off + len - 1) / ss;
     uint8_t *out = (uint8_t *)buf;
-    uint8_t sec[MSC_SECTOR];
-    uint64_t pos = off;
 
-    while (pos < end) {
-        uint64_t lba = pos / MSC_SECTOR;
-        uint32_t skip = (uint32_t)(pos % MSC_SECTOR);
-        uint32_t chunk = MSC_SECTOR - skip;
-        if (chunk > end - pos)
-            chunk = (uint32_t)(end - pos);
-        if (msc_read_blocks(b->dev, lba, sec, 1) < 0)
+    static uint8_t sec[2048];          /* max sector size */
+    for (uint64_t lba = first; lba <= last; lba++) {
+        if (scsi_read_blocks(b->sd, lba, sec, 1) < 0)
             return -E_IO;
-        memcpy(out, sec + skip, chunk);
-        out += chunk;
-        pos += chunk;
+        uint64_t sec_start = lba * ss;
+        uint64_t from = off > sec_start ? off : sec_start;
+        uint64_t to = off + len < sec_start + ss ? off + len : sec_start + ss;
+        if (to > from)
+            memcpy(out + (from - off), sec + (from - sec_start), to - from);
     }
-    return (int32_t)(end - off);
+    return (int32_t)len;
 }
 
 static int32_t msc_bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
                               uint32_t len)
 {
-    (void)n;
-    (void)off;
-    (void)buf;
-    (void)len;
-    return -E_ROFS;                    /* deliberately read-only */
+    (void)n; (void)off; (void)buf; (void)len;
+    return -E_ROFS;                    /* deliberately read-only for now */
 }
 
 static int32_t msc_bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
@@ -286,17 +259,23 @@ static int msc_probe_config(msc_dev_t *dev)
     dev->ep_in_packet = ep_in_packet ? ep_in_packet : 512;
     dev->ep_out_packet = ep_out_packet ? ep_out_packet : 512;
 
-    /* TUR: wait for the drive to be ready (spinning up). */
-    for (int i = 0; i < 10; i++) {
-        uint8_t tur[6];
-        memset(tur, 0, sizeof(tur));
-        tur[0] = SCSI_TEST_UNIT_READY;
-        if (msc_command(dev, tur, 6, NULL, 0, 1) >= 0)
-            break;
-        timer_delay_ms(100);
-    }
-    if (msc_read_capacity(dev) < 0)
+    /* The bus layer does the rest: INQUIRY, TEST UNIT READY (with retries
+     * while the stick spins up), READ CAPACITY. */
+    scsi_device_t sd;
+    memset(&sd, 0, sizeof sd);
+    sd.xport = g_msc_transport;
+    sd.xport.host = dev;
+    sd.lun = 0;
+    if (scsi_device_add(&sd) < 0)
         return -1;
+    for (int i = 0; i < 10 && !sd.ready; i++) {
+        timer_delay_ms(100);
+        sd.ready = (scsi_test_unit_ready(&sd) == 0);
+    }
+    if (!sd.nblocks)
+        return -1;
+    dev->nblocks = sd.nblocks;
+    g_scsi = scsi_device_by_index(scsi_count() - 1);
     return 0;
 }
 
@@ -317,6 +296,7 @@ void usb_msc_init(void)
         dev->active = 1;
         msc_bdev_t *b = &g_msc_bdevs[g_msc_count];
         b->dev = dev;
+        b->sd  = g_scsi;
 
         char name[8];
         memcpy(name, "sdb", 4);       /* ATA owns sda; USB disks come next */
