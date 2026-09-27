@@ -165,6 +165,12 @@ BOOLEAN AcpiOsWritable(void *Pointer, ACPI_SIZE Length)
 
 /* ---- caches (ACPICA object caches) ------------------------------------- */
 
+/* The cache stub remembers the object size; AcpiOsAcquireObject needs it
+ * because ACPICA's state objects are far larger than a pointer. */
+typedef struct {
+    UINT16 size;
+} acpi_cache_stub_t;
+
 ACPI_STATUS AcpiOsCreateCache(char *CacheName, UINT16 ObjectSize,
                               UINT16 MaxDepth, ACPI_CACHE_T **ReturnCache)
 {
@@ -172,8 +178,7 @@ ACPI_STATUS AcpiOsCreateCache(char *CacheName, UINT16 ObjectSize,
     if (!ReturnCache || !ObjectSize)
         return AE_BAD_PARAMETER;
     /* No slab-backed cache: kmalloc per object is correct, just slower. */
-    struct acpi_cache_stub { UINT16 size; };
-    struct acpi_cache_stub *c = kmalloc(sizeof(*c));
+    acpi_cache_stub_t *c = kmalloc(sizeof(*c));
     if (!c)
         return AE_NO_MEMORY;
     c->size = ObjectSize;
@@ -198,9 +203,18 @@ ACPI_STATUS AcpiOsPurgeCache(ACPI_CACHE_T *Cache)
 
 void *AcpiOsAcquireObject(ACPI_CACHE_T *Cache)
 {
-    if (!Cache)
+    /* Size comes from the cache, and the memory is zeroed: ACPICA's
+     * AcpiUtAcquireObject callers expect a clean object (the real cache
+     * hands out zeroed slots too).  A fixed-size block here was the
+     * source of a GP fault inside AcpiUtUpdateObjectReference -- state
+     * objects overran 32 bytes and trampled the next allocation. */
+    acpi_cache_stub_t *c = (acpi_cache_stub_t *)Cache;
+    if (!c || !c->size)
         return NULL;
-    return kmalloc(sizeof(void *) * 4);  /* sized by the caller's use */
+    void *obj = kmalloc(c->size);
+    if (obj)
+        memset(obj, 0, c->size);
+    return obj;
 }
 
 ACPI_STATUS AcpiOsReleaseObject(ACPI_CACHE_T *Cache, void *Object)
