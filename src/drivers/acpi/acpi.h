@@ -44,7 +44,8 @@ typedef struct {
  * the EBDA and the 0xE0000-0xFFFFF BIOS area for the "RSD PTR " signature.
  * Returns the number of tables indexed, 0 if the machine has no usable ACPI.
  */
-int acpi_init(uint64_t rsdp);
+int      acpi_init(uint64_t rsdp);
+uint64_t acpi_rsdp_phys(void);
 
 /* The table with this 4-character signature ("FACP", "APIC", "HPET", ...),
  * or NULL.  The pointer is into the firmware's tables and stays valid. */

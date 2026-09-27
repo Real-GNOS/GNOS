@@ -62,6 +62,15 @@ KINCS       := $(addprefix -I,$(KERNEL_DIRS))
 # port layer in src/fs/fatfs.
 KINCS       += -Isrc/vendor/fatfs/source
 
+# ACPICA: the OS services layer (src/drivers/acpi/acpica_osl.c) includes the
+# vendored headers directly.
+KINCS       += -Isrc/vendor/acpica/source/include -Isrc/vendor/acpica/source/include/platform
+
+# gcc defines __linux__ on this host, which makes acenv.h pick ACPICA's
+# Linux glue (unistd.h and friends).  We are not Linux: drop the macro so it
+# falls back to the generic gcc environment.
+ACPICA_CFLAGS := -U__linux__ -Ulinux -U__unix__ -U_LINUX -DACPI_MACHINE_WIDTH=64
+
 # The two trees with their own consumers: headers shared between kernel and
 # userland (sysnum.h, bootinfo.h), and the userland itself.
 SHARED_DIR := src/include/uapi/linux
@@ -594,6 +603,10 @@ check-hdrs:
 	if [ -n "$$dup" ]; then echo "FATAL: duplicate header basename(s):"; \
 	  echo "$$dup"; exit 1; fi; \
 	echo "check-hdrs: header basenames are unique"
+
+# The ACPICA OSL needs its own flags (see ACPICA_CFLAGS above).
+$(BUILD)/acpica_osl.o: src/drivers/acpi/acpica_osl.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # FatFs core: vendored (pruned from the auto vpath), so it needs an explicit
 # rule.  The port layer beside it (src/fs/fatfs) is ordinary kernel code.

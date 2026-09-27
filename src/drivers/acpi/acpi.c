@@ -377,6 +377,14 @@ void acpi_poweroff(void)
 
 /* ---- public interface --------------------------------------------------- */
 
+/* The RSDP this machine booted from, for the ACPICA OSL (AcpiOsGetRootPointer). */
+static uint64_t g_rsdp_phys;
+
+uint64_t acpi_rsdp_phys(void)
+{
+    return g_rsdp_phys;
+}
+
 int acpi_init(uint64_t rsdp)
 {
     g_ntables = 0;
@@ -386,6 +394,8 @@ int acpi_init(uint64_t rsdp)
     g_pm1a_evt = 0;
 
     const acpi_rsdp_t *r = find_rsdp(rsdp);
+    if (r)
+        g_rsdp_phys = (uint64_t)(uintptr_t)r - g_hhdm;
     if (!r) {
         dbg_puts("ACPI: no RSDP found\r\n");
         return 0;
