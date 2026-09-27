@@ -250,8 +250,6 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/acpica_resources_rsaddr.o \
         $(BUILD)/acpica_resources_rscalc.o \
         $(BUILD)/acpica_resources_rscreate.o \
-        $(BUILD)/acpica_resources_rsdump.o \
-        $(BUILD)/acpica_resources_rsdumpinfo.o \
         $(BUILD)/acpica_resources_rsinfo.o \
         $(BUILD)/acpica_resources_rsio.o \
         $(BUILD)/acpica_resources_rsirq.o \

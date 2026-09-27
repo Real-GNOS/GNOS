@@ -470,14 +470,21 @@ ACPI_STATUS AcpiOsEnterSleep(UINT8 SleepState, UINT32 RegaValue,
 
 void AcpiOsVprintf(const char *Format, va_list Args)
 {
-    /* No printf in the kernel: hand the format's literal text to the
-     * debug console and count the conversions we cannot perform. */
+    (void)Args;
+    /* No printf in the kernel: the conversion specifications cannot be
+     * honoured (the values are in the va_list we cannot walk portably),
+     * so each spec is skipped whole.  The scan stops AT the terminator --
+     * a '%' as the last character of a format string used to walk past
+     * the NUL and spin on whatever followed it. */
     dbg_puts("ACPI: ");
     for (const char *p = Format; *p; p++) {
         if (*p == '%') {
-            /* Skip the conversion specification's literal characters. */
-            p++;
-            if (*p) p++;
+            const char *q = p + 1;
+            while (*q && strchr("diouxXcspeEfgGaAn%", *q) == NULL)
+                q++;
+            if (!*q)
+                break;               /* truncated spec: stay in bounds */
+            p = q;                   /* the loop's p++ moves past it */
             continue;
         }
         char c[2] = { *p, 0 };

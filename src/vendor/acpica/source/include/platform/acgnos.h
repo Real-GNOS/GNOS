@@ -29,9 +29,10 @@
  * platform header is where they are expected to come from. */
 #include "ctype.h"
 
-/* The OSL owns the debug output (AcpiOsPrintf routes to the debug console);
- * ACPICA's internal DEBUG prints go through the same path. */
-#define ACPI_DEBUG_OUTPUT
+/* Internal DEBUG prints are off: every function entry would push a line
+ * through the 9600-ish debug console and drown the boot log.  Flip this on
+ * only when chasing an ACPICA-internal problem. */
+/* #define ACPI_DEBUG_OUTPUT */
 
 /* No 16-bit or 32-bit fallbacks; everything assumes the widths above. */
 #define ACPI_64BIT_TIMEOUT
