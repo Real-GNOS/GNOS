@@ -514,3 +514,22 @@ void AcpiOsPrintf(const char *Format, ...)
     AcpiOsVprintf(Format, ap);
     va_end(ap);
 }
+
+/* ---- allocation-tracking support stubs --------------------------------- */
+
+/* uttrack's statistics dump calls into the debugger, which is not part of
+ * this build; the numbers are only useful interactively. */
+ACPI_STATUS AcpiDbDisplayStatistics(char *TypeArg)
+{
+    (void)TypeArg;
+    return AE_OK;
+}
+
+/* Bounded copy that always terminates (uttrack's descriptor names). */
+void AcpiUtSafeStrncpy(char *Dest, char *Source, ACPI_SIZE DestSize)
+{
+    if (!Dest || !Source || !DestSize)
+        return;
+    strncpy(Dest, Source, (size_t)DestSize - 1);
+    Dest[DestSize - 1] = 0;
+}

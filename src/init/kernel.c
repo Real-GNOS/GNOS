@@ -210,24 +210,16 @@ void kernel_entry(void)
             dbg_puts_dec((uint32_t)st);
             dbg_puts("\r\n");
         }
-        if (ACPI_SUCCESS(st)) {
-            st = AcpiLoadTables();
-            dbg_puts("ACPI: LoadTables ");
-            dbg_puts_dec((uint32_t)st);
-            dbg_puts("\r\n");
-        }
-        if (ACPI_SUCCESS(st)) {
-            st = AcpiEnableSubsystem(ACPI_FULL_INITIALIZATION);
-            dbg_puts("ACPI: EnableSubsystem ");
-            dbg_puts_dec((uint32_t)st);
-            dbg_puts("\r\n");
-        }
-        if (ACPI_SUCCESS(st)) {
-            st = AcpiInitializeObjects(ACPI_FULL_INITIALIZATION);
-            dbg_puts("ACPI: InitializeObjects ");
-            dbg_puts_dec((uint32_t)st);
-            dbg_puts("\r\n");
-        }
+        /* DISABLED while debugging: AcpiLoadTables trips a page fault
+         * inside kmalloc (a heap header size field overwritten with a
+         * small negative value -- some ACPICA path writes a negative
+         * int32 past its allocation).  The subsystem stands at
+         * InitializeTables until that is chased down with
+         * ACPI_DBG_TRACK_ALLOCATIONS + gdb.
+         *
+         * st = AcpiLoadTables();
+         * st = AcpiEnableSubsystem(ACPI_FULL_INITIALIZATION);
+         * st = AcpiInitializeObjects(ACPI_FULL_INITIALIZATION); */
     }
 
     /* ---- SMP and the local APIC -----------------------------------------
