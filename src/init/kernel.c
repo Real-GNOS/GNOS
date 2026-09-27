@@ -216,10 +216,26 @@ void kernel_entry(void)
          * int32 past its allocation).  The subsystem stands at
          * InitializeTables until that is chased down with
          * ACPI_DBG_TRACK_ALLOCATIONS + gdb.
-         *
-         * st = AcpiLoadTables();
-         * st = AcpiEnableSubsystem(ACPI_FULL_INITIALIZATION);
-         * st = AcpiInitializeObjects(ACPI_FULL_INITIALIZATION); */
+         * Live again for the gdb session that is chasing the heap
+         * corruption (see commit history). */
+        if (ACPI_SUCCESS(st)) {
+            st = AcpiLoadTables();
+            dbg_puts("ACPI: LoadTables ");
+            dbg_puts_dec((uint32_t)st);
+            dbg_puts("\r\n");
+        }
+        if (ACPI_SUCCESS(st)) {
+            st = AcpiEnableSubsystem(ACPI_FULL_INITIALIZATION);
+            dbg_puts("ACPI: EnableSubsystem ");
+            dbg_puts_dec((uint32_t)st);
+            dbg_puts("\r\n");
+        }
+        if (ACPI_SUCCESS(st)) {
+            st = AcpiInitializeObjects(ACPI_FULL_INITIALIZATION);
+            dbg_puts("ACPI: InitializeObjects ");
+            dbg_puts_dec((uint32_t)st);
+            dbg_puts("\r\n");
+        }
     }
 
     /* ---- SMP and the local APIC -----------------------------------------

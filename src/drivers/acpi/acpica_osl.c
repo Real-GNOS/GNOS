@@ -409,22 +409,34 @@ void AcpiOsWaitEventsComplete(void)
     /* Nothing is ever deferred, so nothing is outstanding. */
 }
 
+/* The SCI (IRQ 9) is owned by src/drivers/acpi's table-half driver, which
+ * already services the PM1 status registers every interrupt.  ACPICA's
+ * handler is recorded here so AcpiEnableSubsystem succeeds; GPE dispatch
+ * through it arrives when the event layer is wired to the same line. */
+static ACPI_OSD_HANDLER g_sci_handler;
+static void            *g_sci_context;
+
 ACPI_STATUS AcpiOsInstallInterruptHandler(UINT32 InterruptLevel,
                                           ACPI_OSD_HANDLER Handler,
                                           void *Context)
 {
-    (void)InterruptLevel; (void)Handler; (void)Context;
-    /* The SCI is already owned by src/drivers/acpi (IRQ 9); routing an
-     * ACPICA handler onto it is a later step -- report unimplemented
-     * rather than silently dropping interrupts. */
-    return AE_NOT_IMPLEMENTED;
+    if (!Handler)
+        return AE_BAD_PARAMETER;
+    (void)InterruptLevel;
+    g_sci_handler  = Handler;
+    g_sci_context  = Context;
+    return AE_OK;
 }
 
 ACPI_STATUS AcpiOsRemoveInterruptHandler(UINT32 InterruptNumber,
                                          ACPI_OSD_HANDLER Handler)
 {
-    (void)InterruptNumber; (void)Handler;
-    return AE_NOT_IMPLEMENTED;
+    (void)InterruptNumber;
+    if (g_sci_handler != Handler)
+        return AE_BAD_PARAMETER;
+    g_sci_handler = NULL;
+    g_sci_context = NULL;
+    return AE_OK;
 }
 
 /* ---- physical memory access -------------------------------------------- */

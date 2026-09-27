@@ -54,6 +54,7 @@
  * of two in size, so the header is found by masking an object address. */
 typedef struct kmem_slab {
     struct kmem_slab *next, *prev;
+    void             *raw;      /* the kmalloc pointer the run sits inside */
     uint64_t          objmask;   /* AND an object address with this -> slab */
     kmem_cache_t     *cache;
     void             *freelist;  /* chained through the free objects        */
@@ -147,6 +148,11 @@ static kmem_slab_t *slab_grow(kmem_cache_t *c)
     kmem_slab_t *s = (kmem_slab_t *)base;
 
     s->cache   = c;
+    s->raw     = raw;            /* slab_destroy must free THIS, not the
+                                    aligned base: kfree takes the pointer
+                                    kmalloc returned, and an interior
+                                    aligned address silently corrupted the
+                                    heap (the original ACPICA-era bug) */
     s->objmask = ~(c->slab_size - 1);
     s->in_use  = 0;
 
@@ -179,9 +185,9 @@ static kmem_slab_t *slab_grow(kmem_cache_t *c)
 static void slab_destroy(kmem_cache_t *c, kmem_slab_t *s)
 {
     (void)c;                         /* destructors would live here */
-    /* destructors are not supported (no GNOS user needs one yet); the
-     * memory simply goes back to the heap. */
-    kfree(s);
+    /* Free the RAW kmalloc pointer: `s` is the slab_size-aligned interior
+     * address, and freeing that made the heap see a bogus header. */
+    kfree(s->raw);
 }
 
 /* ---- cache lifecycle --------------------------------------------------- */

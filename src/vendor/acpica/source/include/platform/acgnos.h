@@ -25,10 +25,6 @@
  * gnoslibc shim headers instead of shipping its utclib. */
 #define ACPI_USE_SYSTEM_CLIBRARY
 
-/* Allocation tracking: uttrack keeps a per-allocation descriptor and
- * reports the caller of a bad free or an overrun.  Leave on while the
- * ACPI heap is still being debugged. */
-#define ACPI_DBG_TRACK_ALLOCATIONS
 
 /* ACPICA calls the ctype helpers without including <ctype.h> itself; the
  * platform header is where they are expected to come from. */

@@ -25,17 +25,20 @@
 #include "panic.h"
 
 #define KHEAP_HDR_MAGIC  0x4B484452534Au   /* "KHDR"-ish, sanity tag */
-#define KHEAP_MIN_BLOCK  32                /* smallest block we will split off */
+#define KHEAP_MIN_BLOCK  48                /* smallest block we will split off */
 #define KHEAP_ALIGN     16u
 
 typedef struct kheap_hdr {
     uint64_t size;        /* total block size (header + payload + footer) */
     uint64_t free;        /* 1 = free, 0 = used */
+    uint32_t magic;       /* every initialised header carries KHEAP_MAGIC */
+    uint32_t _pad;
     struct kheap_hdr *prev;
     struct kheap_hdr *next;
 } kheap_hdr_t;
 
-#define HDR_SIZE    (sizeof(kheap_hdr_t))   /* 32 bytes on LP64 */
+#define KHEAP_MAGIC   0x4B484541u   /* "KHEA" */
+#define HDR_SIZE    (sizeof(kheap_hdr_t))   /* 40 bytes on LP64 */
 #define FOOT_SIZE   8u                       /* footer holds the size only */
 
 /* Read/write the footer of the block that starts at `h`. */
@@ -117,6 +120,7 @@ void kheap_init(void)
     kheap_hdr_t *b = (kheap_hdr_t *)g_base;
     b->size  = g_size - HDR_SIZE - FOOT_SIZE;
     b->free  = 1;
+    b->magic = KHEAP_MAGIC;
     b->prev  = NULL;
     b->next  = NULL;
     set_footer(b);
@@ -147,6 +151,13 @@ void *kmalloc(size_t size)
         need = KHEAP_MIN_BLOCK;
 
     for (kheap_hdr_t *b = g_free_head; b; b = b->next) {
+        if (b->magic != KHEAP_MAGIC || b->size < KHEAP_MIN_BLOCK ||
+            (uint8_t *)b + b->size > g_base + g_size) {
+            dbg_puts("KHEAP: corrupt free block at ");
+            dbg_puts_hex((uint64_t)(uintptr_t)b);
+            dbg_puts("\r\n");
+            panic("kheap: corrupt free list");
+        }
         if (b->size < need)
             continue;
 
@@ -156,6 +167,7 @@ void *kmalloc(size_t size)
             kheap_hdr_t *rest = (kheap_hdr_t *)((uint8_t *)b + need);
             rest->size  = b->size - need;
             rest->free  = 1;
+            rest->magic = KHEAP_MAGIC;
             rest->prev  = NULL;
             rest->next  = NULL;
             set_footer(rest);
@@ -203,6 +215,18 @@ void kfree(void *p)
         return;
 
     kheap_hdr_t *b = (kheap_hdr_t *)((uint8_t *)p - HDR_SIZE);
+    if (b->magic != KHEAP_MAGIC || b->free ||
+        b->size < KHEAP_MIN_BLOCK ||
+        (uint8_t *)b + b->size > g_base + g_size) {
+        dbg_puts("KHEAP: bad free at ");
+        dbg_puts_hex((uint64_t)(uintptr_t)p);
+        dbg_puts(" (size=");
+        dbg_puts_hex(b->size);
+        dbg_puts(" free=");
+        dbg_puts_dec(b->free);
+        dbg_puts(")\r\n");
+        panic("kheap: bad free (double free or corrupted header)");
+    }
 
     /* Coalesce forward: merge with the next block if it is free and inside
      * the heap region. */
@@ -285,6 +309,39 @@ void kheap_self_test(void)
         ok = (e != NULL);
         if (e)
             kfree(e);
+    }
+
+    /* Churn: hundreds of variable-size allocations live at once, every
+     * one filled with its own pattern, then freed in random order.  This
+     * is what shook the coalesce arithmetic out of hiding when the ACPI
+     * subsystem started allocating in earnest. */
+    if (ok) {
+        enum { CHURN = 300 };
+        static void *slots[CHURN];
+        static uint32_t lens[CHURN];
+        unsigned live = 0;
+        uint32_t seed = 0x1234567;
+        for (int round = 0; round < 3 && ok; round++) {
+            for (int i = 0; i < CHURN && ok; i++) {
+                seed = seed * 1103515245u + 12345u;
+                uint32_t len = 24 + (seed >> 16) % 512;
+                slots[i] = kmalloc(len);
+                if (!slots[i]) { ok = 0; break; }
+                lens[i] = len;
+                memset(slots[i], (uint8_t)(i & 0xFF), len);
+                live++;
+            }
+            for (int i = 0; i < CHURN && ok; i++) {
+                uint8_t *q = slots[i];
+                for (uint32_t j = 0; j < lens[i]; j++)
+                    if (q[j] != (uint8_t)(i & 0xFF)) { ok = 0; break; }
+                kfree(slots[i]);
+                slots[i] = NULL;
+                live--;
+            }
+        }
+        if (ok && live)
+            ok = 0;
     }
 
     dbg_puts(ok ? "ok\r\n" : "FAIL\r\n");
