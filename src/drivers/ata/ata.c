@@ -530,6 +530,16 @@ static const vfs_ops_t g_bdev_ops = {
  * Phases per the T13 spec: select, wait not-BSY, feature/bytecount,
  * PACKET command, wait for the CDB-delivery DRQ, write the CDB, then wait
  * for the data DRQ (a CD spin-up can take seconds on first access). */
+static void atapi_soft_reset(const ata_disk_t *d)
+{
+    outb(d->ctrl, 0x04);                 /* SRST */
+    ata_delay400(d);
+    ata_delay400(d);
+    outb(d->ctrl, 0);
+    ata_delay400(d);
+    ata_wait_ready(d);
+}
+
 static int atapi_packet_read(const ata_disk_t *d, uint8_t *pkt,
                              uint16_t nbytes, uint8_t *buf)
 {
@@ -589,6 +599,23 @@ abort:
     dbg_puts(" cmd=");
     dbg_puts_hexn(pkt[0], 2);
     dbg_puts("\r\n");
+    atapi_soft_reset(d);                 /* clear the stuck error state */
+    {
+        /* REQUEST SENSE: the ASC/ASCQ pair names the exact reason
+         * (0x24 invalid field in CDB, 0x21 LBA out of range, ...) */
+        uint8_t spkt[12] = { 0x03, 0, 0, 0, 18, 0 };
+        uint8_t sense[18];
+        memset(sense, 0, sizeof sense);
+        if (atapi_packet_read(d, spkt, 18, sense) == 0) {
+            dbg_puts("ATAPI: sense SK=");
+            dbg_puts_hexn(sense[2] & 0x0F, 2);
+            dbg_puts(" ASC=");
+            dbg_puts_hexn(sense[12], 2);
+            dbg_puts(" ASCQ=");
+            dbg_puts_hexn(sense[13], 2);
+            dbg_puts("\r\n");
+        }
+    }
     return -1;
     {
         /* REQUEST SENSE: the ASC/ASCQ pair names the reason exactly */
@@ -605,6 +632,7 @@ abort:
             dbg_puts("\r\n");
         }
     }
+    return -1;
 timeout:
     dbg_puts("ATAPI: timeout cmd=");
     dbg_puts_hexn(pkt[0], 2);
