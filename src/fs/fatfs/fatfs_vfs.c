@@ -166,6 +166,10 @@ int fatfs_mount_bdev(const char *path, struct vfs_node *dev, uint64_t sectors)
     if (fatfs_attach(dev, sectors) < 0)
         return -E_NODEV;
 
+    /* Invalidate the sector window before the first mount: a zeroed FATFS
+     * object reads as "sector 0 already cached", and check_fs would then
+     * inspect a zero-filled window instead of the boot sector. */
+    g_fat.winsect = (LBA_t)-1;
     FRESULT r = f_mount(&g_fat, "", 1);   /* 1 = mount immediately */
     if (r != FR_OK) {
         fatfs_detach();

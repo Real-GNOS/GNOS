@@ -77,7 +77,7 @@ sleep 1
 # FAT32 mount check: attached as -device ide-hd (NOT if=ide,index=1 -- that
 # collides with the CD-ROM and the BIOS then finds no bootable disk).
 mkdir -p /mnt/fat
-/sbin/mount -t vfat /dev/sdb1 /mnt/fat > /tmp/fat.out 2>&1
+/bin/mount -t vfat /dev/sda /mnt/fat > /tmp/fat.out 2>&1
 echo "mount_exit=$?" >> /tmp/fat.out
 /usr/bin/ls -l /mnt/fat >> /tmp/fat.out 2>&1
 /usr/bin/cat /mnt/fat/HELLO.TXT >> /tmp/fat.out 2>&1

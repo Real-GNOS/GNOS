@@ -70,6 +70,30 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
     int32_t n = g_fat_dev->ops->read(g_fat_dev, off, buff, len);
     if (n < 0)
         return RES_ERROR;
+    {
+        /* TEMP: first six reads: offset, length, sig when page-aligned */
+        static int calls;
+        if (calls < 6) {
+            calls++;
+            dbg_puts("FATDISK[");
+            dbg_puts_dec((uint32_t)calls);
+            dbg_puts("] off=");
+            dbg_puts_hex(off);
+            dbg_puts(" n=");
+            dbg_puts_dec((uint32_t)n);
+            if (off % 512 == 0 && n >= 512) {
+                dbg_puts(" sig:");
+                dbg_puts_hexn(buff[510], 2);
+                dbg_puts_hexn(buff[511], 2);
+                dbg_puts(" oem:");
+                for (int i = 3; i < 11; i++) {
+                    char c[2] = { (char)buff[i], 0 };
+                    dbg_puts(c);
+                }
+            }
+            dbg_puts("\r\n");
+        }
+    }
     /* A short read means the device ended before the volume did; zero-fill
      * the rest so FatFs sees a gap rather than stale buffer contents. */
     if ((uint32_t)n < len)
