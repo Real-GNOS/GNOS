@@ -66,6 +66,14 @@ sleep 1
 /usr/bin/cat /proc/slabinfo > /tmp/slab.out 2>&1
 /bin/dbgcat.elf /tmp/slab.out
 
+# network batch-3 checks: fragmented loopback ping + proc tables
+/bin/nettest > /tmp/net.out 2>&1
+/bin/dbgcat.elf /tmp/net.out
+/usr/bin/cat /proc/net/arp > /tmp/arp.out 2>&1
+/usr/bin/cat /proc/net/udp > /tmp/udp.out 2>&1
+/bin/dbgcat.elf /tmp/arp.out
+/bin/dbgcat.elf /tmp/udp.out
+
 # apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
 /sbin/apk.static --version >/tmp/apk.out 2>&1
 /sbin/apk.static update >>/tmp/apk.out 2>&1

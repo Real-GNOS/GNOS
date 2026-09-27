@@ -14,6 +14,7 @@
 #include "kstring.h"
 #include "proc.h"
 #include "timer.h"
+#include "heap.h"
 #include "debugcon.h"
 
 /* ---- interfaces -------------------------------------------------------- */
@@ -415,9 +416,85 @@ static int loop_enqueue(const uint8_t *packet, uint16_t len)
 }
 
 /* ---- IPv4 -------------------------------------------------------------- */
-#define IP_HDR_LEN 20
 
 static uint16_t g_ip_id;
+
+uint16_t net_next_ip_id(void)
+{
+    return ++g_ip_id;
+}
+
+/* ---- IP reassembly (RFC 791) ---------------------------------------------
+ * Fragments land in a slot keyed by (src, dst, id, proto); each slot owns a
+ * payload buffer and a bitmap of received 8-byte blocks.  The datagram is
+ * complete when every block below `total - ihl` has arrived.  Unfinished
+ * datagrams expire after 30 seconds (net_tick sweeps the table). */
+#define IPF_SLOTS   8
+#define IPF_MAX     65535               /* the largest IP datagram         */
+#define IPF_LIFE_TICKS (30 * 100)       /* 30 s at 100 Hz                  */
+
+typedef struct {
+    int      used;
+    uint32_t src, dst;
+    uint16_t id;
+    uint8_t  proto;
+    uint64_t stamp;                  /* last fragment arrival            */
+    uint8_t *data;                   /* payload buffer, kmalloc'd        */
+    uint32_t dlen;                   /* allocated bytes                  */
+    uint16_t total;                  /* total payload length, 0 unknown  */
+    uint32_t got;                    /* payload bytes received so far    */
+    uint8_t *holes;                  /* one byte per 8-byte block        */
+    uint32_t nblocks;
+} ipf_t;
+
+static ipf_t g_ipf[IPF_SLOTS];
+
+static void ipf_free(ipf_t *f)
+{
+    if (f->data)
+        kfree(f->data);
+    if (f->holes)
+        kfree(f->holes);
+    memset(f, 0, sizeof(*f));
+}
+
+static ipf_t *ipf_find(uint32_t src, uint32_t dst, uint16_t id, uint8_t proto)
+{
+    for (int i = 0; i < IPF_SLOTS; i++) {
+        ipf_t *f = &g_ipf[i];
+        if (f->used && f->src == src && f->dst == dst &&
+            f->id == id && f->proto == proto)
+            return f;
+    }
+    return NULL;
+}
+
+static ipf_t *ipf_slot(uint32_t src, uint32_t dst, uint16_t id, uint8_t proto)
+{
+    ipf_t *f = ipf_find(src, dst, id, proto);
+    if (f)
+        return f;
+    for (int i = 0; i < IPF_SLOTS; i++) {
+        if (!g_ipf[i].used) {
+            f = &g_ipf[i];
+            memset(f, 0, sizeof(*f));
+            f->used = 1;
+            f->src = src; f->dst = dst; f->id = id; f->proto = proto;
+            f->stamp = timer_ticks();
+            return f;
+        }
+    }
+    return NULL;                         /* table full: oldest will expire */
+}
+
+/* Expire unfinished datagrams; called from net_tick. */
+static void ipf_gc(void)
+{
+    uint64_t now = timer_ticks();
+    for (int i = 0; i < IPF_SLOTS; i++)
+        if (g_ipf[i].used && now - g_ipf[i].stamp >= IPF_LIFE_TICKS)
+            ipf_free(&g_ipf[i]);
+}
 
 int net_is_local(uint32_t dst)
 {
@@ -476,21 +553,21 @@ static int ip_transmit(uint32_t nexthop, const uint8_t *packet, uint16_t len)
     return -E_NOBUFS;
 }
 
-int net_ip_output(uint32_t dst, uint8_t proto, const void *payload, uint16_t len)
+/* Build one IP datagram and send it (loopback or the wire).  All the
+ * header assembly lives here so the fragmentation path below can reuse
+ * it with explicit id/flags. */
+static int ip_send_one(uint32_t dst, uint8_t proto, uint16_t id,
+                       uint16_t frag, const void *payload, uint16_t len)
 {
     static uint8_t packet[NET_MTU];
-
-    if ((uint32_t)len + IP_HDR_LEN > NET_MTU)
-        return -E_MSGSIZE;
-
     uint32_t src = net_route_src(dst);
     uint16_t total = (uint16_t)(IP_HDR_LEN + len);
 
     packet[0] = 0x45;                   /* IPv4, 5 words of header */
     packet[1] = 0;                      /* no DSCP, no ECN */
     net_put16(packet + 2, total);
-    net_put16(packet + 4, ++g_ip_id);
-    net_put16(packet + 6, 0x4000);      /* don't fragment, offset 0 */
+    net_put16(packet + 4, id);
+    net_put16(packet + 6, frag);
     packet[8]  = 64;                    /* TTL */
     packet[9]  = proto;
     net_put16(packet + 10, 0);          /* checksum, filled in below */
@@ -521,13 +598,70 @@ int net_ip_output(uint32_t dst, uint8_t proto, const void *payload, uint16_t len
     return ip_transmit(nexthop, packet, total);
 }
 
+int net_ip_output(uint32_t dst, uint8_t proto, const void *payload, uint16_t len)
+{
+    /* Fits in one datagram: the common path, no fragmentation. */
+    if ((uint32_t)len + IP_HDR_LEN <= NET_MTU)
+        return ip_send_one(dst, proto, ++g_ip_id, 0x4000, payload, len);
+
+    /* Too big: split into fragments whose payloads are multiples of 8
+     * (IP offsets count 8-byte blocks).  Every fragment but the last
+     * carries MF; each shares the datagram id so the far end can
+     * reassemble. */
+    uint16_t chunk = (uint16_t)(((NET_MTU - IP_HDR_LEN) / 8) * 8);
+    uint16_t id = ++g_ip_id;
+    uint16_t off = 0;
+    while (off < len) {
+        uint16_t n = (uint16_t)((len - off) < chunk ? (len - off) : chunk);
+        uint16_t frag = (uint16_t)(off / 8) |
+                        ((uint16_t)(off + n < len) ? 0x2000 : 0);
+        int r = ip_send_one(dst, proto, id, frag,
+                            (const uint8_t *)payload + off, n);
+        if (r < 0)
+            return r;
+        off = (uint16_t)(off + n);
+    }
+    return len;
+}
+
 /* ---- ICMP -------------------------------------------------------------- */
 #define ICMP_ECHO_REPLY   0
 #define ICMP_ECHO_REQUEST 8
 
-static void icmp_input(uint32_t src, uint32_t dst, const uint8_t *msg, uint16_t len)
+/* An ICMP error quoting one of our outgoing packets: deliver it to the
+ * datagram socket that sent the quoted traffic (Linux behaviour for
+ * connected UDP), and let SO_ERROR/recv surface it once. */
+static void icmp_error_to_socket(const uint8_t *quoted)
+{
+    uint32_t qsrc = net_get32(quoted + 12);   /* we were the source       */
+    uint8_t  qproto = quoted[9];
+    (void)qsrc;
+    if (qproto != IP_PROTO_UDP)
+        return;
+    const uint8_t *u = quoted + IP_HDR_LEN;
+    uint16_t qsport = net_get16(u + 0);
+    uint16_t qdport = net_get16(u + 2);
+    uint32_t qdst = net_get32(quoted + 16);
+    sock_udp_icmp_error(qsport, qdst, qdport);
+}
+
+static void icmp_input(uint32_t src, uint32_t dst, const uint8_t *packet,
+                       uint16_t ihl, const uint8_t *msg, uint16_t len)
 {
     static uint8_t reply[NET_MTU - IP_HDR_LEN];
+    (void)dst;
+
+    if (len < 8)
+        return;
+    uint8_t type = msg[0];
+
+    if (type == 3) {                      /* destination unreachable */
+        /* msg+8 quotes the original IP header and the first 8 payload
+         * bytes; that is enough to find the socket it belongs to */
+        if (len >= 8 + IP_HDR_LEN + 8)
+            icmp_error_to_socket(msg + 8);
+        return;
+    }
 
     if (len < 8 || net_checksum(msg, len) != 0)
         return;
@@ -550,6 +684,12 @@ static void icmp_input(uint32_t src, uint32_t dst, const uint8_t *msg, uint16_t 
 }
 
 /* ---- IPv4 input -------------------------------------------------------- */
+static uint8_t proto_of_ip(const uint8_t *packet);
+static uint64_t align_up64(uint64_t v);
+static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
+                          uint16_t ihl, const uint8_t *seg, uint16_t seglen,
+                          uint16_t frag);
+
 static void ip_input(netif_t *nif, const uint8_t *packet, uint16_t len)
 {
     if (len < IP_HDR_LEN)
@@ -567,11 +707,7 @@ static void ip_input(netif_t *nif, const uint8_t *packet, uint16_t len)
     if (total < ihl || total > len)
         return;                          /* truncated, or a lying length */
 
-    /* No reassembly: a fragment is neither the whole datagram nor safe to
-     * hand up as one.  MF set or a non-zero offset means drop. */
-    if (net_get16(packet + 6) & 0x3FFF)
-        return;
-
+    uint16_t frag = net_get16(packet + 6);
     uint8_t  proto = packet[9];
     uint32_t src   = net_get32(packet + 12);
     uint32_t dst   = net_get32(packet + 16);
@@ -591,14 +727,149 @@ static void ip_input(netif_t *nif, const uint8_t *packet, uint16_t len)
     /* Raw sockets see everything, before and regardless of what the cooked
      * protocols make of it -- including the ICMP echo replies that are the
      * entire point of ping. */
+    if (frag & 0x3FFF) {
+        /* A fragment: hand it to reassembly; raw sockets see the whole
+         * datagram once it is complete, never the pieces. */
+        ip_reassemble(src, dst, packet, ihl, seg, seglen, frag);
+        return;
+    }
+
     raw_input(src, dst, proto, packet, total);
 
+    {
+        /* A fragment: neither the whole datagram nor safe to hand up as
+         * one.  It goes into reassembly, which delivers to the protocol
+         * handlers only once every hole is filled. */
+    }
+
     switch (proto) {
-    case IP_PROTO_ICMP: icmp_input(src, dst, seg, seglen); break;
-    case IP_PROTO_UDP:  udp_input(src, dst, seg, seglen);  break;
+    case IP_PROTO_ICMP: icmp_input(src, dst, packet, ihl, seg, seglen); break;
+    case IP_PROTO_UDP:  udp_input(src, dst, packet, ihl, seg, seglen);  break;
     case IP_PROTO_TCP:  tcp_input(src, dst, seg, seglen);  break;
     default: break;
     }
+}
+
+static uint8_t proto_of_ip(const uint8_t *packet);
+static uint64_t align_up64(uint64_t v);
+static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
+                          uint16_t ihl, const uint8_t *seg, uint16_t seglen,
+                          uint16_t frag);
+
+static uint8_t proto_of_ip(const uint8_t *packet)
+{
+    return packet[9];
+}
+
+static uint64_t align_up64(uint64_t v)
+{
+    return (v + 63) & ~(uint64_t)63;     /* kmalloc-friendly rounding */
+}
+
+/* Feed one fragment into the reassembly slot it belongs to; deliver the
+ * reassembled datagram when the last hole closes. */
+static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
+                          uint16_t ihl, const uint8_t *seg, uint16_t seglen,
+                          uint16_t frag)
+{
+    uint16_t id     = net_get16(packet + 4);
+    uint16_t offset = (frag & 0x1FFF) * 8;   /* payload offset in bytes  */
+    int      more   = frag & 0x2000;          /* more fragments follow    */
+    uint16_t seglen_here = (uint16_t)(net_get16(packet + 2) - ihl);
+
+    if ((uint32_t)offset + seglen > IPF_MAX)
+        return;                          /* beyond what IP allows */
+
+    ipf_t *f = ipf_slot(src, dst, id, proto_of_ip(packet));
+    if (!f)
+        return;
+    f->stamp = timer_ticks();
+
+    /* (re)size the payload buffer for this fragment's reach */
+    uint32_t need = (uint32_t)offset + seglen;
+    if (need > f->dlen) {
+        uint8_t *nd = kmalloc((uint32_t)align_up64(need));
+        if (!nd) {
+            ipf_free(f);
+            return;
+        }
+        if (f->data) {
+            memcpy(nd, f->data, f->dlen);
+            kfree(f->data);
+        }
+        uint8_t *nh = kmalloc((uint32_t)align_up64(need / 8 + 1));
+        if (!nh) {
+            kfree(nd);
+            ipf_free(f);
+            return;
+        }
+        if (f->holes) {
+            memcpy(nh, f->holes, f->nblocks);
+            kfree(f->holes);
+        }
+        memset(nh + f->nblocks, 0, (uint32_t)align_up64(need / 8 + 1) - f->nblocks);
+        f->data = nd;  f->dlen = (uint32_t)align_up64(need);
+        f->holes = nh; f->nblocks = (uint32_t)align_up64(need / 8 + 1);
+    }
+
+    /* copy the fragment in, marking its 8-byte blocks received; a
+     * re-transmitted block overwrites identical data, harmless */
+    memcpy(f->data + offset, seg, seglen);
+    for (uint32_t b = offset / 8; b < (offset + seglen + 7) / 8; b++)
+        f->holes[b] = 1;
+    f->got += seglen;
+
+    if (!more) {
+        /* The last fragment is the only one that knows where the datagram
+         * ends: its own header length counts just that fragment, so the
+         * end is offset + this fragment's payload. */
+        uint32_t end = (uint32_t)offset + seglen_here;
+        if (end > f->total && end <= IPF_MAX)
+            f->total = (uint16_t)end;
+    }
+
+    /* complete? every block of the payload must be present */
+    if (!f->total || f->got < f->total)
+        return;
+    for (uint32_t b = 0; b < (f->total + 7) / 8; b++)
+        if (!f->holes[b])
+            return;                      /* a hole remains */
+
+    uint8_t  proto = f->proto;
+    uint16_t plen  = f->total;
+    uint8_t *whole = f->data;
+    f->data = NULL; f->holes = NULL;     /* ownership moves below */
+    ipf_free(f);
+
+    /* Raw sockets get the reassembled datagram with a header rebuilt to
+     * describe it as one packet, which is what ping expects to read. */
+    {
+        uint8_t hdr[IP_HDR_LEN];
+        hdr[0] = 0x45; hdr[1] = 0;
+        net_put16(hdr + 2, (uint16_t)(IP_HDR_LEN + plen));
+        net_put16(hdr + 4, id);
+        net_put16(hdr + 6, 0);
+        hdr[8] = 64; hdr[9] = proto;
+        net_put16(hdr + 10, 0);
+        net_put32(hdr + 12, src);
+        net_put32(hdr + 16, dst);
+        net_put16(hdr + 10, net_checksum(hdr, IP_HDR_LEN));
+        uint8_t *full = kmalloc((uint32_t)(IP_HDR_LEN + plen));
+        if (full) {
+            memcpy(full, hdr, IP_HDR_LEN);
+            memcpy(full + IP_HDR_LEN, whole, plen);
+            raw_input(src, dst, proto, full, (uint16_t)(IP_HDR_LEN + plen));
+            kfree(full);
+        }
+    }
+
+    switch (proto) {
+    case IP_PROTO_ICMP: icmp_input(src, dst, whole, 0, whole, plen); break;
+    case IP_PROTO_UDP:  udp_input(src, dst, whole, 0, whole, plen);  break;
+    case IP_PROTO_TCP:  tcp_input(src, dst, whole, plen);  break;
+    default: break;
+    }
+    kfree(whole);
 }
 
 static void eth_input(const uint8_t *frame, uint16_t len)
@@ -660,6 +931,7 @@ void net_poll(void)
 
 void net_tick(void)
 {
+    ipf_gc();
     uint64_t now = timer_ticks();
 
     /* Retire stale ARP entries.  A pending one that was never answered is
@@ -716,4 +988,20 @@ void net_init(void)
         dbg_puts(", eth0 down (no NIC)");
     }
     dbg_puts("\r\n");
+}
+
+/* /proc/net/arp: snapshot the neighbour table for the procfs generator. */
+int net_arpinfo_next(int *iter, net_arpinfo_t *out)
+{
+    for (int i = *iter; i < ARP_CACHE; i++) {
+        arp_entry_t *e = &g_arp[i];
+        if (e->state != ARP_FREE) {
+            *iter = i + 1;
+            out->ip = e->ip;
+            memcpy(out->mac, e->mac, 6);
+            out->valid = (e->state == ARP_VALID);
+            return 0;
+        }
+    }
+    return -1;
 }

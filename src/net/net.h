@@ -49,6 +49,7 @@
 #define ETH_ALEN       6
 #define ETH_HDR_LEN    14
 #define NET_MTU        1500
+#define IP_HDR_LEN     20
 #define NET_FRAME_MAX  1518        /* MTU + header + 802.1Q room */
 
 #define ETH_P_IP       0x0800
@@ -239,6 +240,16 @@ uint16_t net_checksum_pseudo(uint32_t src, uint32_t dst, uint8_t proto,
  */
 int net_ip_output(uint32_t dst, uint8_t proto, const void *payload, uint16_t len);
 
+uint16_t net_next_ip_id(void);
+
+/* /proc/net/arp: iterate the neighbour table. */
+typedef struct {
+    uint32_t ip;
+    uint8_t  mac[6];
+    int      valid;          /* 1 resolved, 0 pending */
+} net_arpinfo_t;
+int net_arpinfo_next(int *iter, net_arpinfo_t *out);
+
 /* The address this machine would use as a source when talking to `dst`. */
 uint32_t net_route_src(uint32_t dst);
 
@@ -247,7 +258,8 @@ int net_is_local(uint32_t dst);
 
 /* ---- upcalls, implemented by the transport layers ---------------------- */
 /* `seg` points at the transport header; `len` is the transport length. */
-void udp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len);
+void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet,
+               uint16_t ihl, const uint8_t *seg, uint16_t len);
 void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len);
 
 /*

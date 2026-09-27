@@ -66,6 +66,12 @@
 
 void sock_init(void);
 
+/* ICMP quoted an error for one of our UDP datagrams (port unreachable). */
+void sock_udp_icmp_error(uint16_t lport, uint32_t rip, uint16_t rport);
+/* /proc/net/udp: iterate bound datagram sockets. */
+int  sock_udpinfo_next(int *iter, uint32_t *lip, uint16_t *lport,
+                       uint32_t *rip, uint16_t *rport, uint32_t *rxq);
+
 /* Create a socket; returns its index or a negative errno. */
 int  sock_create(int domain, int type, int protocol);
 
@@ -116,7 +122,8 @@ int32_t sock_node_write(struct vfs_node *n, uint64_t off, const void *buf,
                         uint32_t len);
 
 /* The upcalls net.c dispatches to, documented in net.h. */
-void udp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len);
+void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet,
+               uint16_t ihl, const uint8_t *seg, uint16_t len);
 void raw_input(uint32_t src, uint32_t dst, uint8_t proto,
                const uint8_t *packet, uint16_t total_len);
 

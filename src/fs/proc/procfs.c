@@ -31,6 +31,7 @@
 #include "module.h"
 #include "idt.h"       /* irqstat_snapshot, MSI_VECTOR_BASE */
 #include "slab.h"
+#include "sock.h"      /* sock_udpinfo_next */
 
 /* One render never exceeds this; /proc/net/dev with two interfaces is the
  * largest and comes to a few hundred bytes. */
@@ -449,6 +450,74 @@ static void gen_slabinfo(sbuf_t *s)
     }
 }
 
+/* dotted-quad, then :port in hex -- Linux writes IPv4 with the port
+ * appended as %04X, and netstat expects exactly that */
+static void sb_ipport(sbuf_t *s, uint32_t ip, uint16_t port)
+{
+    /* addresses are kept host-order internally, so the most significant
+     * byte is the first octet of the dotted quad */
+    static const char hx[] = "0123456789ABCDEF";
+    sb_dec(s, (ip >> 24) & 0xFF, 0);
+    sb_char(s, '.');
+    sb_dec(s, (ip >> 16) & 0xFF, 0);
+    sb_char(s, '.');
+    sb_dec(s, (ip >> 8) & 0xFF, 0);
+    sb_char(s, '.');
+    sb_dec(s, ip & 0xFF, 0);
+    sb_char(s, ':');
+    for (int i = 12; i >= 0; i -= 4)
+        sb_char(s, hx[(port >> i) & 0xF]);
+}
+
+/* /proc/net/udp: one line per bound datagram socket, Linux's column
+ * layout -- netstat(8) parses exactly these columns. */
+static void gen_net_udp(sbuf_t *s)
+{
+    sb_str(s, "  sl  local_address rem_address   st tx_queue rx_queue\n");
+    int it = 0, sl = 0;
+    uint32_t lip, rip, rxq;
+    uint16_t lport, rport;
+    while (sock_udpinfo_next(&it, &lip, &lport, &rip, &rport, &rxq) == 0) {
+        sb_dec(s, (uint64_t)sl, 4);
+        sb_str(s, "  ");
+        sb_ipport(s, lip, lport);
+        sb_char(s, ' ');
+        sb_ipport(s, rip, rport);
+        sb_str(s, "  07 ");
+        sb_dec(s, 0, 8);               /* tx_queue: 0 */
+        sb_char(s, ':');
+        sb_dec(s, rxq, 8);
+        sb_char(s, '\n');
+        sl++;
+    }
+}
+
+/* /proc/net/arp: the neighbour table, netstat/`route -n` format -- IP,
+ * HW type 1 (ether), flags 0x2 (complete) or 0x0 (incomplete), MAC,
+ * mask, device. */
+static void gen_net_arp(sbuf_t *s)
+{
+    sb_str(s, "IP address       HW type     Flags       HW address            Mask     Device\n");
+    int it = 0;
+    net_arpinfo_t ai;
+    while (net_arpinfo_next(&it, &ai) == 0) {
+        sb_dec(s, (ai.ip >> 24) & 0xFF, 0); sb_char(s, '.');
+        sb_dec(s, (ai.ip >> 16) & 0xFF, 0); sb_char(s, '.');
+        sb_dec(s, (ai.ip >> 8) & 0xFF, 0); sb_char(s, '.');
+        sb_dec(s, ai.ip & 0xFF, 0);
+        for (int pad = 0; pad < 8; pad++) sb_char(s, ' ');
+        sb_str(s, "0x1        ");
+        sb_str(s, ai.valid ? "0x2        " : "0x0        ");
+        static const char hx[] = "0123456789ABCDEF";
+        for (int i = 0; i < 6; i++) {
+            sb_char(s, hx[ai.mac[i] >> 4]);
+            sb_char(s, hx[ai.mac[i] & 0xF]);
+            if (i < 5) sb_char(s, ':');
+        }
+        sb_str(s, "     *        eth0\n");
+    }
+}
+
 typedef void (*proc_gen_t)(sbuf_t *s);
 
 typedef struct {
@@ -460,6 +529,8 @@ static const procfile_t g_files[] = {
     { "/proc/net/dev",      gen_net_dev       },
     { "/proc/net/route",    gen_net_route     },
     { "/proc/net/if_inet6", gen_net_if_inet6  },
+    { "/proc/net/udp",      gen_net_udp       },
+    { "/proc/net/arp",      gen_net_arp       },
     { "/proc/uptime",       gen_uptime        },
     { "/proc/meminfo",      gen_meminfo       },
     { "/proc/interrupts",   gen_interrupts    },

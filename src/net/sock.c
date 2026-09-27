@@ -354,7 +354,8 @@ int sock_getname(int s, uint32_t *ip, uint16_t *port, int peer)
 
 /* ---- UDP and raw: the wire side -------------------------------------------- */
 
-void udp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
+void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
+               const uint8_t *seg, uint16_t len)
 {
     if (len < 8)
         return;
@@ -380,9 +381,63 @@ void udp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
         sched_wake_reason(WAIT_NET);   /* wake poll()/select()/recvfrom waiters */
         return;
     }
-    /* No listener: silence.  A full stack would answer with an ICMP port
-     * unreachable, which exists mostly so that connect()ed UDP can fail
-     * early; nothing in this system relies on it. */
+    /* No listener: answer with ICMP port unreachable, quoting the original
+     * IP header plus 8 payload bytes (RFC 792).  That is what lets a
+     * connected UDP socket fail its next call with ECONNREFUSED instead of
+     * waiting out a timeout. */
+    {
+        uint8_t r[IP_HDR_LEN + 8 + IP_HDR_LEN + 8];
+        uint32_t me = net_route_src(src);
+        r[0] = 0x45; r[1] = 0;
+        net_put16(r + 2, (uint16_t)(IP_HDR_LEN + 8 + IP_HDR_LEN + 8));
+        net_put16(r + 4, net_next_ip_id());
+        net_put16(r + 6, 0);
+        r[8] = 64; r[9] = IP_PROTO_ICMP;
+        net_put16(r + 10, 0);
+        net_put32(r + 12, me);
+        net_put32(r + 16, src);
+        r[IP_HDR_LEN + 0] = 3;        /* destination unreachable */
+        r[IP_HDR_LEN + 1] = 3;        /* code 3: port unreachable */
+        net_put16(r + IP_HDR_LEN + 2, 0);   /* icmp checksum below */
+        net_put16(r + IP_HDR_LEN + 4, 0);   /* unused */
+        memcpy(r + IP_HDR_LEN + 8, packet, ihl + 8);
+        net_put16(r + IP_HDR_LEN + 2, net_checksum(r + IP_HDR_LEN,
+                                                   (uint16_t)(8 + ihl + 8)));
+        net_ip_output(src, IP_PROTO_ICMP, r, (uint16_t)(IP_HDR_LEN + 8 + ihl + 8));
+    }
+}
+
+/* /proc/net/udp support: iterate datagram sockets with a local port. */
+int sock_udpinfo_next(int *iter, uint32_t *lip, uint16_t *lport,
+                      uint32_t *rip, uint16_t *rport, uint32_t *rxq)
+{
+    for (int i = *iter; i < SOCK_MAX; i++) {
+        sock_t *s = &g_socks[i];
+        if (s->used && s->type == SOCK_DGRAM && s->lport) {
+            *iter = i + 1;
+            *lip = s->lip; *lport = s->lport;
+            *rip = s->rip; *rport = s->rport;
+            *rxq = s->rx_used;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* An ICMP destination-unreachable quoted one of our UDP packets; find the
+ * connected socket it belongs to and hand it the error. */
+void sock_udp_icmp_error(uint16_t lport, uint32_t rip, uint16_t rport)
+{
+    for (int i = 0; i < SOCK_MAX; i++) {
+        sock_t *s = &g_socks[i];
+        if (!s->used || s->type != SOCK_DGRAM || !s->connected)
+            continue;
+        if (s->lport == lport && s->rip == rip && s->rport == rport) {
+            s->error = E_CONNREFUSED;
+            sched_wake_reason(WAIT_NET);
+            return;
+        }
+    }
 }
 
 void raw_input(uint32_t src, uint32_t dst, uint8_t proto,
@@ -418,7 +473,9 @@ static int udp_sendto(sock_t *s, const void *buf, uint32_t len,
         return -E_DESTADDRREQ;
     if (is_broadcast_addr(ip) && !s->broadcast)
         return -E_PERM;
-    if (len > NET_MTU - 20 - 8)
+    /* A UDP datagram larger than one frame is not an error: IP fragments
+     * it.  Only what IPv4 cannot represent is refused. */
+    if (len > 65535 - 20 - 8)
         return -E_MSGSIZE;
     int e = udp_ensure_bound(s);
     if (e)
@@ -563,7 +620,9 @@ int sock_sendto(int s, const void *buf, uint32_t len, int flags,
     if (sk->type == SOCK_RAW) {
         if (!ip)
             return -E_DESTADDRREQ;
-        if (len > NET_MTU - 20)
+        /* Bigger than one datagram is legal -- net_ip_output fragments;
+         * only a datagram the IP layer cannot represent is too big. */
+        if (len > 65535 - 20)
             return -E_MSGSIZE;
         int e = net_ip_output(ip, (uint8_t)sk->protocol, buf, (uint16_t)len);
         return e ? e : (int)len;
@@ -611,6 +670,13 @@ int sock_recvfrom(int s, void *buf, uint32_t len, int flags,
         return -E_BADF;
 
     if (sk->type == SOCK_DGRAM || sk->type == SOCK_RAW) {
+        /* An ICMP error quoted our traffic: fail the next call with it,
+         * Linux-style, then clear -- one error is reported once. */
+        if (sk->error) {
+            int e = sk->error;
+            sk->error = 0;
+            return -e;
+        }
         SOCK_WAIT_LOOP(sk, (sk->rx_used > 0), 0);
         return (int)ring_pop(sk, ip, port, buf, len, flags & MSG_PEEK);
     }
