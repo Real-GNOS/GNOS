@@ -897,11 +897,6 @@ check-hdrs:
 	echo "check-hdrs: header basenames are unique"
 
 
-# The ACPICA OSL needs its own flags (see ACPICA_CFLAGS above).
-	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
-
-	$(CC) $(KCFLAGS) $(ACPICA_CFLAGS) $(DEPFLAGS) -c -o $@ $<
-
 # FatFs core: vendored (pruned from the auto vpath), so it needs an explicit
 # rule.  The port layer beside it (src/fs/fatfs) is ordinary kernel code.
 $(BUILD)/ff.o: src/vendor/fatfs/source/ff.c | $(BUILD)

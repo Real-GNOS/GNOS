@@ -11,8 +11,9 @@ way.
 ```sh
 make                # GNOSKr.elf + initrd + ISO
 make guistart       # boot in a QEMU GTK window, log tee'd to build/dbg.log
-make headless       # no window, full debugcon capture -- the CI stance
-make test           # headless self-test with PASS lines + snapshot
+make headless       # no window, full debugcon capture
+make test           # 20s headless self-test: dumps PASS/FAIL, asserts no FAIL
+make check          # one-stop "is this commit ok": check-format + check-hdrs + test
 ```
 
 Kernel changes are only acceptable if `make headless; grep PASS build/dbg.log`
@@ -22,9 +23,9 @@ blocks the merge.
 ## 2. The code contract
 
 - **One contract only: the Linux/x86_64 syscall ABI.**  Syscall numbers,
-  register conventions and negative errno all live in `src/shared/sysnum.h`,
+  register conventions and negative errno all live in `src/include/uapi/linux/sysnum.h`,
   shared verbatim by kernel and userland.  Do not shadow it.
-- Adding a syscall is: assign a number in `src/shared/sysnum.h`, implement it in
+- Adding a syscall is: assign a number in `src/include/uapi/linux/sysnum.h`, implement it in
   `src/kernel/syscall.c`, then prove it with a minimal userland caller in the
   initrd.
 - Return Linux-compatible negative errno, never ad-hoc numbers.
