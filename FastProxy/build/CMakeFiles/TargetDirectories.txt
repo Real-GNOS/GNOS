@@ -1,7 +1,0 @@
-/home/elaina/gnos/FastProxy/build/CMakeFiles/fastproxy_core.dir
-/home/elaina/gnos/FastProxy/build/CMakeFiles/fastproxy.dir
-/home/elaina/gnos/FastProxy/build/CMakeFiles/fp_tests_ir.dir
-/home/elaina/gnos/FastProxy/build/CMakeFiles/fp_tests_parser.dir
-/home/elaina/gnos/FastProxy/build/CMakeFiles/test.dir
-/home/elaina/gnos/FastProxy/build/CMakeFiles/edit_cache.dir
-/home/elaina/gnos/FastProxy/build/CMakeFiles/rebuild_cache.dir

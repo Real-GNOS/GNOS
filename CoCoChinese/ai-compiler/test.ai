@@ -1,8 +1,0 @@
-Sorry, eh?
-//eh simple loop test
-D. [ [baiun: _x=(0)]; ] ]
-revolve: [_x < 5] {
-D. [ [shoutToTheVoid:～「x = _x」; ] ]
-D. [ [baiun: _x=(_x + 1)]; ] ]
-}
-//eh done

@@ -1,6 +1,0 @@
-[submodule "riscof/riscv-arch-test"]
-	path = riscof/riscv-arch-test
-	url = https://github.com/riscv/riscv-arch-test.git
-[submodule "riscv_arch_tests"]
-	path = riscv_arch_tests
-	url = https://github.com/tenstorrent/riscv_arch_tests.git

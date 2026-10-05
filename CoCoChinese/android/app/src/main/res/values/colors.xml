@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <color name="cocokalo_blue">#FF00A1D6</color>
-    <color name="cocokalo_pink">#FFFB7299</color>
-    <color name="text_primary">#FF212121</color>
-    <color name="text_secondary">#FF757575</color>
-    <color name="background">#FFF5F5F5</color>
-    <color name="surface">#FFFFFFFF</color>
-</resources>

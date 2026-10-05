@@ -1,2 +1,0 @@
-/usr/bin/ar qc libfastproxy_core.a CMakeFiles/fastproxy_core.dir/src/ir.cpp.o CMakeFiles/fastproxy_core.dir/src/parser.cpp.o CMakeFiles/fastproxy_core.dir/src/generator.cpp.o CMakeFiles/fastproxy_core.dir/src/net.cpp.o CMakeFiles/fastproxy_core.dir/src/adapter.cpp.o CMakeFiles/fastproxy_core.dir/src/tls.cpp.o
-/usr/bin/ranlib libfastproxy_core.a

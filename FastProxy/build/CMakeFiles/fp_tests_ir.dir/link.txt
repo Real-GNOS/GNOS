@@ -1,1 +1,0 @@
-/usr/bin/c++ -g -Wl,--dependency-file=CMakeFiles/fp_tests_ir.dir/link.d CMakeFiles/fp_tests_ir.dir/tests/test_ir.cpp.o -o fp_tests_ir  libfastproxy_core.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so

@@ -1,1 +1,0 @@
-/usr/bin/c++ -g -Wl,--dependency-file=CMakeFiles/fastproxy.dir/link.d CMakeFiles/fastproxy.dir/src/main.cpp.o CMakeFiles/fastproxy.dir/src/proxy.cpp.o CMakeFiles/fastproxy.dir/src/reverse.cpp.o CMakeFiles/fastproxy.dir/src/adapt.cpp.o -o fastproxy  libfastproxy_core.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so

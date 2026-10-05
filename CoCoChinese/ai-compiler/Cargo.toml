@@ -1,7 +1,0 @@
-[package]
-name = "aifolia"
-version = "0.2.0"
-edition = "2021"
-description = "The Aifolia Programming Language"
-authors = ["Andrew Dri"]
-license = "MIT"

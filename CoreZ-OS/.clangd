@@ -1,6 +1,0 @@
-CompileFlags:
-  Add:
-    - "-I${workspace}/src/kernel/lib/user"
-    - "-I${workspace}/src/kernel/lib/str"
-    - "-I${workspace}/src/kernel/include"
-    - "-I${workspace}/src/kernel/include/asm"

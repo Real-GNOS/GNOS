@@ -1,9 +1,0 @@
-mainmenu "CoreZ Kernel Configuration"
-
-source "arch/Kconfig"
-
-menu "Kernel features"
-
-source "kernel/Kconfig"
-
-endmenu
