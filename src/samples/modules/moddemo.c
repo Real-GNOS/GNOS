@@ -39,8 +39,8 @@ EXPORT_SYMBOL(moddemo_ticks);
 int init_module(void)
 {
     load_ticks = timer_ticks();
-    calls = 0;
-    int slot = subsys_register("moddemo", NULL, SUBSYS_CLASS_OTHER, 0, 0);
+    calls      = 0;
+    int slot   = subsys_register("moddemo", NULL, SUBSYS_CLASS_OTHER, 0, 0);
     if (slot < 0)
         return -E_IO;
     subsys_set_state(slot, SUBSYS_STATE_LIVE);

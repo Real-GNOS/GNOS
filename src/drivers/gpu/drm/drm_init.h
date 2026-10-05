@@ -40,10 +40,13 @@ void drm_vfs_close_cb(void *current);
 int     drm_dev_open(void *node, uint64_t flags, void **private_data);
 void    drm_dev_release(void *node, void *private_data);
 int     drm_dev_file_ioctl(void *ctx, void *private_data, uint64_t flags, size_t req, void *arg);
-int64_t drm_dev_file_read(void *ctx, void *private_data, uint64_t flags, void *addr, size_t offset, size_t size);
-int64_t drm_dev_file_write(void *ctx, void *private_data, uint64_t flags, const void *addr, size_t offset, size_t size);
+int64_t drm_dev_file_read(void *ctx, void *private_data, uint64_t flags, void *addr, size_t offset,
+                          size_t size);
+int64_t drm_dev_file_write(void *ctx, void *private_data, uint64_t flags, const void *addr,
+                           size_t offset, size_t size);
 int     drm_dev_file_poll(void *ctx, void *private_data, uint64_t flags, size_t events);
-void   *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t size, int flags, struct vm_area *vma);
+void   *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t size, int flags,
+                          struct vm_area *vma);
 
 /* Simpler per-file callbacks (used where no ctx/private_data split exists). */
 int64_t drm_dev_read(void *file, void *addr, size_t offset, size_t size);
@@ -55,5 +58,24 @@ void   *drm_dev_mmap(void *file, size_t offset, size_t size, int flags);
 /* Software scanout hooks (called from the timer / refresh thread). */
 void drm_dummy_refresh(void);
 void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep);
+
+/*
+ * Where a committed framebuffer actually ends up.
+ *
+ * By default that is the console framebuffer the bootloader set up, shared
+ * with fbcon.  A hardware driver that owns its own VRAM (see drm_svga.c)
+ * calls drm_scanout_set() during probe and the copy path starts writing
+ * there instead — same loop, different destination.
+ */
+struct drm_scanout {
+    volatile uint32_t *base;
+    uint32_t           w, h, pitch;
+};
+
+/* Hand the copy path a target.  Pass base == NULL to go back to fbcon. */
+int drm_scanout_set(volatile uint32_t *base, uint32_t w, uint32_t h, uint32_t pitch);
+
+/* Resolve the current target; falls back to fbcon's geometry when unset. */
+void drm_scanout_get(volatile uint32_t **base, uint32_t *w, uint32_t *h, uint32_t *pitch);
 
 #endif /* INCLUDE_DRM_DRM_INIT_H_ */

@@ -35,11 +35,11 @@
 /* ---- eventfd ------------------------------------------------------------ */
 #define EFD_SEMAPHORE 0x0001
 #define EFD_CLOEXEC   0x80000
-#define EFD_NONBLOCK  O_NONBLOCK        /* 0x800, same as Linux */
+#define EFD_NONBLOCK  O_NONBLOCK /* 0x800, same as Linux */
 
 typedef struct {
     uint64_t count;
-    int      flags;               /* EFD_* state, mirrored at open */
+    int      flags; /* EFD_* state, mirrored at open */
 } eventfd_t;
 
 static int32_t eventfd_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
@@ -56,11 +56,11 @@ static int32_t eventfd_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
                 v = 1;
                 e->count--;
             } else {
-                v = e->count;
+                v        = e->count;
                 e->count = 0;
             }
             memcpy(buf, &v, 8);
-            sched_wake_reason(WAIT_PIPE);   /* writers may be parked on overflow */
+            sched_wake_reason(WAIT_PIPE); /* writers may be parked on overflow */
             return 8;
         }
         if (e->flags & EFD_NONBLOCK)
@@ -69,8 +69,7 @@ static int32_t eventfd_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
     }
 }
 
-static int32_t eventfd_write(vfs_node_t *n, uint64_t off, const void *buf,
-                             uint32_t len)
+static int32_t eventfd_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)off;
     if (len < 8)
@@ -120,9 +119,9 @@ static const vfs_ops_t g_eventfd_ops = {
 
 /* ---- memfd -------------------------------------------------------------- */
 typedef struct {
-    uint64_t size;               /* bytes the fd says it has */
-    uint64_t npages;             /* pages actually backed */
-    uint64_t first;              /* physical address of page 0 */
+    uint64_t size;   /* bytes the fd says it has */
+    uint64_t npages; /* pages actually backed */
+    uint64_t first;  /* physical address of page 0 */
 } memfd_t;
 
 static void *memfd_virt(memfd_t *m, uint64_t off)
@@ -155,8 +154,7 @@ static int memfd_grow(memfd_t *m, uint64_t len)
     {
         uint64_t keep = m->npages * PAGE_SIZE;
         if (keep < need * PAGE_SIZE)
-            memset((uint8_t *)pmm_virt(span) + keep, 0,
-                   (size_t)(need * PAGE_SIZE - keep));
+            memset((uint8_t *)pmm_virt(span) + keep, 0, (size_t)(need * PAGE_SIZE - keep));
     }
     m->first  = span;
     m->npages = need;
@@ -173,8 +171,7 @@ static int32_t memfd_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return (int32_t)want;
 }
 
-static int32_t memfd_write(vfs_node_t *n, uint64_t off, const void *buf,
-                           uint32_t len)
+static int32_t memfd_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     memfd_t *m = (memfd_t *)n->priv;
     if (memfd_grow(m, off + len) < 0)
@@ -188,7 +185,7 @@ static int32_t memfd_write(vfs_node_t *n, uint64_t off, const void *buf,
 static int memfd_truncate(vfs_node_t *n, uint64_t len)
 {
     memfd_t *m = (memfd_t *)n->priv;
-    int e = memfd_grow(m, len);
+    int      e = memfd_grow(m, len);
     if (e < 0)
         return e;
     /* Freshly extended pages must read as zero, the way shmem's ftruncate
@@ -196,14 +193,12 @@ static int memfd_truncate(vfs_node_t *n, uint64_t len)
     uint64_t old_rounded = (m->size + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
     uint64_t new_rounded = (len + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
     if (new_rounded > old_rounded)
-        memset((uint8_t *)memfd_virt(m, 0) + old_rounded, 0,
-               (size_t)(new_rounded - old_rounded));
+        memset((uint8_t *)memfd_virt(m, 0) + old_rounded, 0, (size_t)(new_rounded - old_rounded));
     m->size = len;
     return 0;
 }
 
-static int memfd_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys,
-                      uint64_t *size)
+static int memfd_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys, uint64_t *size)
 {
     memfd_t *m = (memfd_t *)n->priv;
     /* mmap() on a file that has not been written yet must work: wl_shm
@@ -219,7 +214,7 @@ static int memfd_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys,
 static int memfd_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
     (void)n;
-    *revents = (int16_t)(events & (POLLIN | POLLOUT));   /* a file: always ready */
+    *revents = (int16_t)(events & (POLLIN | POLLOUT)); /* a file: always ready */
     return 0;
 }
 
@@ -261,7 +256,7 @@ int anon_bind(int h, int cloexec)
 
 int64_t sys_memfd_create(uint64_t name, uint64_t flags)
 {
-    (void)name;                              /* Linux uses it for /proc only */
+    (void)name; /* Linux uses it for /proc only */
     if (flags & ~(MFD_CLOEXEC | MFD_ALLOW_SEALING))
         return -E_INVAL;
 
@@ -320,8 +315,6 @@ int anonfd_is_eventfd(const vfs_node_t *n)
 void anonfd_set_nonblock(vfs_node_t *n, int nb)
 {
     if (anonfd_is_eventfd(n))
-        ((eventfd_t *)n->priv)->flags = nb ? ((eventfd_t *)n->priv)->flags |
-                                             O_NONBLOCK
-                                           : ((eventfd_t *)n->priv)->flags &
-                                             ~O_NONBLOCK;
+        ((eventfd_t *)n->priv)->flags = nb ? ((eventfd_t *)n->priv)->flags | O_NONBLOCK
+                                           : ((eventfd_t *)n->priv)->flags & ~O_NONBLOCK;
 }

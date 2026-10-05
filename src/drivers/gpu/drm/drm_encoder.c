@@ -25,22 +25,28 @@
 #include "vfs.h"
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 /* From drm_mode_object.c. */
-extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type);
+extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj,
+                                     uint32_t type);
 
-int drm_encoder_init(struct drm_device *dev, struct drm_encoder *encoder, void *funcs, int encoder_type, const char *name)
+int drm_encoder_init(struct drm_device *dev, struct drm_encoder *encoder, void *funcs,
+                     int encoder_type, const char *name)
 {
     int ret;
 
     (void)name;
 
-    if (dev == NULL || encoder == NULL) { return -EINVAL; }
+    if (dev == NULL || encoder == NULL) {
+        return -EINVAL;
+    }
 
     ret = drm_mode_object_idr_alloc(dev, &encoder->base, DRM_MODE_OBJECT_ENCODER);
-    if (ret != 0) { return ret; }
+    if (ret != 0) {
+        return ret;
+    }
 
     ilist_insert_after(&dev->mode_config.encoder_list, &encoder->head);
 
@@ -68,10 +74,14 @@ int drm_mode_getencoder(struct drm_device *dev, void *data, struct drm_file *fil
     struct drm_mode_object      *obj;
     struct drm_encoder          *encoder;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     obj = drm_mode_object_find(dev, file_priv, req->encoder_id, DRM_MODE_OBJECT_ENCODER);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
     encoder = container_of(obj, struct drm_encoder, base);
 
     req->encoder_type    = encoder->encoder_type;
@@ -87,7 +97,9 @@ void drm_encoder_cleanup(struct drm_encoder *encoder)
 {
     struct drm_device *dev;
 
-    if (encoder == NULL) { return; }
+    if (encoder == NULL) {
+        return;
+    }
 
     dev = encoder->dev;
 
@@ -98,6 +110,8 @@ void drm_encoder_cleanup(struct drm_encoder *encoder)
         drm_idr_remove(&dev->mode_config.object_idr, encoder->base.id);
         spin_unlock(&dev->mode_config.idr_mutex);
 
-        if (dev->mode_config.num_encoder > 0) { dev->mode_config.num_encoder--; }
+        if (dev->mode_config.num_encoder > 0) {
+            dev->mode_config.num_encoder--;
+        }
     }
 }

@@ -19,7 +19,7 @@
 #include <stdint.h>
 
 #include "procfs.h"
-#include "sysnum.h"     /* DT_DIR / DT_REG, the getdents64 file types */
+#include "sysnum.h" /* DT_DIR / DT_REG, the getdents64 file types */
 #include "kstring.h"
 #include "net.h"
 #include "pmm.h"
@@ -29,9 +29,9 @@
 #include "cgroup.h"
 #include "subsys.h"
 #include "module.h"
-#include "idt.h"       /* irqstat_snapshot, MSI_VECTOR_BASE */
+#include "idt.h" /* irqstat_snapshot, MSI_VECTOR_BASE */
 #include "slab.h"
-#include "sock.h"      /* sock_udpinfo_next */
+#include "sock.h" /* sock_udpinfo_next */
 
 /* One render never exceeds this; /proc/net/dev with two interfaces is the
  * largest and comes to a few hundred bytes. */
@@ -93,18 +93,20 @@ static void sb_hex(sbuf_t *s, uint64_t v, int digits, int upper)
  */
 static void sb_route_addr(sbuf_t *s, uint32_t host_ip)
 {
-    uint32_t le = ((host_ip & 0xFF) << 24) | ((host_ip & 0xFF00) << 8) |
-                  ((host_ip >> 8) & 0xFF00) | ((host_ip >> 24) & 0xFF);
+    uint32_t le = ((host_ip & 0xFF) << 24) | ((host_ip & 0xFF00) << 8) | ((host_ip >> 8) & 0xFF00) |
+                  ((host_ip >> 24) & 0xFF);
     sb_hex(s, le, 8, 1);
 }
 
 /* ---- the generators ---------------------------------------------------- */
 static void gen_net_dev(sbuf_t *s)
 {
-    sb_str(s, "Inter-|   Receive                                                |"
-              "  Transmit\n");
-    sb_str(s, " face |bytes    packets errs drop fifo frame compressed multicast|"
-              "bytes    packets errs drop fifo colls carrier compressed\n");
+    sb_str(s,
+           "Inter-|   Receive                                                |"
+           "  Transmit\n");
+    sb_str(s,
+           " face |bytes    packets errs drop fifo frame compressed multicast|"
+           "bytes    packets errs drop fifo colls carrier compressed\n");
 
     for (int i = 0; i < NET_IF_MAX; i++) {
         netif_t *n = net_if(i);
@@ -121,21 +123,22 @@ static void gen_net_dev(sbuf_t *s)
 
         sb_dec(s, n->rx_bytes, 8);
         sb_dec(s, n->rx_packets, 8);
-        sb_dec(s, 0, 5);                  /* errs */
+        sb_dec(s, 0, 5); /* errs */
         sb_dec(s, n->rx_dropped, 5);
-        sb_str(s, "    0     0          0         0");   /* fifo..multicast */
+        sb_str(s, "    0     0          0         0"); /* fifo..multicast */
         sb_dec(s, n->tx_bytes, 9);
         sb_dec(s, n->tx_packets, 8);
-        sb_dec(s, 0, 5);                  /* errs */
+        sb_dec(s, 0, 5); /* errs */
         sb_dec(s, n->tx_dropped, 5);
-        sb_str(s, "    0     0       0          0\n");   /* fifo..compressed */
+        sb_str(s, "    0     0       0          0\n"); /* fifo..compressed */
     }
 }
 
 static void gen_net_route(sbuf_t *s)
 {
-    sb_str(s, "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask"
-              "\t\tMTU\tWindow\tIRTT\n");
+    sb_str(s,
+           "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask"
+           "\t\tMTU\tWindow\tIRTT\n");
 
     for (int i = 0; i < NET_IF_MAX; i++) {
         netif_t *n = net_if(i);
@@ -172,12 +175,12 @@ static void gen_net_route(sbuf_t *s)
  * this exists for the programs that print "which addresses do I have". */
 static void gen_net_if_inet6(sbuf_t *s)
 {
-    (void)s;                    /* no IPv6: the file exists but is empty */
+    (void)s; /* no IPv6: the file exists but is empty */
 }
 
 static void gen_uptime(sbuf_t *s)
 {
-    uint64_t ticks = timer_ticks();          /* 100 Hz, so ticks are centiseconds */
+    uint64_t ticks = timer_ticks(); /* 100 Hz, so ticks are centiseconds */
     sb_dec(s, ticks / 100, 0);
     sb_char(s, '.');
     sb_dec(s, (ticks % 100) / 10, 0);
@@ -198,8 +201,9 @@ static void gen_meminfo(sbuf_t *s)
     sb_dec(s, free_kb, 8);
     sb_str(s, " kB\nMemAvailable:   ");
     sb_dec(s, free_kb, 8);
-    sb_str(s, " kB\nBuffers:               0 kB\nCached:                0 kB\n"
-              "SwapTotal:             0 kB\nSwapFree:              0 kB\n");
+    sb_str(s,
+           " kB\nBuffers:               0 kB\nCached:                0 kB\n"
+           "SwapTotal:             0 kB\nSwapFree:              0 kB\n");
 }
 
 static void gen_version(sbuf_t *s)
@@ -259,8 +263,7 @@ static void gen_devices(sbuf_t *s)
         int seen = 0, shared = 0;
         for (int j = 0; j < subsys_count(); j++) {
             const subsys_t *e = subsys_get(j);
-            if (j == i || e->state != SUBSYS_STATE_LIVE || !e->dev[0] ||
-                e->major != d->major)
+            if (j == i || e->state != SUBSYS_STATE_LIVE || !e->dev[0] || e->major != d->major)
                 continue;
             shared = 1;
             if (j < i)
@@ -296,9 +299,9 @@ static void gen_subsystems(sbuf_t *s)
         sb_char(s, '\t');
         sb_str(s, subsys_class_name(d->cls));
         sb_char(s, '\t');
-        sb_str(s, d->state == SUBSYS_STATE_LIVE   ? "live"
-                : d->state == SUBSYS_STATE_FAILED ? "failed"
-                                                  : "registered");
+        sb_str(s, d->state == SUBSYS_STATE_LIVE     ? "live"
+                  : d->state == SUBSYS_STATE_FAILED ? "failed"
+                                                    : "registered");
         sb_char(s, '\t');
         sb_str(s, d->dev[0] ? d->dev : "-");
         sb_char(s, '\t');
@@ -315,7 +318,7 @@ static void gen_subsystems(sbuf_t *s)
  * empty when no module has ever been loaded. */
 static void gen_modules(sbuf_t *s)
 {
-    char line[128];
+    char   line[128];
     size_t n = module_format_proc(line, sizeof(line));
     for (size_t i = 0; i < n; i++)
         sb_char(s, line[i]);
@@ -326,8 +329,8 @@ static void gen_modules(sbuf_t *s)
  * controller reports hierarchy 1. */
 static void gen_cgroups(sbuf_t *s)
 {
-    static const char *const names[CG_NCTRLS] = { "cpu", "pids", "memory" };
-    int n = cg_count();
+    static const char *const names[CG_NCTRLS] = {"cpu", "pids", "memory"};
+    int                      n                = cg_count();
 
     sb_str(s, "#subsys_name\thierarchy\tnum_cgroups\tenabled\n");
     for (int i = 0; i < CG_NCTRLS; i++) {
@@ -347,7 +350,7 @@ static void gen_cgroups(sbuf_t *s)
 static void self_cgroup_line(sbuf_t *s, proc_t *p)
 {
     char line[GNUOS_PATH_MAX + 8];
-    int len = cg_proc_cgroup_line(p, line, (int)sizeof(line));
+    int  len = cg_proc_cgroup_line(p, line, (int)sizeof(line));
     if (len < 0)
         return;
     for (int i = 0; i < len; i++)
@@ -422,9 +425,10 @@ static void gen_interrupts(sbuf_t *s)
 static void gen_slabinfo(sbuf_t *s)
 {
     sb_str(s, "slabinfo - version: 2.1 (GNOS)\n");
-    sb_str(s, "# name            <active_objs> <num_objs> <objsize> "
-              "<objperslab> <pagesperslab> : tunables : slabdata\n");
-    int it = 0;
+    sb_str(s,
+           "# name            <active_objs> <num_objs> <objsize> "
+           "<objperslab> <pagesperslab> : tunables : slabdata\n");
+    int             it = 0;
     kmem_slabinfo_t si;
     while (kmem_slabinfo_next(&it, &si) == 0) {
         sb_str(s, si.name);
@@ -474,7 +478,7 @@ static void sb_ipport(sbuf_t *s, uint32_t ip, uint16_t port)
 static void gen_net_udp(sbuf_t *s)
 {
     sb_str(s, "  sl  local_address rem_address   st tx_queue rx_queue\n");
-    int it = 0, sl = 0;
+    int      it = 0, sl = 0;
     uint32_t lip, rip, rxq;
     uint16_t lport, rport;
     while (sock_udpinfo_next(&it, &lip, &lport, &rip, &rport, &rxq) == 0) {
@@ -484,7 +488,7 @@ static void gen_net_udp(sbuf_t *s)
         sb_char(s, ' ');
         sb_ipport(s, rip, rport);
         sb_str(s, "  07 ");
-        sb_dec(s, 0, 8);               /* tx_queue: 0 */
+        sb_dec(s, 0, 8); /* tx_queue: 0 */
         sb_char(s, ':');
         sb_dec(s, rxq, 8);
         sb_char(s, '\n');
@@ -498,21 +502,26 @@ static void gen_net_udp(sbuf_t *s)
 static void gen_net_arp(sbuf_t *s)
 {
     sb_str(s, "IP address       HW type     Flags       HW address            Mask     Device\n");
-    int it = 0;
+    int           it = 0;
     net_arpinfo_t ai;
     while (net_arpinfo_next(&it, &ai) == 0) {
-        sb_dec(s, (ai.ip >> 24) & 0xFF, 0); sb_char(s, '.');
-        sb_dec(s, (ai.ip >> 16) & 0xFF, 0); sb_char(s, '.');
-        sb_dec(s, (ai.ip >> 8) & 0xFF, 0); sb_char(s, '.');
+        sb_dec(s, (ai.ip >> 24) & 0xFF, 0);
+        sb_char(s, '.');
+        sb_dec(s, (ai.ip >> 16) & 0xFF, 0);
+        sb_char(s, '.');
+        sb_dec(s, (ai.ip >> 8) & 0xFF, 0);
+        sb_char(s, '.');
         sb_dec(s, ai.ip & 0xFF, 0);
-        for (int pad = 0; pad < 8; pad++) sb_char(s, ' ');
+        for (int pad = 0; pad < 8; pad++)
+            sb_char(s, ' ');
         sb_str(s, "0x1        ");
         sb_str(s, ai.valid ? "0x2        " : "0x0        ");
         static const char hx[] = "0123456789ABCDEF";
         for (int i = 0; i < 6; i++) {
             sb_char(s, hx[ai.mac[i] >> 4]);
             sb_char(s, hx[ai.mac[i] & 0xF]);
-            if (i < 5) sb_char(s, ':');
+            if (i < 5)
+                sb_char(s, ':');
         }
         sb_str(s, "     *        eth0\n");
     }
@@ -521,36 +530,35 @@ static void gen_net_arp(sbuf_t *s)
 typedef void (*proc_gen_t)(sbuf_t *s);
 
 typedef struct {
-    const char *path;           /* absolute, always beginning "/proc" */
+    const char *path; /* absolute, always beginning "/proc" */
     proc_gen_t  gen;
 } procfile_t;
 
 static const procfile_t g_files[] = {
-    { "/proc/net/dev",      gen_net_dev       },
-    { "/proc/net/route",    gen_net_route     },
-    { "/proc/net/if_inet6", gen_net_if_inet6  },
-    { "/proc/net/udp",      gen_net_udp       },
-    { "/proc/net/arp",      gen_net_arp       },
-    { "/proc/uptime",       gen_uptime        },
-    { "/proc/meminfo",      gen_meminfo       },
-    { "/proc/interrupts",   gen_interrupts    },
-    { "/proc/slabinfo",     gen_slabinfo      },
-    { "/proc/version",      gen_version       },
-    { "/proc/cmdline",      gen_cmdline       },
-    { "/proc/filesystems",  gen_filesystems   },
-    { "/proc/mounts",       gen_mounts        },
-    { "/proc/self/mounts",  gen_mounts        },
-    { "/proc/devices",      gen_devices       },
-    { "/proc/subsystems",   gen_subsystems    },
-    { "/proc/modules",      gen_modules        },
-    { "/proc/cgroups",      gen_cgroups       },
-    { "/proc/self/cgroup",  gen_self_cgroup   },
+    {"/proc/net/dev", gen_net_dev},
+    {"/proc/net/route", gen_net_route},
+    {"/proc/net/if_inet6", gen_net_if_inet6},
+    {"/proc/net/udp", gen_net_udp},
+    {"/proc/net/arp", gen_net_arp},
+    {"/proc/uptime", gen_uptime},
+    {"/proc/meminfo", gen_meminfo},
+    {"/proc/interrupts", gen_interrupts},
+    {"/proc/slabinfo", gen_slabinfo},
+    {"/proc/version", gen_version},
+    {"/proc/cmdline", gen_cmdline},
+    {"/proc/filesystems", gen_filesystems},
+    {"/proc/mounts", gen_mounts},
+    {"/proc/self/mounts", gen_mounts},
+    {"/proc/devices", gen_devices},
+    {"/proc/subsystems", gen_subsystems},
+    {"/proc/modules", gen_modules},
+    {"/proc/cgroups", gen_cgroups},
+    {"/proc/self/cgroup", gen_self_cgroup},
 };
 #define NFILES ((int)(sizeof(g_files) / sizeof(g_files[0])))
 
 /* The directories.  There are few enough to list rather than derive. */
-static const char *g_dirs[] = { "/proc", "/proc/net", "/proc/self",
-                                "/proc/self/fd", "/proc/boot" };
+static const char *g_dirs[] = {"/proc", "/proc/net", "/proc/self", "/proc/self/fd", "/proc/boot"};
 #define NDIRS ((int)(sizeof(g_dirs) / sizeof(g_dirs[0])))
 
 /* ---- blobs -------------------------------------------------------------- */
@@ -565,9 +573,9 @@ static const char *g_dirs[] = { "/proc", "/proc/net", "/proc/self",
 #define MAX_BLOBS 8
 
 typedef struct {
-    const char     *path;
-    const uint8_t  *data;
-    uint32_t        size;
+    const char    *path;
+    const uint8_t *data;
+    uint32_t       size;
 } proc_blob_t;
 
 static proc_blob_t g_blobs[MAX_BLOBS];
@@ -583,9 +591,9 @@ int procfs_add_blob(const char *path, const void *data, uint32_t size)
         return -E_NOSPC;
 
     proc_blob_t *b = &g_blobs[g_nblobs];
-    b->path = path;
-    b->data = (const uint8_t *)data;
-    b->size = size;
+    b->path        = path;
+    b->data        = (const uint8_t *)data;
+    b->size        = size;
     g_nblobs++;
     return 0;
 }
@@ -606,7 +614,7 @@ static int32_t blob_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return (int32_t)len;
 }
 
-static const vfs_ops_t g_blob_ops = { .read = blob_read, .write = NULL };
+static const vfs_ops_t g_blob_ops = {.read = blob_read, .write = NULL};
 
 /* ---- /proc/self/fd ------------------------------------------------------
  * One symlink per open descriptor of the calling process, each pointing at
@@ -617,7 +625,7 @@ static const vfs_ops_t g_blob_ops = { .read = blob_read, .write = NULL };
  * "No such file or directory" for a perfectly good terminal. */
 /* A symlink is resolved through readlink, not read; the ops exist only so
  * the node has a well-typed skeleton. */
-static const vfs_ops_t g_fdlink_ops = { .read = NULL, .write = NULL };
+static const vfs_ops_t g_fdlink_ops = {.read = NULL, .write = NULL};
 
 static int fd_node(int fd, vfs_node_t *out)
 {
@@ -634,11 +642,11 @@ static int fd_node(int fd, vfs_node_t *out)
         out->name[i] = tmp[n - 1 - i];
     out->name[n] = 0;
 
-    out->kind = VFS_SYMLINK;
-    out->ops  = &g_fdlink_ops;
-    out->e2.ino = 0x8000 + (uint32_t)orig;   /* unique per fd; ttyname()
-                                              * only wants it to match the
-                                              * target node it stat()s */
+    out->kind   = VFS_SYMLINK;
+    out->ops    = &g_fdlink_ops;
+    out->e2.ino = 0x8000 + (uint32_t)orig; /* unique per fd; ttyname()
+                                            * only wants it to match the
+                                            * target node it stat()s */
     return 0;
 }
 
@@ -681,8 +689,8 @@ static int procfs_fd_resolve(const char *path, vfs_node_t *out)
         proc_t *p = proc_current();
         memset(out, 0, sizeof(*out));
         strncpy(out->name, "exe", VFS_NAME_MAX - 1);
-        out->kind = VFS_SYMLINK;
-        out->ops  = &g_fdlink_ops;
+        out->kind   = VFS_SYMLINK;
+        out->ops    = &g_fdlink_ops;
         out->e2.ino = 0x9000;
         (void)p;
         return 0;
@@ -699,7 +707,7 @@ static int procfs_fd_resolve(const char *path, vfs_node_t *out)
         if (*p < '0' || *p > '9')
             return -E_NOENT;
         fd = fd * 10 + (*p - '0');
-        if (fd > 4096)               /* no PROC_MAX_FD in the interface */
+        if (fd > 4096) /* no PROC_MAX_FD in the interface */
             return -E_NOENT;
     }
     return fd_node(fd, out);
@@ -718,7 +726,7 @@ static int priv_pid(const void *priv)
 static int32_t procfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     static char scratch[PROC_BUF];
-    sbuf_t s = { scratch, PROC_BUF, 0 };
+    sbuf_t      s = {scratch, PROC_BUF, 0};
 
     if ((uintptr_t)n->priv & 1) {
         proc_t *p = proc_by_pid(priv_pid(n->priv));
@@ -733,7 +741,7 @@ static int32_t procfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 
     uint32_t size = (s.pos < PROC_BUF) ? s.pos : PROC_BUF;
     if (off >= size)
-        return 0;                        /* end of file */
+        return 0; /* end of file */
 
     uint32_t avail = size - (uint32_t)off;
     if (len > avail)
@@ -742,18 +750,21 @@ static int32_t procfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return (int32_t)len;
 }
 
-static const vfs_ops_t g_proc_ops = { .read = procfs_read, .write = NULL };
+static const vfs_ops_t g_proc_ops = {.read = procfs_read, .write = NULL};
 
 /* A directory's read is never called -- getdents64 goes through
  * procfs_readdir -- but the node needs non-NULL ops so an accidental read()
  * reports EISDIR-ish behaviour instead of dereferencing NULL. */
 static int32_t procdir_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
-static const vfs_ops_t g_procdir_ops = { .read = procdir_read, .write = NULL };
+static const vfs_ops_t g_procdir_ops = {.read = procdir_read, .write = NULL};
 
 /* ---- lookup ------------------------------------------------------------ */
 /* Parse "/proc/<pid>[/cgroup]" into *pid.  Returns 0 when the path is a
@@ -766,17 +777,17 @@ static int pid_path_parse(const char *path, int *pid, const char **rest)
         return -E_INVAL;
     const char *p = path + 6;
     if (*p < '0' || *p > '9')
-        return -E_NOENT;            /* not pid-shaped */
+        return -E_NOENT; /* not pid-shaped */
     uint64_t v = 0;
     while (*p >= '0' && *p <= '9') {
         v = v * 10 + (uint64_t)(*p - '0');
         if (v > (1u << 22))
-            return -E_NOENT;        /* absurd pid: give up quietly */
+            return -E_NOENT; /* absurd pid: give up quietly */
         p++;
     }
     if (!proc_by_pid((int)v))
         return -E_NOENT;
-    *pid = (int)v;
+    *pid  = (int)v;
     *rest = p;
     return 0;
 }
@@ -822,9 +833,9 @@ int procfs_resolve(const char *path, vfs_node_t *out)
      * "/proc/<pid>/cgroup" the one per-process cgroup file.  Anything else
      * below a pid dir (Linux has many files there) is not present here. */
     {
-        int pid;
+        int         pid;
         const char *rest;
-        int r = pid_path_parse(path, &pid, &rest);
+        int         r = pid_path_parse(path, &pid, &rest);
         if (r == 0) {
             memset(out, 0, sizeof(*out));
             if (rest[0] == 0) {
@@ -844,7 +855,7 @@ int procfs_resolve(const char *path, vfs_node_t *out)
             return -E_NOENT;
         }
         if (r != -E_NOENT)
-            return r;               /* not "/proc" shaped at all */
+            return r; /* not "/proc" shaped at all */
     }
 
     for (int i = 0; i < NFILES; i++) {
@@ -903,7 +914,7 @@ int procfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *typ
         if (strcmp(dirpath, g_dirs[i]) == 0)
             is_dir = 1;
     if (!is_dir) {
-        int pid;
+        int         pid;
         const char *rest;
         if (pid_path_parse(dirpath, &pid, &rest) == 0 && rest[0] == 0)
             is_dir = 1;
@@ -975,7 +986,7 @@ int procfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *typ
                     for (int w = 0; w < k; w++)
                         name[w] = tmp[k - 1 - w];
                     name[k] = 0;
-                    *type = DT_LNK;
+                    *type   = DT_LNK;
                     return 0;
                 }
             }
@@ -984,7 +995,7 @@ int procfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *typ
 
     /* A numeric pid dir lists the one per-process cgroup file. */
     {
-        int pid;
+        int         pid;
         const char *rest;
         if (pid_path_parse(dirpath, &pid, &rest) == 0 && rest[0] == 0) {
             if (index == n++) {
@@ -999,9 +1010,9 @@ int procfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *typ
     /* The top of /proc appends one directory per live process, in ascending
      * pid order, after the static entries. */
     if (strcmp(dirpath, "/proc") == 0 && index >= n) {
-        uint32_t k = index - n;         /* k-th live pid (ascending) */
-        int last = 0;
-        int best = -1;
+        uint32_t k    = index - n; /* k-th live pid (ascending) */
+        int      last = 0;
+        int      best = -1;
         for (;;) {
             best = -1;
             for (int i = 0; i < proc_capacity(); i++) {
@@ -1027,7 +1038,7 @@ int procfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *typ
         for (int w = 0; w < m; w++)
             name[w] = tmp[m - 1 - w];
         name[m] = 0;
-        *type = DT_DIR;
+        *type   = DT_DIR;
         return 0;
     }
 

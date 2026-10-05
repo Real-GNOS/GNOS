@@ -10,14 +10,12 @@
 #include "cpuid.h"
 #include "vmm.h"
 
-int64_t cpuid_syscall(uint64_t leaf, uint64_t subleaf, uint64_t a, uint64_t b,
-                      uint64_t c, uint64_t d)
+int64_t cpuid_syscall(uint64_t leaf, uint64_t subleaf, uint64_t a, uint64_t b, uint64_t c,
+                      uint64_t d)
 {
     uint32_t ea = (uint32_t)leaf, eb = 0, ec = (uint32_t)subleaf, ed = 0;
 
-    asm volatile("cpuid"
-                 : "=a"(ea), "=b"(eb), "=c"(ec), "=d"(ed)
-                 : "a"(ea), "c"(ec));
+    asm volatile("cpuid" : "=a"(ea), "=b"(eb), "=c"(ec), "=d"(ed) : "a"(ea), "c"(ec));
 
     if (a && user_ptr_ok(a, 4))
         *(uint32_t *)(uintptr_t)a = ea;

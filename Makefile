@@ -18,6 +18,27 @@ OVMF  := /usr/share/ovmf/OVMF.fd
 # `make` would never rebuild the kernel.
 .DEFAULT_GOAL := all
 
+# Where the userland shipped in the image comes from.
+#
+#   minirootfs (default)
+#                     tools/build-alpine-rootfs.sh unpacks Alpine's own
+#                     minirootfs into build/alpine-rootfs and then lets apk
+#                     install the extras into it.  The image's root filesystem
+#                     IS Alpine's: /etc/os-release, the skeleton files, the
+#                     CA bundle, the signing keys and a working /sbin/apk all
+#                     come from there, and only GNOS's own binaries and the
+#                     handful of files Alpine has no opinion about ride on
+#                     top.  Alpine's musl-dev in that tree is also the sysroot
+#                     src/usr's programs are compiled against.
+#   alpine            the previous recipe: tools/install-alpine.sh stages
+#                     build/alpine-root by unpacking individual .apk files.
+#                     Kept because it is a useful comparison -- it ships
+#                     Alpine's binaries but not Alpine's system.
+#   src               the original recipe: build coreutils/bash/curl/nano/
+#                     python/busybox/binutils/fastfetch/openrc from trees
+#                     fetched by hand into build/*src/.  Also opt-in.
+USERLAND ?= minirootfs
+
 # The system compiler for the userland programs.  Must be gcc-13: the
 # stock gcc 12.3 on this machine has a libcpp ICE (_cpp_process_line_notes,
 # libcpp/lex.cc:1163) that randomly kills preprocessing of perfectly
@@ -121,7 +142,8 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/drm_atomic_uapi.o $(BUILD)/drm_vblank.o \
          $(BUILD)/drm_gem.o $(BUILD)/drm_framebuffer.o \
          $(BUILD)/drm_property.o $(BUILD)/drm_libc.o \
-         $(BUILD)/drm_vbe.o \
+         $(BUILD)/drm_vbe.o $(BUILD)/drm_svga.o \
+    $(BUILD)/kaslr.o \
                   $(BUILD)/subsys.o $(BUILD)/acpi.o $(BUILD)/sysfs.o \
          $(BUILD)/debugcon.o $(BUILD)/ext2.o $(BUILD)/panic.o \
          $(BUILD)/gdt.o $(BUILD)/idt.o $(BUILD)/isr.o \
@@ -317,18 +339,30 @@ UPROGS  := init shell count ls cat tail tac rm mkdir touch scan dbgcat envtest
 UELFS   := $(addprefix $(BUILD)/,$(addsuffix .elf,$(UPROGS)))
 UCRT    := $(BUILD)/user/crt0.o $(BUILD)/user/ulib.o
 
-# musl (built by hand into build/muslsrc/musl) provides the C runtime for
-# programs that want a real libc.  They are linked non-PIE at 0x400000 like
-# every other user program, but from musl's crt1.o + libc.a instead of ulib.
+# musl provides the C runtime for programs that want a real libc.  They are
+# linked non-PIE at 0x400000 like every other user program, but from musl's
+# crt1.o + libc.a instead of ulib.
+#
+# USERLAND=alpine points this at build/alpine-root/usr: Alpine's musl-dev
+# ships include/, crt1.o, crti.o, crtn.o and libc.a, which is the whole of
+# what the rules below consume.  MUSL_GCC stays aimed at the source tree --
+# Alpine ships no musl-gcc and only dynhello (a USERLAND=src extra) needs one.
 MUSL_SRC    := $(BUILD)/muslsrc/musl-1.2.5
+ifeq ($(USERLAND),alpine)
+MUSL_PREFIX := $(BUILD)/alpine-root/usr
+else ifeq ($(USERLAND),minirootfs)
+# The minirootfs tree carries Alpine's musl-dev, so it doubles as the sysroot.
+MUSL_PREFIX := $(BUILD)/alpine-rootfs/usr
+else
 MUSL_PREFIX := $(BUILD)/muslsrc/musl
+endif
 MUSL_LIB  := $(MUSL_PREFIX)/lib
 MUSL_CRT  := $(MUSL_PREFIX)/lib
 MUSL_INC  := $(MUSL_PREFIX)/include
 MUSL_GCC  := $(MUSL_PREFIX)/bin/musl-gcc
 
 # Programs built against musl rather than ulib.
-MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1
+MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest
 MUSL_OBJS := $(addprefix $(BUILD)/user/,$(addsuffix .o,$(MUSLPROGS)))
 MUSL_ELFS := $(addprefix $(BUILD)/,$(addsuffix .elf,$(MUSLPROGS)))
 
@@ -563,7 +597,14 @@ QEMU_SMP := -smp $(SMP_CPUS)
 QEMU_MEM ?= 8G
 QEMU_MEM_ARG := -m $(QEMU_MEM)
 
-QEMU_DEVICES := $(QEMU_NET) $(QEMU_AUDIO) $(QEMU_DISK) $(QEMU_SMP)
+# The SVGA II card is what the drm_svga driver probes for (15ad:0405).  It
+# sits alongside the default stdvga rather than replacing it, so the
+# bootloader framebuffer fbcon draws into stays exactly where it was and the
+# SVGA VRAM is genuinely separate memory.  Override to "" to boot without it
+# and exercise the console-framebuffer scanout path instead.
+QEMU_SVGA ?= -device vmware-svga
+
+QEMU_DEVICES := $(QEMU_NET) $(QEMU_AUDIO) $(QEMU_DISK) $(QEMU_SMP) $(QEMU_SVGA)
 
 # The same hardware, but with a backend you can actually hear.  Override on
 # the command line if PulseAudio is not what your desktop runs, e.g.
@@ -605,20 +646,65 @@ $(GNOSCFG_BIN): $(GNOSCFG_OBJS) $(NC_LIBS) | $(BUILD)
 config menuconfig: $(GNOSCFG_BIN) src/Kconfig
 	$(GNOSCFG_BIN)
 # ---------- Alpine software autoinstall -----------------------------------------
+# This is where the userland comes from by default (see USERLAND at the top).
 # `make autoinstall ALPINE_PKGS="htop curl"` pulls the named Alpine musl
 # packages (and their dependencies) off dl-cdn.alpinelinux.org and unpacks
 # them into $(ALPINE_ROOT); the initrd rule below folds that directory into
 # the image whenever it exists, so a plain `make` afterwards ships them.
 # See tools/install-alpine.sh for what is and is not done to each .apk.
 ALPINE_ROOT := $(BUILD)/alpine-root
-ALPINE_PKGS ?=
 
-autoinstall:
-	@if [ -z "$(ALPINE_PKGS)" ]; then \
-	    echo "usage: make autoinstall ALPINE_PKGS=\"pkg1 pkg2\""; \
-	    exit 2; \
-	fi
+# The default set: everything that used to arrive from a hand-fetched source
+# tree, plus the boot-time X session.  Only top-level names are listed --
+# install-alpine.sh resolves each package's `depends` against the index.
+#   musl          /lib/ld-musl-x86_64.so.1 and libc.musl-x86_64.so.1
+#   musl-dev      headers + crt1.o/crti.o/crtn.o/libc.a that src/usr links
+#   busybox       the 304 applet links (grep/sed/awk/hostname/ifconfig/...)
+#   busybox-binsh /bin/sh
+#   bash          the login shell named in /etc/passwd
+#   coreutils, binutils   dd/ls/cat/head ... and ar/ld/objdump/strip
+#   curl/nano/python3/fastfetch/openrc/ncurses-terminfo
+#                 what the *src trees used to ship; openrc is what /etc/rc
+#                 brings up at boot, terminfo is what xterm/TERM=xterm asks for
+#   X set         xorg-server, its evdev input driver, twm, xterm, xeyes,
+#                 xsetroot and mkfontscale (fonts.dir), the session /usr/rc runs
+ALPINE_PKGS ?= musl musl-dev busybox busybox-binsh bash coreutils binutils \
+               curl nano python3 fastfetch openrc ncurses-terminfo \
+               xorg-server xf86-input-evdev xkbcomp xkeyboard-config \
+               twm xterm xeyes xsetroot mkfontscale
+
+# The X clients and fastfetch live in community rather than main.  Override on
+# the command line (`make ALPINE_REPOS=main ...`) to pin it back to main only.
+ALPINE_REPOS ?= main community
+export ALPINE_REPOS
+
+# The staged package set only changes when $(ALPINE_PKGS) does.  Rewrite this
+# list only on a real change so its mtime stays put: otherwise every make would
+# re-resolve the repository.  A fresh `build/` has neither this file nor
+# build/alpine-root, and runs the installer exactly once.
+ALPINE_LIST := $(BUILD)/.alpine-packages
+
+$(ALPINE_LIST): FORCE | $(BUILD)
+	@printf '%s\n' $(ALPINE_PKGS) > $@.tmp
+	@cmp -s $@.tmp $@ 2>/dev/null && rm -f $@.tmp || mv -f $@.tmp $@
+
+# The install record.  $(ALPINE_LIST) cannot carry the trigger itself: tar
+# preserves each member's archive mtime (libc.a still dates from 2024), so a
+# package-list prerequisite would always be "newer" and the installer would
+# re-run on every make.  A stamp touched after the run has a stable, current
+# mtime, and only a real change to the list or the script moves it.
+ALPINE_STAMP := $(BUILD)/.alpine-install
+
+$(ALPINE_STAMP): $(ALPINE_LIST) tools/install-alpine.sh | $(BUILD)
 	tools/install-alpine.sh $(ALPINE_PKGS)
+	@touch $@
+
+# `make autoinstall` always re-resolves (a new upstream release should show up
+# without editing anything), and refreshes the stamp so a following plain
+# `make` does not install a second time.
+autoinstall: $(ALPINE_LIST)
+	tools/install-alpine.sh $(ALPINE_PKGS)
+	@touch $(ALPINE_STAMP)
 
 alpine: autoinstall
 
@@ -637,6 +723,27 @@ ALPINE_ROOTFS := $(BUILD)/alpine-rootfs
 
 alpine-base:
 	tools/build-alpine-rootfs.sh
+
+# Same producer skill as alpine-base, but as a real file target so the
+# initrd rule can order itself after the tree exists.
+$(ALPINE_ROOTFS):
+	tools/build-alpine-rootfs.sh
+
+# ---- hand-built third-party trees: USERLAND=src only -----------------------
+# Under the default USERLAND=alpine none of this is required, and none of it
+# may even be *visible*: every rule below lists $(MUSL_GCC), which Alpine does
+# not provide (there is no musl-gcc package), so an exposed rule would leave
+# `make` failing on "No rule to make target .../musl-gcc".  The variable
+# definitions are hoisted above the conditional so both modes spell the same
+# names -- only the rules are conditional.
+FF_SRC  := $(BUILD)/ffsrc
+FF_BIN  := $(BUILD)/ffbuild/fastfetch
+FFLASH  := $(BUILD)/ffbuild/flashfetch
+PY_VER  := 3.12.10
+PY_SRC  := $(BUILD)/pysrc/Python-$(PY_VER)
+PY_BIN  := $(PY_SRC)/python
+
+ifeq ($(USERLAND),src)
 
 # musl's headers only become usable after `make install` assembles them into a
 # sysroot: bits/alltypes.h is generated by configure and lives in obj/include,
@@ -699,10 +806,6 @@ $(BU_SRC)/binutils/readelf: $(BU_SRC)/Makefile | $(MUSL_GCC)
 #
 # This rule must live below `all`: make takes the first target in the file
 # as its default goal.
-FF_SRC := $(BUILD)/ffsrc
-FF_BIN := $(BUILD)/ffbuild/fastfetch
-FFLASH  := $(BUILD)/ffbuild/flashfetch
-
 $(FF_BIN): $(FF_SRC)/CMakeLists.txt | $(MUSL_GCC)
 	chmod +x tools/build-fastfetch.sh
 	tools/build-fastfetch.sh
@@ -715,12 +818,34 @@ $(FF_BIN): $(FF_SRC)/CMakeLists.txt | $(MUSL_GCC)
 # The result is dynamically linked against /lib/ld-musl-x86_64.so.1, which
 # the initrd already ships, so this rule only relinks when the binary is
 # missing, exactly like the bash/coreutils rules above.
-PY_VER := 3.12.10
-PY_SRC := $(BUILD)/pysrc/Python-$(PY_VER)
-PY_BIN := $(PY_SRC)/python
-
 $(PY_BIN): $(PY_SRC)/Makefile | $(MUSL_GCC)
 	REALGCC=gcc-13 $(MAKE) -C $(PY_SRC) -j4
+
+else  # USERLAND=alpine
+
+# Alpine stages the sysroot.  These four files are what src/usr compiles and
+# links against.  The rule has no normal prerequisite, so it fires only when
+# its file is genuinely absent (a wiped build/alpine-root): tar members keep
+# their archive mtimes, which are always older than anything this Makefile
+# writes, and a package-list prerequisite would therefore re-run the installer
+# on every single make.  A changed package list reaches the install through
+# the order-only $(ALPINE_STAMP) instead, which does the installing first --
+# by the time make checks these targets they exist, and the recipe is skipped.
+# The fallback below only matters when the stamp is up to date but
+# build/alpine-root has been deleted by hand.
+ifeq ($(USERLAND),alpine)
+$(MUSL_LIB)/libc.a $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $(MUSL_CRT)/crtn.o: | $(ALPINE_STAMP)
+	@[ -f $@ ] || tools/install-alpine.sh $(ALPINE_PKGS)
+	@test -f $@ || { echo "install-alpine.sh did not stage $@" >&2; exit 1; }
+else ifeq ($(USERLAND),minirootfs)
+# Alpine's musl-dev already sits in the minirootfs tree; it is produced by
+# tools/build-alpine-rootfs.sh, not install-alpine.sh, so there is nothing
+# to fall back to here -- only a clear error naming the producer.
+$(MUSL_LIB)/libc.a $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $(MUSL_CRT)/crtn.o:
+	@test -f $@ || { echo "$@ missing: run 'make alpine-base'" >&2; exit 1; }
+endif
+
+endif  # USERLAND
 
 # Both directories are listed separately: `clean` leaves $(BUILD) standing (the
 # third-party trees live there), so a rule keyed only on $(BUILD) would never
@@ -1199,18 +1324,41 @@ $(MUSL_ELFS): $(BUILD)/%.elf: $(BUILD)/user/%.o \
 # interpreter path, loads the linker, and hands the entry point to it, the
 # way a Linux loader would.  Everything else stays -static: this file exists
 # to prove the ET_DYN + PT_INTERP path, not to be a production choice.
+# dynhello exists only in USERLAND=src: its link goes through $(MUSL_GCC),
+# which Alpine does not ship.  Alpine's own binaries are ET_DYN with the same
+# PT_INTERP, so the path it proves is exercised by every package either way.
+ifeq ($(USERLAND),src)
 $(BUILD)/dynhello.elf: src/usr/dynhello.c $(MUSL_GCC)
 	REALGCC=gcc-13 $(MUSL_GCC) -O2 -g -o $@ $<
 	file $@
+endif
 
 # ---------- initrd (ext2 image holding the user programs) ----------
 # mke2fs -d fills the image straight from a staging directory, so this needs
 # neither a loopback mount nor root.  The feature set is trimmed on purpose:
 # ^dir_index keeps every directory a plain linear list, which is all the
 # kernel driver knows how to rewrite.
-$(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
-           $(CC_BIN) $(KRNL) $(FF_BIN) $(KMODS) $(CURL_BIN) $(NANO_BIN) \
-           $(PY_BIN) $(ALPINE_ROOT) $(BUILD)/.kcmd src/usr/rc | $(BUILD)
+# USERLAND=alpine gets the userland from build/alpine-root -- and from
+# $(ALPINE_STAMP), whose rule is what runs install-alpine.sh when the package
+# list or the script changes (see the autoinstall block above).  The staging
+# directory is listed too: it is created/refreshed by an install, so its mtime
+# moves and the initrd re-folds the new tree into the image.  USERLAND=src
+# still needs every hand-built tree listed below.
+ifeq ($(USERLAND),alpine)
+INITRD_ULDEPS := $(ALPINE_ROOT) $(ALPINE_STAMP)
+else ifeq ($(USERLAND),minirootfs)
+# The rootfs tree is the userland; depending on it re-folds a refreshed
+# build/alpine-rootfs into the image.  Empty target list entry when the
+# directory already exists (a directory with no prerequisites is always
+# up to date); a missing one builds it via the rule below.
+INITRD_ULDEPS := $(ALPINE_ROOTFS)
+else
+INITRD_ULDEPS := $(BB_BIN) $(BASH_BIN) $(CC_BIN) $(FF_BIN) $(CURL_BIN) \
+                 $(NANO_BIN) $(PY_BIN) $(BUILD)/dynhello.elf
+endif
+
+$(INITRD): $(UELFS) $(MUSL_ELFS) $(KRNL) $(KMODS) $(INITRD_ULDEPS) \
+           $(BUILD)/.kcmd src/etc/inittab | $(BUILD)
 	rm -rf $(BUILD)/initrd-root
 	mkdir -p $(BUILD)/initrd-root
 	# ---- FHS skeleton (empty dirs are harmless placeholders for now) ----
@@ -1222,7 +1370,9 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	mkdir -p $(BUILD)/initrd-root/debug
 	mkdir -p $(BUILD)/initrd-root/sys
 	mkdir -p $(BUILD)/initrd-root/tmp
-	mkdir -p $(BUILD)/initrd-root/var/run
+	# var/run comes from Alpine as a symlink to /run; pre-creating it as a
+	# real directory makes "cp -a" fail with "not a directory".
+	# mkdir -p $(BUILD)/initrd-root/var/run
 	mkdir -p $(BUILD)/initrd-root/usr/bin
 	mkdir -p $(BUILD)/initrd-root/usr/sbin
 	mkdir -p $(BUILD)/initrd-root/usr/lib
@@ -1283,31 +1433,36 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	for p in $(MUSLPROGS); do \
 	  cp $(BUILD)/$$p.elf $(BUILD)/initrd-root/bin/$$p.elf; \
 	done
-	# ---- the dynamically linked hello, and the loader it needs ----
+	# ---- the dynamic loader -----------------------------------------------
+ifeq ($(USERLAND),src)
 	# dynhello.elf is an ET_DYN with PT_INTERP=/lib/ld-musl-x86_64.so.1, so
 	# the initrd must carry the interpreter at exactly that path.  musl's
 	# libc.so *is* the dynamic linker (the two names are the same file in a
 	# musl install), so a plain copy provides both the interpreter and the
-	# libc.so it is asked to load.
+	# libc.so it is asked to load.  Alpine's binaries are linked the same
+	# way, so USERLAND=alpine gets the same file from the musl package.
 	cp $(BUILD)/dynhello.elf $(BUILD)/initrd-root/bin/dynhello.elf
+endif
 	cp $(MUSL_LIB)/libc.so $(BUILD)/initrd-root/lib/ld-musl-x86_64.so.1
 	cp $(MUSL_LIB)/libc.so $(BUILD)/initrd-root/lib/libc.so
 	# Alpine packages staged by `make autoinstall` ride along on every image
 	# build.  Their binaries link against /lib/ld-musl-x86_64.so.1, which
 	# the copy just above provides, so they run unmodified.
 	if [ -d $(BUILD)/alpine-root ]; then \
-	    cp -a $(BUILD)/alpine-root/. $(BUILD)/initrd-root/; \
+	    cp -af $(BUILD)/alpine-root/. $(BUILD)/initrd-root/; \
 	fi
 	# Alpine minirootfs base (Unixed-Kernel style): the full Alpine userland
 	# (openrc services, udev rules, dbus configs, ...) layers on top.
 	if [ -d $(BUILD)/alpine-rootfs ]; then \
-	    cp -a $(BUILD)/alpine-rootfs/. $(BUILD)/initrd-root/; \
+	    cp -af $(BUILD)/alpine-rootfs/. $(BUILD)/initrd-root/; \
 	fi
 	# ---- prune the desktop/media dead weight ---------------------------
-	# Xfce/Xorg cannot run on this kernel, and WebKit, the media codecs
-	# and the X data files exist only to serve that stack.  Limine loads
-	# the whole initrd through the BIOS CD path, so every megabyte cut
-	# here is seconds of boot time.
+	# WebKit, the media codecs, GTK and the Xfce session cannot run on this
+	# kernel and serve nothing here.  Limine loads the whole initrd through
+	# the BIOS CD path, so every megabyte cut is seconds of boot time.
+	# Xorg, its data files (/usr/share/X11: xkb, locale, xorg.conf.d) and
+	# the core fonts are deliberately absent from this list -- those are
+	# exactly what the boot-time X session in /usr/rc needs.
 	rm -rf $(BUILD)/initrd-root/usr/lib/libwebkit2gtk-4.1* \
 	       $(BUILD)/initrd-root/usr/lib/libjavascriptcoregtk-4.1* \
 	       $(BUILD)/initrd-root/usr/libexec/webkit2gtk-4.1 \
@@ -1320,12 +1475,9 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	       $(BUILD)/initrd-root/usr/lib/libpostproc* \
 	       $(BUILD)/initrd-root/usr/lib/libgtk-3* \
 	       $(BUILD)/initrd-root/usr/lib/libgdk* \
-	       $(BUILD)/initrd-root/usr/libexec/Xorg* \
 	       $(BUILD)/initrd-root/usr/libexec/upower* \
-	       $(BUILD)/initrd-root/usr/share/X11 \
 	       $(BUILD)/initrd-root/usr/share/icons \
 	       $(BUILD)/initrd-root/usr/share/themes \
-	       $(BUILD)/initrd-root/usr/share/fonts \
 	       $(BUILD)/initrd-root/etc/xdg/xfce4 \
 	       $(BUILD)/initrd-root/usr/bin/xfce4-* \
 	       $(BUILD)/initrd-root/usr/bin/startxfce4
@@ -1334,6 +1486,20 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# `mount` is invoked by its bare name from OpenRC's init.sh and service
 	# scripts, so it must sit on PATH as /bin/mount (not /bin/mount.elf).  The
 	# rest of the musl programs are only ever called by absolute path.
+	#
+	# Alpine lays these same names down as absolute busybox links
+	# (/bin/mount -> /bin/busybox), and `cp -a alpine-root/.` above copies
+	# them verbatim: writing through such a link from the *host* would follow
+	# it to the host's /bin/busybox (EPERM) instead of replacing the guest's
+	# entry.  Remove the links first, exactly like the /bin/sh handling in
+	# USERLAND=src below; the copies are the GNOS programs the boot scripts
+	# actually call.
+	rm -f $(BUILD)/initrd-root/bin/mount \
+	      $(BUILD)/initrd-root/sbin/getty \
+	      $(BUILD)/initrd-root/bin/login \
+	      $(BUILD)/initrd-root/usr/bin/chvt \
+	      $(BUILD)/initrd-root/sbin/insmod \
+	      $(BUILD)/initrd-root/sbin/rmmod
 	cp $(BUILD)/mount.elf $(BUILD)/initrd-root/bin/mount
 	# getty, login and chvt are named without the .elf suffix: /etc/inittab
 	# style callers, the shell and /etc/issue all refer to them by the names
@@ -1358,6 +1524,7 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# The installer is typed by name at the shell, exactly like the rest of
 	# a Unix tool set -- no .elf suffix.
 	cp $(BUILD)/installer.elf $(BUILD)/initrd-root/bin/installer
+ifeq ($(USERLAND),src)
 	# ---- BusyBox: the multi-call binary, plus one file per applet ----
 	# BusyBox picks its applet from basename(argv[0]) -- names that start with
 	# "busybox" fall through to the multi-call dispatcher instead -- so every
@@ -1489,10 +1656,27 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	cp -a $(PY_SRC)/Lib/. $(BUILD)/initrd-root/usr/lib/python3.12/
 	cp $(PY_SRC)/Modules/*.so \
 	   $(BUILD)/initrd-root/usr/lib/python3.12/lib-dynload/
+endif  # USERLAND=src: busybox/bash/coreutils/binutils/fastfetch/curl/nano/python
 	# ---- desktop stack (labwc/xfce) DISABLED for headless ISO -----------
 	# To re-enable: un-comment the labwc/xfce sections above this line.
 	
-	cp src/usr/rc $(BUILD)/initrd-root/etc/rc            # run once at boot by init
+	cp src/etc/inittab $(BUILD)/initrd-root/etc/inittab  # busybox init rewires openrc
+	# Standard Alpine runlevel set: hostname/sysctl/bootmisc/localmount in the
+	# boot runlevel, the local(8) script dir at default.  Without the runlevel
+	# symlinks the openrc runlevels stay empty and "openrc boot/default"
+	# starts nothing; this mirrors what apk's maintainer scripts put there on
+	# a fully provisioned Alpine.  /run/openrc is openrc's state dir and must
+	# exist before "openrc sysinit" runs; /run is plain ext2 in the image.
+	mkdir -p $(BUILD)/initrd-root/etc/local.d \
+	         $(BUILD)/initrd-root/etc/runlevels/sysinit \
+	         $(BUILD)/initrd-root/etc/runlevels/boot \
+	         $(BUILD)/initrd-root/etc/runlevels/default \
+	         $(BUILD)/initrd-root/run/openrc \
+	         $(BUILD)/initrd-root/run/lock
+	for s in hostname sysctl bootmisc localmount; do \
+	  ln -sf /etc/init.d/$$s $(BUILD)/initrd-root/etc/runlevels/boot/$$s; \
+	done
+	ln -sf /etc/init.d/local $(BUILD)/initrd-root/etc/runlevels/default/local
 	# startxfce: post-login desktop launcher (see /root/.profile).  Installed
 	# executable because the kernel honours the #! line only on a real exec.
 	cp src/usr/startxfce $(BUILD)/initrd-root/usr/bin/startxfce
@@ -1505,6 +1689,19 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# Guest-side helper scripts (start-xfce, ...).
 	cp -a src/rootfs/sbin/. $(BUILD)/initrd-root/sbin/
 	cp -a src/rootfs/bin/. $(BUILD)/initrd-root/bin/
+	# ---- the /usr/bin spelling of the tools /etc/rc calls by path ------
+	# Alpine lays coreutils out as /bin/<name> -> ../usr/bin/coreutils and
+	# puts busybox's applets under /bin as well, while the hand-built
+	# coreutils (USERLAND=src) put every name in /usr/bin.  /etc/rc calls
+	# dd, ls, cat and hostname by their /usr/bin path, so point that spelling
+	# at whichever of the two is actually there -- and do nothing at all when
+	# /usr/bin already has the file, which is the USERLAND=src case.
+	for c in dd ls cat hostname; do \
+	  if [ ! -e $(BUILD)/initrd-root/usr/bin/$$c ] && \
+	     [ -e $(BUILD)/initrd-root/bin/$$c ]; then \
+	    ln -sf ../../bin/$$c $(BUILD)/initrd-root/usr/bin/$$c; \
+	  fi; \
+	done
 	# Kernel command line carrier: `make KCMD="single"` drops the words into
 	# /cmdline at the initrd root; the kernel reads that file before PID 1
 	# (Limine does not forward conf cmdline: to direct-protocol kernels).
@@ -1521,10 +1718,12 @@ $(INITRD): $(UELFS) $(MUSL_ELFS) $(BUILD)/dynhello.elf $(BB_BIN) $(BASH_BIN) \
 	# mount/getrandom/symlink/rename support exists to serve, so it rides along
 	# in the initrd and /etc/rc brings its runlevels up at boot.
 	mkdir -p $(BUILD)/initrd-root/dev/shm $(BUILD)/initrd-root/run/lock
+ifeq ($(USERLAND),src)
 	cp -a build/orcsrc/openrc-install/bin/.    $(BUILD)/initrd-root/bin/    2>/dev/null || true
 	cp -a build/orcsrc/openrc-install/sbin/.   $(BUILD)/initrd-root/sbin/
 	cp -a build/orcsrc/openrc-install/etc/.    $(BUILD)/initrd-root/etc/
 	cp -a build/orcsrc/openrc-install/usr/.    $(BUILD)/initrd-root/usr/
+endif
 	# devfs would mount a tmpfs over /dev and hide the static character
 	# devices the kernel already provides (null, tty, ...); drop it from the
 	# sysinit runlevel so the rest of OpenRC can run headless.
@@ -1637,6 +1836,34 @@ guistart: $(ISO) $(DISK)
 	  $(QEMU_NET) $(GUI_AUDIO) $(QEMU_DISK) $(QEMU_SMP) \
 	  -device isa-debugcon,chardev=dbg -chardev file,id=dbg,path=$(BUILD)/dbg.log \
 	  -display gtk -no-reboot
+
+
+# clang-format gate: every first-party kernel/userland C+header obeys the
+# repo-level .clang-format (Google base, BreakBeforeBraces=Linux, 4-space
+# indent, 100 columns).  Vendor trees keep their upstream formatting.
+.PHONY: check-format
+check-format:
+	@find src -name '*.c' -o -name '*.h' | grep -v '/vendor/' | \
+	  xargs clang-format --dry-run -Werror --style=file
+	@echo "check-format: clang-format clean"
+
+# `make test` — the headless self-test: run qemu for 20s, then hunt the
+# debug console's PASS/FAIL and fault markers for the binary that ran.
+# headless leaves the process on after its tests, so timeout kills it.
+.PHONY: test
+test: $(ISO) $(DISK)
+	@echo "GNOS: headless self-test (20 s)..."
+	@rm -f $(BUILD)/dbg.log
+	@timeout 20 $(MAKE) headless || true
+	@grep -E 'PASS|FAIL' $(BUILD)/dbg.log >/dev/null || \
+	  { echo "test: no PASS/FAIL lines in $(BUILD)/dbg.log"; exit 1; }
+	@grep 'FAIL' $(BUILD)/dbg.log && { echo "test: FAIL present"; exit 1; } || true
+	@echo "test: PASS lines present, no FAIL"
+
+# The one-stop "is this commit acceptable?" gate used by CI and by hand.
+.PHONY: check
+check: check-format check-hdrs test
+	@echo "check: all gates passed"
 
 # headless — guistart without the window: the headless self-test target.
 # The debug console is teed to build/dbg.log, exactly like guistart, so

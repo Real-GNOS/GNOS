@@ -17,7 +17,7 @@
  * and c_cc[VTIME] are all denominated in, so the kernel and user space have
  * to agree on it.  100 Hz makes a tick exactly 10 ms.
  */
-#define SCHED_HZ  100
+#define SCHED_HZ 100
 
 /* Program the PIT to `hz` ticks per second and hook it to the scheduler. */
 void timer_init(unsigned hz);

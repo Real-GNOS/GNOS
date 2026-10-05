@@ -38,7 +38,9 @@ bool drm_rect_clip_scaled(struct drm_rect *src, struct drm_rect *dst, const stru
     int64_t overshoot;
 
     /* Nothing to scale against, so nothing can be trimmed consistently. */
-    if (drm_rect_width(dst) == 0 || drm_rect_height(dst) == 0) { return drm_rect_visible(dst); }
+    if (drm_rect_width(dst) == 0 || drm_rect_height(dst) == 0) {
+        return drm_rect_visible(dst);
+    }
 
     /* Each side is handled on its own: how far @dst pokes past @clip is
      * converted into source units through the width ratio, so whatever ends
@@ -46,7 +48,9 @@ bool drm_rect_clip_scaled(struct drm_rect *src, struct drm_rect *dst, const stru
     overshoot = (int64_t)clip->x1 - (int64_t)dst->x1;
     if (overshoot > 0) {
         int64_t shift = overshoot * (int64_t)drm_rect_width(src) / (int64_t)drm_rect_width(dst);
-        if (shift < 0) { shift = 0; }
+        if (shift < 0) {
+            shift = 0;
+        }
         src->x1 = (int32_t)((int64_t)src->x1 + shift);
         dst->x1 = clip->x1;
     }
@@ -54,7 +58,9 @@ bool drm_rect_clip_scaled(struct drm_rect *src, struct drm_rect *dst, const stru
     overshoot = (int64_t)clip->x2 - (int64_t)dst->x2;
     if (overshoot < 0) {
         int64_t shift = overshoot * (int64_t)drm_rect_width(src) / (int64_t)drm_rect_width(dst);
-        if (shift > 0) { shift = 0; }
+        if (shift > 0) {
+            shift = 0;
+        }
         src->x2 = (int32_t)((int64_t)src->x2 + shift);
         dst->x2 = clip->x2;
     }
@@ -62,7 +68,9 @@ bool drm_rect_clip_scaled(struct drm_rect *src, struct drm_rect *dst, const stru
     overshoot = (int64_t)clip->y1 - (int64_t)dst->y1;
     if (overshoot > 0) {
         int64_t shift = overshoot * (int64_t)drm_rect_height(src) / (int64_t)drm_rect_height(dst);
-        if (shift < 0) { shift = 0; }
+        if (shift < 0) {
+            shift = 0;
+        }
         src->y1 = (int32_t)((int64_t)src->y1 + shift);
         dst->y1 = clip->y1;
     }
@@ -70,7 +78,9 @@ bool drm_rect_clip_scaled(struct drm_rect *src, struct drm_rect *dst, const stru
     overshoot = (int64_t)clip->y2 - (int64_t)dst->y2;
     if (overshoot < 0) {
         int64_t shift = overshoot * (int64_t)drm_rect_height(src) / (int64_t)drm_rect_height(dst);
-        if (shift > 0) { shift = 0; }
+        if (shift > 0) {
+            shift = 0;
+        }
         src->y2 = (int32_t)((int64_t)src->y2 + shift);
         dst->y2 = clip->y2;
     }

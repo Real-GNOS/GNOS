@@ -58,7 +58,7 @@ static int read_line(char *buf, size_t cap)
 {
     size_t n = 0;
     for (;;) {
-        char c;
+        char    c;
         ssize_t r = read(0, &c, 1);
         if (r <= 0)
             return (r == 0 && n) ? 0 : -1;
@@ -75,11 +75,11 @@ static int read_line(char *buf, size_t cap)
 static int read_secret(char *buf, size_t cap)
 {
     struct termios raw;
-    int quiet = 0;
+    int            quiet = 0;
 
     if (tcgetattr(0, &g_saved) == 0) {
         g_saved_ok = 1;
-        raw = g_saved;
+        raw        = g_saved;
         raw.c_lflag &= ~(tcflag_t)ECHO;
         quiet = tcsetattr(0, TCSAFLUSH, &raw) == 0;
     }
@@ -131,9 +131,9 @@ static const char *shadow_hash(const char *user, const struct passwd *pw)
 
 int main(int argc, char **argv)
 {
-    signal(SIGINT,  on_signal);
+    signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    signal(SIGHUP,  on_signal);
+    signal(SIGHUP, on_signal);
 
     /* `login -f name` skips authentication; only root may ask for it, which
      * is the case that matters (getty --autologin, and the installer). */
@@ -143,10 +143,10 @@ int main(int argc, char **argv)
             forced = argv[++i];
     }
 
-    char user[64], pass[128];
+    char           user[64], pass[128];
     struct passwd *pw = NULL;
 
-    for (int tries = 0; ; tries++) {
+    for (int tries = 0;; tries++) {
         if (forced) {
             snprintf(user, sizeof user, "%s", forced);
         } else {
@@ -185,13 +185,12 @@ int main(int argc, char **argv)
         fputs("login incorrect\n", stdout);
     }
 
-    if (!pw) {                       /* only reachable via -f with a bad name */
+    if (!pw) { /* only reachable via -f with a bad name */
         fprintf(stderr, "login: no such user: %s\n", user);
         return 1;
     }
 
-    const char *shell = (pw->pw_shell && *pw->pw_shell) ? pw->pw_shell
-                                                        : "/bin/sh";
+    const char *shell = (pw->pw_shell && *pw->pw_shell) ? pw->pw_shell : "/bin/sh";
     const char *home  = (pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : "/";
 
     /* ---- drop privilege, in the only order that is safe ----------------- */
@@ -220,16 +219,15 @@ int main(int argc, char **argv)
     setenv("SHELL", shell, 1);
     setenv("USER", pw->pw_name, 1);
     setenv("LOGNAME", pw->pw_name, 1);
-    setenv("PATH", pw->pw_uid == 0 ? "/sbin:/bin:/usr/sbin:/usr/bin"
-                                   : "/bin:/usr/bin", 1);
+    setenv("PATH", pw->pw_uid == 0 ? "/sbin:/bin:/usr/sbin:/usr/bin" : "/bin:/usr/bin", 1);
 
     /* A leading '-' in argv[0] is how every shell since v7 is told it is a
      * login shell, and therefore to read the profile files. */
-    char arg0[64];
+    char        arg0[64];
     const char *base = strrchr(shell, '/');
     snprintf(arg0, sizeof arg0, "-%s", base ? base + 1 : shell);
 
-    char *av[2] = { arg0, NULL };
+    char *av[2] = {arg0, NULL};
     execv(shell, av);
 
     fprintf(stderr, "login: cannot exec %s: %s\n", shell, strerror(errno));

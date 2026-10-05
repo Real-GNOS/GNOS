@@ -30,12 +30,16 @@
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
 /* Implemented in drm_atomic.c. */
-extern struct drm_crtc_state      *drm_atomic_get_crtc_state(struct drm_atomic_state *state, struct drm_crtc *crtc);
-extern struct drm_plane_state     *drm_atomic_get_plane_state(struct drm_atomic_state *state, struct drm_plane *plane);
-extern struct drm_connector_state *drm_atomic_get_connector_state(struct drm_atomic_state *state, struct drm_connector *connector);
-extern int                         drm_atomic_add_affected_planes(struct drm_atomic_state *state, struct drm_crtc *crtc);
-extern int                         drm_atomic_add_affected_connectors(struct drm_atomic_state *state, struct drm_crtc *crtc);
-extern void                        drm_atomic_state_free(struct drm_atomic_state *state);
+extern struct drm_crtc_state      *drm_atomic_get_crtc_state(struct drm_atomic_state *state,
+                                                             struct drm_crtc         *crtc);
+extern struct drm_plane_state     *drm_atomic_get_plane_state(struct drm_atomic_state *state,
+                                                              struct drm_plane        *plane);
+extern struct drm_connector_state *drm_atomic_get_connector_state(struct drm_atomic_state *state,
+                                                                  struct drm_connector *connector);
+extern int  drm_atomic_add_affected_planes(struct drm_atomic_state *state, struct drm_crtc *crtc);
+extern int  drm_atomic_add_affected_connectors(struct drm_atomic_state *state,
+                                               struct drm_crtc         *crtc);
+extern void drm_atomic_state_free(struct drm_atomic_state *state);
 
 /*
  * Work out what this commit is going to disturb.  Turning a CRTC on or off
@@ -50,11 +54,17 @@ int drm_atomic_helper_check_modeset(struct drm_device *dev, struct drm_atomic_st
     for (i = 0; i < config->num_crtc; i++) {
         struct drm_crtc_state *crtc_state = state->crtcs[i].state;
 
-        if (crtc_state == NULL) { continue; }
+        if (crtc_state == NULL) {
+            continue;
+        }
 
-        if (crtc_state->active_changed) { crtc_state->mode_changed = true; }
+        if (crtc_state->active_changed) {
+            crtc_state->mode_changed = true;
+        }
 
-        if (crtc_state->mode_changed) { DRM_DEBUG_KMS("CRTC %d: mode changed\n", i); }
+        if (crtc_state->mode_changed) {
+            DRM_DEBUG_KMS("CRTC %d: mode changed\n", i);
+        }
         if (crtc_state->active_changed) {
             DRM_DEBUG_KMS("CRTC %d: active changed to %s\n", i, crtc_state->active ? "on" : "off");
         }
@@ -66,8 +76,12 @@ int drm_atomic_helper_check_modeset(struct drm_device *dev, struct drm_atomic_st
         struct drm_crtc            *old_crtc;
         struct drm_crtc            *new_crtc;
 
-        if (conn_state == NULL || connector == NULL || connector->state == NULL) { continue; }
-        if (conn_state->crtc == connector->state->crtc) { continue; }
+        if (conn_state == NULL || connector == NULL || connector->state == NULL) {
+            continue;
+        }
+        if (conn_state->crtc == connector->state->crtc) {
+            continue;
+        }
 
         old_crtc = connector->state->crtc;
         new_crtc = conn_state->crtc;
@@ -77,13 +91,17 @@ int drm_atomic_helper_check_modeset(struct drm_device *dev, struct drm_atomic_st
         if (old_crtc != NULL) {
             struct drm_crtc_state *old_crtc_state = drm_atomic_get_crtc_state(state, old_crtc);
 
-            if (old_crtc_state != NULL) { old_crtc_state->connectors_changed = true; }
+            if (old_crtc_state != NULL) {
+                old_crtc_state->connectors_changed = true;
+            }
         }
 
         if (new_crtc != NULL) {
             struct drm_crtc_state *new_crtc_state = drm_atomic_get_crtc_state(state, new_crtc);
 
-            if (new_crtc_state != NULL) { new_crtc_state->connectors_changed = true; }
+            if (new_crtc_state != NULL) {
+                new_crtc_state->connectors_changed = true;
+            }
         }
     }
 
@@ -96,16 +114,20 @@ int drm_atomic_helper_check_planes(struct drm_device *dev, struct drm_atomic_sta
     struct drm_mode_config *config = &dev->mode_config;
     int                     i;
 
-    if (state->planes == NULL) { return 0; }
+    if (state->planes == NULL) {
+        return 0;
+    }
 
     for (i = 0; i < config->num_total_plane; i++) {
         struct __drm_planes_state *entry       = &state->planes[i];
         struct drm_plane_state    *plane_state = entry->state;
 
-        if (plane_state == NULL) { continue; }
+        if (plane_state == NULL) {
+            continue;
+        }
 
         if (plane_state->fb != NULL) {
-            struct drm_plane *plane = entry->ptr;
+            struct drm_plane *plane     = entry->ptr;
             bool              format_ok = false;
 
             if (plane == NULL || plane->format_types == NULL || plane->format_count == 0) {
@@ -132,7 +154,8 @@ int drm_atomic_helper_check_planes(struct drm_device *dev, struct drm_atomic_sta
     return 0;
 }
 
-void drm_atomic_helper_commit_modeset_disables(struct drm_device *dev, struct drm_atomic_state *state)
+void drm_atomic_helper_commit_modeset_disables(struct drm_device       *dev,
+                                               struct drm_atomic_state *state)
 {
     struct drm_mode_config *config = &dev->mode_config;
     int                     i;
@@ -141,7 +164,9 @@ void drm_atomic_helper_commit_modeset_disables(struct drm_device *dev, struct dr
         struct __drm_crtcs_state *entry      = &state->crtcs[i];
         struct drm_crtc_state    *crtc_state = entry->state;
 
-        if (crtc_state == NULL || entry->ptr == NULL) { continue; }
+        if (crtc_state == NULL || entry->ptr == NULL) {
+            continue;
+        }
 
         if (crtc_state->active_changed && !crtc_state->active) {
             entry->ptr->enabled = false;
@@ -150,7 +175,8 @@ void drm_atomic_helper_commit_modeset_disables(struct drm_device *dev, struct dr
     }
 }
 
-void drm_atomic_helper_commit_modeset_enables(struct drm_device *dev, struct drm_atomic_state *state)
+void drm_atomic_helper_commit_modeset_enables(struct drm_device       *dev,
+                                              struct drm_atomic_state *state)
 {
     struct drm_mode_config *config = &dev->mode_config;
     int                     i;
@@ -159,33 +185,44 @@ void drm_atomic_helper_commit_modeset_enables(struct drm_device *dev, struct drm
         struct __drm_crtcs_state *entry      = &state->crtcs[i];
         struct drm_crtc_state    *crtc_state = entry->state;
 
-        if (crtc_state == NULL || entry->ptr == NULL) { continue; }
+        if (crtc_state == NULL || entry->ptr == NULL) {
+            continue;
+        }
 
         if (crtc_state->active_changed && crtc_state->active) {
             entry->ptr->enabled = true;
 
-            if (crtc_state->mode_changed) { memcpy(&entry->ptr->mode, &crtc_state->mode, sizeof(crtc_state->mode)); }
+            if (crtc_state->mode_changed) {
+                memcpy(&entry->ptr->mode, &crtc_state->mode, sizeof(crtc_state->mode));
+            }
 
             DRM_DEBUG_KMS("CRTC %d: enabled\n", i);
         }
     }
 }
 
-void drm_atomic_helper_commit_planes(struct drm_device *dev, struct drm_atomic_state *state, uint32_t flags)
+void drm_atomic_helper_commit_planes(struct drm_device *dev, struct drm_atomic_state *state,
+                                     uint32_t flags)
 {
     struct drm_mode_config *config = &dev->mode_config;
     int                     i;
 
     (void)flags;
 
-    if (state->planes == NULL) { return; }
+    if (state->planes == NULL) {
+        return;
+    }
 
     for (i = 0; i < config->num_total_plane; i++) {
         struct __drm_planes_state *entry       = &state->planes[i];
         struct drm_plane_state    *plane_state = entry->state;
 
-        if (plane_state == NULL || entry->ptr == NULL) { continue; }
-        if (plane_state->fb == NULL) { continue; }
+        if (plane_state == NULL || entry->ptr == NULL) {
+            continue;
+        }
+        if (plane_state->fb == NULL) {
+            continue;
+        }
 
         if (entry->ptr->state != NULL) {
             entry->ptr->state->fb      = plane_state->fb;
@@ -229,7 +266,9 @@ void drm_atomic_helper_cleanup_planes(struct drm_device *dev, struct drm_atomic_
     struct drm_mode_config *config = &dev->mode_config;
     int                     i;
 
-    if (state->planes == NULL) { return; }
+    if (state->planes == NULL) {
+        return;
+    }
 
     for (i = 0; i < config->num_total_plane; i++) {
         struct __drm_planes_state *entry = &state->planes[i];

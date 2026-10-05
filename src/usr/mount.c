@@ -34,14 +34,12 @@
 
 #define FSTAB "/etc/fstab"
 
-static int do_mount(const char *source, const char *target, const char *fstype,
-                    int quiet)
+static int do_mount(const char *source, const char *target, const char *fstype, int quiet)
 {
     long r = syscall(__NR_mount, source ? source : "", target, fstype, 0UL, NULL);
     if (r != 0) {
         if (!quiet)
-            fprintf(stderr, "mount: %s on %s: %s\n", fstype, target,
-                    strerror(errno));
+            fprintf(stderr, "mount: %s on %s: %s\n", fstype, target, strerror(errno));
         return 1;
     }
     return 0;
@@ -56,11 +54,10 @@ static int already_mounted(const char *target)
     if (!f)
         return 0;
     char line[256];
-    int found = 0;
+    int  found = 0;
     while (!found && fgets(line, sizeof line, f)) {
         char dev[128], dir[128];
-        if (sscanf(line, "%127s %127s", dev, dir) == 2 &&
-            strcmp(dir, target) == 0)
+        if (sscanf(line, "%127s %127s", dev, dir) == 2 && strcmp(dir, target) == 0)
             found = 1;
     }
     fclose(f);
@@ -84,8 +81,7 @@ static int fstab_next(FILE *f, fstab_t *e)
         if (h)
             *h = 0;
         e->opts[0] = 0;
-        int n = sscanf(line, "%127s %127s %31s %127s",
-                       e->src, e->dir, e->type, e->opts);
+        int n      = sscanf(line, "%127s %127s %31s %127s", e->src, e->dir, e->type, e->opts);
         if (n >= 3)
             return 1;
     }
@@ -106,11 +102,11 @@ static int type_selected(const char *want, const char *type)
         want += 2;
     }
 
-    int match = 0;
-    const char *p = want;
+    int         match = 0;
+    const char *p     = want;
     while (*p && !match) {
         const char *comma = strchr(p, ',');
-        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        size_t      len   = comma ? (size_t)(comma - p) : strlen(p);
         if (len == strlen(type) && strncmp(p, type, len) == 0)
             match = 1;
         p = comma ? comma + 1 : p + len;
@@ -127,10 +123,10 @@ static int mount_all(const char *want_type)
     }
 
     fstab_t e;
-    int rc = 0;
+    int     rc = 0;
     while (fstab_next(f, &e)) {
         if (strcmp(e.dir, "/") == 0 || strcmp(e.dir, "none") == 0)
-            continue;                        /* the root is already mounted */
+            continue; /* the root is already mounted */
         if (!type_selected(want_type, e.type))
             continue;
         if (already_mounted(e.dir))
@@ -139,7 +135,7 @@ static int mount_all(const char *want_type)
          * Linux system, and the entries this kernel cannot honour should not
          * turn a successful boot into a wall of errors. */
         if (do_mount(e.src, e.dir, e.type, 1) != 0 && strcmp(e.type, "tmpfs") == 0)
-            rc = 1;                          /* a tmpfs failure is real */
+            rc = 1; /* a tmpfs failure is real */
     }
     fclose(f);
     return rc;
@@ -154,7 +150,7 @@ static int mount_from_fstab(const char *target)
         return 1;
     }
     fstab_t e;
-    int rc = 1;
+    int     rc = 1;
     while (fstab_next(f, &e)) {
         if (strcmp(e.dir, target) != 0 && strcmp(e.src, target) != 0)
             continue;
@@ -176,8 +172,7 @@ static int list_mounts(void)
     char line[256];
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "%127s %127s %63s %127s", dev, dir, type, opts) >= 3)
-            printf("%s on %s type %s (%s)\n", dev, dir, type,
-                   opts[0] ? opts : "defaults");
+            printf("%s on %s type %s (%s)\n", dev, dir, type, opts[0] ? opts : "defaults");
     }
     fclose(f);
     return 0;
@@ -188,19 +183,17 @@ int main(int argc, char **argv)
     const char *fstype = NULL;
     const char *source = NULL;
     const char *target = NULL;
-    int all = 0;
+    int         all    = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strcmp(a, "-t") == 0 && i + 1 < argc) {
             fstype = argv[++i];
         } else if (strcmp(a, "-o") == 0 && i + 1 < argc) {
-            i++;                    /* options are accepted and ignored */
+            i++; /* options are accepted and ignored */
         } else if (strcmp(a, "-a") == 0) {
             all = 1;
-        } else if (strcmp(a, "-n") == 0 ||
-                   strcmp(a, "-r") == 0 ||
-                   strcmp(a, "-v") == 0 ||
+        } else if (strcmp(a, "-n") == 0 || strcmp(a, "-r") == 0 || strcmp(a, "-v") == 0 ||
                    strcmp(a, "-f") == 0) {
             /* no-mtab / read-only / verbose / fake: nothing to act on here */
         } else if (a[0] == '-' && a[1]) {

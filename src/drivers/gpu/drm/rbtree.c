@@ -29,9 +29,11 @@
 /* The one and only leaf.  Its own pointers fold back on itself so that a
  * careless descent cannot run off; nothing writes to it except its parent
  * link, transiently, while a deletion is being repaired. */
-static rb_node_t rb_sentinel = {
-    .parent = &rb_sentinel, .left = &rb_sentinel, .right = &rb_sentinel, .min_vruntime = 0, .color = RB_BLACK
-};
+static rb_node_t rb_sentinel = {.parent       = &rb_sentinel,
+                                .left         = &rb_sentinel,
+                                .right        = &rb_sentinel,
+                                .min_vruntime = 0,
+                                .color        = RB_BLACK};
 
 #define RB_NIL (&rb_sentinel)
 
@@ -49,7 +51,9 @@ static void rb_refresh_path(rb_node_t *node, rb_augment_fn augment, void *data)
 /* Leftmost node of a (possibly empty) subtree. */
 static rb_node_t *rb_leftmost_of(rb_node_t *node)
 {
-    while (node->left != RB_NIL) { node = node->left; }
+    while (node->left != RB_NIL) {
+        node = node->left;
+    }
     return node;
 }
 
@@ -86,7 +90,7 @@ static void rb_pivot_left(rb_root_t *root, rb_node_t *x, rb_augment_fn augment, 
 {
     rb_node_t *y = x->right;
 
-    x->right = y->left;
+    x->right        = y->left;
     y->left->parent = x;
 
     rb_graft(root, x, y);
@@ -105,7 +109,7 @@ static void rb_pivot_right(rb_root_t *root, rb_node_t *x, rb_augment_fn augment,
 {
     rb_node_t *y = x->left;
 
-    x->left = y->right;
+    x->left          = y->right;
     y->right->parent = x;
 
     rb_graft(root, x, y);
@@ -179,7 +183,7 @@ static void rb_insert_repair(rb_root_t *root, rb_node_t *node, rb_augment_fn aug
 static void rb_erase_repair(rb_root_t *root, rb_node_t *x, rb_augment_fn augment, void *data)
 {
     while (x != root->root && x->color == RB_BLACK) {
-        rb_node_t *parent    = x->parent;
+        rb_node_t *parent = x->parent;
         rb_node_t *sibling;
         int        x_on_left = (x == parent->left);
 
@@ -252,8 +256,12 @@ rb_node_t *rb_next(rb_node_t *node)
 {
     rb_node_t *parent;
 
-    if (node == NULL) { return NULL; }
-    if (node->right != RB_NIL) { return rb_leftmost_of(node->right); }
+    if (node == NULL) {
+        return NULL;
+    }
+    if (node->right != RB_NIL) {
+        return rb_leftmost_of(node->right);
+    }
 
     /* Climb until coming up out of a left subtree: that ancestor is the
      * next node in order. */
@@ -270,7 +278,8 @@ int rb_is_empty(rb_root_t *root)
     return root->root == RB_NIL;
 }
 
-void rb_insert_augmented(rb_root_t *root, rb_node_t *node, rb_less_fn less, rb_augment_fn augment, void *data)
+void rb_insert_augmented(rb_root_t *root, rb_node_t *node, rb_less_fn less, rb_augment_fn augment,
+                         void *data)
 {
     rb_node_t *parent = RB_NIL;
     rb_node_t *walk   = root->root;
@@ -294,20 +303,26 @@ void rb_insert_augmented(rb_root_t *root, rb_node_t *node, rb_less_fn less, rb_a
         parent->right = node;
     }
 
-    if (root->leftmost == RB_NIL || less(node, root->leftmost)) { root->leftmost = node; }
+    if (root->leftmost == RB_NIL || less(node, root->leftmost)) {
+        root->leftmost = node;
+    }
 
     rb_insert_repair(root, node, augment, data);
 
-    if (augment != NULL) { rb_refresh_path(node, augment, data); }
+    if (augment != NULL) {
+        rb_refresh_path(node, augment, data);
+    }
 }
 
 void rb_erase_augmented(rb_root_t *root, rb_node_t *node, rb_augment_fn augment, void *data)
 {
-    rb_node_t *heir;           /* what took its place, maybe the sentinel */
+    rb_node_t *heir; /* what took its place, maybe the sentinel */
     rb_color_t detached_color;
     rb_node_t *refresh_from;
 
-    if (root->leftmost == node) { root->leftmost = rb_next(node); }
+    if (root->leftmost == node) {
+        root->leftmost = rb_next(node);
+    }
 
     detached_color = node->color;
 
@@ -346,11 +361,17 @@ void rb_erase_augmented(rb_root_t *root, rb_node_t *node, rb_augment_fn augment,
     /* Summaries along the changed path need redoing: once for what moved,
      * and again below for whatever the repair rotates. */
     refresh_from = (heir != RB_NIL) ? heir : heir->parent;
-    if (augment != NULL && refresh_from != RB_NIL) { rb_refresh_path(refresh_from, augment, data); }
+    if (augment != NULL && refresh_from != RB_NIL) {
+        rb_refresh_path(refresh_from, augment, data);
+    }
 
-    if (detached_color == RB_BLACK) { rb_erase_repair(root, heir, augment, data); }
+    if (detached_color == RB_BLACK) {
+        rb_erase_repair(root, heir, augment, data);
+    }
 
-    if (augment != NULL && root->root != RB_NIL) { rb_refresh_path(root->root, augment, data); }
+    if (augment != NULL && root->root != RB_NIL) {
+        rb_refresh_path(root->root, augment, data);
+    }
 
     /* Leave the sentinel tidy: a stale parent here is the sort of thing
      * that silently misdirects the next deletion. */

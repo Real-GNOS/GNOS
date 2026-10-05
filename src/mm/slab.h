@@ -25,9 +25,9 @@
 typedef struct kmem_cache kmem_cache_t;
 
 /* Creation flags. */
-#define SLAB_HWCACHE_ALIGN  0x01   /* round the object size to a cache line */
-#define SLAB_PANIC          0x02   /* panic instead of returning NULL       */
-#define SLAB_ZEROED         0x04   /* memory handed out pre-zeroed          */
+#define SLAB_HWCACHE_ALIGN 0x01 /* round the object size to a cache line */
+#define SLAB_PANIC         0x02 /* panic instead of returning NULL       */
+#define SLAB_ZEROED        0x04 /* memory handed out pre-zeroed          */
 
 /* Optional constructor: called once per object when a slab is carved. */
 typedef void (*kmem_ctor_t)(void *obj, kmem_cache_t *cache);
@@ -37,8 +37,8 @@ typedef void (*kmem_ctor_t)(void *obj, kmem_cache_t *cache);
  * the default (16-byte, or a full cache line with SLAB_HWCACHE_ALIGN).
  * Returns NULL on failure unless SLAB_PANIC.
  */
-kmem_cache_t *kmem_cache_create(const char *name, uint32_t size, uint32_t align,
-                                uint32_t flags, kmem_ctor_t ctor);
+kmem_cache_t *kmem_cache_create(const char *name, uint32_t size, uint32_t align, uint32_t flags,
+                                kmem_ctor_t ctor);
 
 /* Destroy a cache: every object must have been handed back first. */
 void kmem_cache_destroy(kmem_cache_t *cache);
@@ -57,8 +57,8 @@ typedef struct {
     uint32_t    ac_hits, slab_hits;
 } kmem_slabinfo_t;
 
-int   kmem_slabinfo_next(int *iter, kmem_slabinfo_t *out);
-void  slab_selftest(void);
+int  kmem_slabinfo_next(int *iter, kmem_slabinfo_t *out);
+void slab_selftest(void);
 
 /* The one lock the slab layer takes; heap.c owns the region underneath. */
 #include "heap.h"

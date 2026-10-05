@@ -22,11 +22,15 @@
 #include "bootinfo.h"
 
 /* early trace via QEMU debugcon (port 0xE9), works even under UEFI */
-static void bout(uint8_t v) { asm volatile("outb %0,%1" :: "a"(v), "Nd"((uint16_t)0xE9)); }
+static void bout(uint8_t v)
+{
+    asm volatile("outb %0,%1" ::"a"(v), "Nd"((uint16_t)0xE9));
+}
 static void bputs(const char *s)
 {
     for (; *s; s++) {
-        if (*s == '\n') bout('\r');
+        if (*s == '\n')
+            bout('\r');
         bout((uint8_t)*s);
     }
 }
@@ -66,22 +70,19 @@ typedef struct {
 #define ELF_PT_LOAD   1
 
 /* ---------------- file helpers ---------------- */
-static EFI_STATUS
-open_file(EFI_HANDLE image, EFI_SYSTEM_TABLE *st, CHAR16 *path, EFI_FILE **out)
+static EFI_STATUS open_file(EFI_HANDLE image, EFI_SYSTEM_TABLE *st, CHAR16 *path, EFI_FILE **out)
 {
-    EFI_LOADED_IMAGE_PROTOCOL        *loaded = NULL;
-    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *fs     = NULL;
-    EFI_FILE                         *root   = NULL;
-    EFI_STATUS r;
+    EFI_LOADED_IMAGE_PROTOCOL       *loaded = NULL;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs     = NULL;
+    EFI_FILE                        *root   = NULL;
+    EFI_STATUS                       r;
 
-    r = uefi_call_wrapper(st->BootServices->HandleProtocol, 3,
-                          image, &gEfiLoadedImageProtocolGuid,
+    r = uefi_call_wrapper(st->BootServices->HandleProtocol, 3, image, &gEfiLoadedImageProtocolGuid,
                           (VOID **)&loaded);
     if (EFI_ERROR(r))
         return r;
 
-    r = uefi_call_wrapper(st->BootServices->HandleProtocol, 3,
-                          loaded->DeviceHandle,
+    r = uefi_call_wrapper(st->BootServices->HandleProtocol, 3, loaded->DeviceHandle,
                           &gEfiSimpleFileSystemProtocolGuid, (VOID **)&fs);
     if (EFI_ERROR(r))
         return r;
@@ -90,29 +91,25 @@ open_file(EFI_HANDLE image, EFI_SYSTEM_TABLE *st, CHAR16 *path, EFI_FILE **out)
     if (EFI_ERROR(r))
         return r;
 
-    return uefi_call_wrapper(root->Open, 5, root, out, path,
-                             EFI_FILE_MODE_READ, 0);
+    return uefi_call_wrapper(root->Open, 5, root, out, path, EFI_FILE_MODE_READ, 0);
 }
 
-static VOID *
-read_file(EFI_SYSTEM_TABLE *st, EFI_FILE *f, UINTN *size_out)
+static VOID *read_file(EFI_SYSTEM_TABLE *st, EFI_FILE *f, UINTN *size_out)
 {
-    EFI_FILE_INFO *info = NULL;
+    EFI_FILE_INFO *info   = NULL;
     UINTN          infosz = 0;
     UINTN          size   = 0;
     VOID          *buf;
     EFI_STATUS     r;
 
-    r = uefi_call_wrapper(f->GetInfo, 4, f,
-                          &gEfiFileInfoGuid, &infosz, NULL);
+    r = uefi_call_wrapper(f->GetInfo, 4, f, &gEfiFileInfoGuid, &infosz, NULL);
     if (r != EFI_BUFFER_TOO_SMALL || !infosz)
         return NULL;
 
     info = AllocateZeroPool(infosz);
     if (!info)
         return NULL;
-    r = uefi_call_wrapper(f->GetInfo, 4, f,
-                          &gEfiFileInfoGuid, &infosz, info);
+    r = uefi_call_wrapper(f->GetInfo, 4, f, &gEfiFileInfoGuid, &infosz, info);
     if (EFI_ERROR(r)) {
         FreePool(info);
         return NULL;
@@ -136,15 +133,14 @@ read_file(EFI_SYSTEM_TABLE *st, EFI_FILE *f, UINTN *size_out)
 }
 
 /* Copy one PT_LOAD segment to its p_vaddr (identity mapped). */
-static EFI_STATUS
-map_segment(EFI_SYSTEM_TABLE *st, const elf64_phdr_t *ph,
-            const VOID *file, UINTN filesize)
+static EFI_STATUS map_segment(EFI_SYSTEM_TABLE *st, const elf64_phdr_t *ph, const VOID *file,
+                              UINTN filesize)
 {
-    uint64_t target = ph->p_vaddr;
-    uint64_t avail  = ph->p_memsz;
-    const char *src = (const char *)file + ph->p_offset;
-    char *dst = (char *)(UINTN)target;
-    uint64_t n = ph->p_filesz;
+    uint64_t    target = ph->p_vaddr;
+    uint64_t    avail  = ph->p_memsz;
+    const char *src    = (const char *)file + ph->p_offset;
+    char       *dst    = (char *)(UINTN)target;
+    uint64_t    n      = ph->p_filesz;
 
     if (ph->p_offset + ph->p_filesz > filesize) {
         Print(L"  segment past EOF\r\n");
@@ -158,27 +154,23 @@ map_segment(EFI_SYSTEM_TABLE *st, const elf64_phdr_t *ph,
     return EFI_SUCCESS;
 }
 
-static uint64_t
-map_kernel(EFI_SYSTEM_TABLE *st, const VOID *file, UINTN filesize)
+static uint64_t map_kernel(EFI_SYSTEM_TABLE *st, const VOID *file, UINTN filesize)
 {
     const elf64_ehdr_t *eh = (const elf64_ehdr_t *)file;
-    UINT16 i;
+    UINT16              i;
 
-    if (filesize < sizeof(*eh) ||
-        __builtin_memcmp(eh->e_ident, "\177ELF", 4) != 0) {
+    if (filesize < sizeof(*eh) || __builtin_memcmp(eh->e_ident, "\177ELF", 4) != 0) {
         Print(L"  not an ELF\r\n");
         return 0;
     }
-    if (eh->e_type != ELF_ET_EXEC ||
-        eh->e_machine != ELF_EM_X86_64 ||
+    if (eh->e_type != ELF_ET_EXEC || eh->e_machine != ELF_EM_X86_64 ||
         eh->e_phentsize < sizeof(elf64_phdr_t)) {
         Print(L"  not an x86-64 ET_EXEC\r\n");
         return 0;
     }
     for (i = 0; i < eh->e_phnum; i++) {
         const elf64_phdr_t *ph =
-            (const elf64_phdr_t *)((const char *)file + eh->e_phoff +
-                                   (UINTN)i * eh->e_phentsize);
+            (const elf64_phdr_t *)((const char *)file + eh->e_phoff + (UINTN)i * eh->e_phentsize);
         if (ph->p_type != ELF_PT_LOAD)
             continue;
         if (EFI_ERROR(map_segment(st, ph, file, filesize)))
@@ -189,10 +181,9 @@ map_kernel(EFI_SYSTEM_TABLE *st, const VOID *file, UINTN filesize)
 
 /* ---------------- paging + GDT ---------------- */
 /* Identity-map the first 4 GiB with 2 MiB pages.  Returns CR3 (pml4 phys). */
-static EFI_PHYSICAL_ADDRESS
-setup_identity_paging(EFI_SYSTEM_TABLE *st)
+static EFI_PHYSICAL_ADDRESS setup_identity_paging(EFI_SYSTEM_TABLE *st)
 {
-    EFI_STATUS r;
+    EFI_STATUS           r;
     EFI_PHYSICAL_ADDRESS pages = 0;
     r = st->BootServices->AllocatePages(AllocateAnyPages, EfiLoaderData, 6, &pages);
     if (EFI_ERROR(r))
@@ -204,52 +195,52 @@ setup_identity_paging(EFI_SYSTEM_TABLE *st)
     for (UINTN i = 0; i < 6 * 512; i++)
         ((uint64_t *)(UINTN)pages)[i] = 0;
 
-    pml4[0] = (UINTN)pdpt | 0x3;                 /* present | rw */
+    pml4[0] = (UINTN)pdpt | 0x3; /* present | rw */
     for (int p = 0; p < 4; p++) {
         pdpt[p] = (UINTN)(pd + (UINTN)p * 512) | 0x3;
         for (int i = 0; i < 512; i++) {
-            uint64_t addr = (uint64_t)p * 0x40000000ULL +
-                            (uint64_t)i * 0x200000ULL;
-            pd[p * 512 + i] = addr | 0x83;       /* present | rw | PS(2MB) */
+            uint64_t addr   = (uint64_t)p * 0x40000000ULL + (uint64_t)i * 0x200000ULL;
+            pd[p * 512 + i] = addr | 0x83; /* present | rw | PS(2MB) */
         }
     }
     return pages;
 }
 
-static VOID
-setup_gdt(EFI_SYSTEM_TABLE *st)
+static VOID setup_gdt(EFI_SYSTEM_TABLE *st)
 {
-    EFI_STATUS r;
+    EFI_STATUS           r;
     EFI_PHYSICAL_ADDRESS gp = 0;
     r = st->BootServices->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &gp);
     if (EFI_ERROR(r))
         return;
 
     uint64_t *gdt = (uint64_t *)(UINTN)gp;
-    gdt[0] = 0;
-    gdt[1] = 0x00AF9A000000FFFFULL;   /* 64-bit code */
-    gdt[2] = 0x00CF92000000FFFFULL;   /* 64-bit data */
+    gdt[0]        = 0;
+    gdt[1]        = 0x00AF9A000000FFFFULL; /* 64-bit code */
+    gdt[2]        = 0x00CF92000000FFFFULL; /* 64-bit data */
 
-    struct { uint16_t limit; uint64_t base; } __attribute__((packed)) gdtr;
+    struct {
+        uint16_t limit;
+        uint64_t base;
+    } __attribute__((packed)) gdtr;
     gdtr.limit = 3 * 8 - 1;
     gdtr.base  = (uint64_t)(UINTN)gdt;
 
-    asm volatile("lgdt %0" :: "m"(gdtr));
+    asm volatile("lgdt %0" ::"m"(gdtr));
     uint16_t ds = 0x10;
-    asm volatile("mov %0, %%ds; mov %0, %%es; mov %0, %%ss; "
-                 "mov %0, %%fs; mov %0, %%gs" :: "r"(ds));
+    asm volatile(
+        "mov %0, %%ds; mov %0, %%es; mov %0, %%ss; "
+        "mov %0, %%fs; mov %0, %%gs" ::"r"(ds));
 }
 
-static BOOLEAN
-grab_gop(EFI_SYSTEM_TABLE *st, bootinfo_t *bi)
+static BOOLEAN grab_gop(EFI_SYSTEM_TABLE *st, bootinfo_t *bi)
 {
-    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
-    EFI_GUID guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-    EFI_STATUS r;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL         *gop  = NULL;
+    EFI_GUID                              guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    EFI_STATUS                            r;
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
 
-    r = uefi_call_wrapper(st->BootServices->LocateProtocol, 3,
-                          &guid, NULL, (VOID **)&gop);
+    r = uefi_call_wrapper(st->BootServices->LocateProtocol, 3, &guid, NULL, (VOID **)&gop);
     if (EFI_ERROR(r) || !gop || !gop->Mode->Info)
         return FALSE;
 
@@ -257,8 +248,7 @@ grab_gop(EFI_SYSTEM_TABLE *st, bootinfo_t *bi)
     bi->fb_addr   = gop->Mode->FrameBufferBase;
     bi->fb_width  = info->HorizontalResolution;
     bi->fb_height = info->VerticalResolution;
-    bi->fb_pitch  = gop->Mode->FrameBufferSize /
-                    info->VerticalResolution;
+    bi->fb_pitch  = gop->Mode->FrameBufferSize / info->VerticalResolution;
     bi->fb_bpp    = (UINT32)(bi->fb_pitch * 8 / info->HorizontalResolution);
     bi->fb_type   = GNUCOS_FB_RGB;
     return TRUE;
@@ -268,11 +258,11 @@ grab_gop(EFI_SYSTEM_TABLE *st, bootinfo_t *bi)
 EFI_STATUS
 efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
-    EFI_FILE  *f = NULL;
-    VOID      *buf = NULL;
-    UINTN      len = 0;
-    bootinfo_t *bi = (bootinfo_t *)GNOS_BOOTINFO_ADDR;
-    uint64_t   entry;
+    EFI_FILE   *f   = NULL;
+    VOID       *buf = NULL;
+    UINTN       len = 0;
+    bootinfo_t *bi  = (bootinfo_t *)GNOS_BOOTINFO_ADDR;
+    uint64_t    entry;
 
     InitializeLib(image, st);
     BTRACE("initlib");
@@ -286,7 +276,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     BTRACE("paging");
     setup_gdt(st);
     BTRACE("gdt");
-    asm volatile("mov %0, %%cr3" :: "r"(cr3));
+    asm volatile("mov %0, %%cr3" ::"r"(cr3));
     BTRACE("cr3");
 
     SetMem(bi, sizeof(*bi), 0);
@@ -319,7 +309,8 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     {
         EFI_FILE *f2 = NULL;
         if (!EFI_ERROR(open_file(image, st, L"\\gnos\\initrd.img", &f2))) {
-            VOID *ibuf; UINTN ilen;
+            VOID *ibuf;
+            UINTN ilen;
             ibuf = read_file(st, f2, &ilen);
             if (ibuf) {
                 bi->initrd_addr = (uint64_t)(UINTN)ibuf;
@@ -333,7 +324,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* 3. memory map snapshot (before ExitBootServices) */
     {
-        UINTN msize = 0, dsize = 0, key = 0;
+        UINTN  msize = 0, dsize = 0, key = 0;
         UINT32 dver = 0;
         st->BootServices->GetMemoryMap(&msize, NULL, &key, &dsize, &dver);
         msize += 8192;
@@ -344,8 +335,8 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
             bi->mmap_size      = msize;
             bi->mmap_desc_size = dsize;
             bi->mmap_ver       = dver;
-            uint64_t *dst = (uint64_t *)(UINTN)bi->mmap_addr;
-            uint64_t *src = (uint64_t *)map;
+            uint64_t *dst      = (uint64_t *)(UINTN)bi->mmap_addr;
+            uint64_t *src      = (uint64_t *)map;
             for (UINTN i = 0; i < msize / 8; i++)
                 dst[i] = src[i];
             FreePool(map);

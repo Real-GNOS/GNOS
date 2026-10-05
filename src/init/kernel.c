@@ -5,7 +5,8 @@
  * Limine enters kernel_entry() in long mode with paging already enabled:
  *   - the whole of physical RAM is direct-mapped at the HHDM offset
  *     (limine_hhdm_response.offset, normally 0xFFFF800000000000),
- *   - the kernel image itself lives at 0xFFFFFFFF80000000.
+ *   - the kernel image lives at a per-boot randomized high-half base
+ *     (kaslr.c moves it right after the handoff; see the kaslr section).
  * Every pointer Limine hands us (framebuffer address, module address, the
  * response structs themselves) is therefore an *already mapped* higher-half
  * virtual address -- we can dereference it straight away and must NOT try to
@@ -18,7 +19,7 @@
  *   3. PMM and VMM, because every later step allocates memory.
  *   4. VFS over the initrd, then the tty on top of it.
  *   5. The syscall gate and the timer.
- *   6. PID 1, built from /init.elf, and then the scheduler -- which never
+ *   6. PID 1 (/sbin/init -> busybox init), and then the scheduler -- which never
  *      returns: this function becomes the idle loop.
  */
 #include <stddef.h>
@@ -29,6 +30,7 @@
 #include "bootinfo.h"
 #include "fbcon.h"
 #include "debugcon.h"
+#include "kaslr.h"
 #include "vfs.h"
 #include "cgroup.h"
 #include "panic.h"
@@ -62,7 +64,7 @@ extern unsigned int AcpiInitializeTables(void *Table, unsigned int n, unsigned c
 extern unsigned int AcpiLoadTables(void);
 extern unsigned int AcpiEnableSubsystem(unsigned int Flags);
 extern unsigned int AcpiInitializeObjects(unsigned int Flags);
-#define ACPI_SUCCESS(st)   ((st) == 0)
+#define ACPI_SUCCESS(st)         ((st) == 0)
 #define ACPI_FULL_INITIALIZATION 0u
 typedef unsigned int ACPI_STATUS_K;
 #include "lapic.h"
@@ -78,16 +80,17 @@ typedef unsigned int ACPI_STATUS_K;
 #include "nvme.h"
 #include "drm.h"
 #include "drm_init.h"
+#include "drm_svga.h"
 #include "procfs.h"
 #include "xhci.h"
 #include "usb_hid.h"
 #include "usb_msc.h"
 
-extern volatile struct limine_framebuffer_request framebuffer_request;
-extern volatile struct limine_module_request      module_request;
-extern volatile struct limine_hhdm_request        hhdm_request;
-extern volatile struct limine_kernel_address_request kernel_address_request;
-extern volatile struct limine_rsdp_request        rsdp_request;
+extern volatile struct limine_framebuffer_request        framebuffer_request;
+extern volatile struct limine_module_request             module_request;
+extern volatile struct limine_hhdm_request               hhdm_request;
+extern volatile struct limine_kernel_address_request     kernel_address_request;
+extern volatile struct limine_rsdp_request               rsdp_request;
 extern volatile struct limine_executable_cmdline_request cmdline_request;
 
 /* The boot command line (limine.conf's `cmdline:` line), kept for
@@ -104,6 +107,15 @@ static bootinfo_t g_bi;
 uint64_t g_hhdm;
 uint64_t g_kernel_phys;
 uint64_t g_kernel_virt;
+
+/*
+ * The Limine protocol entry point.  Deliberately thin: fill the globals the
+ * rest of the boot needs, give KASLR its one chance to move the image, and
+ * hand off to kernel_main().  The split matters -- if the kernel was
+ * relocated, execution must never wander back into this function's old-base
+ * instruction stream, or the randomization would be cosmetic.
+ */
+void kernel_main(void);
 
 void kernel_entry(void)
 {
@@ -126,17 +138,28 @@ void kernel_entry(void)
     dbg_puts_hex(g_kernel_virt);
     dbg_puts("\r\n");
 
+    /* ---- move the image to a random base, unless something says no ---- */
+    uint64_t base = kaslr_maybe_relocate(g_kernel_virt, g_kernel_phys, g_hhdm);
+    if (base != g_kernel_virt) {
+        g_kernel_virt = base;
+    }
+
+    kernel_main();
+}
+
+/* Everything from the first framebuffer byte onward; runs at whatever base
+ * kernel_entry settled on. */
+void kernel_main(void)
+{
     /* ---- framebuffer from Limine (HHDM virtual, already mapped) ------ */
-    if (framebuffer_request.response &&
-        framebuffer_request.response->framebuffer_count > 0) {
-        struct limine_framebuffer *fb =
-            framebuffer_request.response->framebuffers[0];
-        g_bi.fb_addr   = (uint64_t)(uintptr_t)fb->address;
-        g_bi.fb_width  = (uint32_t)fb->width;
-        g_bi.fb_height = (uint32_t)fb->height;
-        g_bi.fb_pitch  = (uint32_t)fb->pitch;
-        g_bi.fb_bpp    = fb->bpp;
-        g_bi.fb_type   = GNUCOS_FB_RGB;
+    if (framebuffer_request.response && framebuffer_request.response->framebuffer_count > 0) {
+        struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+        g_bi.fb_addr                  = (uint64_t)(uintptr_t)fb->address;
+        g_bi.fb_width                 = (uint32_t)fb->width;
+        g_bi.fb_height                = (uint32_t)fb->height;
+        g_bi.fb_pitch                 = (uint32_t)fb->pitch;
+        g_bi.fb_bpp                   = fb->bpp;
+        g_bi.fb_type                  = GNUCOS_FB_RGB;
     }
 
     /* ---- initrd module from Limine (HHDM virtual too) ---------------- */
@@ -146,14 +169,14 @@ void kernel_entry(void)
      * installer in user space.  The module wins when both exist.  The
      * disk-root branch is resolved later, once the allocator can give us
      * the 48 MiB a whole filesystem costs. */
-    uint8_t *root_img   = NULL;
-    uint32_t root_size  = 0;
+    uint8_t *root_img  = NULL;
+    uint32_t root_size = 0;
     if (module_request.response && module_request.response->module_count > 0) {
         struct limine_file *mod = module_request.response->modules[0];
-        g_bi.initrd_addr = (uint64_t)(uintptr_t)mod->address;
-        g_bi.initrd_size = mod->size;
-        root_img  = (uint8_t *)(uintptr_t)mod->address;
-        root_size = (uint32_t)mod->size;
+        g_bi.initrd_addr        = (uint64_t)(uintptr_t)mod->address;
+        g_bi.initrd_size        = mod->size;
+        root_img                = (uint8_t *)(uintptr_t)mod->address;
+        root_size               = (uint32_t)mod->size;
         dbg_puts("GNOS: initrd = ");
         dbg_puts_hex(g_bi.initrd_addr);
         dbg_puts(" size=");
@@ -169,9 +192,9 @@ void kernel_entry(void)
 
     /* The driver registry has to exist before the first driver init runs,
      * because every one of them announces itself into it. */
-    klog_init();                       /* /dev-style kernel log ring */
+    klog_init(); /* /dev-style kernel log ring */
     subsys_init();
-    sysfs_init();                      /* /sys built-in attributes */
+    sysfs_init(); /* /sys built-in attributes */
 
     /* ---- console ------------------------------------------------------ */
     fbcon_init(&g_bi);
@@ -180,16 +203,15 @@ void kernel_entry(void)
     /* ---- memory ------------------------------------------------------- */
     pmm_init();
     vmm_init();
-    vmm_map_kernel_bss();              /* bootloader may leave BSS unmapped */
-    kheap_init();                      /* kernel heap on top of the PMM */
-    module_subsys_init();              /* loadable-module registry */
+    vmm_map_kernel_bss(); /* bootloader may leave BSS unmapped */
+    kheap_init();         /* kernel heap on top of the PMM */
+    module_subsys_init(); /* loadable-module registry */
 
     /* ---- firmware description ------------------------------------------
      * After the direct map is trustworthy (every ACPI pointer is physical and
      * gets read through it) and before the PCI probe, so that anything the
      * tables say about interrupt routing is already on hand. */
-    acpi_init(rsdp_request.response
-                  ? (uint64_t)(uintptr_t)rsdp_request.response->address : 0);
+    acpi_init(rsdp_request.response ? (uint64_t)(uintptr_t)rsdp_request.response->address : 0);
     acpi_dump();
     acpi_pm1_init();
 
@@ -255,6 +277,21 @@ void kernel_entry(void)
      * NIC loops a frame through its own PHY, the codec streams a tone past
      * the DMA engine.  Neither test needs a human, a network or a speaker. */
     pci_init();
+
+    /* The display device goes first: it claims the scanout target the DRM
+     * pipeline will later size itself from, so it has to have answered
+     * before drm_init_fallback() builds that pipeline.  Probing it here
+     * also means "was there a GPU?" ends up in the registry like every
+     * other device instead of being a line of boot text nobody kept.
+     * FAILED is the ordinary case -- QEMU only has one with -device
+     * vmware-svga -- and it costs nothing but a PCI lookup. */
+    int slot_svga = subsys_register("svga", NULL, SUBSYS_CLASS_GRAPHIC, 0, 0);
+    if (svga_init()) {
+        subsys_set_state(slot_svga, SUBSYS_STATE_LIVE);
+    } else {
+        subsys_set_state(slot_svga, SUBSYS_STATE_FAILED);
+    }
+
     /* Each probe reports into the registry so that "was there a NIC?" is a
      * lookup later on instead of a line of boot text nobody kept. */
     int slot_nic = subsys_register("e1000", NULL, SUBSYS_CLASS_NET, 0, 0);
@@ -308,14 +345,13 @@ void kernel_entry(void)
         fbcon_puts("no initrd module: reading root from disk 0 partition 1\n");
         ata_init();
 
-        uint64_t frames = 16896;       /* 66 MiB: the image is 64 MB plus
-                                        * margin for a grown one later */
-        uint64_t phys   = pmm_alloc_contiguous(frames);
+        uint64_t frames = 16896; /* 66 MiB: the image is 64 MB plus
+                                  * margin for a grown one later */
+        uint64_t phys = pmm_alloc_contiguous(frames);
         if (!phys)
             panic("disk root: no memory for the root filesystem");
         root_img  = (uint8_t *)pmm_virt(phys);
-        root_size = (uint32_t)ata_read_boot_partition(root_img,
-                                                      (uint32_t)(frames * 4096));
+        root_size = (uint32_t)ata_read_boot_partition(root_img, (uint32_t)(frames * 4096));
         if (!root_size)
             panic("disk root: no root partition found on disk 0");
         g_bi.initrd_addr = phys;
@@ -333,8 +369,8 @@ void kernel_entry(void)
      * exists: vfs_init() starts the device table from scratch, and
      * anything registered before it is forgotten. */
     pty_init();
-    audio_vfs_register();               /* /dev/dsp (AC97 PCM out) */
-    alsa_vfs_register();                /* /dev/snd/controlC0 + pcmC0D0p */
+    audio_vfs_register(); /* /dev/dsp (AC97 PCM out) */
+    alsa_vfs_register();  /* /dev/snd/controlC0 + pcmC0D0p */
 
     tty_init();
 
@@ -416,24 +452,36 @@ void kernel_entry(void)
     gfx_self_test();
     fbdev_self_test();
     acpi_self_test();
+    /* Before any process exists, so the two scratch address spaces it borrows
+     * cannot collide with a real one: fork() sharing has to be proven before
+     * anything relies on it. */
+    vmm_cow_self_test();
+
+    /* Last, and only meaningful with a device: it is what decides whether
+     * the SVGA II accelerated copy may be used at all, and settles how GMR
+     * page descriptors are encoded while it is at it.  Must run after the
+     * allocators (it borrows pages) and before user space. */
+    svga_selftest();
+
     subsys_dump();
 
-    /* kthreadd (PID 2) must be spawned before init (PID 1) so that
-     * proc_alloc() hands it the lower pid.  It will not run until
-     * sched_start(); any work queued between now and then will be
-     * processed once the scheduler is live. */
-    int kd = proc_spawn_kthreadd();
-    if (kd < 0)
-        panic("cannot start kthreadd");
-
-    fbcon_puts("starting /init.elf as pid 1...\n\n");
+    /* PID 1 must be the real init: busybox init refuses to start if it
+     * is not, which is the whole point of the busybox userland.  Allocate
+     * it first so proc_alloc() hands it pid 1, then kthreadd lands on
+     * pid 2.  kthreadd will not run until sched_start(); any work queued
+     * between now and then is processed once the scheduler is live. */
+    fbcon_puts("starting /sbin/init as pid 1...\n\n");
 
     /* The boot command line (an initrd-root /cmdline file, written by make
      * from KCMD=...) is spliced into PID 1's argv inside proc_spawn_init();
      * g_boot_cmdline is kept here for /proc/cmdline. */
-    int pid = proc_spawn_init("/init.elf");
+    int pid = proc_spawn_init("/sbin/init");
     if (pid < 0)
-        panic("cannot start /init.elf");
+        panic("cannot start /sbin/init");
+
+    int kd = proc_spawn_kthreadd();
+    if (kd < 0)
+        panic("cannot start kthreadd");
 
     /* init owns the terminal until it hands it to a child of its own. */
     tty_set_pgrp(pid);

@@ -25,7 +25,7 @@ int32_t drm_ioctl_get_resources(uint64_t arg)
 
     if (r.fb_id_ptr && r.count_fbs >= nfb) {
         uint32_t ids[MAX_FB];
-        int k = 0;
+        int      k = 0;
         for (int i = 0; i < MAX_FB; i++)
             if (g_fbs[i].used)
                 ids[k++] = g_fbs[i].fb_id;
@@ -44,12 +44,14 @@ int32_t drm_ioctl_get_resources(uint64_t arg)
         copy_to_user((uint64_t)(uintptr_t)r.encoder_id_ptr, &id, 4);
     }
 
-    r.count_fbs = nfb;
-    r.count_crtcs = 1;
+    r.count_fbs        = nfb;
+    r.count_crtcs      = 1;
     r.count_connectors = 1;
-    r.count_encoders = 1;
-    r.min_width = 320; r.max_width = 4096;
-    r.min_height = 200; r.max_height = 4096;
+    r.count_encoders   = 1;
+    r.min_width        = 320;
+    r.max_width        = 4096;
+    r.min_height       = 200;
+    r.max_height       = 4096;
     return copy_to_user(arg, &r, sizeof r);
 }
 
@@ -69,29 +71,28 @@ int32_t drm_ioctl_get_connector(uint64_t arg)
         drm_mode_modeinfo_t modes[N_MODES];
         for (int i = 0; i < N_MODES; i++)
             fill_modeinfo(&modes[i], &g_modes[i]);
-        copy_to_user((uint64_t)(uintptr_t)c.modes_ptr, modes,
-                     sizeof(modes[0]) * N_MODES);
+        copy_to_user((uint64_t)(uintptr_t)c.modes_ptr, modes, sizeof(modes[0]) * N_MODES);
     }
     if (c.props_ptr && c.count_props >= 1) {
-        static const uint32_t props[1] = { DRM_PROP_ID_DPMS };
+        static const uint32_t props[1] = {DRM_PROP_ID_DPMS};
         copy_to_user((uint64_t)(uintptr_t)c.props_ptr, props, sizeof props);
     }
     if (c.prop_values_ptr && c.count_props >= 1) {
-        static const uint64_t vals[1] = { 0 };   /* DPMS On */
-        copy_to_user((uint64_t)(uintptr_t)c.prop_values_ptr, vals,
-                     sizeof vals);
+        static const uint64_t vals[1] = {0}; /* DPMS On */
+        copy_to_user((uint64_t)(uintptr_t)c.prop_values_ptr, vals, sizeof vals);
     }
 
-    c.count_modes = N_MODES;
-    c.count_props = 1;
-    c.count_encoders = 1;
-    c.encoder_id = 1;
-    c.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
+    c.count_modes       = N_MODES;
+    c.count_props       = 1;
+    c.count_encoders    = 1;
+    c.encoder_id        = 1;
+    c.connector_type    = DRM_MODE_CONNECTOR_VIRTUAL;
     c.connector_type_id = 1;
-    c.connection = DRM_MODE_CONNECTED;
-    c.mm_width = 320; c.mm_height = 200;
-    c.subpixel = DRM_MODE_SUBPIXEL_UNKNOWN;
-    c.pad = 0;
+    c.connection        = DRM_MODE_CONNECTED;
+    c.mm_width          = 320;
+    c.mm_height         = 200;
+    c.subpixel          = DRM_MODE_SUBPIXEL_UNKNOWN;
+    c.pad               = 0;
     return copy_to_user(arg, &c, sizeof c);
 }
 
@@ -102,9 +103,9 @@ int32_t drm_ioctl_get_encoder(uint64_t arg)
         return -E_FAULT;
     if (e.encoder_id != 1)
         return -E_NOENT;
-    e.encoder_type = DRM_MODE_ENCODER_VIRTUAL;
-    e.crtc_id = 1;
-    e.possible_crtcs = 1;
+    e.encoder_type    = DRM_MODE_ENCODER_VIRTUAL;
+    e.crtc_id         = 1;
+    e.possible_crtcs  = 1;
     e.possible_clones = 0;
     return copy_to_user(arg, &e, sizeof e);
 }
@@ -127,8 +128,8 @@ int32_t drm_ioctl_get_crtc(uint64_t arg)
         return -E_NOENT;
     memset(&c, 0, sizeof c);
     c.crtc_id = 1;
-    c.fb_id = g_cur_fb;
-    c.x = c.y = 0;
+    c.fb_id   = g_cur_fb;
+    c.x = c.y    = 0;
     c.gamma_size = 0;
     c.mode_valid = 1;
     current_modeinfo(&c.mode);
@@ -152,13 +153,13 @@ int32_t drm_ioctl_set_crtc(uint64_t arg)
     if (c.crtc_id != 1)
         return -E_NOENT;
     if (c.x || c.y)
-        return -E_INVAL;                /* no panning */
+        return -E_INVAL; /* no panning */
     if (c.count_connectors > 1)
         return -E_INVAL;
 
     /* Resolve the fb up front: a failed lookup must not leave the mode
      * switched behind an error return. */
-    fb_t *f = NULL;
+    fb_t   *f = NULL;
     dumb_t *d = NULL;
     if (c.fb_id) {
         f = fb_by_id(c.fb_id);
@@ -178,7 +179,7 @@ int32_t drm_ioctl_set_crtc(uint64_t arg)
         if (!w || !h)
             return -E_INVAL;
         if (!mode_by_size(w, h))
-            return -E_INVAL;            /* only modes we advertise */
+            return -E_INVAL; /* only modes we advertise */
 
         /* A real mode change goes through the VBE registers; fbcon is then
          * told about the new geometry and repaints itself. */
@@ -244,8 +245,7 @@ static const uint32_t g_plane_formats[] = {
     DRM_FORMAT_XRGB8888,
     DRM_FORMAT_ARGB8888,
 };
-#define N_PLANE_FORMATS \
-    ((uint32_t)(sizeof g_plane_formats / sizeof g_plane_formats[0]))
+#define N_PLANE_FORMATS ((uint32_t)(sizeof g_plane_formats / sizeof g_plane_formats[0]))
 
 int32_t drm_ioctl_get_plane(uint64_t arg)
 {
@@ -255,12 +255,12 @@ int32_t drm_ioctl_get_plane(uint64_t arg)
     if (p.plane_id != 1)
         return -E_NOENT;
     if (p.format_type_ptr && p.count_format_types >= N_PLANE_FORMATS)
-        copy_to_user((uint64_t)(uintptr_t)p.format_type_ptr,
-                     g_plane_formats, sizeof g_plane_formats);
-    p.crtc_id = 1;
-    p.fb_id = g_cur_fb;
-    p.possible_crtcs = 1;
-    p.gamma_size = 0;
+        copy_to_user((uint64_t)(uintptr_t)p.format_type_ptr, g_plane_formats,
+                     sizeof g_plane_formats);
+    p.crtc_id            = 1;
+    p.fb_id              = g_cur_fb;
+    p.possible_crtcs     = 1;
+    p.gamma_size         = 0;
     p.count_format_types = N_PLANE_FORMATS;
     return copy_to_user(arg, &p, sizeof p);
 }
@@ -276,7 +276,7 @@ int32_t drm_ioctl_page_flip(uint64_t arg)
     if (p.crtc_id != 1)
         return -E_NOENT;
     if (p.flags & ~DRM_MODE_PAGE_FLIP_EVENT)
-        return -E_INVAL;                /* no async; the event flag is served */
+        return -E_INVAL; /* no async; the event flag is served */
     fb_t *f = fb_by_id(p.fb_id);
     if (!f)
         return -E_NOENT;

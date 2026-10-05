@@ -52,8 +52,8 @@
 #include "process_vm_access.h"
 
 /* reboot(169) command codes; the Linux ABI as musl's reboot() passes them. */
-#define LINUX_REBOOT_CMD_RESTART    0x01234567
-#define LINUX_REBOOT_CMD_POWER_OFF  0x4321fedc
+#define LINUX_REBOOT_CMD_RESTART   0x01234567
+#define LINUX_REBOOT_CMD_POWER_OFF 0x4321fedc
 
 /* The `syscall` instruction lands here; defined in isr.asm.  It builds a
  * regs_t frame and calls syscall_handler(), exactly like the int 0x80 path. */
@@ -71,7 +71,7 @@ static void wrmsr(uint32_t msr, uint64_t val)
 
 /* Room for a shell's environment plus a long command line.  bash alone
  * exports about 30 variables before it runs anything. */
-#define MAX_ARGV    128
+#define MAX_ARGV 128
 
 /* user_ptr_ok() now lives in vmm.c (the network ioctl path needs it too);
  * it is declared in vmm.h, which this file includes. */
@@ -122,9 +122,9 @@ static int path_norm(const char *base, const char *path, char *out)
      * slash, and a separator is only added between components, which is what
      * keeps "/" itself from coming back as "//". */
     uint32_t o = 0;
-    out[o++] = '/';
+    out[o++]   = '/';
 
-    for (uint32_t i = 0; i < n; ) {
+    for (uint32_t i = 0; i < n;) {
         while (i < n && buf[i] == '/')
             i++;
         uint32_t start = i;
@@ -140,8 +140,8 @@ static int path_norm(const char *base, const char *path, char *out)
             while (o > 1 && out[o - 1] != '/')
                 o--;
             if (o > 1)
-                o--;                   /* drop the separator as well */
-            continue;                  /* ".." at the root is the root */
+                o--;  /* drop the separator as well */
+            continue; /* ".." at the root is the root */
         }
 
         if (o > 1) {
@@ -232,8 +232,8 @@ static int perm_check(const char *abs, int want, int follow)
         return -E_INVAL;
 
     uint32_t uid, gid, mode;
-    int is_dir;
-    int r = vfs_owner(abs, &uid, &gid, &mode, &is_dir, follow);
+    int      is_dir;
+    int      r = vfs_owner(abs, &uid, &gid, &mode, &is_dir, follow);
     if (r < 0)
         return r;
 
@@ -299,7 +299,7 @@ static int64_t open_resolved(const char *abs, int flags)
             want |= 2;
 
         uint32_t uid, gid, mode;
-        int is_dir;
+        int      is_dir;
         if (vfs_owner(abs, &uid, &gid, &mode, &is_dir, 1) == 0) {
             if (!proc_permitted(mode, uid, gid, want, is_dir))
                 return -E_ACCES;
@@ -310,7 +310,6 @@ static int64_t open_resolved(const char *abs, int flags)
             creator_from_current();
         }
     }
-
 
     /* O_CLOEXEC describes the descriptor, not the open file, so it is
      * stripped here and never reaches the filesystem layer. */
@@ -383,7 +382,7 @@ static int64_t sys_openat(int dfd, uint64_t upath, int flags)
  * second one that is *not* cloexec, which is exactly how a shell moves a
  * descriptor out of the way before exec.
  */
-static int64_t sys_close(int fd);       /* defined further down */
+static int64_t sys_close(int fd); /* defined further down */
 
 /* fallocate(285): reserve/punch file space.  Without an extent-based
  * allocator the honest implementations are the zero-filling ones:
@@ -391,11 +390,10 @@ static int64_t sys_close(int fd);       /* defined further down */
  *   KEEP_SIZE              zero [offset, min(offset+len, EOF)), size kept
  *   PUNCH_HOLE|KEEP_SIZE   same as KEEP_SIZE (an ext2 hole reads as zeros)
  * anything else -> EOPNOTSUPP, like a filesystem without ->fallocate. */
-#define FALLOC_FL_KEEP_SIZE     0x01
-#define FALLOC_FL_PUNCH_HOLE    0x02
+#define FALLOC_FL_KEEP_SIZE  0x01
+#define FALLOC_FL_PUNCH_HOLE 0x02
 
-static int64_t sys_fallocate(uint64_t fd, uint64_t mode, uint64_t off,
-                             uint64_t len)
+static int64_t sys_fallocate(uint64_t fd, uint64_t mode, uint64_t off, uint64_t len)
 {
     if (len == 0)
         return 0;
@@ -418,20 +416,19 @@ static int64_t sys_fallocate(uint64_t fd, uint64_t mode, uint64_t off,
     uint64_t wstart, wend;
     if (mode & FALLOC_FL_KEEP_SIZE) {
         wstart = off;
-        wend = off + len;
+        wend   = off + len;
         if (wend > size)
-            wend = size;                 /* beyond EOF: nothing to punch */
+            wend = size; /* beyond EOF: nothing to punch */
     } else {
-        wstart = size;                   /* fill the gap, then grow */
-        wend = off + len;
+        wstart = size; /* fill the gap, then grow */
+        wend   = off + len;
         if (wend <= size)
-            return 0;                    /* fully inside: size unchanged */
+            return 0; /* fully inside: size unchanged */
         wstart = size;
     }
     for (uint64_t p = wstart; p < wend; p += sizeof zeros) {
-        uint32_t n = (uint32_t)((wend - p) < sizeof zeros ? (wend - p)
-                                                         : sizeof zeros);
-        int32_t w = vfs_file_pwrite(h, zeros, n, p);
+        uint32_t n = (uint32_t)((wend - p) < sizeof zeros ? (wend - p) : sizeof zeros);
+        int32_t  w = vfs_file_pwrite(h, zeros, n, p);
         if (w < 0)
             return w;
     }
@@ -443,20 +440,21 @@ static int64_t sys_fallocate(uint64_t fd, uint64_t mode, uint64_t off,
 static int64_t sys_syslog(uint64_t type, uint64_t bufp, uint64_t len)
 {
     switch (type) {
-    case 0: case 1:                      /* open/close: no state to change */
+    case 0:
+    case 1: /* open/close: no state to change */
         return 0;
-    case 2:                              /* read + drain */
-    case 3:                              /* read without draining */
+    case 2: /* read + drain */
+    case 3: /* read without draining */
         if (!user_ptr_ok(bufp, len))
             return -E_FAULT;
         return klog_syscall(type == 2 ? 0 : 2, bufp, len);
-    case 4:                              /* clear the unread tail */
+    case 4: /* clear the unread tail */
         return klog_syscall(3, 0, 0);
-    case 5:                              /* clear the whole ring */
+    case 5: /* clear the whole ring */
         return klog_syscall(6, 0, 0);
-    case 8:                              /* set console log level: accepted */
+    case 8: /* set console log level: accepted */
         return 0;
-    default:                             /* 6/7 console control: no-op */
+    default: /* 6/7 console control: no-op */
         return 0;
     }
 }
@@ -468,10 +466,9 @@ static int64_t sys_syslog(uint64_t type, uint64_t bufp, uint64_t len)
  * path, which is exactly what the rseq ABI prescribes. */
 #define RSEQ_FLAG_UNREGISTER 1
 
-static int64_t sys_rseq(uint64_t urseq, uint64_t len, uint64_t flags,
-                        uint64_t sig)
+static int64_t sys_rseq(uint64_t urseq, uint64_t len, uint64_t flags, uint64_t sig)
 {
-    if (len != 32)                       /* sizeof(struct rseq) on x86-64 */
+    if (len != 32) /* sizeof(struct rseq) on x86-64 */
         return -E_INVAL;
     if (flags & ~RSEQ_FLAG_UNREGISTER)
         return -E_INVAL;
@@ -480,21 +477,21 @@ static int64_t sys_rseq(uint64_t urseq, uint64_t len, uint64_t flags,
     return proc_rseq_register(urseq, sig);
 }
 
-static int64_t sys_close(int fd);       /* defined further down */
+static int64_t sys_close(int fd); /* defined further down */
 
 /* close_range(436): close every fd in [first, last].  A shell or a service
  * manager hands a child a clean set of descriptors with one call instead of
  * looping over close() (or, worse, over /proc/self/fd). */
 static int64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags)
 {
-    if (flags & ~1u)                     /* CLOSE_RANGE_CLOEXEC is bit 0 */
+    if (flags & ~1u) /* CLOSE_RANGE_CLOEXEC is bit 0 */
         return -E_INVAL;
     proc_t *p = proc_current();
     if (!p)
         return -E_BADF;
     if (first > last)
         return -E_INVAL;
-    if (last >= PROC_MAX_FD)             /* Linux clamps, so do we */
+    if (last >= PROC_MAX_FD) /* Linux clamps, so do we */
         last = PROC_MAX_FD - 1;
 
     for (uint64_t fd = first; fd <= last; fd++) {
@@ -515,9 +512,9 @@ static int64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags)
  * entry with the big kernel lock and runs its interrupt handlers on the
  * interrupted core, so there is nothing to issue an IPI for -- the barrier
  * is already there.  QUERY reports the commands we can honour. */
-#define MEMBARRIER_CMD_QUERY              0
-#define MEMBARRIER_CMD_GLOBAL             1
-#define MEMBARRIER_CMD_PRIVATE_EXPEDITED  8
+#define MEMBARRIER_CMD_QUERY                      0
+#define MEMBARRIER_CMD_GLOBAL                     1
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED          8
 #define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED 16
 
 static int64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t cpu_id)
@@ -542,41 +539,39 @@ static int64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t cpu_id)
 /* copy_file_range(326): splice bytes between two files without a user-side
  * buffer round trip.  No page-cache splice here, so it is a pread/pwrite
  * loop -- the observable behaviour is what matters to the caller. */
-static int64_t sys_copy_file_range(uint64_t fd_in, uint64_t uoff_in,
-                                   uint64_t fd_out, uint64_t uoff_out,
-                                   uint64_t len, uint64_t flags)
+static int64_t sys_copy_file_range(uint64_t fd_in, uint64_t uoff_in, uint64_t fd_out,
+                                   uint64_t uoff_out, uint64_t len, uint64_t flags)
 {
     if (flags)
         return -E_INVAL;
     if (!len)
         return 0;
 
-    int hin = fd_handle((int)fd_in);
+    int hin  = fd_handle((int)fd_in);
     int hout = fd_handle((int)fd_out);
     if (hin < 0 || hout < 0)
         return -E_BADF;
 
     uint64_t off_in = 0, off_out = 0;
-    int have_in = 0, have_out = 0;
+    int      have_in = 0, have_out = 0;
     if (uoff_in) {
         if (!user_ptr_ok(uoff_in, 8))
             return -E_FAULT;
-        off_in = *(uint64_t *)(uintptr_t)uoff_in;
+        off_in  = *(uint64_t *)(uintptr_t)uoff_in;
         have_in = 1;
     }
     if (uoff_out) {
         if (!user_ptr_ok(uoff_out, 8))
             return -E_FAULT;
-        off_out = *(uint64_t *)(uintptr_t)uoff_out;
+        off_out  = *(uint64_t *)(uintptr_t)uoff_out;
         have_out = 1;
     }
 
     static uint8_t cfr_buf[4096];
-    uint64_t done = 0;
+    uint64_t       done = 0;
     while (done < len) {
-        uint32_t n = (uint32_t)((len - done) < sizeof cfr_buf ? (len - done)
-                                                             : sizeof cfr_buf);
-        int32_t got, wrote;
+        uint32_t n = (uint32_t)((len - done) < sizeof cfr_buf ? (len - done) : sizeof cfr_buf);
+        int32_t  got, wrote;
         if (have_in) {
             got = vfs_file_pread(hin, cfr_buf, n, off_in + done);
         } else {
@@ -593,7 +588,7 @@ static int64_t sys_copy_file_range(uint64_t fd_in, uint64_t uoff_in,
             return done ? (int64_t)done : wrote;
         done += (uint32_t)wrote;
         if ((uint32_t)wrote < (uint32_t)got)
-            break;                       /* short write: stop like Linux does */
+            break; /* short write: stop like Linux does */
     }
     if (have_in)
         *(uint64_t *)(uintptr_t)uoff_in = off_in + done;
@@ -606,10 +601,11 @@ static int64_t sys_copy_file_range(uint64_t fd_in, uint64_t uoff_in,
  * be extended.  `resolve` (RESOLVE_BENEATH and friends) is rejected rather
  * than silently ignored -- a caller that asks for a guarantee it is not
  * getting is worse off than one that gets EINVAL. */
-struct open_how { uint64_t flags, mode, resolve; };
+struct open_how {
+    uint64_t flags, mode, resolve;
+};
 
-static int64_t sys_openat2(uint64_t dfd, uint64_t upath, uint64_t uhow,
-                           uint64_t size)
+static int64_t sys_openat2(uint64_t dfd, uint64_t upath, uint64_t uhow, uint64_t size)
 {
     if (size < sizeof(struct open_how))
         return -E_INVAL;
@@ -617,13 +613,13 @@ static int64_t sys_openat2(uint64_t dfd, uint64_t upath, uint64_t uhow,
         return -E_FAULT;
     const struct open_how *how = (const struct open_how *)(uintptr_t)uhow;
     if (how->resolve)
-        return -E_INVAL;                 /* no RESOLVE_* support yet */
+        return -E_INVAL; /* no RESOLVE_* support yet */
     if (how->flags & O_CREAT) {
         /* open_resolved() takes no mode; create through the plain path. */
         return sys_openat((int)dfd, upath, (int)how->flags);
     }
     char abs[GNUOS_PATH_MAX];
-    int r = path_at((int)dfd, upath, abs);
+    int  r = path_at((int)dfd, upath, abs);
     if (r < 0)
         return r;
     return open_resolved(abs, (int)how->flags);
@@ -633,8 +629,7 @@ static int64_t sys_openat2(uint64_t dfd, uint64_t upath, uint64_t uhow,
  * on.  The mask lives beside the process table rather than inside proc_t so
  * that growing it cannot disturb the struct's 16-byte alignment (the FPU
  * save area depends on it). */
-static int64_t sys_sched_setaffinity(uint64_t pid, uint64_t cpusetsize,
-                                     uint64_t umask)
+static int64_t sys_sched_setaffinity(uint64_t pid, uint64_t cpusetsize, uint64_t umask)
 {
     if (cpusetsize < 8 || cpusetsize > 64)
         return -E_INVAL;
@@ -642,8 +637,7 @@ static int64_t sys_sched_setaffinity(uint64_t pid, uint64_t cpusetsize,
         return -E_FAULT;
 
     uint64_t mask = 0;
-    memcpy(&mask, (const void *)(uintptr_t)umask,
-           cpusetsize < 8 ? cpusetsize : 8);
+    memcpy(&mask, (const void *)(uintptr_t)umask, cpusetsize < 8 ? cpusetsize : 8);
     if (!mask)
         return -E_INVAL;
 
@@ -658,8 +652,7 @@ static int64_t sys_sched_setaffinity(uint64_t pid, uint64_t cpusetsize,
     return 0;
 }
 
-static int64_t sys_sched_getaffinity(uint64_t pid, uint64_t cpusetsize,
-                                     uint64_t umask)
+static int64_t sys_sched_getaffinity(uint64_t pid, uint64_t cpusetsize, uint64_t umask)
 {
     if (cpusetsize < 8 || cpusetsize > 64)
         return -E_INVAL;
@@ -720,7 +713,7 @@ static int64_t sys_fcntl(int fd, int cmd, uint64_t arg)
          * bit that lives in the socket itself.  musl and BusyBox read this to
          * decide whether a connect()/accept()/recv() will block. */
         int fl = vfs_file_flags(h) & 3;
-        int s = vfs_file_sock(h);
+        int s  = vfs_file_sock(h);
         if (s >= 0 && sock_is_nonblock(s))
             fl |= O_NONBLOCK;
         return fl;
@@ -745,7 +738,8 @@ static int64_t sys_fcntl(int fd, int cmd, uint64_t arg)
         input_set_nonblock(fln, (arg & O_NONBLOCK) != 0);
         return 0;
     }
-    default:       return -E_NOSYS;
+    default:
+        return -E_NOSYS;
     }
 }
 
@@ -836,14 +830,14 @@ static int64_t sys_gstat(uint64_t upath, uint64_t ust)
 
     uint64_t size = 0;
     int      kind = 0;
-    r = vfs_stat(abs, &size, &kind);
+    r             = vfs_stat(abs, &size, &kind);
     if (r < 0)
         return r;
 
     gstat_t *st = (gstat_t *)(uintptr_t)ust;
-    st->size = size;
-    st->kind = (uint32_t)kind;
-    st->attr = 0;
+    st->size    = size;
+    st->kind    = (uint32_t)kind;
+    st->attr    = 0;
     return 0;
 }
 
@@ -912,8 +906,7 @@ static int64_t sys_newfstatat(int fd, uint64_t upath, uint64_t ust, uint64_t fla
         int  pr = path_at(fd, upath, abs);
         if (pr < 0)
             return pr;
-        r = vfs_stat_linux(abs, (lstat_t *)(uintptr_t)ust,
-                           (flags & AT_SYMLINK_NOFOLLOW) ? 0 : 1);
+        r = vfs_stat_linux(abs, (lstat_t *)(uintptr_t)ust, (flags & AT_SYMLINK_NOFOLLOW) ? 0 : 1);
     }
     return r;
 }
@@ -923,8 +916,7 @@ static int64_t sys_newfstatat(int fd, uint64_t upath, uint64_t ust, uint64_t fla
  * fields (type/mode/size/ino/nlink), so we reuse the lstat_t path and copy the
  * interesting fields over.  AT_EMPTY_PATH stats the dirfd itself.
  */
-static int64_t sys_statx(int dirfd, uint64_t upath, uint64_t flags,
-                         uint64_t mask, uint64_t ust)
+static int64_t sys_statx(int dirfd, uint64_t upath, uint64_t flags, uint64_t mask, uint64_t ust)
 {
     (void)mask;
     if (!user_ptr_ok(ust, sizeof(kstatx_t)))
@@ -948,35 +940,34 @@ static int64_t sys_statx(int dirfd, uint64_t upath, uint64_t flags,
 
     kstatx_t *sx = (kstatx_t *)(uintptr_t)ust;
     memset(sx, 0, sizeof(*sx));
-    sx->stx_mask        = STATX_BASIC_STATS;
-    sx->stx_blksize     = tmp.st_blksize;
-    sx->stx_nlink       = tmp.st_nlink;
-    sx->stx_uid         = tmp.st_uid;
-    sx->stx_gid         = tmp.st_gid;
-    sx->stx_mode        = tmp.st_mode;
-    sx->stx_ino         = tmp.st_ino;
-    sx->stx_size        = tmp.st_size;
-    sx->stx_blocks      = tmp.st_blocks;
+    sx->stx_mask    = STATX_BASIC_STATS;
+    sx->stx_blksize = tmp.st_blksize;
+    sx->stx_nlink   = tmp.st_nlink;
+    sx->stx_uid     = tmp.st_uid;
+    sx->stx_gid     = tmp.st_gid;
+    sx->stx_mode    = tmp.st_mode;
+    sx->stx_ino     = tmp.st_ino;
+    sx->stx_size    = tmp.st_size;
+    sx->stx_blocks  = tmp.st_blocks;
     /* Linux reports the device number as (major, minor) pairs.  tmp.st_rdev
      * is the new_encode_dev() value the rest of stat returns; split it. */
-    sx->stx_rdev_major  = (uint32_t)((tmp.st_rdev >> 8) & 0xfff) |
-                          (uint32_t)((tmp.st_rdev >> 32) & ~0xfffu);
-    sx->stx_rdev_minor  = (uint32_t)(tmp.st_rdev & 0xff) |
-                          (uint32_t)((tmp.st_rdev >> 12) & ~0xffu);
-    sx->stx_dev_major   = 8;            /* one ext2 image on /dev/hda */
-    sx->stx_dev_minor   = 0;
-    sx->stx_atime_sec   = (int64_t)tmp.st_atim_sec;
-    sx->stx_atime_nsec  = tmp.st_atim_nsec;
-    sx->stx_mtime_sec   = (int64_t)tmp.st_mtim_sec;
-    sx->stx_mtime_nsec  = tmp.st_mtim_nsec;
-    sx->stx_ctime_sec   = (int64_t)tmp.st_ctim_sec;
-    sx->stx_ctime_nsec  = tmp.st_ctim_nsec;
+    sx->stx_rdev_major =
+        (uint32_t)((tmp.st_rdev >> 8) & 0xfff) | (uint32_t)((tmp.st_rdev >> 32) & ~0xfffu);
+    sx->stx_rdev_minor = (uint32_t)(tmp.st_rdev & 0xff) | (uint32_t)((tmp.st_rdev >> 12) & ~0xffu);
+    sx->stx_dev_major  = 8; /* one ext2 image on /dev/hda */
+    sx->stx_dev_minor  = 0;
+    sx->stx_atime_sec  = (int64_t)tmp.st_atim_sec;
+    sx->stx_atime_nsec = tmp.st_atim_nsec;
+    sx->stx_mtime_sec  = (int64_t)tmp.st_mtim_sec;
+    sx->stx_mtime_nsec = tmp.st_mtim_nsec;
+    sx->stx_ctime_sec  = (int64_t)tmp.st_ctim_sec;
+    sx->stx_ctime_nsec = tmp.st_ctim_nsec;
     /* There is exactly one mount -- the built-in filesystem -- so the id
      * is 1 and DIO has no alignment to report. */
-    sx->stx_mnt_id      = 1;
+    sx->stx_mnt_id           = 1;
     sx->stx_dio_mem_align    = 0;
     sx->stx_dio_offset_align = 0;
-    sx->stx_mask       |= STATX_MNT_ID | STATX_DIOALIGN;
+    sx->stx_mask |= STATX_MNT_ID | STATX_DIOALIGN;
     return 0;
 }
 
@@ -986,22 +977,23 @@ static int64_t sys_statx(int dirfd, uint64_t upath, uint64_t flags,
  * without blocking, which a synchronous VFS cannot do, so it is refused
  * rather than silently honoured as a blocking read.  RWF_APPEND pins the
  * write to the end of the file regardless of the offset. */
-#define RWF_HIPRI   0x00000001
-#define RWF_DSYNC   0x00000002
-#define RWF_SYNC    0x00000004
-#define RWF_NOWAIT  0x00000008
-#define RWF_APPEND  0x00000010
+#define RWF_HIPRI  0x00000001
+#define RWF_DSYNC  0x00000002
+#define RWF_SYNC   0x00000004
+#define RWF_NOWAIT 0x00000008
+#define RWF_APPEND 0x00000010
 
 /* Same layout as iovec_t, which is declared further down the file. */
-typedef struct { uint64_t v_base, v_len; } vec2_t;
+typedef struct {
+    uint64_t v_base, v_len;
+} vec2_t;
 
-static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off,
-                           uint64_t flags, int writing)
+static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off, uint64_t flags,
+                           int writing)
 {
     if (cnt > 1024 || !user_ptr_ok(uiov, cnt * sizeof(vec2_t)))
         return -E_INVAL;
-    if (flags & ~(uint64_t)(RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT |
-                            RWF_APPEND))
+    if (flags & ~(uint64_t)(RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND))
         return -E_OPNOTSUPP;
     if (flags & RWF_NOWAIT)
         return -E_OPNOTSUPP;
@@ -1010,16 +1002,16 @@ static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off,
     if (h < 0)
         return -E_BADF;
 
-    const vec2_t *iov = (const vec2_t *)(uintptr_t)uiov;
-    int64_t total = 0;
-    uint64_t pos = (off >= 0) ? (uint64_t)off : 0;
+    const vec2_t *iov   = (const vec2_t *)(uintptr_t)uiov;
+    int64_t       total = 0;
+    uint64_t      pos   = (off >= 0) ? (uint64_t)off : 0;
 
     if (writing && (flags & RWF_APPEND)) {
         lstat_t st;
         if (vfs_fstat(h, &st) < 0)
             return -E_BADF;
         pos = st.st_size;
-        off = (int64_t)pos;              /* append pins the position */
+        off = (int64_t)pos; /* append pins the position */
     }
 
     for (uint64_t i = 0; i < cnt; i++) {
@@ -1031,14 +1023,11 @@ static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off,
 
         int64_t n;
         if (off >= 0) {
-            n = writing
-                ? vfs_file_pwrite(h, (const void *)(uintptr_t)iov[i].v_base,
-                                  len, pos)
-                : vfs_file_pread(h, (void *)(uintptr_t)iov[i].v_base, len, pos);
+            n = writing ? vfs_file_pwrite(h, (const void *)(uintptr_t)iov[i].v_base, len, pos)
+                        : vfs_file_pread(h, (void *)(uintptr_t)iov[i].v_base, len, pos);
         } else {
-            n = writing
-                ? vfs_file_write(h, (const void *)(uintptr_t)iov[i].v_base, len)
-                : vfs_file_read(h, (void *)(uintptr_t)iov[i].v_base, len);
+            n = writing ? vfs_file_write(h, (const void *)(uintptr_t)iov[i].v_base, len)
+                        : vfs_file_read(h, (void *)(uintptr_t)iov[i].v_base, len);
         }
         if (n < 0)
             return total ? total : n;
@@ -1055,26 +1044,29 @@ static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off,
  * u32 __reserved; } -- 24 bytes -- and the only defined bits in `flags` are
  * FUTEX_32 (32-bit word) and FUTEX_PRIVATE_FLAG (process-private word).
  * Returns the index of the futex that changed, or -1/ETIMEDOUT. */
-#define FUTEX_WAITV_MAX     128
-#define FUTEX_32            0x02
-#define FUTEX_PRIVATE_FLAG  0x80
+#define FUTEX_WAITV_MAX    128
+#define FUTEX_32           0x02
+#define FUTEX_PRIVATE_FLAG 0x80
 
-typedef struct { uint64_t val, uaddr; uint32_t flags, reserved; } futex_waitv_t;
+typedef struct {
+    uint64_t val, uaddr;
+    uint32_t flags, reserved;
+} futex_waitv_t;
 
-static int64_t sys_futex_waitv(uint64_t uwaiters, uint64_t nr, uint64_t flags,
-                               uint64_t utimeout, uint64_t clockid)
+static int64_t sys_futex_waitv(uint64_t uwaiters, uint64_t nr, uint64_t flags, uint64_t utimeout,
+                               uint64_t clockid)
 {
     if (flags)
-        return -E_INVAL;                 /* no flags are defined */
+        return -E_INVAL; /* no flags are defined */
     if (!nr || nr > FUTEX_WAITV_MAX)
         return -E_INVAL;
-    if (clockid > 7)                     /* MONOTONIC/REALTIME/BOOTTIME only */
+    if (clockid > 7) /* MONOTONIC/REALTIME/BOOTTIME only */
         return -E_INVAL;
     if (!user_ptr_ok(uwaiters, nr * sizeof(futex_waitv_t)))
         return -E_FAULT;
 
     const futex_waitv_t *w = (const futex_waitv_t *)(uintptr_t)uwaiters;
-    static uint64_t addrs[FUTEX_WAITV_MAX];
+    static uint64_t      addrs[FUTEX_WAITV_MAX];
 
     for (uint32_t i = 0; i < nr; i++) {
         if (w[i].flags & ~(uint32_t)(FUTEX_32 | FUTEX_PRIVATE_FLAG))
@@ -1096,14 +1088,16 @@ static int64_t sys_futex_waitv(uint64_t uwaiters, uint64_t nr, uint64_t flags,
     if (utimeout) {
         if (!user_ptr_ok(utimeout, 16))
             return -E_FAULT;
-        struct { int64_t tv_sec; int64_t tv_nsec; } ts;
+        struct {
+            int64_t tv_sec;
+            int64_t tv_nsec;
+        } ts;
         memcpy(&ts, (const void *)(uintptr_t)utimeout, sizeof ts);
         if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
             return -E_INVAL;
-        int64_t base = (clockid == 0)
-            ? (int64_t)(timer_ticks() / SCHED_HZ + timer_boot_epoch())
-            : (int64_t)(timer_ticks() / SCHED_HZ);
-        ticks = (ts.tv_sec - base) * SCHED_HZ + ts.tv_nsec / 10000000;
+        int64_t base = (clockid == 0) ? (int64_t)(timer_ticks() / SCHED_HZ + timer_boot_epoch())
+                                      : (int64_t)(timer_ticks() / SCHED_HZ);
+        ticks        = (ts.tv_sec - base) * SCHED_HZ + ts.tv_nsec / 10000000;
         if (ticks < 0)
             ticks = 0;
     }
@@ -1137,10 +1131,12 @@ static int64_t sys_futex_waitv(uint64_t uwaiters, uint64_t nr, uint64_t flags,
  * mount table at all -- the filesystem is built in -- so the honest answer
  * is ENOSYS, not a silent success that would fool a caller into believing
  * its mount options had taken effect. */
-static int64_t sys_mount_setattr(uint64_t dfd, uint64_t upath, uint64_t flags,
-                                 uint64_t uattr, uint64_t usize)
+static int64_t sys_mount_setattr(uint64_t dfd, uint64_t upath, uint64_t flags, uint64_t uattr,
+                                 uint64_t usize)
 {
-    (void)dfd; (void)upath; (void)uattr;
+    (void)dfd;
+    (void)upath;
+    (void)uattr;
     /* Linux accepts AT_SYMLINK_NOFOLLOW (0x100), AT_NO_AUTOMOUNT (0x800),
      * AT_EMPTY_PATH (0x1000) and AT_RECURSIVE (0x8000) here -- the 0x7FF
      * mask this used to apply wrongly refused three of the four. */
@@ -1173,7 +1169,8 @@ static int64_t sys_mount_setattr(uint64_t dfd, uint64_t upath, uint64_t flags,
 
 static int64_t sys_fadvise64(int fd, uint64_t off, uint64_t len, uint64_t advice)
 {
-    (void)off; (void)len;
+    (void)off;
+    (void)len;
     if (fd_handle(fd) < 0)
         return -E_BADF;
     if (advice > POSIX_FADV_NOREUSE)
@@ -1191,7 +1188,7 @@ static int64_t cwd_set(const char *abs)
 
     uint64_t size = 0;
     int      kind = 0;
-    int r = vfs_stat(abs, &size, &kind);
+    int      r    = vfs_stat(abs, &size, &kind);
     if (r < 0)
         return r;
     if (kind != VFS_DIR)
@@ -1255,11 +1252,11 @@ static int64_t sys_uname(uint64_t ubuf)
 
     utsname_t *u = (utsname_t *)(uintptr_t)ubuf;
     memset(u, 0, sizeof(*u));
-    strncpy(u->sysname,  "GNOS",     UTS_LEN - 1);
-    strncpy(u->nodename, g_hostname,  UTS_LEN - 1);
-    strncpy(u->release,  "0.1",       UTS_LEN - 1);
-    strncpy(u->version,  "GNOS 0.1", UTS_LEN - 1);
-    strncpy(u->machine,  "x86_64",    UTS_LEN - 1);
+    strncpy(u->sysname, "GNOS", UTS_LEN - 1);
+    strncpy(u->nodename, g_hostname, UTS_LEN - 1);
+    strncpy(u->release, "0.1", UTS_LEN - 1);
+    strncpy(u->version, "GNOS 0.1", UTS_LEN - 1);
+    strncpy(u->machine, "x86_64", UTS_LEN - 1);
     return 0;
 }
 
@@ -1283,9 +1280,9 @@ static int64_t sys_gethostname(uint64_t ubuf, uint64_t sz)
         return -E_INVAL;
     if (!user_ptr_ok(ubuf, 1))
         return -E_FAULT;
-    size_t n = strlen(g_hostname);
+    size_t n    = strlen(g_hostname);
     size_t copy = (n < (size_t)sz) ? n : (size_t)sz - 1;
-    char *u = (char *)(uintptr_t)ubuf;
+    char  *u    = (char *)(uintptr_t)ubuf;
     memcpy(u, g_hostname, copy);
     if (copy < (size_t)sz)
         u[copy] = '\0';
@@ -1299,7 +1296,7 @@ static int64_t sys_gethostname(uint64_t ubuf, uint64_t sz)
  * things a boot actually uses it for (ASLR-ish, seedrng's seed, temp names).
  * The GRND_* flags are all honoured trivially: we never block.
  */
-static uint64_t g_rng_state;
+static uint64_t        g_rng_state;
 static inline uint64_t rdtsc(void)
 {
     uint32_t lo, hi;
@@ -1321,10 +1318,10 @@ void krandom_bytes(void *buf, uint32_t n)
 {
     if (g_rng_state == 0)
         g_rng_state = rdtsc() ^ 0x9E3779B97F4A7C15ULL;
-    uint8_t *p = (uint8_t *)buf;
+    uint8_t *p    = (uint8_t *)buf;
     uint32_t done = 0;
     while (done < n) {
-        uint64_t w = rng_u64();
+        uint64_t w     = rng_u64();
         uint32_t chunk = n - done;
         if (chunk > 8)
             chunk = 8;
@@ -1347,12 +1344,12 @@ static int64_t sys_getrandom(uint64_t ubuf, uint64_t usize, uint64_t uflags)
     if (g_rng_state == 0)
         g_rng_state = rdtsc() ^ 0x9E3779B97F4A7C15ULL;
 
-    uint8_t *u = (uint8_t *)(uintptr_t)ubuf;
-    size_t n = (size_t)usize;
-    size_t done = 0;
+    uint8_t *u    = (uint8_t *)(uintptr_t)ubuf;
+    size_t   n    = (size_t)usize;
+    size_t   done = 0;
     while (done < n) {
-        uint64_t w = rng_u64();
-        size_t chunk = n - done;
+        uint64_t w     = rng_u64();
+        size_t   chunk = n - done;
         if (chunk > 8)
             chunk = 8;
         memcpy(u + done, &w, chunk);
@@ -1371,8 +1368,8 @@ static int64_t sys_getrandom(uint64_t ubuf, uint64_t usize, uint64_t uflags)
  */
 #define MS_REMOUNT 0x20
 
-static int64_t sys_mount(uint64_t usrc, uint64_t utgt, uint64_t ufs,
-                         uint64_t uflags, uint64_t udata)
+static int64_t sys_mount(uint64_t usrc, uint64_t utgt, uint64_t ufs, uint64_t uflags,
+                         uint64_t udata)
 {
     (void)usrc;
     (void)udata;
@@ -1394,12 +1391,12 @@ static int64_t sys_mount(uint64_t usrc, uint64_t utgt, uint64_t ufs,
     }
 
     char abs[GNUOS_PATH_MAX];
-    int r = path_norm("/", tgt, abs);
+    int  r = path_norm("/", tgt, abs);
     if (r < 0)
         return r;
 
     if (uflags & MS_REMOUNT)
-        return 0;                       /* ro/rw tracking is not implemented */
+        return 0; /* ro/rw tracking is not implemented */
 
     if (strcmp(fst, "tmpfs") == 0)
         return vfs_mount_tmpfs(abs);
@@ -1412,19 +1409,17 @@ static int64_t sys_mount(uint64_t usrc, uint64_t utgt, uint64_t ufs,
      * a /dev block device. */
     /* vfat/fat/msdos name the FAT family, which vfs_mount_bdev tries when
      * the volume is not ext2 -- the same call covers both. */
-    if (strcmp(fst, "ext4") == 0 || strcmp(fst, "ext3") == 0 ||
-        strcmp(fst, "ext2") == 0 ||
-        strcmp(fst, "vfat") == 0 || strcmp(fst, "fat") == 0 ||
-        strcmp(fst, "msdos") == 0 ||
+    if (strcmp(fst, "ext4") == 0 || strcmp(fst, "ext3") == 0 || strcmp(fst, "ext2") == 0 ||
+        strcmp(fst, "vfat") == 0 || strcmp(fst, "fat") == 0 || strcmp(fst, "msdos") == 0 ||
         strcmp(fst, "iso9660") == 0) {
         if (!user_ptr_ok(usrc, 1))
             return -E_FAULT;
         char src[32];
         strncpy(src, (const char *)(uintptr_t)usrc, sizeof(src) - 1);
         src[sizeof(src) - 1] = 0;
-        const char *dev = src;
+        const char *dev      = src;
         if (strncmp(dev, "/dev/", 5) == 0)
-            dev += 5;                   /* the VFS dev table drops the prefix */
+            dev += 5; /* the VFS dev table drops the prefix */
         return vfs_mount_bdev(abs, dev);
     }
 
@@ -1440,7 +1435,7 @@ static int64_t sys_umount2(uint64_t utgt, uint64_t uflags)
     strncpy(tgt, (const char *)(uintptr_t)utgt, GNUOS_PATH_MAX - 1);
     tgt[GNUOS_PATH_MAX - 1] = 0;
     char abs[GNUOS_PATH_MAX];
-    int r = path_norm("/", tgt, abs);
+    int  r = path_norm("/", tgt, abs);
     if (r < 0)
         return r;
     return vfs_umount(abs);
@@ -1456,10 +1451,13 @@ static int64_t sys_umount2(uint64_t utgt, uint64_t uflags)
  * are refused outright rather than quietly aliased onto real time, which
  * would make a profiler report confident nonsense.
  */
-#define ITIMER_REAL     0
+#define ITIMER_REAL 0
 
 /* ktimeval_t is the shared struct timeval from sysnum.h. */
-typedef struct { ktimeval_t it_interval; ktimeval_t it_value; } kitimerval_t;
+typedef struct {
+    ktimeval_t it_interval;
+    ktimeval_t it_value;
+} kitimerval_t;
 
 #define USEC_PER_TICK (1000000ULL / SCHED_HZ)
 
@@ -1502,9 +1500,9 @@ static int64_t sys_setitimer(uint64_t which, uint64_t unew, uint64_t uold)
         if (!user_ptr_ok(unew, sizeof(nv)))
             return -E_FAULT;
         memcpy(&nv, (const void *)(uintptr_t)unew, sizeof(nv));
-        if (nv.it_value.tv_sec < 0 || nv.it_value.tv_usec < 0 ||
-            nv.it_interval.tv_sec < 0 || nv.it_interval.tv_usec < 0 ||
-            nv.it_value.tv_usec >= 1000000 || nv.it_interval.tv_usec >= 1000000)
+        if (nv.it_value.tv_sec < 0 || nv.it_value.tv_usec < 0 || nv.it_interval.tv_sec < 0 ||
+            nv.it_interval.tv_usec < 0 || nv.it_value.tv_usec >= 1000000 ||
+            nv.it_interval.tv_usec >= 1000000)
             return -E_INVAL;
     }
 
@@ -1520,7 +1518,7 @@ static int64_t sys_setitimer(uint64_t which, uint64_t unew, uint64_t uold)
     }
 
     if (unew) {
-        uint64_t val = tv_to_ticks(&nv.it_value);
+        uint64_t val       = tv_to_ticks(&nv.it_value);
         p->itimer_interval = tv_to_ticks(&nv.it_interval);
         p->itimer_expire   = val ? now + val : 0;
     }
@@ -1571,7 +1569,7 @@ static int64_t sys_umask(uint32_t mask)
         return -E_INVAL;
 
     uint32_t old = p->umask;
-    p->umask = mask & 0777;
+    p->umask     = mask & 0777;
     return (int64_t)old;
 }
 
@@ -1583,11 +1581,13 @@ static int chmod_allowed(const char *abs)
         return -E_INVAL;
 
     uint32_t uid, gid, mode;
-    int is_dir;
-    int r = vfs_owner(abs, &uid, &gid, &mode, &is_dir, 1);
+    int      is_dir;
+    int      r = vfs_owner(abs, &uid, &gid, &mode, &is_dir, 1);
     if (r < 0)
         return r;
-    (void)gid; (void)mode; (void)is_dir;
+    (void)gid;
+    (void)mode;
+    (void)is_dir;
 
     if (p->euid == 0 || p->euid == uid)
         return 0;
@@ -1622,23 +1622,24 @@ static int chown_allowed(uint32_t owner, uint32_t uid, uint32_t gid)
         return 0;
 
     if (uid != (uint32_t)-1 && uid != owner)
-        return -E_PERM;                     /* giving it away: root only */
+        return -E_PERM; /* giving it away: root only */
     if (p->euid != owner)
-        return -E_PERM;                     /* not yours to re-group     */
+        return -E_PERM; /* not yours to re-group     */
     if (gid != (uint32_t)-1 && !proc_in_group(p, gid))
         return -E_PERM;
     return 0;
 }
 
-static int64_t sys_chown(const char *abs, uint32_t uid, uint32_t gid,
-                         int follow)
+static int64_t sys_chown(const char *abs, uint32_t uid, uint32_t gid, int follow)
 {
     uint32_t owner, group, mode;
-    int is_dir;
-    int r = vfs_owner(abs, &owner, &group, &mode, &is_dir, follow);
+    int      is_dir;
+    int      r = vfs_owner(abs, &owner, &group, &mode, &is_dir, follow);
     if (r < 0)
         return r;
-    (void)group; (void)mode; (void)is_dir;
+    (void)group;
+    (void)mode;
+    (void)is_dir;
 
     r = chown_allowed(owner, uid, gid);
     if (r < 0)
@@ -1658,7 +1659,7 @@ static int64_t sys_fchown(int fd, uint32_t uid, uint32_t gid)
         return -E_BADF;
 
     lstat_t st;
-    int r = vfs_fstat(h, &st);
+    int     r = vfs_fstat(h, &st);
     if (r < 0)
         return r;
 
@@ -1686,20 +1687,20 @@ static int64_t sys_access(int dfd, uint64_t upath, int at, int amode)
         return -E_INVAL;
 
     uint32_t uid, gid, mode;
-    int is_dir;
+    int      is_dir;
     r = vfs_owner(abs, &uid, &gid, &mode, &is_dir, 1);
     if (r < 0)
         return r;
 
     int want = amode & 7;
     if (!want)
-        return 0;                           /* F_OK: it exists, we are done */
+        return 0; /* F_OK: it exists, we are done */
 
     /* Swap in the real ids for the duration of the test, per POSIX. */
     uint32_t save_euid = p->euid, save_egid = p->egid;
     p->euid = p->uid;
     p->egid = p->gid;
-    int ok = proc_permitted(mode, uid, gid, want, is_dir);
+    int ok  = proc_permitted(mode, uid, gid, want, is_dir);
     p->euid = save_euid;
     p->egid = save_egid;
 
@@ -1720,9 +1721,12 @@ static int64_t sys_getresuid(uint64_t ruid, uint64_t euid, uint64_t suid)
     proc_t *p = proc_current();
     if (!p)
         return -E_SRCH;
-    if (ruid && user_ptr_ok(ruid, 4)) *(uint32_t *)(uintptr_t)ruid = p->uid;
-    if (euid && user_ptr_ok(euid, 4)) *(uint32_t *)(uintptr_t)euid = p->euid;
-    if (suid && user_ptr_ok(suid, 4)) *(uint32_t *)(uintptr_t)suid = p->suid;
+    if (ruid && user_ptr_ok(ruid, 4))
+        *(uint32_t *)(uintptr_t)ruid = p->uid;
+    if (euid && user_ptr_ok(euid, 4))
+        *(uint32_t *)(uintptr_t)euid = p->euid;
+    if (suid && user_ptr_ok(suid, 4))
+        *(uint32_t *)(uintptr_t)suid = p->suid;
     return 0;
 }
 
@@ -1731,9 +1735,12 @@ static int64_t sys_getresgid(uint64_t rgid, uint64_t egid, uint64_t sgid)
     proc_t *p = proc_current();
     if (!p)
         return -E_SRCH;
-    if (rgid && user_ptr_ok(rgid, 4)) *(uint32_t *)(uintptr_t)rgid = p->gid;
-    if (egid && user_ptr_ok(egid, 4)) *(uint32_t *)(uintptr_t)egid = p->egid;
-    if (sgid && user_ptr_ok(sgid, 4)) *(uint32_t *)(uintptr_t)sgid = p->sgid;
+    if (rgid && user_ptr_ok(rgid, 4))
+        *(uint32_t *)(uintptr_t)rgid = p->gid;
+    if (egid && user_ptr_ok(egid, 4))
+        *(uint32_t *)(uintptr_t)egid = p->egid;
+    if (sgid && user_ptr_ok(sgid, 4))
+        *(uint32_t *)(uintptr_t)sgid = p->sgid;
     return 0;
 }
 
@@ -1759,14 +1766,16 @@ static int64_t sys_setresuid(uint32_t r, uint32_t e, uint32_t s)
     if (!p)
         return -E_SRCH;
 
-    if ((r != ID_KEEP && !uid_allowed(p, r)) ||
-        (e != ID_KEEP && !uid_allowed(p, e)) ||
+    if ((r != ID_KEEP && !uid_allowed(p, r)) || (e != ID_KEEP && !uid_allowed(p, e)) ||
         (s != ID_KEEP && !uid_allowed(p, s)))
         return -E_PERM;
 
-    if (r != ID_KEEP) p->uid  = r;
-    if (e != ID_KEEP) p->euid = e;
-    if (s != ID_KEEP) p->suid = s;
+    if (r != ID_KEEP)
+        p->uid = r;
+    if (e != ID_KEEP)
+        p->euid = e;
+    if (s != ID_KEEP)
+        p->suid = s;
     return 0;
 }
 
@@ -1776,14 +1785,16 @@ static int64_t sys_setresgid(uint32_t r, uint32_t e, uint32_t s)
     if (!p)
         return -E_SRCH;
 
-    if ((r != ID_KEEP && !gid_allowed(p, r)) ||
-        (e != ID_KEEP && !gid_allowed(p, e)) ||
+    if ((r != ID_KEEP && !gid_allowed(p, r)) || (e != ID_KEEP && !gid_allowed(p, e)) ||
         (s != ID_KEEP && !gid_allowed(p, s)))
         return -E_PERM;
 
-    if (r != ID_KEEP) p->gid  = r;
-    if (e != ID_KEEP) p->egid = e;
-    if (s != ID_KEEP) p->sgid = s;
+    if (r != ID_KEEP)
+        p->gid = r;
+    if (e != ID_KEEP)
+        p->egid = e;
+    if (s != ID_KEEP)
+        p->sgid = s;
     return 0;
 }
 
@@ -1831,13 +1842,14 @@ static int64_t sys_setreuid(uint32_t r, uint32_t e)
     if (!p)
         return -E_SRCH;
 
-    if ((r != ID_KEEP && !uid_allowed(p, r)) ||
-        (e != ID_KEEP && !uid_allowed(p, e)))
+    if ((r != ID_KEEP && !uid_allowed(p, r)) || (e != ID_KEEP && !uid_allowed(p, e)))
         return -E_PERM;
 
     uint32_t old_uid = p->uid;
-    if (r != ID_KEEP) p->uid  = r;
-    if (e != ID_KEEP) p->euid = e;
+    if (r != ID_KEEP)
+        p->uid = r;
+    if (e != ID_KEEP)
+        p->euid = e;
     /* POSIX: if the real uid was changed, or the effective was set to
      * something other than the old real uid, the saved id follows the new
      * effective one. */
@@ -1852,13 +1864,14 @@ static int64_t sys_setregid(uint32_t r, uint32_t e)
     if (!p)
         return -E_SRCH;
 
-    if ((r != ID_KEEP && !gid_allowed(p, r)) ||
-        (e != ID_KEEP && !gid_allowed(p, e)))
+    if ((r != ID_KEEP && !gid_allowed(p, r)) || (e != ID_KEEP && !gid_allowed(p, e)))
         return -E_PERM;
 
     uint32_t old_gid = p->gid;
-    if (r != ID_KEEP) p->gid  = r;
-    if (e != ID_KEEP) p->egid = e;
+    if (r != ID_KEEP)
+        p->gid = r;
+    if (e != ID_KEEP)
+        p->egid = e;
     if (r != ID_KEEP || (e != ID_KEEP && e != old_gid))
         p->sgid = p->egid;
     return 0;
@@ -1907,8 +1920,7 @@ static int64_t sys_getdents64(int fd, uint64_t ubuf, uint64_t len)
 {
     if (!user_ptr_ok(ubuf, len))
         return -E_INVAL;
-    return vfs_dir_getdents64(fd_handle(fd), (void *)(uintptr_t)ubuf,
-                              (uint32_t)len);
+    return vfs_dir_getdents64(fd_handle(fd), (void *)(uintptr_t)ubuf, (uint32_t)len);
 }
 
 /* ---- pipes ------------------------------------------------------------ */
@@ -1954,8 +1966,8 @@ static int64_t sys_pipe2(uint64_t ufds, int flags)
         p->fd_cloexec |= (1ULL << rfd) | (1ULL << wfd);
 
     int *out = (int *)(uintptr_t)ufds;
-    out[0] = rfd;
-    out[1] = wfd;
+    out[0]   = rfd;
+    out[1]   = wfd;
     return 0;
 }
 
@@ -2054,21 +2066,25 @@ static int64_t sock_to_fd(int s)
 {
     proc_t *p = proc_current();
     if (!p) {
-        if (s >= 0) sock_close(s);
-        else        unix_close(-2 - s);
+        if (s >= 0)
+            sock_close(s);
+        else
+            unix_close(-2 - s);
         return -E_INVAL;
     }
 
     int h = vfs_socket(s);
     if (h < 0) {
-        if (s >= 0) sock_close(s);
-        else        unix_close(-2 - s);
+        if (s >= 0)
+            sock_close(s);
+        else
+            unix_close(-2 - s);
         return h;
     }
 
     int fd = fd_alloc(p, h);
     if (fd < 0) {
-        vfs_file_unref(h);            /* the last unref closes the socket */
+        vfs_file_unref(h); /* the last unref closes the socket */
         return fd;
     }
     return fd;
@@ -2079,10 +2095,10 @@ static int64_t sys_socket(int domain, int type, int protocol)
     int s;
     int unix_sock;
     if (domain == AF_UNIX) {
-        s = unix_create(type, protocol);
+        s         = unix_create(type, protocol);
         unix_sock = 1;
     } else {
-        s = sock_create(domain, type, protocol);
+        s         = sock_create(domain, type, protocol);
         unix_sock = 0;
     }
     if (s < 0)
@@ -2095,8 +2111,7 @@ static int64_t sys_socket(int domain, int type, int protocol)
  * bytes, truncated at the first NUL like Linux does. */
 #define UNIX_PATH_MAX 108
 
-static int sa_un_in(uint64_t uaddr, uint64_t alen, char *path, uint32_t *plen,
-                    int *abstract)
+static int sa_un_in(uint64_t uaddr, uint64_t alen, char *path, uint32_t *plen, int *abstract)
 {
     if (!uaddr || alen < 3 || alen > 2 + UNIX_PATH_MAX)
         return -E_INVAL;
@@ -2123,7 +2138,7 @@ static int sa_un_in(uint64_t uaddr, uint64_t alen, char *path, uint32_t *plen,
         *abstract = 1;
         memmove(path, path + 1, n - 1);
         path[n - 1] = 0;
-        *plen = n - 1;
+        *plen       = n - 1;
         return 0;
     }
     *abstract = 0;
@@ -2149,10 +2164,10 @@ static int sa_un_out(uint64_t uaddr, uint64_t ualen, const char *path)
     uint32_t room;
     memcpy(&room, (const void *)(uintptr_t)ualen, sizeof(room));
 
-    uint32_t n = path ? (uint32_t)strlen(path) : 0;
-    uint32_t full = 2 + n + 1;          /* family + path + NUL */
+    uint32_t n    = path ? (uint32_t)strlen(path) : 0;
+    uint32_t full = 2 + n + 1; /* family + path + NUL */
     if (n == 0)
-        full = 2;                       /* unnamed: family only */
+        full = 2; /* unnamed: family only */
     if (room > 2 + UNIX_PATH_MAX)
         room = 2 + UNIX_PATH_MAX;
     if (room && !user_ptr_ok(uaddr, room < full ? room : full))
@@ -2179,14 +2194,14 @@ static int64_t sys_bind(int fd, uint64_t uaddr, uint64_t alen)
     if (s >= 0) {
         uint32_t ip;
         uint16_t port;
-        int r = sa_in(uaddr, alen, &ip, &port);
+        int      r = sa_in(uaddr, alen, &ip, &port);
         return r < 0 ? r : sock_bind(s, ip, port);
     }
 
-    char path[UNIX_PATH_MAX];
+    char     path[UNIX_PATH_MAX];
     uint32_t plen;
-    int abstract = 0;
-    int r = sa_un_in(uaddr, alen, path, &plen, &abstract);
+    int      abstract = 0;
+    int      r        = sa_un_in(uaddr, alen, path, &plen, &abstract);
     return r < 0 ? r : unix_bind_sys(-2 - s, path, plen, abstract);
 }
 
@@ -2198,14 +2213,14 @@ static int64_t sys_connect(int fd, uint64_t uaddr, uint64_t alen)
     if (s >= 0) {
         uint32_t ip;
         uint16_t port;
-        int r = sa_in(uaddr, alen, &ip, &port);
+        int      r = sa_in(uaddr, alen, &ip, &port);
         return r < 0 ? r : sock_connect(s, ip, port);
     }
 
-    char path[UNIX_PATH_MAX];
+    char     path[UNIX_PATH_MAX];
     uint32_t plen;
-    int abstract = 0;
-    int r = sa_un_in(uaddr, alen, path, &plen, &abstract);
+    int      abstract = 0;
+    int      r        = sa_un_in(uaddr, alen, path, &plen, &abstract);
     if (r == 0) {
         dbg_puts("UCONN pid=");
         dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
@@ -2236,7 +2251,7 @@ static int64_t sys_accept(int fd, uint64_t uaddr, uint64_t ualen, int flags)
     if (s >= 0) {
         uint32_t ip   = 0;
         uint16_t port = 0;
-        int ns = sock_accept(s, &ip, &port);
+        int      ns   = sock_accept(s, &ip, &port);
         if (ns < 0)
             return ns;
         if (flags & SOCK_NONBLOCK)
@@ -2263,15 +2278,15 @@ static int64_t sys_accept(int fd, uint64_t uaddr, uint64_t ualen, int flags)
     if (nfd < 0)
         return nfd;
 
-    char path[UNIX_PATH_MAX];
+    char     path[UNIX_PATH_MAX];
     uint32_t plen = UNIX_PATH_MAX;
     if (unix_getname(nu, path, &plen, 0) == 0)
         sa_un_out(uaddr, ualen, path);
     return nfd;
 }
 
-static int64_t sys_sendto(int fd, uint64_t ubuf, uint64_t len, int flags,
-                          uint64_t uaddr, uint64_t alen)
+static int64_t sys_sendto(int fd, uint64_t ubuf, uint64_t len, int flags, uint64_t uaddr,
+                          uint64_t alen)
 {
     int s = fd_sock(fd);
     if (s == -1)
@@ -2287,17 +2302,15 @@ static int64_t sys_sendto(int fd, uint64_t ubuf, uint64_t len, int flags,
             if (r < 0)
                 return r;
         }
-        return sock_sendto(s, (const void *)(uintptr_t)ubuf, (uint32_t)len,
-                           flags, ip, port);
+        return sock_sendto(s, (const void *)(uintptr_t)ubuf, (uint32_t)len, flags, ip, port);
     }
 
     (void)flags;
-    return unix_sendmsg(-2 - s, (const void *)(uintptr_t)ubuf, (uint32_t)len,
-                        NULL, 0);
+    return unix_sendmsg(-2 - s, (const void *)(uintptr_t)ubuf, (uint32_t)len, NULL, 0);
 }
 
-static int64_t sys_recvfrom(int fd, uint64_t ubuf, uint64_t len, int flags,
-                            uint64_t uaddr, uint64_t ualen)
+static int64_t sys_recvfrom(int fd, uint64_t ubuf, uint64_t len, int flags, uint64_t uaddr,
+                            uint64_t ualen)
 {
     int s = fd_sock(fd);
     if (s == -1)
@@ -2308,16 +2321,14 @@ static int64_t sys_recvfrom(int fd, uint64_t ubuf, uint64_t len, int flags,
     if (s >= 0) {
         uint32_t ip   = 0;
         uint16_t port = 0;
-        int n = sock_recvfrom(s, (void *)(uintptr_t)ubuf, (uint32_t)len,
-                              flags, &ip, &port);
+        int      n    = sock_recvfrom(s, (void *)(uintptr_t)ubuf, (uint32_t)len, flags, &ip, &port);
         if (n < 0)
             return n;
         return sa_out(uaddr, ualen, ip, port) < 0 ? -E_FAULT : n;
     }
 
     int u = -2 - s;
-    int n = unix_recvmsg(u, (void *)(uintptr_t)ubuf, (uint32_t)len, NULL,
-                         (int[]){ 0 }, flags);
+    int n = unix_recvmsg(u, (void *)(uintptr_t)ubuf, (uint32_t)len, NULL, (int[]){0}, flags);
     if (n < 0)
         return n;
     return sa_un_out(uaddr, ualen, NULL) < 0 ? -E_FAULT : n;
@@ -2345,13 +2356,13 @@ static int64_t sys_getsockname(int fd, uint64_t uaddr, uint64_t ualen, int peer)
     if (s >= 0) {
         uint32_t ip   = 0;
         uint16_t port = 0;
-        int r = sock_getname(s, &ip, &port, peer);
+        int      r    = sock_getname(s, &ip, &port, peer);
         return r < 0 ? r : sa_out(uaddr, ualen, ip, port);
     }
 
-    char path[UNIX_PATH_MAX];
+    char     path[UNIX_PATH_MAX];
     uint32_t plen = UNIX_PATH_MAX;
-    int r = unix_getname(-2 - s, path, &plen, peer);
+    int      r    = unix_getname(-2 - s, path, &plen, peer);
     return r < 0 ? r : sa_un_out(uaddr, ualen, r == 0 && plen == 1 ? "" : path);
 }
 
@@ -2359,8 +2370,7 @@ static int64_t sys_getsockname(int fd, uint64_t uaddr, uint64_t ualen, int peer)
  * bounce buffer is enough and keeps user memory out of sock.c entirely. */
 #define SOCKOPT_MAX 128
 
-static int64_t sys_setsockopt(int fd, int level, int name, uint64_t uval,
-                              uint64_t len)
+static int64_t sys_setsockopt(int fd, int level, int name, uint64_t uval, uint64_t len)
 {
     int s = fd_sock(fd);
     if (s == -1)
@@ -2375,14 +2385,14 @@ static int64_t sys_setsockopt(int fd, int level, int name, uint64_t uval,
         memcpy(tmp, (const void *)(uintptr_t)uval, (uint32_t)len);
     if (s < 0) {
         /* AF_UNIX: nothing configurable, but everything must be accepted. */
-        (void)level; (void)name;
+        (void)level;
+        (void)name;
         return 0;
     }
     return sock_setsockopt(s, level, name, tmp, (uint32_t)len);
 }
 
-static int64_t sys_getsockopt(int fd, int level, int name, uint64_t uval,
-                              uint64_t ulen)
+static int64_t sys_getsockopt(int fd, int level, int name, uint64_t uval, uint64_t ulen)
 {
     int s = fd_sock(fd);
     if (s == -1)
@@ -2412,7 +2422,7 @@ static int64_t sys_getsockopt(int fd, int level, int name, uint64_t uval,
 
     uint8_t  tmp[SOCKOPT_MAX];
     uint32_t got = room;
-    int r = sock_getsockopt(s, level, name, tmp, &got);
+    int      r   = sock_getsockopt(s, level, name, tmp, &got);
     if (r < 0)
         return r;
 
@@ -2443,9 +2453,9 @@ static int64_t sys_getsockopt(int fd, int level, int name, uint64_t uval,
 #define MSG_NOSIGNAL     0x4000
 #define MSG_CMSG_CLOEXEC 0x40000000
 
-#define MSG_IOV_MAX   32
-#define MSG_BUF_MAX   65536
-#define MSG_FD_MAX    16
+#define MSG_IOV_MAX 32
+#define MSG_BUF_MAX 65536
+#define MSG_FD_MAX  16
 
 typedef struct {
     uint64_t msg_name;
@@ -2457,25 +2467,25 @@ typedef struct {
     uint64_t msg_controllen;
     int32_t  msg_flags;
     int32_t  pad1;
-} k_msghdr_t;                            /* 56 bytes */
+} k_msghdr_t; /* 56 bytes */
 
 typedef struct {
     uint64_t iov_base;
     uint64_t iov_len;
-} k_iovec_t;                             /* 16 bytes */
+} k_iovec_t; /* 16 bytes */
 
 typedef struct {
     uint64_t cmsg_len;
     int32_t  cmsg_level;
     int32_t  cmsg_type;
-} k_cmsghdr_t;                           /* 16 bytes */
+} k_cmsghdr_t; /* 16 bytes */
 
-#define CMSG_LEN(payload)  (16 + (payload))
+#define CMSG_LEN(payload)   (16 + (payload))
 #define CMSG_SPACE(payload) (((16 + (payload)) + 7) & ~7u)
 
 static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
 {
-    (void)flags;                         /* NOSIGNAL/CLOEXEC: nothing to do */
+    (void)flags; /* NOSIGNAL/CLOEXEC: nothing to do */
     int s = fd_sock(fd);
     if (s == -1)
         return -E_NOTSOCK;
@@ -2491,8 +2501,7 @@ static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
 
     k_iovec_t iov[MSG_IOV_MAX];
     if (m.msg_iovlen)
-        memcpy(iov, (const void *)(uintptr_t)m.msg_iov,
-               m.msg_iovlen * 16);
+        memcpy(iov, (const void *)(uintptr_t)m.msg_iov, m.msg_iovlen * 16);
 
     /* Flatten the iovecs into one kernel buffer: the sockets only want a
      * contiguous run anyway, and a stream write is all-or-nothing. */
@@ -2504,7 +2513,7 @@ static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
     }
 
     int32_t fds[MSG_FD_MAX];
-    int nfds = 0;
+    int     nfds = 0;
     if (m.msg_control) {
         if (m.msg_controllen > 4096)
             return -E_MSGSIZE;
@@ -2517,21 +2526,19 @@ static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
             uint64_t len = c.cmsg_len;
             if (len < 16 || off + len > m.msg_controllen)
                 return -E_INVAL;
-            if (c.cmsg_level == 1 /* SOL_SOCKET */ &&
-                c.cmsg_type == 1 /* SCM_RIGHTS */) {
+            if (c.cmsg_level == 1 /* SOL_SOCKET */ && c.cmsg_type == 1 /* SCM_RIGHTS */) {
                 uint64_t n = (len - 16) / 4;
                 if (n > (uint64_t)(MSG_FD_MAX - nfds))
                     return -E_MSGSIZE;
                 if (!user_ptr_ok(m.msg_control + off + 16, n * 4))
                     return -E_FAULT;
                 uint32_t ufds[MSG_FD_MAX];
-                memcpy(ufds, (const void *)(uintptr_t)(m.msg_control + off + 16),
-                       n * 4);
+                memcpy(ufds, (const void *)(uintptr_t)(m.msg_control + off + 16), n * 4);
                 for (uint64_t i = 0; i < n; i++) {
                     int h = fd_handle((int)ufds[i]);
                     if (h < 0)
                         return -E_BADF;
-                    vfs_file_ref(h);    /* the receiver will unref it */
+                    vfs_file_ref(h); /* the receiver will unref it */
                     fds[nfds++] = h;
                 }
             }
@@ -2569,8 +2576,7 @@ static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
                     vfs_file_unref(fds[--nfds]);
                 return -E_FAULT;
             }
-            memcpy(buf + got, (const void *)(uintptr_t)iov[i].iov_base,
-                   iov[i].iov_len);
+            memcpy(buf + got, (const void *)(uintptr_t)iov[i].iov_base, iov[i].iov_len);
             got += iov[i].iov_len;
         }
         r = unix_sendmsg(-2 - s, buf, (uint32_t)total, fds, nfds);
@@ -2618,8 +2624,8 @@ static int64_t sys_recvmsg(int fd, uint64_t umsg, int flags)
     if (s >= 0) {
         uint32_t src_ip   = 0;
         uint16_t src_port = 0;
-        n = sock_recvfrom(s, buf, (uint32_t)room, 0, &src_ip, &src_port);
-        froom = 0;
+        n                 = sock_recvfrom(s, buf, (uint32_t)room, 0, &src_ip, &src_port);
+        froom             = 0;
         /* recvmsg must report who sent the datagram.  musl's DNS resolver
          * checks the reply's source address against the nameserver before
          * trusting it; a zeroed msg_name makes every answer look like it
@@ -2631,7 +2637,7 @@ static int64_t sys_recvmsg(int fd, uint64_t umsg, int flags)
             sa.sin_family = AF_INET;
             sa.sin_port   = net_htons(src_port);
             sa.sin_addr   = net_htonl(src_ip);
-            uint32_t cap = m.msg_namelen;
+            uint32_t cap  = m.msg_namelen;
             if (cap > sizeof sa)
                 cap = (uint32_t)sizeof sa;
             if (!user_ptr_ok(m.msg_name, cap)) {
@@ -2670,9 +2676,9 @@ static int64_t sys_recvmsg(int fd, uint64_t umsg, int flags)
     /* Install received fds into our table and build the SCM_RIGHTS cmsg.
      * A control buffer too small for them drops the excess, like Linux. */
     if (froom > 0 && m.msg_control && m.msg_controllen >= CMSG_SPACE(4)) {
-        proc_t *p = proc_current();
+        proc_t  *p = proc_current();
         uint32_t ufds[MSG_FD_MAX];
-        int kept = 0;
+        int      kept = 0;
         for (int i = 0; i < froom; i++) {
             int nfd = p ? fd_alloc(p, fds[i]) : -1;
             if (nfd >= 0) {
@@ -2683,11 +2689,10 @@ static int64_t sys_recvmsg(int fd, uint64_t umsg, int flags)
         }
         uint64_t clen = CMSG_LEN(kept * 4);
         if (m.msg_controllen >= clen) {
-            k_cmsghdr_t c = { clen, 1 /* SOL_SOCKET */, 1 /* SCM_RIGHTS */ };
+            k_cmsghdr_t c = {clen, 1 /* SOL_SOCKET */, 1 /* SCM_RIGHTS */};
             memcpy((void *)(uintptr_t)m.msg_control, &c, 16);
             if (kept > 0)
-                memcpy((void *)(uintptr_t)(m.msg_control + 16), ufds,
-                       kept * 4);
+                memcpy((void *)(uintptr_t)(m.msg_control + 16), ufds, kept * 4);
             m.msg_controllen = (uint64_t)CMSG_SPACE(kept * 4);
         } else {
             m.msg_controllen = 0;
@@ -2701,8 +2706,7 @@ static int64_t sys_recvmsg(int fd, uint64_t umsg, int flags)
     return n;
 }
 
-static int64_t sys_socketpair(int domain, int type, int protocol,
-                              uint64_t usv)
+static int64_t sys_socketpair(int domain, int type, int protocol, uint64_t usv)
 {
     if (domain != AF_UNIX)
         return -E_AFNOSUPPORT;
@@ -2730,7 +2734,7 @@ static int64_t sys_socketpair(int domain, int type, int protocol,
         return fb;
     }
 
-    uint32_t sv[2] = { (uint32_t)fa, (uint32_t)fb };
+    uint32_t sv[2] = {(uint32_t)fa, (uint32_t)fb};
     memcpy((void *)(uintptr_t)usv, sv, sizeof(sv));
     return 0;
 }
@@ -2834,6 +2838,40 @@ static int64_t sys_tgkill(int tgid, int tid, int sig)
  * `ticks` is the timeout in timer ticks; -1 means wait forever, 0 means probe
  * and return immediately.
  */
+/* TEMPORARY Xorg debugging: offsets from do_ppoll's post-prologue rsp to the
+ * caller's saved registers.  Prologue = push r15,r14,r13,r12,rbp,rbx then
+ * `sub $SAVED_RBX_OFF`; rbx lands at rsp+SAVED_RBX_OFF, rbp 8 bytes above.
+ * Verified against `objdump -d` of the built kernel; the watchdog below
+ * prints when either slot changes while the call runs. */
+/* VERIFIED against `objdump -d` of the built kernel: prologue = push
+ * r15,r14,r13,r12,rbp,rbx then `sub $0x68`; rbx lands at rsp+0x68, rbp 8
+ * bytes above.  The watchdog below prints when either slot changes. */
+#define SAVED_RBX_OFF 0x68
+#define SAVED_RBP_OFF 0x70
+
+static void ppoll_slot_watch(const char *phase, uint64_t rsp_me, uint64_t o_bx, uint64_t o_bp)
+{
+    uint64_t bx = *(volatile uint64_t *)(rsp_me + SAVED_RBX_OFF);
+    uint64_t bp = *(volatile uint64_t *)(rsp_me + SAVED_RBP_OFF);
+    if (bx == o_bx && bp == o_bp)
+        return;
+    dbg_puts("PPCORR pid=");
+    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
+    dbg_puts(" phase=");
+    dbg_puts(phase);
+    dbg_puts(" rsp=");
+    dbg_puts_hex(rsp_me);
+    dbg_puts(" ent_bx=");
+    dbg_puts_hex(o_bx);
+    dbg_puts(" ent_bp=");
+    dbg_puts_hex(o_bp);
+    dbg_puts(" now_bx=");
+    dbg_puts_hex(bx);
+    dbg_puts(" now_bp=");
+    dbg_puts_hex(bp);
+    dbg_puts("\r\n");
+}
+
 int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
 {
     if (nfds > 4096)
@@ -2841,19 +2879,35 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
     if (nfds == 0)
         return 0;
 
-    int64_t ready = 0;
-    uint64_t deadline = 0;
-    int have_deadline = 0;
+    /* TEMPORARY Xorg debugging: snapshot the caller's saved registers right
+     * after the prologue (they are, by construction, still correct here). */
+    uint64_t rsp_me, o_bx, o_bp;
+    asm volatile("mov %%rsp, %0" : "=r"(rsp_me));
+    o_bx = *(volatile uint64_t *)(rsp_me + SAVED_RBX_OFF);
+    o_bp = *(volatile uint64_t *)(rsp_me + SAVED_RBP_OFF);
+    dbg_puts("PPENT pid=");
+    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
+    dbg_puts(" rsp=");
+    dbg_puts_hex(rsp_me);
+    dbg_puts(" bx=");
+    dbg_puts_hex(o_bx);
+    dbg_puts(" bp=");
+    dbg_puts_hex(o_bp);
+    dbg_puts("\r\n");
+
+    int64_t  ready         = 0;
+    uint64_t deadline      = 0;
+    int      have_deadline = 0;
     for (;;) {
         int wait_tty  = 0;
         int wait_net  = 0;
         int wait_pipe = 0;
-        ready = 0;
-        net_poll();                   /* fold any received packet into socket buffers */
+        ready         = 0;
+        net_poll(); /* fold any received packet into socket buffers */
         for (uint64_t i = 0; i < nfds; i++) {
-            int32_t  fd = *(int32_t  *)(p + i*8 + 0);
-            int16_t  ev = *(int16_t  *)(p + i*8 + 4);
-            int16_t *rv = (int16_t  *)(p + i*8 + 6);
+            int32_t  fd = *(int32_t *)(p + i * 8 + 0);
+            int16_t  ev = *(int16_t *)(p + i * 8 + 4);
+            int16_t *rv = (int16_t *)(p + i * 8 + 6);
             int16_t  r  = 0;
 
             if (fd < 0) {
@@ -2902,13 +2956,17 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
                     } else if (kind == VFS_SOCKET) {
                         int s = vfs_file_sock(h);
                         if (s >= 0) {
-                            if ((ev & POLLIN)  && sock_readable(s))  r |= POLLIN;
-                            if ((ev & POLLOUT) && sock_writable(s))  r |= POLLOUT;
+                            if ((ev & POLLIN) && sock_readable(s))
+                                r |= POLLIN;
+                            if ((ev & POLLOUT) && sock_writable(s))
+                                r |= POLLOUT;
                             wait_net = 1;
                         } else if (s < -1) {
                             int u = -2 - s;
-                            if ((ev & POLLIN)  && unix_readable(u))  r |= POLLIN;
-                            if ((ev & POLLOUT) && unix_writable(u))  r |= POLLOUT;
+                            if ((ev & POLLIN) && unix_readable(u))
+                                r |= POLLIN;
+                            if ((ev & POLLOUT) && unix_writable(u))
+                                r |= POLLOUT;
                             wait_pipe = 1;
                         }
                     } else {
@@ -2921,6 +2979,10 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
             if (r)
                 ready++;
         }
+
+        /* TEMPORARY Xorg debugging: did anything change the saved slots
+         * during net_poll() + the scan? */
+        ppoll_slot_watch("scan", rsp_me, o_bx, o_bp);
 
         if (ready > 0 || ticks == 0)
             break;
@@ -2937,14 +2999,14 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
         /* Convert the deadline into remaining ticks: each wake (timeout or
          * event) must shrink the budget, otherwise a timed poll that keeps
          * re-blocking with the original value never returns. */
-        uint64_t sleep_for = 0;                 /* 0 == wait forever */
+        uint64_t sleep_for = 0; /* 0 == wait forever */
         if (ticks >= 0) {
             if (!have_deadline) {
-                deadline = timer_ticks() + (uint64_t)ticks;
+                deadline      = timer_ticks() + (uint64_t)ticks;
                 have_deadline = 1;
             }
             if (timer_ticks() >= deadline)
-                break;                          /* budget exhausted */
+                break; /* budget exhausted */
             sleep_for = deadline - timer_ticks();
         }
 
@@ -2956,10 +3018,15 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
             sched_block_timeout(WAIT_PIPE, sleep_for);
         (void)wait_pipe;
 
+        /* TEMPORARY Xorg debugging: and across the sleep? */
+        ppoll_slot_watch("wake", rsp_me, o_bx, o_bp);
+
         if (proc_pending_signals(cur))
             return -E_INTR;
     }
 
+    /* TEMPORARY Xorg debugging: final check before handing back. */
+    ppoll_slot_watch("ret", rsp_me, o_bx, o_bp);
     return ready;
 }
 
@@ -2973,7 +3040,10 @@ static int ppoll_timeout(uint64_t utmo, int64_t *ticks)
         return 0;
     if (!user_ptr_ok(utmo, 16))
         return -E_INVAL;
-    struct { int64_t tv_sec; int64_t tv_nsec; } ts;
+    struct {
+        int64_t tv_sec;
+        int64_t tv_nsec;
+    } ts;
     memcpy(&ts, (const void *)(uintptr_t)utmo, sizeof(ts));
     if (ts.tv_sec == 0 && ts.tv_nsec == 0)
         *ticks = 0;
@@ -2993,7 +3063,7 @@ static int64_t sys_ppoll(uint64_t ufds, uint64_t nfds, uint64_t utmo, uint64_t s
         return -E_INVAL;
 
     int64_t ticks;
-    int e = ppoll_timeout(utmo, &ticks);
+    int     e = ppoll_timeout(utmo, &ticks);
     if (e < 0)
         return e;
 
@@ -3011,7 +3081,7 @@ static int64_t sys_poll(uint64_t ufds, uint64_t nfds, int64_t ms)
     else if (ms == 0)
         ticks = 0;
     else
-        ticks = (ms + 9) / 10;        /* rounding up to one tick (100 Hz) */
+        ticks = (ms + 9) / 10; /* rounding up to one tick (100 Hz) */
     return do_ppoll((uint8_t *)(uintptr_t)ufds, nfds, ticks);
 }
 
@@ -3026,16 +3096,18 @@ static int64_t sys_poll(uint64_t ufds, uint64_t nfds, int64_t ms)
  * are never generated by anything we report, so they come back empty -- which
  * is exactly what these tools expect.
  */
-typedef uint64_t fdset_t[16];          /* 1024 bits, the layout musl uses */
+typedef uint64_t fdset_t[16]; /* 1024 bits, the layout musl uses */
 
-static inline int  fdset_get(const fdset_t *s, int fd)
+static inline int fdset_get(const fdset_t *s, int fd)
 {
-    if (fd < 0 || fd >= 1024) return 0;
+    if (fd < 0 || fd >= 1024)
+        return 0;
     return (int)(((*s)[fd / 64] >> (fd % 64)) & 1u);
 }
 static inline void fdset_set(fdset_t *s, int fd)
 {
-    if (fd < 0 || fd >= 1024) return;
+    if (fd < 0 || fd >= 1024)
+        return;
     (*s)[fd / 64] |= (1ull << (fd % 64));
 }
 
@@ -3045,8 +3117,7 @@ static inline void fdset_set(fdset_t *s, int fd)
  * musl's fd_set uses -- and differ only in timeout encoding.  exceptfds are
  * never set: nothing this kernel reports counts as an exceptional condition.
  */
-static int64_t select_common(int nfds, uint64_t ur, uint64_t uw, uint64_t ue,
-                             int64_t ticks)
+static int64_t select_common(int nfds, uint64_t ur, uint64_t uw, uint64_t ue, int64_t ticks)
 {
     if (nfds < 0)
         return -E_INVAL;
@@ -3055,21 +3126,28 @@ static int64_t select_common(int nfds, uint64_t ur, uint64_t uw, uint64_t ue,
 
     /* Read the caller's masks once; select writes the result back in place. */
     fdset_t in_r = {0}, in_w = {0};
-    if (ur && !user_ptr_ok(ur, sizeof(fdset_t))) return -E_FAULT;
-    if (uw && !user_ptr_ok(uw, sizeof(fdset_t))) return -E_FAULT;
-    if (ue && !user_ptr_ok(ue, sizeof(fdset_t))) return -E_FAULT;
-    if (ur) memcpy(&in_r, (const void *)(uintptr_t)ur, sizeof(in_r));
-    if (uw) memcpy(&in_w, (const void *)(uintptr_t)uw, sizeof(in_w));
+    if (ur && !user_ptr_ok(ur, sizeof(fdset_t)))
+        return -E_FAULT;
+    if (uw && !user_ptr_ok(uw, sizeof(fdset_t)))
+        return -E_FAULT;
+    if (ue && !user_ptr_ok(ue, sizeof(fdset_t)))
+        return -E_FAULT;
+    if (ur)
+        memcpy(&in_r, (const void *)(uintptr_t)ur, sizeof(in_r));
+    if (uw)
+        memcpy(&in_w, (const void *)(uintptr_t)uw, sizeof(in_w));
 
     /* Build a pollfd array in kernel scratch. */
     uint8_t pbuf[PROC_MAX_FD * 8];
     for (int i = 0; i < nfds; i++) {
         uint16_t ev = 0;
-        if (fdset_get(&in_r, i)) ev |= POLLIN;
-        if (fdset_get(&in_w, i)) ev |= POLLOUT;
-        *(int32_t *)(pbuf + i*8 + 0) = i;
-        *(int16_t *)(pbuf + i*8 + 4) = (int16_t)ev;
-        *(int16_t *)(pbuf + i*8 + 6) = 0;
+        if (fdset_get(&in_r, i))
+            ev |= POLLIN;
+        if (fdset_get(&in_w, i))
+            ev |= POLLOUT;
+        *(int32_t *)(pbuf + i * 8 + 0) = i;
+        *(int16_t *)(pbuf + i * 8 + 4) = (int16_t)ev;
+        *(int16_t *)(pbuf + i * 8 + 6) = 0;
     }
 
     int64_t r = do_ppoll(pbuf, (uint64_t)nfds, ticks);
@@ -3079,23 +3157,29 @@ static int64_t select_common(int nfds, uint64_t ur, uint64_t uw, uint64_t ue,
     /* Clear the user masks and set the bits for descriptors that are ready. */
     fdset_t out_r = {0}, out_w = {0};
     for (int i = 0; i < nfds; i++) {
-        int16_t rev = *(int16_t *)(pbuf + i*8 + 6);
-        if (rev & POLLIN)  fdset_set(&out_r, i);
-        if (rev & POLLOUT) fdset_set(&out_w, i);
+        int16_t rev = *(int16_t *)(pbuf + i * 8 + 6);
+        if (rev & POLLIN)
+            fdset_set(&out_r, i);
+        if (rev & POLLOUT)
+            fdset_set(&out_w, i);
     }
-    if (ur) memcpy((void *)(uintptr_t)ur, &out_r, sizeof(out_r));
-    if (uw) memcpy((void *)(uintptr_t)uw, &out_w, sizeof(out_w));
+    if (ur)
+        memcpy((void *)(uintptr_t)ur, &out_r, sizeof(out_r));
+    if (uw)
+        memcpy((void *)(uintptr_t)uw, &out_w, sizeof(out_w));
     (void)ue;
     return r;
 }
 
-static int64_t sys_select(int nfds, uint64_t ur, uint64_t uw, uint64_t ue,
-                          uint64_t utv)
+static int64_t sys_select(int nfds, uint64_t ur, uint64_t uw, uint64_t ue, uint64_t utv)
 {
     /* Translate the timeval (NULL => block forever) into timer ticks. */
     int64_t ticks = -1;
     if (utv) {
-        struct { int64_t tv_sec; int64_t tv_usec; } tv;
+        struct {
+            int64_t tv_sec;
+            int64_t tv_usec;
+        } tv;
         if (!user_ptr_ok(utv, sizeof(tv)))
             return -E_FAULT;
         memcpy(&tv, (const void *)(uintptr_t)utv, sizeof(tv));
@@ -3113,13 +3197,16 @@ static int64_t sys_select(int nfds, uint64_t ur, uint64_t uw, uint64_t ue,
  * this single-signal-mask-per-process kernel has no machinery for; ignoring
  * it is harmless because no caller here relies on the race it closes.
  */
-static int64_t sys_pselect6(int nfds, uint64_t ur, uint64_t uw, uint64_t ue,
-                            uint64_t uts, uint64_t usig)
+static int64_t sys_pselect6(int nfds, uint64_t ur, uint64_t uw, uint64_t ue, uint64_t uts,
+                            uint64_t usig)
 {
     (void)usig;
     int64_t ticks = -1;
     if (uts) {
-        struct { int64_t tv_sec; int64_t tv_nsec; } ts;
+        struct {
+            int64_t tv_sec;
+            int64_t tv_nsec;
+        } ts;
         if (!user_ptr_ok(uts, sizeof(ts)))
             return -E_FAULT;
         memcpy(&ts, (const void *)(uintptr_t)uts, sizeof(ts));
@@ -3258,7 +3345,7 @@ static int64_t sys_ioctl(int fd, uint64_t cmd, uint64_t arg)
     uint8_t          kind = vfs_file_kind(h);
     if ((kind == VFS_CHARDEV || kind == VFS_BLOCKDEV) && ops && ops->ioctl) {
         const vfs_node_t *n = vfs_file_node(h);
-        int64_t r = ops->ioctl((vfs_node_t *)n, cmd, arg);
+        int64_t           r = ops->ioctl((vfs_node_t *)n, cmd, arg);
         if (r != -E_NOTTY)
             return r;
     }
@@ -3363,9 +3450,9 @@ static int64_t sys_dbgputs(uint64_t ubuf)
     if (!user_ptr_ok(ubuf, 1))
         return -E_FAULT;
 
-    char scratch[DBGPUTS_MAX + 1];
+    char        scratch[DBGPUTS_MAX + 1];
     const char *src = (const char *)(uintptr_t)ubuf;
-    uint64_t len = 0;
+    uint64_t    len = 0;
     while (len < DBGPUTS_MAX && src[len])
         len++;
     memcpy(scratch, src, len);
@@ -3379,8 +3466,7 @@ static int64_t sys_dbgputs(uint64_t ubuf)
  * module image is copied into kernel memory before module_load() ever
  * sees it, so a racy user buffer cannot be walked under the loader. */
 
-static int64_t sys_init_module(uint64_t uimage, uint64_t usize,
-                               uint64_t uargs)
+static int64_t sys_init_module(uint64_t uimage, uint64_t usize, uint64_t uargs)
 {
     proc_t *p = proc_current();
     if (!p || p->euid != 0)
@@ -3396,9 +3482,7 @@ static int64_t sys_init_module(uint64_t uimage, uint64_t usize,
     if (!image)
         return -E_NOMEM;
     memcpy(image, (const void *)(uintptr_t)uimage, usize);
-    int ret = module_load(image, usize, uargs ? (const char *)(uintptr_t)uargs
-                                              : NULL,
-                          0, NULL);
+    int ret = module_load(image, usize, uargs ? (const char *)(uintptr_t)uargs : NULL, 0, NULL);
     kfree(image);
     return ret;
 }
@@ -3415,8 +3499,7 @@ static int64_t sys_finit_module(int fd, uint64_t uargs, uint64_t flags)
     if (h < 0)
         return -E_BADF;
     lstat_t st;
-    if (vfs_fstat(h, &st) < 0 || st.st_size == 0 ||
-        st.st_size > MODULE_MAX_SIZE)
+    if (vfs_fstat(h, &st) < 0 || st.st_size == 0 || st.st_size > MODULE_MAX_SIZE)
         return -E_BADF;
     void *image = kmalloc((size_t)st.st_size);
     if (!image)
@@ -3426,14 +3509,12 @@ static int64_t sys_finit_module(int fd, uint64_t uargs, uint64_t flags)
      * is read (the file was just stat'd, so it cannot be smaller). */
     uint32_t got = 0;
     while (got < st.st_size) {
-        int32_t r = vfs_file_read(h, (uint8_t *)image + got,
-                                  (uint32_t)st.st_size - got);
+        int32_t r = vfs_file_read(h, (uint8_t *)image + got, (uint32_t)st.st_size - got);
         if (r <= 0)
             break;
         got += (uint32_t)r;
     }
-    int ret = module_load(image, got, uargs ? (const char *)(uintptr_t)uargs
-                                            : NULL,
+    int ret = module_load(image, got, uargs ? (const char *)(uintptr_t)uargs : NULL,
                           (unsigned int)flags, vfs_file_path(h));
     kfree(image);
     return ret;
@@ -3447,9 +3528,9 @@ static int64_t sys_delete_module(uint64_t uname, uint64_t flags)
     if (!uname || !user_ptr_ok(uname, 1))
         return -E_FAULT;
 
-    char name[MODULE_NAME_LEN];
+    char        name[MODULE_NAME_LEN];
     const char *src = (const char *)(uintptr_t)uname;
-    uint64_t len = 0;
+    uint64_t    len = 0;
     while (len < MODULE_NAME_LEN - 1 && src[len])
         len++;
     memcpy(name, src, len);
@@ -3466,8 +3547,8 @@ static int64_t sys_delete_module(uint64_t uname, uint64_t flags)
  * exit can release it.  Eight slots is enough for a teaching OS and keeps the
  * bookkeeping in the PCB with no allocator.
  */
-#define MMAP_BASE  USER_MMAP_BASE
-#define MMAP_TOP   USER_MMAP_CEIL           /* never climb into the brk heap */
+#define MMAP_BASE USER_MMAP_BASE
+#define MMAP_TOP  USER_MMAP_CEIL /* never climb into the brk heap */
 
 static int mmap_record(proc_t *p, uint64_t base, uint64_t size, unsigned flags)
 {
@@ -3497,25 +3578,31 @@ static int mmap_record(proc_t *p, uint64_t base, uint64_t size, unsigned flags)
             if (as->mmaps[j].flags != as->mmaps[i].flags)
                 continue;
             uint64_t lo = i, hi = j;
-            if (as->mmaps[j].base < as->mmaps[i].base) { lo = j; hi = i; }
+            if (as->mmaps[j].base < as->mmaps[i].base) {
+                lo = j;
+                hi = i;
+            }
             if (as->mmaps[lo].base + as->mmaps[lo].size != as->mmaps[hi].base)
                 continue;
-            uint64_t cb = as->mmaps[lo].base;
-            uint64_t ce = as->mmaps[hi].base + as->mmaps[hi].size;
-            int blocked = 0;
+            uint64_t cb      = as->mmaps[lo].base;
+            uint64_t ce      = as->mmaps[hi].base + as->mmaps[hi].size;
+            int      blocked = 0;
             for (int k = 0; k < as->nmmaps; k++) {
                 if (k == lo || k == hi)
                     continue;
                 uint64_t kb = as->mmaps[k].base;
                 uint64_t ke = kb + as->mmaps[k].size;
-                if (kb < ce && ke > cb) { blocked = 1; break; }
+                if (kb < ce && ke > cb) {
+                    blocked = 1;
+                    break;
+                }
             }
             if (blocked)
                 continue;
             as->mmaps[lo].size += as->mmaps[hi].size;
             as->mmaps[hi] = as->mmaps[as->nmmaps - 1];
             as->nmmaps--;
-            j = i;      /* rescan against the merged slot */
+            j = i; /* rescan against the merged slot */
         }
     }
     return 1;
@@ -3549,8 +3636,8 @@ static void mmap_forget(proc_t *p, int idx)
  * caller; this only serves the "let the kernel pick" case. */
 static uint64_t mmap_pick_base(proc_t *p, uint64_t size)
 {
-    uint64_t base = MMAP_BASE;
-    addrspace_t *as = p->as;
+    uint64_t     base = MMAP_BASE;
+    addrspace_t *as   = p->as;
     for (int i = 0; i < as->nmmaps; i++) {
         if (as->mmaps[i].base < MMAP_BASE || as->mmaps[i].base >= MMAP_TOP)
             continue;
@@ -3563,16 +3650,18 @@ static uint64_t mmap_pick_base(proc_t *p, uint64_t size)
     return base;
 }
 
-static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
-                        uint64_t flags, int64_t fd, uint64_t off)
+static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, int64_t fd,
+                        uint64_t off)
 {
     proc_t *p = proc_current();
     if (!p || len == 0)
         return -E_INVAL;
 
     unsigned vflags = VM_USER;
-    if (prot & PROT_WRITE) vflags |= VM_WRITE;
-    if (prot & PROT_EXEC)  vflags |= VM_EXEC;
+    if (prot & PROT_WRITE)
+        vflags |= VM_WRITE;
+    if (prot & PROT_EXEC)
+        vflags |= VM_EXEC;
 
     uint64_t size = (len + PAGE_SIZE - 1) & ~0xFFFULL;
 
@@ -3592,24 +3681,23 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
              * shm_open/sem_open live entirely on this path).  MAP_PRIVATE
              * keeps the copy-in behaviour below. */
             if ((flags & MAP_SHARED) && tmpfs_is_file_node(vfs_file_node(h))) {
-                struct tmpfs_node *tn =
-                    (struct tmpfs_node *)vfs_file_node(h)->priv;
-                uint64_t fsize = tmpfs_file_size(vfs_file_node(h));
-                uint64_t mapsize = (fsize + PAGE_SIZE - 1) & ~0xFFFULL;
+                struct tmpfs_node *tn      = (struct tmpfs_node *)vfs_file_node(h)->priv;
+                uint64_t           fsize   = tmpfs_file_size(vfs_file_node(h));
+                uint64_t           mapsize = (fsize + PAGE_SIZE - 1) & ~0xFFFULL;
                 if (mapsize == 0)
                     mapsize = PAGE_SIZE;
 
-                uint64_t base = (flags & MAP_FIXED) ? (addr & ~0xFFFULL)
-                              : (addr ? (addr & ~0xFFFULL)
-                                      : mmap_pick_base(p, mapsize));
+                uint64_t base = (flags & MAP_FIXED)
+                                    ? (addr & ~0xFFFULL)
+                                    : (addr ? (addr & ~0xFFFULL) : mmap_pick_base(p, mapsize));
                 if (!base || base + mapsize > USER_LIMIT)
                     return -E_INVAL;
                 if (tmpfs_node_shm_start(tn, mapsize) < 0)
                     return -ENOMEM;
 
-                unsigned sv = vflags | VM_EXTSHM;
+                unsigned sv     = vflags | VM_EXTSHM;
                 uint32_t npages = (uint32_t)(mapsize >> 12);
-                uint32_t done = 0;
+                uint32_t done   = 0;
                 for (; done < npages; done++) {
                     if (!vmm_map(p->as, base + ((uint64_t)done << 12),
                                  tmpfs_node_shm_frame(tn, done), sv))
@@ -3619,8 +3707,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
                     vmm_unmap(p->as, base, (uint64_t)done << 12);
                     return -ENOMEM;
                 }
-                if (!mmap_record(p, base, mapsize, sv) ||
-                    p->as->nshared >= 16) {
+                if (!mmap_record(p, base, mapsize, sv) || p->as->nshared >= 16) {
                     vmm_unmap(p->as, base, mapsize);
                     return -ENOMEM;
                 }
@@ -3637,7 +3724,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
              * right semantics; we just don't support write-back for
              * MAP_SHARED.  Without this the mapping returned -ENOSYS and the
              * caller dereferenced the (unmapped) address. */
-            char fpath[GNUOS_PATH_MAX];
+            char        fpath[GNUOS_PATH_MAX];
             const char *pp = vfs_file_path(h);
             if (!pp)
                 return -E_INVAL;
@@ -3645,7 +3732,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
             fpath[GNUOS_PATH_MAX - 1] = 0;
 
             uint64_t fsize = 0;
-            int      fk = 0;
+            int      fk    = 0;
             /* Size the mapping from the open file's own record: for a
              * shared-memory object that was unlinked after ftruncate (the
              * wl_shm keymap dance), a by-path stat cannot see the file any
@@ -3653,8 +3740,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
              * vfs_node copy is frozen at open time, before ftruncate). */
             vfs_node_t *mn = vfs_file_node(h);
             if (mn) {
-                fsize = tmpfs_is_file_node(mn) ? tmpfs_file_size(mn)
-                                               : mn->size;
+                fsize = tmpfs_is_file_node(mn) ? tmpfs_file_size(mn) : mn->size;
                 fk    = mn->kind;
             } else {
                 vfs_stat(fpath, &fsize, &fk);
@@ -3670,9 +3756,9 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
             if (mapsize == 0)
                 mapsize = PAGE_SIZE;
 
-            uint64_t base = (flags & MAP_FIXED) ? (addr & ~0xFFFULL)
-                          : (addr ? (addr & ~0xFFFULL)
-                                  : mmap_pick_base(p, mapsize));
+            uint64_t base = (flags & MAP_FIXED)
+                                ? (addr & ~0xFFFULL)
+                                : (addr ? (addr & ~0xFFFULL) : mmap_pick_base(p, mapsize));
             if (!base || base + mapsize > USER_LIMIT)
                 return -E_INVAL;
             /* MAP_FIXED replaces whatever was mapped before (Linux
@@ -3694,19 +3780,17 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
              * MAP_FIXED map of base+off must show file bytes from off, not
              * from the start of the file.  Beyond the file's end a mapping
              * reads as zeroes, exactly like Linux. */
-            uint64_t foff = (flags & MAP_FIXED) ? (off & ~0xFFFULL) : 0;
+            uint64_t foff    = (flags & MAP_FIXED) ? (off & ~0xFFFULL) : 0;
             uint64_t to_copy = (fsize > foff) ? fsize - foff : 0;
             if (to_copy > mapsize)
                 to_copy = mapsize;
             uint64_t copied = 0;
             for (uint64_t o = 0; o < to_copy; o += PAGE_SIZE) {
-                uint32_t chunk = (to_copy - o < PAGE_SIZE)
-                                 ? (uint32_t)(to_copy - o) : PAGE_SIZE;
-                int32_t got = vfs_pread_fd(h, foff + o, g_mmap_bounce, chunk);
+                uint32_t chunk = (to_copy - o < PAGE_SIZE) ? (uint32_t)(to_copy - o) : PAGE_SIZE;
+                int32_t  got   = vfs_pread_fd(h, foff + o, g_mmap_bounce, chunk);
                 if (got > 0) {
                     /* TEMPORARY Xorg debugging: verify every page write. */
-                    if (!vmm_copy_to_user(p->as, base + o, g_mmap_bounce,
-                                          (uint64_t)got)) {
+                    if (!vmm_copy_to_user(p->as, base + o, g_mmap_bounce, (uint64_t)got)) {
                         dbg_puts("COPYFAIL: base=");
                         dbg_puts_hex(base + o);
                         dbg_puts("\r\n");
@@ -3714,9 +3798,9 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
                         /* TEMPORARY Xorg debugging: full-page byte sum, not
                          * just the first byte -- the earlier first-byte check
                          * missed partial-zero pages. */
-                        uint64_t chk = vmm_resolve(p->as, base + o);
-                        const uint8_t *kp = (const uint8_t *)pmm_virt(chk);
-                        uint32_t sum = 0;
+                        uint64_t       chk = vmm_resolve(p->as, base + o);
+                        const uint8_t *kp  = (const uint8_t *)pmm_virt(chk);
+                        uint32_t       sum = 0;
                         for (uint32_t b = 0; b < got; b++)
                             sum += kp[b];
                         uint32_t wsum = 0;
@@ -3787,8 +3871,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
                      * match would hit the overlapping whole-file record). */
                     for (int i = 0; i < p->as->nmmaps; i++) {
                         if (p->as->mmaps[i].base == base) {
-                            p->as->mmaps[i].cksum =
-                                vmm_region_checksum(p->as, base, mapsize);
+                            p->as->mmaps[i].cksum = vmm_region_checksum(p->as, base, mapsize);
                             break;
                         }
                     }
@@ -3809,7 +3892,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
             size = drounded;
 
         uint64_t base = (flags & MAP_FIXED) ? (addr & ~0xFFFULL)
-                      : (addr ? (addr & ~0xFFFULL) : mmap_pick_base(p, size));
+                                            : (addr ? (addr & ~0xFFFULL) : mmap_pick_base(p, size));
         if (!base || base + size > USER_LIMIT)
             return -E_INVAL;
         /* Map the whole span, not just its first page: a 1024x768 framebuffer
@@ -3880,7 +3963,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
      * same words, and what lets a futex parked here be woken across
      * processes. */
     if (flags & MAP_SHARED) {
-        unsigned sv = vflags | VM_EXTSHM;
+        unsigned sv     = vflags | VM_EXTSHM;
         uint32_t npages = (uint32_t)(size >> 12);
         for (uint32_t i = 0; i < npages; i++) {
             uint64_t frame = pmm_alloc_zeroed();
@@ -3930,18 +4013,17 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot,
  * PROT_NONE and then flips everything above the guard page to read-write,
  * which must not silently make the guard page writable too.
  */
-static void mmap_update_flags(proc_t *p, uint64_t addr, uint64_t size,
-                              unsigned flags)
+static void mmap_update_flags(proc_t *p, uint64_t addr, uint64_t size, unsigned flags)
 {
-    addrspace_t *as = p->as;
-    int      cap   = (int)(sizeof(as->mmaps) / sizeof(as->mmaps[0]));
-    uint64_t r_end = addr + size;
+    addrspace_t *as    = p->as;
+    int          cap   = (int)(sizeof(as->mmaps) / sizeof(as->mmaps[0]));
+    uint64_t     r_end = addr + size;
 
     for (int i = 0; i < as->nmmaps; i++) {
         uint64_t b = as->mmaps[i].base;
         uint64_t e = b + as->mmaps[i].size;
         if (e <= addr || b >= r_end)
-            continue;                   /* no overlap with the range */
+            continue; /* no overlap with the range */
 
         /* Split off the part above the range first, so the record being
          * re-flagged ends at min(e, r_end). */
@@ -3951,7 +4033,7 @@ static void mmap_update_flags(proc_t *p, uint64_t addr, uint64_t size,
             as->mmaps[as->nmmaps].flags = as->mmaps[i].flags;
             as->nmmaps++;
             as->mmaps[i].size = r_end - b;
-            e = r_end;
+            e                 = r_end;
         }
         /* Then the part below it. */
         if (b < addr && as->nmmaps < cap) {
@@ -3990,8 +4072,10 @@ static int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot)
         return -E_NOSYS;
 
     unsigned vflags = VM_USER;
-    if (prot & PROT_WRITE) vflags |= VM_WRITE;
-    if (prot & PROT_EXEC)  vflags |= VM_EXEC;
+    if (prot & PROT_WRITE)
+        vflags |= VM_WRITE;
+    if (prot & PROT_EXEC)
+        vflags |= VM_EXEC;
     mmap_update_flags(p, addr, size, vflags);
     /* TEMPORARY Xorg debugging */
     dbg_puts("MPROT: addr=");
@@ -4014,9 +4098,9 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len)
         return -E_INVAL;
 
     uint64_t base, size;
-    int idx = mmap_find(p, addr, &base, &size);
+    int      idx = mmap_find(p, addr, &base, &size);
     if (idx < 0)
-        return -EINVAL;          /* not one of ours; Linux would EINVAL too */
+        return -EINVAL; /* not one of ours; Linux would EINVAL too */
 
     uint64_t ulen = (len + 0xFFF) & ~0xFFFULL;
     if (ulen > size)
@@ -4050,8 +4134,8 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len)
      * block is freed.  Refusing it used to strand the pages until exit. */
     if (addr == base && ulen < size) {
         vmm_unmap(p->as, base, ulen);
-        p->as->mmaps[idx].base  = base + ulen;
-        p->as->mmaps[idx].size  = size - ulen;
+        p->as->mmaps[idx].base = base + ulen;
+        p->as->mmaps[idx].size = size - ulen;
         return 0;
     }
     /* Head trim: same idea from the front. */
@@ -4060,12 +4144,12 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len)
         p->as->mmaps[idx].size = size - ulen;
         return 0;
     }
-    return -EINVAL;              /* middle holes are not worth the bookkeeping */
+    return -EINVAL; /* middle holes are not worth the bookkeeping */
 }
 
 /* Linux' mremap flags; only MAYMOVE is honoured here. */
-#define MREMAP_MAYMOVE  1u
-#define MREMAP_FIXED    2u
+#define MREMAP_MAYMOVE 1u
+#define MREMAP_FIXED   2u
 
 /*
  * mremap(25): resize a mapping.  musl's realloc uses it to grow large
@@ -4074,8 +4158,7 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len)
  * doubling peak memory each time.  Shrink happens in place; growth extends
  * in place when the span above is still free, otherwise the region moves.
  */
-static int64_t sys_mremap(uint64_t old_addr, uint64_t old_len,
-                          uint64_t new_len, uint64_t mflags)
+static int64_t sys_mremap(uint64_t old_addr, uint64_t old_len, uint64_t new_len, uint64_t mflags)
 {
     proc_t *p = proc_current();
     if (!p || !p->as)
@@ -4088,13 +4171,13 @@ static int64_t sys_mremap(uint64_t old_addr, uint64_t old_len,
         return -E_INVAL;
 
     uint64_t base, size;
-    int idx = mmap_find(p, old_addr, &base, &size);
+    int      idx = mmap_find(p, old_addr, &base, &size);
     if (idx < 0 || old_addr != base || old_size > size)
         return -E_INVAL;
 
     unsigned flags = p->as->mmaps[idx].flags;
 
-    if (new_size <= size) {                    /* shrink (or keep) */
+    if (new_size <= size) { /* shrink (or keep) */
         if (new_size < size) {
             vmm_unmap(p->as, base + new_size, size - new_size);
             p->as->mmaps[idx].size = new_size;
@@ -4147,7 +4230,7 @@ static int64_t sys_brk(uint64_t addr)
         return -E_INVAL;
 
     if (addr == 0)
-        return (int64_t)p->brk;          /* brk(0) queries the current break */
+        return (int64_t)p->brk; /* brk(0) queries the current break */
 
     /* Refuse to move outside [base, ceil): below the base, or up into the mmap
      * arena / the stack.  Leaving the break unchanged reads as "no change". */
@@ -4179,10 +4262,9 @@ typedef struct {
 } k_sigaction_t;
 
 /* Neither of these can be caught, blocked or ignored, by anybody, ever. */
-#define SIG_UNCATCHABLE  (SIGMASK(SIGKILL) | SIGMASK(SIGSTOP))
+#define SIG_UNCATCHABLE (SIGMASK(SIGKILL) | SIGMASK(SIGSTOP))
 
-static int64_t sys_rt_sigaction(int sig, uint64_t uact, uint64_t uold,
-                                uint64_t sigsetsize)
+static int64_t sys_rt_sigaction(int sig, uint64_t uact, uint64_t uold, uint64_t sigsetsize)
 {
     proc_t *p = proc_current();
     if (!p || sig <= 0 || sig >= NSIG)
@@ -4198,10 +4280,10 @@ static int64_t sys_rt_sigaction(int sig, uint64_t uact, uint64_t uold,
         if (!user_ptr_ok(uold, sizeof(k_sigaction_t)))
             return -E_INVAL;
         k_sigaction_t *o = (k_sigaction_t *)(uintptr_t)uold;
-        o->handler  = p->sigact[sig].handler;
-        o->flags    = p->sigact[sig].flags;
-        o->restorer = p->sigact[sig].restorer;
-        o->mask     = p->sigact[sig].mask;
+        o->handler       = p->sigact[sig].handler;
+        o->flags         = p->sigact[sig].flags;
+        o->restorer      = p->sigact[sig].restorer;
+        o->mask          = p->sigact[sig].mask;
     }
 
     if (!uact)
@@ -4209,8 +4291,8 @@ static int64_t sys_rt_sigaction(int sig, uint64_t uact, uint64_t uold,
     if (!user_ptr_ok(uact, sizeof(k_sigaction_t)))
         return -E_INVAL;
 
-    const k_sigaction_t *a = (const k_sigaction_t *)(uintptr_t)uact;
-    uint64_t handler = a->handler;
+    const k_sigaction_t *a       = (const k_sigaction_t *)(uintptr_t)uact;
+    uint64_t             handler = a->handler;
 
     /*
      * x86-64 has no kernel-owned return trampoline: the sequence that turns
@@ -4220,8 +4302,7 @@ static int64_t sys_rt_sigaction(int sig, uint64_t uact, uint64_t uold,
      * exactly what Linux answers.
      */
     if (handler != SIG_DFL && handler != SIG_IGN) {
-        if (!(a->flags & SA_RESTORER) || !user_ptr_ok(a->restorer, 1) ||
-            !user_ptr_ok(handler, 1))
+        if (!(a->flags & SA_RESTORER) || !user_ptr_ok(a->restorer, 1) || !user_ptr_ok(handler, 1))
             return -E_FAULT;
     }
 
@@ -4241,8 +4322,7 @@ static int64_t sys_rt_sigaction(int sig, uint64_t uact, uint64_t uold,
     return 0;
 }
 
-static int64_t sys_rt_sigprocmask(int how, uint64_t uset, uint64_t uold,
-                                  uint64_t sigsetsize)
+static int64_t sys_rt_sigprocmask(int how, uint64_t uset, uint64_t uold, uint64_t sigsetsize)
 {
     proc_t *p = proc_current();
     if (!p)
@@ -4264,10 +4344,17 @@ static int64_t sys_rt_sigprocmask(int how, uint64_t uset, uint64_t uold,
     uint64_t set = *(const uint64_t *)(uintptr_t)uset;
 
     switch (how) {
-    case SIG_BLOCK:   p->sig_mask |=  set; break;
-    case SIG_UNBLOCK: p->sig_mask &= ~set; break;
-    case SIG_SETMASK: p->sig_mask  =  set; break;
-    default:          return -E_INVAL;
+    case SIG_BLOCK:
+        p->sig_mask |= set;
+        break;
+    case SIG_UNBLOCK:
+        p->sig_mask &= ~set;
+        break;
+    case SIG_SETMASK:
+        p->sig_mask = set;
+        break;
+    default:
+        return -E_INVAL;
     }
     /* musl's fork() blocks everything with an all-ones set and restores the
      * old mask afterwards, so this filter runs on every fork in the system. */
@@ -4349,14 +4436,15 @@ static int64_t sys_rt_sigsuspend(uint64_t uset, uint64_t sigsetsize)
  * pair, so threads in different processes waiting on the same virtual
  * address never see each other.
  */
-#define FUTEX_REQUEUE         3
-#define FUTEX_PRIVATE_FLAG  128   /* private and shared futexes behave alike here */
+#define FUTEX_REQUEUE        3
+#define FUTEX_PRIVATE_FLAG   128 /* private and shared futexes behave alike here */
 #define FUTEX_CLOCK_REALTIME 256
 
-static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
-                         uint64_t utimeout, uint64_t uaddr2, uint64_t val3)
+static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t utimeout,
+                         uint64_t uaddr2, uint64_t val3)
 {
-    (void)uaddr2; (void)val3;
+    (void)uaddr2;
+    (void)val3;
 
     proc_t *p = proc_current();
     if (!p || !p->as)
@@ -4380,16 +4468,17 @@ static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
         if (utimeout) {
             if (!user_ptr_ok(utimeout, 16))
                 return -E_FAULT;
-            struct { int64_t tv_sec; int64_t tv_nsec; } ts;
+            struct {
+                int64_t tv_sec;
+                int64_t tv_nsec;
+            } ts;
             memcpy(&ts, (const void *)(uintptr_t)utimeout, sizeof(ts));
             int64_t base;
             if (op & FUTEX_CLOCK_REALTIME)
-                base = (int64_t)(timer_ticks() / SCHED_HZ +
-                                 timer_boot_epoch());
+                base = (int64_t)(timer_ticks() / SCHED_HZ + timer_boot_epoch());
             else
                 base = (int64_t)(timer_ticks() / SCHED_HZ);
-            ticks = ((int64_t)ts.tv_sec - base) * SCHED_HZ +
-                    (int64_t)ts.tv_nsec / 10000000;
+            ticks = ((int64_t)ts.tv_sec - base) * SCHED_HZ + (int64_t)ts.tv_nsec / 10000000;
             if (ticks < 0)
                 ticks = 0;
         }
@@ -4405,14 +4494,14 @@ static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
          * FUTEX_WAITERS convention) boosts the owner's scheduling weight
          * for as long as it waits. */
         if (cur & 0x40000000u) {
-            uint32_t tid = cur & 0x3FFFFFFFu;
-            proc_t *owner = proc_by_pid((int)tid);
+            uint32_t tid   = cur & 0x3FFFFFFFu;
+            proc_t  *owner = proc_by_pid((int)tid);
             if (owner && owner != p) {
                 uint32_t w = proc_eff_weight(p);
                 if (w > owner->pi_boost)
                     owner->pi_boost = w;
-                p->pi_owner = owner;
-                p->pi_wnext = owner->pi_waiters;
+                p->pi_owner       = owner;
+                p->pi_wnext       = owner->pi_waiters;
                 owner->pi_waiters = p;
             }
         }
@@ -4423,7 +4512,7 @@ static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
          * private word stays keyed by (address space, virtual address). */
         p->futex_shared = vmm_page_shared(p->as, uaddr);
         p->futex_key    = p->futex_shared ? vmm_resolve(p->as, uaddr) : 0;
-        p->futex_addr = uaddr;
+        p->futex_addr   = uaddr;
         if (utimeout) {
             sched_block_timeout(WAIT_FUTEX, (uint64_t)ticks);
             futex_pi_unregister(p);
@@ -4431,7 +4520,7 @@ static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
             sched_block(WAIT_FUTEX);
             futex_pi_unregister(p);
         }
-        p->futex_addr = 0;
+        p->futex_addr   = 0;
         p->futex_shared = 0;
         p->futex_key    = 0;
 
@@ -4460,15 +4549,15 @@ static int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val,
             }
             uint32_t tid = v & 0x3FFFFFFFu;
             if (tid == (uint32_t)mypid)
-                return -E_INVAL;   /* EDEADLK: the lock already belongs to us */
+                return -E_INVAL; /* EDEADLK: the lock already belongs to us */
             *(volatile uint32_t *)(uintptr_t)uaddr = v | 0x40000000u;
-            proc_t *owner = proc_by_pid((int)tid);
+            proc_t *owner                          = proc_by_pid((int)tid);
             if (owner && owner != p) {
                 uint32_t w = proc_eff_weight(p);
                 if (w > owner->pi_boost)
                     owner->pi_boost = w;
-                p->pi_owner = owner;
-                p->pi_wnext = owner->pi_waiters;
+                p->pi_owner       = owner;
+                p->pi_wnext       = owner->pi_waiters;
                 owner->pi_waiters = p;
             }
             sched_block(WAIT_FUTEX);
@@ -4511,7 +4600,7 @@ static int64_t sys_arch_prctl(uint64_t code, uint64_t addr)
     switch (code) {
     case ARCH_SET_FS:
         p->fs_base = addr;
-        proc_set_fs(p);                 /* take effect before we return */
+        proc_set_fs(p); /* take effect before we return */
         return 0;
     case ARCH_GET_FS:
         if (!user_ptr_ok(addr, 8))
@@ -4528,7 +4617,7 @@ static int64_t sys_set_tid_address(uint64_t utid)
     proc_t *p = proc_current();
     if (!p)
         return -E_INVAL;
-    p->clear_child_tid = utid;          /* zeroed in proc_exit() */
+    p->clear_child_tid = utid; /* zeroed in proc_exit() */
     return p->pid;
 }
 
@@ -4548,10 +4637,10 @@ static int64_t sys_clock_gettime(uint64_t clkid, uint64_t utp)
     if (clkid > CLOCK_BOOTTIME)
         return -E_INVAL;
     if (utp && user_ptr_ok(utp, sizeof(ktimespec_t))) {
-        uint64_t ticks = timer_ticks();
-        ktimespec_t *ts = (ktimespec_t *)(uintptr_t)utp;
-        ts->tv_sec  = (int64_t)(ticks / SCHED_HZ);
-        ts->tv_nsec = (int64_t)((ticks % SCHED_HZ) * (1000000000ULL / SCHED_HZ));
+        uint64_t     ticks = timer_ticks();
+        ktimespec_t *ts    = (ktimespec_t *)(uintptr_t)utp;
+        ts->tv_sec         = (int64_t)(ticks / SCHED_HZ);
+        ts->tv_nsec        = (int64_t)((ticks % SCHED_HZ) * (1000000000ULL / SCHED_HZ));
         if (clock_is_realtime(clkid))
             ts->tv_sec += (int64_t)timer_boot_epoch();
     }
@@ -4565,20 +4654,20 @@ static int64_t sys_clock_getres(uint64_t clkid, uint64_t utp)
         return -E_INVAL;
     if (utp && user_ptr_ok(utp, sizeof(ktimespec_t))) {
         ktimespec_t *ts = (ktimespec_t *)(uintptr_t)utp;
-        ts->tv_sec  = 0;
-        ts->tv_nsec = 1000000000L / SCHED_HZ;
+        ts->tv_sec      = 0;
+        ts->tv_nsec     = 1000000000L / SCHED_HZ;
     }
     return 0;
 }
 
 static int64_t sys_gettimeofday(uint64_t utv, uint64_t utz)
 {
-    (void)utz;                          /* timezones are ignored */
+    (void)utz; /* timezones are ignored */
     if (utv && user_ptr_ok(utv, sizeof(ktimeval_t))) {
-        uint64_t ticks = timer_ticks();
-        ktimeval_t *tv = (ktimeval_t *)(uintptr_t)utv;
-        tv->tv_sec  = (int64_t)(ticks / SCHED_HZ + timer_boot_epoch());
-        tv->tv_usec = (int64_t)((ticks % SCHED_HZ) * (1000000ULL / SCHED_HZ));
+        uint64_t    ticks = timer_ticks();
+        ktimeval_t *tv    = (ktimeval_t *)(uintptr_t)utv;
+        tv->tv_sec        = (int64_t)(ticks / SCHED_HZ + timer_boot_epoch());
+        tv->tv_usec       = (int64_t)((ticks % SCHED_HZ) * (1000000ULL / SCHED_HZ));
     }
     return 0;
 }
@@ -4613,13 +4702,13 @@ static uint64_t proc_elapsed_ticks(const proc_t *p)
 
 static int64_t sys_times(uint64_t ubuf)
 {
-    proc_t *p = proc_current();
+    proc_t  *p       = proc_current();
     uint64_t elapsed = proc_elapsed_ticks(p);
 
     if (ubuf) {
         if (!user_ptr_ok(ubuf, sizeof(tms_t)))
             return -E_FAULT;
-        tms_t *t = (tms_t *)(uintptr_t)ubuf;
+        tms_t *t      = (tms_t *)(uintptr_t)ubuf;
         t->tms_utime  = (int64_t)elapsed;
         t->tms_stime  = 0;
         t->tms_cutime = 0;
@@ -4657,11 +4746,21 @@ static int64_t sys_getrusage(int who, uint64_t ubuf)
 static void rlimit_for(int res, rlimit_t *out)
 {
     switch (res) {
-    case RLIMIT_NOFILE: out->rlim_cur = PROC_MAX_FD;      break;
-    case RLIMIT_STACK:  out->rlim_cur = USER_STACK_SIZE;  break;
-    case RLIMIT_NPROC:  out->rlim_cur = MAX_PROCS;        break;
-    case RLIMIT_CORE:   out->rlim_cur = 0;                break;  /* no dumps */
-    default:            out->rlim_cur = RLIM_INFINITY;    break;
+    case RLIMIT_NOFILE:
+        out->rlim_cur = PROC_MAX_FD;
+        break;
+    case RLIMIT_STACK:
+        out->rlim_cur = USER_STACK_SIZE;
+        break;
+    case RLIMIT_NPROC:
+        out->rlim_cur = MAX_PROCS;
+        break;
+    case RLIMIT_CORE:
+        out->rlim_cur = 0;
+        break; /* no dumps */
+    default:
+        out->rlim_cur = RLIM_INFINITY;
+        break;
     }
     out->rlim_max = out->rlim_cur;
 }
@@ -4680,7 +4779,7 @@ static int64_t sys_prlimit64(int pid, int res, uint64_t unew, uint64_t uold)
 {
     proc_t *p = proc_current();
     if (pid != 0 && (!p || pid != p->pid))
-        return -E_SRCH;                 /* only ourselves */
+        return -E_SRCH; /* only ourselves */
     if (res < 0 || res >= RLIMIT_NLIMITS)
         return -E_INVAL;
 
@@ -4711,8 +4810,7 @@ static int64_t do_nanosleep(const ktimespec_t *req, uint64_t urem)
 
     uint64_t ns    = (uint64_t)req->tv_nsec;
     uint64_t ticks = (uint64_t)req->tv_sec * SCHED_HZ +
-                     (ns + (1000000000ULL / SCHED_HZ) - 1) /
-                     (1000000000ULL / SCHED_HZ);
+                     (ns + (1000000000ULL / SCHED_HZ) - 1) / (1000000000ULL / SCHED_HZ);
     if (!ticks)
         return 0;
 
@@ -4724,11 +4822,10 @@ static int64_t do_nanosleep(const ktimespec_t *req, uint64_t urem)
             /* POSIX wants the shortfall reported so a caller can resume the
              * sleep after handling the signal. */
             if (urem && user_ptr_ok(urem, sizeof(ktimespec_t))) {
-                uint64_t left = deadline - timer_ticks();
-                ktimespec_t *rem = (ktimespec_t *)(uintptr_t)urem;
-                rem->tv_sec  = (int64_t)(left / SCHED_HZ);
-                rem->tv_nsec = (int64_t)((left % SCHED_HZ) *
-                                         (1000000000ULL / SCHED_HZ));
+                uint64_t     left = deadline - timer_ticks();
+                ktimespec_t *rem  = (ktimespec_t *)(uintptr_t)urem;
+                rem->tv_sec       = (int64_t)(left / SCHED_HZ);
+                rem->tv_nsec      = (int64_t)((left % SCHED_HZ) * (1000000000ULL / SCHED_HZ));
             }
             return -E_INTR;
         }
@@ -4754,8 +4851,7 @@ static int64_t sys_nanosleep(uint64_t ureq, uint64_t urem)
  */
 #define TIMER_ABSTIME 1
 
-static int64_t sys_clock_nanosleep(uint64_t clkid, int flags, uint64_t ureq,
-                                   uint64_t urem)
+static int64_t sys_clock_nanosleep(uint64_t clkid, int flags, uint64_t ureq, uint64_t urem)
 {
     if (clkid > CLOCK_BOOTTIME)
         return -E_INVAL;
@@ -4772,10 +4868,13 @@ static int64_t sys_clock_nanosleep(uint64_t clkid, int flags, uint64_t ureq,
     if (clock_is_realtime(clkid))
         base += (int64_t)timer_boot_epoch();
 
-    ktimespec_t rel = { req->tv_sec - base, req->tv_nsec };
-    while (rel.tv_nsec < 0) { rel.tv_nsec += 1000000000L; rel.tv_sec--; }
+    ktimespec_t rel = {req->tv_sec - base, req->tv_nsec};
+    while (rel.tv_nsec < 0) {
+        rel.tv_nsec += 1000000000L;
+        rel.tv_sec--;
+    }
     if (rel.tv_sec < 0)
-        return 0;                       /* the deadline is already past */
+        return 0; /* the deadline is already past */
     /* An absolute sleep has no meaningful remainder. */
     return do_nanosleep(&rel, 0);
 }
@@ -4786,16 +4885,18 @@ static int64_t sys_clock_nanosleep(uint64_t clkid, int flags, uint64_t ureq,
  * character.  We walk the vector entry by entry and stop as soon as one
  * transfer comes up short, which is the behaviour stdio is written against.
  */
-typedef struct { uint64_t base, len; } iovec_t;
+typedef struct {
+    uint64_t base, len;
+} iovec_t;
 
 static int64_t sys_rw_vec(int fd, uint64_t uiov, uint64_t cnt, int writing)
 {
     if (cnt > 1024 || !user_ptr_ok(uiov, cnt * sizeof(iovec_t)))
         return -E_INVAL;
 
-    const iovec_t *iov = (const iovec_t *)(uintptr_t)uiov;
-    int h = fd_handle(fd);
-    int64_t total = 0;
+    const iovec_t *iov   = (const iovec_t *)(uintptr_t)uiov;
+    int            h     = fd_handle(fd);
+    int64_t        total = 0;
 
     for (uint64_t i = 0; i < cnt; i++) {
         uint32_t len = (uint32_t)iov[i].len;
@@ -4804,9 +4905,8 @@ static int64_t sys_rw_vec(int fd, uint64_t uiov, uint64_t cnt, int writing)
         if (!user_ptr_ok(iov[i].base, len))
             return total ? total : -E_INVAL;
 
-        int64_t n = writing
-            ? vfs_file_write(h, (const void *)(uintptr_t)iov[i].base, len)
-            : vfs_file_read(h, (void *)(uintptr_t)iov[i].base, len);
+        int64_t n = writing ? vfs_file_write(h, (const void *)(uintptr_t)iov[i].base, len)
+                            : vfs_file_read(h, (void *)(uintptr_t)iov[i].base, len);
 
         if (n < 0)
             return total ? total : n;
@@ -4826,8 +4926,7 @@ static int64_t sys_rw_vec(int fd, uint64_t uiov, uint64_t cnt, int writing)
  * buffer, which is what vfs_file_pread/vfs_file_write would do anyway.  The
  * point of the call is the Linux-ABI shape, not a shortcut.
  */
-static int64_t sys_sendfile(int out_fd, int in_fd, uint64_t uoff,
-                            uint64_t count)
+static int64_t sys_sendfile(int out_fd, int in_fd, uint64_t uoff, uint64_t count)
 {
     int oh = fd_handle(out_fd);
     int ih = fd_handle(in_fd);
@@ -4842,18 +4941,15 @@ static int64_t sys_sendfile(int out_fd, int in_fd, uint64_t uoff,
     }
 
     int64_t total = 0;
-    char buf[512];
+    char    buf[512];
 
     while (count > 0) {
-        uint32_t chunk = count > sizeof(buf) ? (uint32_t)sizeof(buf)
-                                             : (uint32_t)count;
-        int64_t n = uoff
-            ? vfs_file_pread(ih, buf, chunk, off)
-            : vfs_file_read(ih, buf, chunk);
+        uint32_t chunk = count > sizeof(buf) ? (uint32_t)sizeof(buf) : (uint32_t)count;
+        int64_t  n     = uoff ? vfs_file_pread(ih, buf, chunk, off) : vfs_file_read(ih, buf, chunk);
         if (n < 0)
             return total ? total : n;
         if (n == 0)
-            break;                      /* EOF */
+            break; /* EOF */
 
         int64_t w = vfs_file_write(oh, buf, (uint32_t)n);
         if (w < 0)
@@ -4862,7 +4958,7 @@ static int64_t sys_sendfile(int out_fd, int in_fd, uint64_t uoff,
         off += (uint64_t)w;
         count -= (uint64_t)w;
         if ((uint32_t)w < (uint32_t)n)
-            break;                      /* target full */
+            break; /* target full */
     }
 
     if (uoff)
@@ -4882,8 +4978,11 @@ void syscall_handler(regs_t *r)
     uint64_t a2 = r->rsi;
     uint64_t a3 = r->rdx;
 
-    proc_t  *p  = proc_current();
-    int64_t  ret;
+    proc_t *p = proc_current();
+    int64_t ret;
+
+    /* TEMPORARY Xorg debugging: a syscall must run on its own task's slot. */
+    proc_kstack_audit("SYS");
 
     /* Remembered for SA_RESTART: by the time signals are looked at, RAX holds
      * the result rather than the call number. */
@@ -4894,7 +4993,7 @@ void syscall_handler(regs_t *r)
      * the tracer sees (and may rewrite) the original register image. */
     if (p) {
         ptrace_syscall_enter(r, nr);
-        nr = r->rax;                  /* whatever the tracer left in RAX */
+        nr = r->rax; /* whatever the tracer left in RAX */
     }
 
     /* ---- seccomp-BPF filter check ------------------------------------
@@ -4910,7 +5009,7 @@ void syscall_handler(regs_t *r)
                 proc_exit(128 + 31);
                 return;
             }
-            ret = sc;
+            ret    = sc;
             r->rax = (uint64_t)ret;
             goto done;
         }
@@ -4918,9 +5017,11 @@ void syscall_handler(regs_t *r)
 
     switch (nr) {
     case SYS_read:
-        if (!user_ptr_ok(a2, a3)) { ret = -E_INVAL; break; }
-        ret = vfs_file_read(fd_handle((int)a1), (void *)(uintptr_t)a2,
-                            (uint32_t)a3);
+        if (!user_ptr_ok(a2, a3)) {
+            ret = -E_INVAL;
+            break;
+        }
+        ret = vfs_file_read(fd_handle((int)a1), (void *)(uintptr_t)a2, (uint32_t)a3);
 #ifdef SYSTRACE
         if (ret == 0 && (int)a1 >= 3) {
             static unsigned r0n;
@@ -4929,7 +5030,7 @@ void syscall_handler(regs_t *r)
                 dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
                 dbg_puts(" fd=");
                 dbg_puts_dec((uint32_t)a1);
-                int h0 = fd_handle((int)a1);
+                int               h0 = fd_handle((int)a1);
                 const vfs_node_t *nd = h0 >= 0 ? vfs_file_node(h0) : 0;
                 dbg_puts(" kind=");
                 dbg_puts_dec(nd ? (uint32_t)nd->kind : 99);
@@ -4944,26 +5045,39 @@ void syscall_handler(regs_t *r)
         break;
 
     case SYS_write:
-        if (!user_ptr_ok(a2, a3)) { ret = -E_INVAL; break; }
-        ret = vfs_file_write(fd_handle((int)a1), (const void *)(uintptr_t)a2,
-                             (uint32_t)a3);
+        if (!user_ptr_ok(a2, a3)) {
+            ret = -E_INVAL;
+            break;
+        }
+        ret = vfs_file_write(fd_handle((int)a1), (const void *)(uintptr_t)a2, (uint32_t)a3);
         break;
 
     /* pread64(17)/pwrite64(18): musl's pread/pwrite, and what any program
      * that does random access without an lseek dance -- an ELF loader, a
      * framebuffer client, sqlite -- reaches for first. */
     case SYS_pread64:
-        if (!user_ptr_ok(a2, a3)) { ret = -E_INVAL; break; }
-        if ((int64_t)r->r10 < 0)  { ret = -E_INVAL; break; }
-        ret = vfs_file_pread(fd_handle((int)a1), (void *)(uintptr_t)a2,
-                             (uint32_t)a3, r->r10);
+        if (!user_ptr_ok(a2, a3)) {
+            ret = -E_INVAL;
+            break;
+        }
+        if ((int64_t)r->r10 < 0) {
+            ret = -E_INVAL;
+            break;
+        }
+        ret = vfs_file_pread(fd_handle((int)a1), (void *)(uintptr_t)a2, (uint32_t)a3, r->r10);
         break;
 
     case SYS_pwrite64:
-        if (!user_ptr_ok(a2, a3)) { ret = -E_INVAL; break; }
-        if ((int64_t)r->r10 < 0)  { ret = -E_INVAL; break; }
-        ret = vfs_file_pwrite(fd_handle((int)a1), (const void *)(uintptr_t)a2,
-                              (uint32_t)a3, r->r10);
+        if (!user_ptr_ok(a2, a3)) {
+            ret = -E_INVAL;
+            break;
+        }
+        if ((int64_t)r->r10 < 0) {
+            ret = -E_INVAL;
+            break;
+        }
+        ret =
+            vfs_file_pwrite(fd_handle((int)a1), (const void *)(uintptr_t)a2, (uint32_t)a3, r->r10);
         break;
 
     case SYS_readv:
@@ -5053,7 +5167,7 @@ void syscall_handler(regs_t *r)
         ret = sys_sched_getaffinity(a1, a2, a3);
         break;
 
-    case SYS_sync:                       /* 162: flush every dirty page */
+    case SYS_sync: /* 162: flush every dirty page */
         ret = pagecache_flush_all();
         break;
 
@@ -5150,7 +5264,8 @@ void syscall_handler(regs_t *r)
     case SYS_mkdir: {
         char abs[GNUOS_PATH_MAX];
         ret = path_abs(a1, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = vfs_mkdir(abs);
         break;
     }
@@ -5158,7 +5273,8 @@ void syscall_handler(regs_t *r)
     case SYS_unlink: {
         char abs[GNUOS_PATH_MAX];
         ret = path_abs(a1, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = vfs_unlink(abs);
         break;
     }
@@ -5166,7 +5282,8 @@ void syscall_handler(regs_t *r)
     case SYS_rmdir: {
         char abs[GNUOS_PATH_MAX];
         ret = path_abs(a1, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = vfs_rmdir(abs);
         break;
     }
@@ -5190,9 +5307,11 @@ void syscall_handler(regs_t *r)
     case SYS_link: {
         char oabs[GNUOS_PATH_MAX], nabs[GNUOS_PATH_MAX];
         ret = path_abs(a1, oabs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = path_abs(a2, nabs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = vfs_link(oabs, nabs);
         break;
     }
@@ -5200,7 +5319,8 @@ void syscall_handler(regs_t *r)
     case SYS_statfs: {
         char abs[GNUOS_PATH_MAX];
         ret = path_abs(a1, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         if (!user_ptr_ok(a2, sizeof(kstatfs_t))) {
             ret = -E_FAULT;
             break;
@@ -5221,7 +5341,8 @@ void syscall_handler(regs_t *r)
     case SYS_truncate: {
         char abs[GNUOS_PATH_MAX];
         ret = path_abs(a1, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = (int64_t)a2 < 0 ? -E_INVAL : vfs_truncate(abs, a2);
         break;
     }
@@ -5230,7 +5351,7 @@ void syscall_handler(regs_t *r)
         /* A device with a truncate op resizes itself (the memfd backing
          * store); anything else goes back through the VFS by path, which is
          * what keeps the open file's cached size and the inode honest. */
-        int h = fd_handle((int)a1);
+        int         h  = fd_handle((int)a1);
         vfs_node_t *tn = vfs_file_node(h);
         const char *fp = (h >= 0) ? vfs_file_path(h) : NULL;
         if (tn && tn->ops && tn->ops->truncate) {
@@ -5243,7 +5364,10 @@ void syscall_handler(regs_t *r)
                 tn->size = (uint64_t)a2;
             break;
         }
-        if (!fp) { ret = -E_BADF; break; }
+        if (!fp) {
+            ret = -E_BADF;
+            break;
+        }
         ret = (int64_t)a2 < 0 ? -E_INVAL : vfs_truncate(fp, a2);
         break;
     }
@@ -5360,11 +5484,11 @@ void syscall_handler(regs_t *r)
         }
         switch ((int)a3) {
         case LINUX_REBOOT_CMD_POWER_OFF:
-            acpi_poweroff();             /* parks in a halt unless it fails */
-            ret = 0;                     /* no PM1a block: nothing to write */
+            acpi_poweroff(); /* parks in a halt unless it fails */
+            ret = 0;         /* no PM1a block: nothing to write */
             break;
         case LINUX_REBOOT_CMD_RESTART:
-            outb(0x64, 0xFE);            /* 8042 CPU reset */
+            outb(0x64, 0xFE); /* 8042 CPU reset */
             for (;;)
                 asm volatile("cli; hlt");
             break;
@@ -5395,7 +5519,8 @@ void syscall_handler(regs_t *r)
     case SYS_lchown: {
         char abs[GNUOS_PATH_MAX];
         ret = path_abs(a1, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = sys_chown(abs, (uint32_t)a2, (uint32_t)a3, nr == SYS_chown);
         break;
     }
@@ -5419,7 +5544,8 @@ void syscall_handler(regs_t *r)
     case SYS_unlinkat: {
         char abs[GNUOS_PATH_MAX];
         ret = path_at((int)a1, a2, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         /* AT_REMOVEDIR (0x200) turns unlinkat into rmdir. */
         if (a3 & 0x200)
             ret = vfs_rmdir(abs);
@@ -5431,7 +5557,8 @@ void syscall_handler(regs_t *r)
     case SYS_mkdirat: {
         char abs[GNUOS_PATH_MAX];
         ret = path_at((int)a1, a2, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = vfs_mkdir(abs);
         break;
     }
@@ -5448,9 +5575,11 @@ void syscall_handler(regs_t *r)
          * caller happened to leave there: `mv` was enough to trip it. */
         char old[GNUOS_PATH_MAX], newp[GNUOS_PATH_MAX];
         ret = path_at((int)a1, a2, old);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = path_at((int)a3, r->r10, newp);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         if (nr == SYS_renameat2) {
             uint32_t flags = (uint32_t)r->r8;
             /* RENAME_NOREPLACE is the one flag worth honouring: gnulib asks
@@ -5462,7 +5591,8 @@ void syscall_handler(regs_t *r)
                 ret = -E_INVAL;
                 break;
             }
-            uint64_t sz; int kind;
+            uint64_t sz;
+            int      kind;
             if ((flags & RENAME_NOREPLACE) && vfs_stat(newp, &sz, &kind) == 0) {
                 ret = -E_EXIST;
                 break;
@@ -5479,7 +5609,8 @@ void syscall_handler(regs_t *r)
     case SYS_symlinkat: {
         char abs[GNUOS_PATH_MAX];
         ret = path_at((int)a2, a3, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = vfs_symlink((const char *)a1, abs);
         break;
     }
@@ -5487,7 +5618,8 @@ void syscall_handler(regs_t *r)
     case SYS_readlinkat: {
         char abs[GNUOS_PATH_MAX];
         ret = path_at((int)a1, a2, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         /* readlinkat(dirfd, path, buf, bufsize): buf is a3 (RDX), bufsize
          * is the 4th argument r10 -- not r8. */
         ret = do_readlink(abs, a3, r->r10);
@@ -5497,17 +5629,23 @@ void syscall_handler(regs_t *r)
     case SYS_fchmod: {
         /* fchmod(fd, mode): wlroots' shm files go through this with mode 0
          * to lock a shared-memory file down before use. */
-        int h = fd_handle((int)a1);
+        int         h  = fd_handle((int)a1);
         vfs_node_t *tn = (h >= 0) ? vfs_file_node(h) : NULL;
         const char *fp = (h >= 0) ? vfs_file_path(h) : NULL;
-        if (!fp)
-            { ret = -E_BADF; break; }
+        if (!fp) {
+            ret = -E_BADF;
+            break;
+        }
         /* tmpfs files are world-writable scratch (/tmp, /run, /dev/shm):
          * the mode is meaningless, and resolving by path fails for an
          * object that was unlinked while still open.  Report success. */
-        if (tmpfs_is_file_node(tn)) { ret = 0; break; }
+        if (tmpfs_is_file_node(tn)) {
+            ret = 0;
+            break;
+        }
         ret = chmod_allowed(fp);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = vfs_chmod(fp, (uint32_t)a2);
         break;
     }
@@ -5515,11 +5653,13 @@ void syscall_handler(regs_t *r)
     case SYS_fchmodat: {
         char abs[GNUOS_PATH_MAX];
         ret = path_at((int)a1, a2, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         /* AT_SYMLINK_NOFOLLOW (0x100) would mean chmod the link itself, which
          * we cannot do; we always operate on the resolved target. */
         ret = chmod_allowed(abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         ret = vfs_chmod(abs, (uint32_t)a3);
         break;
     }
@@ -5527,10 +5667,10 @@ void syscall_handler(regs_t *r)
     case SYS_fchownat: {
         char abs[GNUOS_PATH_MAX];
         ret = path_at((int)a1, a2, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         /* AT_SYMLINK_NOFOLLOW (0x100) picks the link itself. */
-        ret = sys_chown(abs, (uint32_t)a3, (uint32_t)r->r10,
-                        !(r->r8 & 0x100));
+        ret = sys_chown(abs, (uint32_t)a3, (uint32_t)r->r10, !(r->r8 & 0x100));
         break;
     }
 
@@ -5742,24 +5882,34 @@ void syscall_handler(regs_t *r)
     case SYS_execve: {
         char abs[GNUOS_PATH_MAX];
         ret = path_abs(a1, abs);
-        if (ret < 0) break;
+        if (ret < 0)
+            break;
         /* /proc/self/exe: apk.static re-execs itself through this magic
          * symlink -- the kernel knows the answer. */
         if (strcmp(abs, "/proc/self/exe") == 0) {
             proc_t *cp = proc_current();
-            if (!cp || !cp->exe_path[0]) { ret = -E_NOENT; break; }
+            if (!cp || !cp->exe_path[0]) {
+                ret = -E_NOENT;
+                break;
+            }
             strncpy(abs, cp->exe_path, sizeof(abs) - 1);
             abs[sizeof(abs) - 1] = '\0';
         }
 #ifdef SYSTRACE
-        {   /* remember what each exec tried, so ENOENT loops name their
-             * missing binary instead of hiding behind a bare return code */
+        { /* remember what each exec tried, so ENOENT loops name their
+           * missing binary instead of hiding behind a bare return code */
         }
 #endif
         int n = collect_vec(a2, g_argv);
-        if (n < 0) { ret = n; break; }
+        if (n < 0) {
+            ret = n;
+            break;
+        }
         n = collect_vec(a3, g_envp);
-        if (n < 0) { ret = n; break; }
+        if (n < 0) {
+            ret = n;
+            break;
+        }
         ret = proc_execve(abs, g_argv, g_envp, r);
 #ifdef SYSTRACE
         if (ret == -E_NOENT) {
@@ -5774,15 +5924,18 @@ void syscall_handler(regs_t *r)
         }
 #endif
         if (ret == 0)
-            return;                    /* the frame now belongs to the new image */
+            return; /* the frame now belongs to the new image */
         break;
     }
 
     case SYS_wait4: {
         int status = 0;
-        ret = proc_waitpid((int)a1, &status, (int)a3);
+        ret        = proc_waitpid((int)a1, &status, (int)a3);
         if (ret > 0 && a2) {
-            if (!user_ptr_ok(a2, sizeof(int))) { ret = -E_INVAL; break; }
+            if (!user_ptr_ok(a2, sizeof(int))) {
+                ret = -E_INVAL;
+                break;
+            }
             *(int *)(uintptr_t)a2 = status;
         }
         break;
@@ -5860,7 +6013,7 @@ void syscall_handler(regs_t *r)
         break;
 
     case SYS_madvise:
-        ret = 0;                       /* accepted and ignored */
+        ret = 0; /* accepted and ignored */
         break;
 
     case SYS_rt_sigaction:
@@ -6026,7 +6179,7 @@ void syscall_handler(regs_t *r)
 
     case SYS_exit_group:
         proc_exit_group((int)a1);
-        ret = 0;                       /* not reached */
+        ret = 0; /* not reached */
         break;
 
     case SYS_exit:
@@ -6034,7 +6187,7 @@ void syscall_handler(regs_t *r)
          * libc that calls plain exit() from main() still takes the whole
          * process down with it. */
         proc_exit((int)a1);
-        ret = 0;                       /* not reached */
+        ret = 0; /* not reached */
         break;
 
     case SYS_smp_count:
@@ -6058,14 +6211,12 @@ void syscall_handler(regs_t *r)
     }
 
 #ifdef SYSTRACE
-    if (nr == 9 || nr == 10 || nr == 12 || nr == 158 || nr == 218 ||
-        nr == 0 || nr == 1 || nr == 7 || nr == 29 || nr == 43 ||
-        nr == 202 || nr == 232 || nr == 257 || nr == 57 ||
-        nr == 217 || nr == 16 || nr == 8 || nr == 59 || nr == 61 ||
-        nr == 270 || nr == 23 || nr == 281 || nr == 35 || nr == 230 ||
-        nr == 2 || nr == 3 || nr == 5 || nr == 11 || nr == 13 ||
-        nr == 14 || nr == 6 || nr == 4 || nr == 89 || nr == 90 ||
-        nr == 41 || nr == 42 || nr == 45 || nr == 46 || nr == 47) {
+    if (nr == 9 || nr == 10 || nr == 12 || nr == 158 || nr == 218 || nr == 0 || nr == 1 ||
+        nr == 7 || nr == 29 || nr == 43 || nr == 202 || nr == 232 || nr == 257 || nr == 57 ||
+        nr == 217 || nr == 16 || nr == 8 || nr == 59 || nr == 61 || nr == 270 || nr == 23 ||
+        nr == 281 || nr == 35 || nr == 230 || nr == 2 || nr == 3 || nr == 5 || nr == 11 ||
+        nr == 13 || nr == 14 || nr == 6 || nr == 4 || nr == 89 || nr == 90 || nr == 41 ||
+        nr == 42 || nr == 45 || nr == 46 || nr == 47) {
         dbg_puts("SY p=");
         dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
         dbg_puts(" nr=");
@@ -6089,7 +6240,7 @@ done:
     {
         proc_t *sp = proc_current();
         if (sp) {
-            uint8_t i = sp->sys_hist_idx & 7;
+            uint8_t i           = sp->sys_hist_idx & 7;
             sp->sys_hist_nr[i]  = (uint16_t)nr;
             sp->sys_hist_ret[i] = (int32_t)ret;
             sp->sys_hist_idx++;
@@ -6111,8 +6262,8 @@ void syscall_init(void)
      * selector the CPU switches into on entry. */
     wrmsr(0xC0000081,                 /* IA32_STAR: syscall CS = kernel,  */
           ((uint64_t)SEL_KCODE << 32) /* sysret CS field (unused here)    */
-          | ((uint64_t)SEL_UCODE << 48));
-    wrmsr(0xC0000082, (uint64_t)syscall_entry);   /* IA32_LSTAR */
+              | ((uint64_t)SEL_UCODE << 48));
+    wrmsr(0xC0000082, (uint64_t)syscall_entry); /* IA32_LSTAR */
     /* EFER must be a READ-MODIFY-WRITE: under KVM-SVM with NPT the
      * hypervisor owns EFER.SVME (bit 12) and rejects a write that clears
      * it -- a blind 0x801 store #GPs on KVM (TCG, where EFER reads as 0,
@@ -6123,13 +6274,11 @@ void syscall_init(void)
         uint32_t maxext = 0;
         asm volatile("cpuid" : "=a"(maxext) : "a"(0x80000000) : "ebx", "ecx", "edx");
         if (maxext >= 0x80000001u)
-            asm volatile("cpuid" : "=a"(a), "=d"(d)
-                         : "a"(0x80000001), "c"(0u)
-                         : "ebx");
+            asm volatile("cpuid" : "=a"(a), "=d"(d) : "a"(0x80000001), "c"(0u) : "ebx");
         asm volatile("rdmsr" : "=A"(efer) : "c"(0xC0000080u));
-        efer |= 0x1;                          /* SCE: enable syscall */
+        efer |= 0x1; /* SCE: enable syscall */
         if ((d & (1u << 20)) && maxext >= 0x80000001u)
-            efer |= 0x800;                    /* NXE when NX exists */
+            efer |= 0x800; /* NXE when NX exists */
         dbg_puts("SYSGATE: efer=");
         dbg_puts_hex(efer);
         dbg_puts("\r\n");

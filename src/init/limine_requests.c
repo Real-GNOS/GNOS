@@ -14,24 +14,29 @@ void kernel_entry(void);
 
 __attribute__((used, section(".limine_requests_start"))) LIMINE_REQUESTS_START_MARKER
 
-__attribute__((used, section(".limine_requests"))) LIMINE_BASE_REVISION(0)
+    __attribute__((used, section(".limine_requests"))) LIMINE_BASE_REVISION(0)
 
-__attribute__((used, section(".limine_requests"))) volatile struct limine_framebuffer_request framebuffer_request = {
-    .id       = LIMINE_FRAMEBUFFER_REQUEST,
-    .revision = 0,
+        __attribute__((used,
+                       section(".limine_requests"))) volatile struct limine_framebuffer_request
+    framebuffer_request = {
+        .id       = LIMINE_FRAMEBUFFER_REQUEST,
+        .revision = 0,
 };
 
-__attribute__((used, section(".limine_requests"))) volatile struct limine_module_request module_request = {
+__attribute__((
+    used, section(".limine_requests"))) volatile struct limine_module_request module_request = {
     .id       = LIMINE_MODULE_REQUEST,
     .revision = 0,
 };
 
-__attribute__((used, section(".limine_requests"))) volatile struct limine_hhdm_request hhdm_request = {
+__attribute__((used,
+               section(".limine_requests"))) volatile struct limine_hhdm_request hhdm_request = {
     .id       = LIMINE_HHDM_REQUEST,
     .revision = 0,
 };
 
-__attribute__((used, section(".limine_requests"))) volatile struct limine_memmap_request memmap_request = {
+__attribute__((
+    used, section(".limine_requests"))) volatile struct limine_memmap_request memmap_request = {
     .id       = LIMINE_MEMMAP_REQUEST,
     .revision = 0,
 };
@@ -40,26 +45,31 @@ __attribute__((used, section(".limine_requests"))) volatile struct limine_memmap
  * it in order to boot, so asking is far more reliable than scanning the BIOS
  * area -- on a UEFI machine the RSDP is not down there at all.  acpi.c keeps
  * the scan only as a fallback. */
-__attribute__((used, section(".limine_requests"))) volatile struct limine_rsdp_request rsdp_request = {
+__attribute__((used,
+               section(".limine_requests"))) volatile struct limine_rsdp_request rsdp_request = {
     .id       = LIMINE_RSDP_REQUEST,
     .revision = 0,
 };
 
-__attribute__((used, section(".limine_requests"))) volatile struct limine_kernel_address_request kernel_address_request = {
-    .id       = LIMINE_KERNEL_ADDRESS_REQUEST,
-    .revision = 0,
+__attribute__((used, section(".limine_requests"))) volatile struct limine_kernel_address_request
+    kernel_address_request = {
+        .id       = LIMINE_KERNEL_ADDRESS_REQUEST,
+        .revision = 0,
 };
 
 /* The kernel command line, taken verbatim from the boot entry's `cmdline:`
  * line in limine.conf.  Words the kernel does not consume are passed on to
  * /init.elf as argv[1..], Linux style -- that is how "single" reaches init
  * to select single-user mode. */
-__attribute__((used, section(".limine_requests"))) volatile struct limine_executable_cmdline_request cmdline_request = {
-    .id       = LIMINE_EXECUTABLE_CMDLINE_REQUEST,
-    .revision = 0,
+__attribute__((used, section(".limine_requests"))) volatile struct limine_executable_cmdline_request
+    cmdline_request = {
+        .id       = LIMINE_EXECUTABLE_CMDLINE_REQUEST,
+        .revision = 0,
 };
 
-__attribute__((used, section(".limine_requests"))) volatile struct limine_entry_point_request entry_point_request = {
+__attribute__((
+    used,
+    section(".limine_requests"))) volatile struct limine_entry_point_request entry_point_request = {
     .id       = LIMINE_ENTRY_POINT_REQUEST,
     .revision = 3,
     .entry    = &kernel_entry,
@@ -70,7 +80,8 @@ __attribute__((used, section(".limine_requests"))) volatile struct limine_entry_
  * struct limine_smp_request; the id magic LIMINE_SMP_REQUEST is the same
  * 128-bit value regardless.  We fill in each AP's goto_address from
  * smp_init() once the response is populated. */
-__attribute__((used, section(".limine_requests"))) volatile struct limine_smp_request smp_request = {
+__attribute__((used,
+               section(".limine_requests"))) volatile struct limine_smp_request smp_request = {
     .id       = LIMINE_SMP_REQUEST,
     .revision = 0,
 };

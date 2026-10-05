@@ -54,14 +54,13 @@
 #define CG_NCTRLS      3
 #define CG_CTRL_BIT(n) (1u << (n))
 
-#define CG_ALL_CTRLS (CG_CTRL_BIT(CG_CTRL_CPU) | \
-                      CG_CTRL_BIT(CG_CTRL_PIDS) | \
-                      CG_CTRL_BIT(CG_CTRL_MEM))
+#define CG_ALL_CTRLS \
+    (CG_CTRL_BIT(CG_CTRL_CPU) | CG_CTRL_BIT(CG_CTRL_PIDS) | CG_CTRL_BIT(CG_CTRL_MEM))
 
 /* ---- tree limits -------------------------------------------------------- */
-#define MAX_CGS       512      /* static pool; slots are never reused */
-#define CG_ROOT       0        /* the root cgroup lives at slot 0 */
-#define CG_NAME_MAX   31       /* component names (VFS_NAME_MAX is 32) */
+#define MAX_CGS     512 /* static pool; slots are never reused */
+#define CG_ROOT     0   /* the root cgroup lives at slot 0 */
+#define CG_NAME_MAX 31  /* component names (VFS_NAME_MAX is 32) */
 
 /* ---- cpu controller ------------------------------------------------------ */
 #define CG_WEIGHT_MIN     1
@@ -70,14 +69,14 @@
 
 /* Effective weight of a default (weight 100) task, the NICE_0 anchor every
  * virtual-time accounting rate is scaled against. */
-#define CG_NICE0         1024
+#define CG_NICE0 1024
 
 /* Bounds on the hierarchical effective weight a task can end up with.
  * 16 is ~1/64 of a default task, 262144 is 256x one; both keep the
  * fixed-point virtual-time deltas at least 1 unit per scheduler tick and
  * stop a deep, hostile hierarchy from overflowing the u64 clocks. */
-#define CG_EFF_MIN   16
-#define CG_EFF_MAX   262144
+#define CG_EFF_MIN 16
+#define CG_EFF_MAX 262144
 
 /* Controller timers are quantised to scheduler ticks (SCHED_HZ = 100).
  * cpu.max defaults to unlimited; when a quota is written the period
@@ -85,18 +84,18 @@
 #define CG_PERIOD_DEFAULT_TICKS 10
 
 /* ---- exported tree shape (read-only) ------------------------------------ */
-int  cgroup_init(void);
-int  cg_count(void);                    /* live cgroups, for /proc/cgroups */
+int cgroup_init(void);
+int cg_count(void); /* live cgroups, for /proc/cgroups */
 
 /* Enumerate a cgroup's children: return the child index at 0-based slot
  * `i`, or -1 when exhausted.  Caller holds the sched lock. */
-int  cg_child(int cg, int i);
-int  cg_parent(int cg);
-int  cg_live(int cg);
+int cg_child(int cg, int i);
+int cg_parent(int cg);
+int cg_live(int cg);
 
 /* Path of a cgroup ("/" for the root, "/a/b" otherwise) rendered into buf.
  * Returns the length.  Caller holds the sched lock. */
-int  cg_path(int cg, char *buf, int cap);
+int cg_path(int cg, char *buf, int cap);
 
 /* Controllers currently usable on cg (enabled all the way from the root),
  * as a CG_CTRL_BIT mask; plus which of them are enabled for cg's own
@@ -114,7 +113,7 @@ uint32_t cg_eff_weight(int cg);
 /* Attach a freshly created process (never attached before) to cgroup `cg`.
  * Enforces the pids controller: returns 0, or -E_AGAIN when the subtree is
  * at its pids.max.  Caller holds the sched lock; p->cg must be -1. */
-int  cg_attach_new(proc_t *p, int cg);
+int cg_attach_new(proc_t *p, int cg);
 
 /* Detach a process that is leaving (exit).  Caller holds the sched lock;
  * p->cg is reset to -1. */
@@ -122,7 +121,7 @@ void cg_detach(proc_t *p);
 
 /* Move the thread group containing pid `pid` into cgroup `cg`.  Returns 0
  * or a negative errno.  pids.max of the destination is enforced. */
-int  cg_move_tgid(int pid, int cg);
+int cg_move_tgid(int pid, int cg);
 
 /* Recompute every task's cached effective weight after a weight write,
  * mkdir/rmdir or subtree_control change.  Caller holds the sched lock. */
@@ -134,10 +133,10 @@ void cg_refresh_weights(void);
  * chain from p's leaf to the root).  Maintains usage accounting and the
  * cpu.max budget; returns 1 when the leaf chain is throttled right now
  * (the caller should not leave p runnable), 0 otherwise. */
-int  cg_charge_runtime(proc_t *p, uint64_t used);
+int cg_charge_runtime(proc_t *p, uint64_t used);
 
 /* Whether p's cgroup chain is currently throttled. */
-int  cg_chain_throttled(proc_t *p);
+int cg_chain_throttled(proc_t *p);
 
 /* Park a runnable-but-throttled task: mark it BLOCKED (WAIT_CGROUP) and
  * link it on its throttled cgroup's parked list so the period rollover can
@@ -155,7 +154,7 @@ void cg_tick_refresh(void);
  * memory.max.  Caller must hold the BKL (already held at every call site).
  * When this returns 0, the caller MUST later call cg_mem_discharge() with
  * the same bytes when the pages are freed. */
-int  cg_mem_charge(int cg, uint64_t bytes);
+int cg_mem_charge(int cg, uint64_t bytes);
 
 /* Discharge (un-charge) `bytes` from every cgroup on `cg`'s ancestor chain.
  * Called when resident pages are freed or an address space is destroyed. */
@@ -164,19 +163,19 @@ void cg_mem_discharge(int cg, uint64_t bytes);
 /* ---- cgroupfs ------------------------------------------------------------ */
 /* Path relative to the cgroupfs mount root (always starts with '/') is
  * resolved/enumerated exactly like the tmpfs calls of the same shape. */
-int  cgfs_resolve(const char *rel, vfs_node_t *out);
-int  cgfs_readdir(const char *rel, uint32_t index, char *name, uint8_t *type);
-int  cgfs_mkdir(const char *rel);
-int  cgfs_rmdir(const char *rel);
+int cgfs_resolve(const char *rel, vfs_node_t *out);
+int cgfs_readdir(const char *rel, uint32_t index, char *name, uint8_t *type);
+int cgfs_mkdir(const char *rel);
+int cgfs_rmdir(const char *rel);
 
 /* ---- per-process queries (procfs) ---------------------------------------- */
 /* cgroup path of process `p`, e.g. "0::/a/b" (the v2 unified layout of
  * /proc/<pid>/cgroup).  Rendered into buf; returns length. */
-int  cg_proc_cgroup_line(proc_t *p, char *buf, int cap);
+int cg_proc_cgroup_line(proc_t *p, char *buf, int cap);
 /* pid of the member task at 0-based slot `i` of cgroup `cg` (direct
  * members only), or -1.  Caller holds the sched lock. */
-int  cg_member_pid(int cg, int i);
+int cg_member_pid(int cg, int i);
 /* Total live tasks in the subtree rooted at `cg` (pids.current). */
-int  cg_subtree_tasks(int cg);
+int cg_subtree_tasks(int cg);
 
 #endif

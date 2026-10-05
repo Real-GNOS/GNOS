@@ -52,17 +52,17 @@ uint64_t acpi_rsdp_phys(void);
 const acpi_sdt_t *acpi_find(const char *sig);
 
 /* How many tables were indexed, and read-only access to one of them. */
-int                acpi_table_count(void);
-const acpi_sdt_t  *acpi_table(int i);
+int               acpi_table_count(void);
+const acpi_sdt_t *acpi_table(int i);
 
 /* Facts extracted from the tables at init time.  Each is 0 when the relevant
  * table was absent, so a caller can treat 0 as "fall back to the legacy way"
  * without a second "is ACPI present" flag. */
-int      acpi_cpu_count(void);      /* enabled local APICs in the MADT */
-uint64_t acpi_lapic_base(void);     /* physical address of the local APIC */
-uint64_t acpi_ioapic_base(void);    /* physical address of the first IOAPIC */
-uint64_t acpi_hpet_base(void);      /* physical address of the HPET block */
-uint16_t acpi_pm1a_control(void);   /* PM1a control port, for poweroff */
+int      acpi_cpu_count(void);    /* enabled local APICs in the MADT */
+uint64_t acpi_lapic_base(void);   /* physical address of the local APIC */
+uint64_t acpi_ioapic_base(void);  /* physical address of the first IOAPIC */
+uint64_t acpi_hpet_base(void);    /* physical address of the HPET block */
+uint16_t acpi_pm1a_control(void); /* PM1a control port, for poweroff */
 
 /* Print the table index to the debug console, one line per table. */
 void acpi_dump(void);

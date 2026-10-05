@@ -17,14 +17,13 @@
 int sysfs_resolve(const char *path, vfs_node_t *out);
 
 /* Enumerate /sys directories for getdents64, same contract as debugfs. */
-int sysfs_readdir(const char *dirpath, uint32_t index, char *name,
-                  uint8_t *type);
+int sysfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *type);
 
 /* Register /sys/<relpath>.  `gen` renders the read content; `put`, when
  * non-NULL, receives user writes.  Intermediate directories materialise
  * automatically.  Returns 0, -E_INVAL, or -E_NOSPC when full. */
 typedef void (*sysfs_gen_t)(char *buf, uint32_t cap, uint32_t *len);
-typedef int  (*sysfs_put_t)(const char *buf, uint32_t len);
+typedef int (*sysfs_put_t)(const char *buf, uint32_t len);
 int sysfs_add_file(const char *relpath, sysfs_gen_t gen, sysfs_put_t put);
 
 /* Boot-time registration of the built-in attributes. */

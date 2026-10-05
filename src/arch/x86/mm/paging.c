@@ -16,11 +16,11 @@
 #include "debugcon.h"
 #include "kstring.h"
 
-#define PG_P    0x001
-#define PG_RW   0x002
-#define PG_U    0x004
-#define PG_PS   0x080
-#define PG_NX   (1ULL << 63)
+#define PG_P  0x001
+#define PG_RW 0x002
+#define PG_U  0x004
+#define PG_PS 0x080
+#define PG_NX (1ULL << 63)
 
 #define PG_ADDR 0x000FFFFFFFFFF000ULL
 
@@ -60,19 +60,18 @@ static uint64_t *alloc_table(uint64_t *phys_out)
 
 /* Replace a large-page entry with a table of smaller entries covering the
  * same physical range, preserving its flags. */
-static uint64_t *split_large(uint64_t *entry, uint64_t child_page_size,
-                             int child_is_large)
+static uint64_t *split_large(uint64_t *entry, uint64_t child_page_size, int child_is_large)
 {
     uint64_t old   = *entry;
     uint64_t base  = old & PG_ADDR;
-    uint64_t flags = old & (PG_RW | PG_U | PG_NX | 0x18);  /* RW U NX PCD PWT */
+    uint64_t flags = old & (PG_RW | PG_U | PG_NX | 0x18); /* RW U NX PCD PWT */
 
-    uint64_t tbl_phys;
+    uint64_t  tbl_phys;
     uint64_t *tbl = alloc_table(&tbl_phys);
 
     for (unsigned i = 0; i < 512; i++)
-        tbl[i] = (base + (uint64_t)i * child_page_size) | flags | PG_P
-               | (child_is_large ? PG_PS : 0);
+        tbl[i] =
+            (base + (uint64_t)i * child_page_size) | flags | PG_P | (child_is_large ? PG_PS : 0);
 
     *entry = tbl_phys | PG_P | PG_RW | PG_U;
     return tbl;
@@ -100,14 +99,14 @@ void paging_make_user(uint64_t vaddr, uint64_t size)
         uint64_t *pdpt = phys_to_virt(pml4[i4] & PG_ADDR);
         if (!(pdpt[i3] & PG_P))
             panic("paging: user range is not mapped (PDPT)");
-        if (pdpt[i3] & PG_PS)                       /* 1 GiB page -> 2 MiB */
+        if (pdpt[i3] & PG_PS) /* 1 GiB page -> 2 MiB */
             split_large(&pdpt[i3], 0x200000, 1);
         pdpt[i3] = (pdpt[i3] | PG_U | PG_RW) & ~PG_NX;
 
         uint64_t *pd = phys_to_virt(pdpt[i3] & PG_ADDR);
         if (!(pd[i2] & PG_P))
             panic("paging: user range is not mapped (PD)");
-        if (pd[i2] & PG_PS)                         /* 2 MiB page -> 4 KiB */
+        if (pd[i2] & PG_PS) /* 2 MiB page -> 4 KiB */
             split_large(&pd[i2], 0x1000, 0);
         pd[i2] = (pd[i2] | PG_U | PG_RW) & ~PG_NX;
 
@@ -116,7 +115,7 @@ void paging_make_user(uint64_t vaddr, uint64_t size)
             panic("paging: user range is not mapped (PT)");
         pt[i1] = (pt[i1] | PG_U | PG_RW | PG_P) & ~PG_NX;
 
-        asm volatile("invlpg (%0)" :: "r"(va) : "memory");
+        asm volatile("invlpg (%0)" ::"r"(va) : "memory");
     }
 
     dbg_puts("GNOS: user window ");

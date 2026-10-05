@@ -23,9 +23,9 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    unsigned int flags = 0;
-    int wait_while_busy = 0;
-    int opt;
+    unsigned int flags           = 0;
+    int          wait_while_busy = 0;
+    int          opt;
     while ((opt = getopt(argc, argv, "fwsV")) != -1) {
         switch (opt) {
         case 'f':
@@ -34,7 +34,7 @@ int main(int argc, char **argv)
         case 'w':
             wait_while_busy = 1;
             break;
-        case 's':                    /* syslog: we have no syslog */
+        case 's': /* syslog: we have no syslog */
             break;
         case 'V':
             printf("rmmod: GNOS rmmod 1.0\n");
@@ -55,8 +55,7 @@ int main(int argc, char **argv)
             usleep(100000);
             continue;
         }
-        fprintf(stderr, "rmmod: error removing '%s': %s\n", name,
-                strerror(errno));
+        fprintf(stderr, "rmmod: error removing '%s': %s\n", name, strerror(errno));
         return 1;
     }
 }

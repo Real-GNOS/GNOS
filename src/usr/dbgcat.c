@@ -23,8 +23,8 @@ static long dbgputs(char *s, long n)
         while (end < n && s[end] != '\n' && s[end] != 0)
             end++;
         if (end < n && s[end] == 0)
-            break;                      /* stray NUL: stop, not worth chasing */
-        s[end] = 0;                     /* in our buffer: safe */
+            break;  /* stray NUL: stop, not worth chasing */
+        s[end] = 0; /* in our buffer: safe */
         long r = sys_dbgputs(&s[off]);
         if (r < 0)
             return r;
@@ -37,7 +37,7 @@ static long dbgputs(char *s, long n)
 
 int main(int argc, char **argv)
 {
-    int rc = 0;
+    int  rc = 0;
     char buf[CHUNK + 1];
 
     for (int i = 1; i < argc; i++) {

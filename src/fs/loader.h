@@ -40,9 +40,9 @@
  * (the dynamic linker to hand the entry point to) is copied there, NUL
  * terminated; an image with no PT_INTERP leaves it empty.
  */
-int load_executable(addrspace_t *as, const uint8_t *img, uint32_t size,
-                    uint64_t dyn_base, uint64_t *entry, uint64_t *phdr,
-                    uint16_t *phnum, char *interp, uint32_t interp_cap);
+int load_executable(addrspace_t *as, const uint8_t *img, uint32_t size, uint64_t dyn_base,
+                    uint64_t *entry, uint64_t *phdr, uint16_t *phnum, char *interp,
+                    uint32_t interp_cap);
 
 /* Load bases for dynamically linked processes: the PIE main program lands at
  * DYN_PROG_BASE (the same slot a static ET_EXEC occupies) and the dynamic

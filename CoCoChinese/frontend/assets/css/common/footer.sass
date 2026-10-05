@@ -1,0 +1,54 @@
+@import "../global/variable"
+
+
+.footerNavBox
+
+  .footerItem
+    position: relative
+
+    .footerItemTitle
+      position: relative
+      left: 2.5%
+      padding: 3px 10px
+      transition: 0.5s
+
+      &:before
+        content: ""
+        position: absolute
+        top: $fontSize + 10px
+        left: 0
+        z-index: 1
+        border-bottom: 1px solid #767676
+        transition: 0.5s
+        width: 100%
+
+      &:hover:before
+        width: 300px
+
+    ul
+      list-style: none
+      margin: 15px 0
+      padding: 10px 0
+
+      li
+        width: 33.3%
+        margin-bottom: 15px
+        float: left
+        display: inline-block
+
+        b
+          height: 50px
+          font-size: 48px
+          margin-bottom: 10px
+
+.attestBox
+
+  .web_authentication
+
+    img
+      position: relative
+      top: -2px
+      width: auto
+      max-width: 100%
+      height: $fontSize + 1px
+      max-font-size: $fontSize + 1px

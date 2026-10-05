@@ -1,0 +1,17 @@
+# /etc/inittab -- busybox init (the kernel's PID 1 is /sbin/init -> busybox).
+# This is Alpine's standard shape: openrc runs the three runlevels, one
+# respawning getty per virtual terminal.  Indentation and the colon format
+# are busybox's.
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+tty1::respawn:/sbin/getty tty1
+tty2::respawn:/sbin/getty tty2
+tty3::respawn:/sbin/getty tty3
+tty4::respawn:/sbin/getty tty4
+tty5::respawn:/sbin/getty tty5
+tty6::respawn:/sbin/getty tty6
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown

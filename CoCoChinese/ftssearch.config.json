@@ -1,0 +1,18 @@
+{
+  "database": "postgresql://postgres:123@localhost:5432/cocokalo",
+  "table": "videos",
+  "language": "simple",
+  "columns": [
+    { "column": "title",       "weight": "A" },
+    { "column": "tags",        "weight": "B", "isArray": true },
+    { "column": "category",    "weight": "B" },
+    { "column": "author",      "weight": "C" },
+    { "column": "description", "weight": "D" },
+    { "column": "introduction","weight": "D" }
+  ],
+  "cache": {
+    "redis": { "url": "redis://localhost:6379" },
+    "ttl": 60,
+    "maxEntries": 2000
+  }
+}

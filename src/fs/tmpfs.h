@@ -34,8 +34,7 @@ int tmpfs_resolve(tmpfs_t *fs, const char *rel, vfs_node_t *out);
 /* Enumerate a tmpfs directory for getdents64.  `index` is 0-based; index 0 is
  * "." and 1 is "..", then the real children.  Fills name/type and returns 0,
  * or -E_NOENT once the directory is exhausted. */
-int tmpfs_readdir(tmpfs_t *fs, const char *rel, uint32_t index,
-                  char *name, uint8_t *type);
+int tmpfs_readdir(tmpfs_t *fs, const char *rel, uint32_t index, char *name, uint8_t *type);
 
 /* Mutating operations; return 0 or a negative errno. */
 int tmpfs_mkdir(tmpfs_t *fs, const char *rel, uint32_t mode);
@@ -75,7 +74,7 @@ uint64_t tmpfs_file_size(const vfs_node_t *n);
  * node itself goes away).  Mappings hold a mapper reference on the node so
  * unlink + last-close cannot free a file that is still mapped.
  */
-struct tmpfs_node;              /* opaque outside tmpfs.c */
+struct tmpfs_node; /* opaque outside tmpfs.c */
 
 /* The node's frame count; 0 while it is still arena-backed. */
 uint32_t tmpfs_node_shm_pages(struct tmpfs_node *n);
@@ -83,11 +82,11 @@ uint32_t tmpfs_node_shm_pages(struct tmpfs_node *n);
 uint64_t tmpfs_node_shm_frame(struct tmpfs_node *n, uint32_t idx);
 /* Turn the node frame-backed: allocate zeroed frames covering `bytes` and
  * copy any arena payload in.  Returns 0 or a negative errno. */
-int      tmpfs_node_shm_start(struct tmpfs_node *n, uint64_t bytes);
+int tmpfs_node_shm_start(struct tmpfs_node *n, uint64_t bytes);
 /* Reference counting: +1 per address space mapping the node, -1 when a
  * mapping goes away (munmap or address-space teardown).  Dropping the last
  * mapper may free a node that was unlinked and had its last fd closed. */
-void     tmpfs_node_shm_addmapper(struct tmpfs_node *n);
-void     tmpfs_node_shm_putmapper(struct tmpfs_node *n);
+void tmpfs_node_shm_addmapper(struct tmpfs_node *n);
+void tmpfs_node_shm_putmapper(struct tmpfs_node *n);
 
 #endif

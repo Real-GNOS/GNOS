@@ -22,11 +22,11 @@
 
 #include <stdint.h>
 
-#define SEL_KCODE   0x08
-#define SEL_KDATA   0x10
-#define SEL_UDATA   (0x18 | 3)   /* 0x1B — RPL 3 */
-#define SEL_UCODE   (0x20 | 3)   /* 0x23 — RPL 3 */
-#define SEL_TSS     0x28
+#define SEL_KCODE 0x08
+#define SEL_KDATA 0x10
+#define SEL_UDATA (0x18 | 3) /* 0x1B — RPL 3 */
+#define SEL_UCODE (0x20 | 3) /* 0x23 — RPL 3 */
+#define SEL_TSS   0x28
 
 /* The 64-bit TSS: in long mode it no longer holds a task context, only the
  * privilege-level stacks (RSP0..2), the interrupt-stack table and the I/O

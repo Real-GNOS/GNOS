@@ -21,7 +21,7 @@
 #include <stdint.h>
 
 #include "secretmem.h"
-#include "vfs.h"        /* errno values */
+#include "vfs.h" /* errno values */
 
 int64_t sys_memfd_secret(uint64_t flags)
 {

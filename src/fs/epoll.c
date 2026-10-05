@@ -25,6 +25,7 @@
 #include "vmm.h"
 #include "kstring.h"
 #include "syscall.h"
+#include "debugcon.h"
 
 #define EPOLLIN      0x00000001
 #define EPOLLOUT     0x00000004
@@ -121,7 +122,7 @@ int64_t sys_epoll_create(uint64_t flags)
 int64_t sys_epoll_ctl(int epfd, int op, int fd, uint64_t up_event)
 {
     epoll_inst_t *inst;
-    int e = inst_of(epfd, &inst);
+    int           e = inst_of(epfd, &inst);
     if (e < 0)
         return e;
     if (fd < 0)
@@ -178,26 +179,39 @@ int64_t sys_epoll_ctl(int epfd, int op, int fd, uint64_t up_event)
 /* The pollfd layout do_ppoll speaks: fd, events, revents.  Built in kernel
  * scratch so the user's epoll_event array never has to look like one. */
 typedef struct {
-    int32_t  fd;
-    int16_t  events;
-    int16_t  revents;
+    int32_t fd;
+    int16_t events;
+    int16_t revents;
 } pollfd_k_t;
 
 static uint32_t epoll_bit(int16_t rev)
 {
     uint32_t r = 0;
-    if (rev & POLLIN)  r |= EPOLLIN;
-    if (rev & POLLOUT) r |= EPOLLOUT;
-    if (rev & POLLERR) r |= EPOLLERR;
-    if (rev & POLLHUP) r |= EPOLLHUP;
+    if (rev & POLLIN)
+        r |= EPOLLIN;
+    if (rev & POLLOUT)
+        r |= EPOLLOUT;
+    if (rev & POLLERR)
+        r |= EPOLLERR;
+    if (rev & POLLHUP)
+        r |= EPOLLHUP;
     return r;
 }
 
-static int64_t epoll_wait_common(int epfd, uint64_t uevents, int maxevents,
-                                 int64_t ms)
+static int64_t epoll_wait_common(int epfd, uint64_t uevents, int maxevents, int64_t ms)
 {
     epoll_inst_t *inst;
-    int e = inst_of(epfd, &inst);
+    int           e = inst_of(epfd, &inst);
+    /* TEMPORARY Xorg debugging: who hands us this buffer, and is it real? */
+    dbg_puts("EPOLLW pid=");
+    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
+    dbg_puts(" epfd=");
+    dbg_puts_dec((uint32_t)epfd);
+    dbg_puts(" uevents=");
+    dbg_puts_hex(uevents);
+    dbg_puts(" maxevents=");
+    dbg_puts_dec((uint32_t)maxevents);
+    dbg_puts("\r\n");
     if (e < 0)
         return e;
     if (maxevents <= 0 || maxevents > EPOLL_MAX_ENTRIES)
@@ -214,7 +228,7 @@ static int64_t epoll_wait_common(int epfd, uint64_t uevents, int maxevents,
         ticks = (ms + 9) / 10;
 
     pollfd_k_t pf[EPOLL_MAX_ENTRIES];
-    int want = 0;
+    int        want = 0;
     for (int i = 0; i < EPOLL_MAX_ENTRIES; i++)
         if (inst->entries[i].used) {
             pf[want].fd      = inst->entries[i].fd;
@@ -222,13 +236,20 @@ static int64_t epoll_wait_common(int epfd, uint64_t uevents, int maxevents,
             pf[want].revents = 0;
             want++;
         }
+    /* TEMPORARY Xorg debugging: where the kernel-side pollfd array lives
+     * (it sits on this task's stack) and how many entries were filled. */
+    dbg_puts("EPW2 pf=");
+    dbg_puts_hex((uint64_t)(uintptr_t)pf);
+    dbg_puts(" want=");
+    dbg_puts_dec((uint32_t)want);
+    dbg_puts("\r\n");
 
     int64_t n = do_ppoll((uint8_t *)pf, (uint64_t)want, ticks);
     if (n <= 0)
         return n;
 
-    epoll_event_t *out = (epoll_event_t *)(uintptr_t)uevents;
-    int nout = 0;
+    epoll_event_t *out  = (epoll_event_t *)(uintptr_t)uevents;
+    int            nout = 0;
     for (int i = 0; i < want && nout < maxevents; i++) {
         if (!pf[i].revents)
             continue;
@@ -254,8 +275,7 @@ int64_t sys_epoll_wait(int epfd, uint64_t uevents, int maxevents, int ms)
     return epoll_wait_common(epfd, uevents, maxevents, ms);
 }
 
-int64_t sys_epoll_pwait(int epfd, uint64_t uevents, int maxevents, int ms,
-                        uint64_t usigmask)
+int64_t sys_epoll_pwait(int epfd, uint64_t uevents, int maxevents, int ms, uint64_t usigmask)
 {
     (void)usigmask;
     return epoll_wait_common(epfd, uevents, maxevents, ms);
@@ -264,11 +284,12 @@ int64_t sys_epoll_pwait(int epfd, uint64_t uevents, int maxevents, int ms,
 /* epoll_pwait2(441): epoll_pwait with a nanosecond-resolution timeout in a
  * struct timespec instead of a millisecond int.  NULL means "wait forever",
  * as it does for epoll_wait. */
-int64_t sys_epoll_pwait2(int epfd, uint64_t uevents, int maxevents,
-                         uint64_t uts, uint64_t usigmask)
+int64_t sys_epoll_pwait2(int epfd, uint64_t uevents, int maxevents, uint64_t uts, uint64_t usigmask)
 {
     (void)usigmask;
-    struct { int64_t tv_sec, tv_nsec; } ts;
+    struct {
+        int64_t tv_sec, tv_nsec;
+    } ts;
 
     if (!uts)
         return epoll_wait_common(epfd, uevents, maxevents, -1);
@@ -280,6 +301,6 @@ int64_t sys_epoll_pwait2(int epfd, uint64_t uevents, int maxevents,
 
     int64_t ms = ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
     if (ms > 0x7FFFFFFFLL)
-        ms = 0x7FFFFFFFLL;               /* saturate rather than overflow */
+        ms = 0x7FFFFFFFLL; /* saturate rather than overflow */
     return epoll_wait_common(epfd, uevents, maxevents, ms);
 }

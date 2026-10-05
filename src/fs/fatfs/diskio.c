@@ -87,7 +87,7 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
                 dbg_puts_hexn(buff[511], 2);
                 dbg_puts(" oem:");
                 for (int i = 3; i < 11; i++) {
-                    char c[2] = { (char)buff[i], 0 };
+                    char c[2] = {(char)buff[i], 0};
                     dbg_puts(c);
                 }
             }
@@ -107,7 +107,7 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
     if (!g_fat_dev || !g_fat_dev->ops)
         return RES_NOTRDY;
     if (!g_fat_dev->ops->write)
-        return RES_WRPRT;                /* read-only device */
+        return RES_WRPRT; /* read-only device */
     if (g_fat_sectors && (uint64_t)count + sector > g_fat_sectors)
         return RES_PARERR;
 
@@ -118,7 +118,7 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
     if (n < 0)
         return RES_ERROR;
     if ((uint32_t)n < len)
-        return RES_ERROR;                /* a partial write loses data */
+        return RES_ERROR; /* a partial write loses data */
     return RES_OK;
 }
 
@@ -130,7 +130,7 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 
     switch (cmd) {
     case CTRL_SYNC:
-        return RES_OK;                   /* every write is synchronous */
+        return RES_OK; /* every write is synchronous */
     case GET_SECTOR_COUNT:
         *(LBA_t *)buff = (LBA_t)g_fat_sectors;
         return RES_OK;
@@ -138,10 +138,10 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
         *(WORD *)buff = FAT_SECTOR_SIZE;
         return RES_OK;
     case GET_BLOCK_SIZE:
-        *(DWORD *)buff = 1;              /* erase block granularity: none */
+        *(DWORD *)buff = 1; /* erase block granularity: none */
         return RES_OK;
     case CTRL_TRIM:
-        return RES_OK;                   /* nothing to discard */
+        return RES_OK; /* nothing to discard */
     default:
         return RES_PARERR;
     }

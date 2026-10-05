@@ -8,9 +8,9 @@
 #include <stdint.h>
 #include "panic.h"
 
-#define IRQ_BASE      0x20    /* PIC vectors are remapped to 0x20..0x2F */
-#define MSI_VECTOR_BASE 0xE0  /* dedicated MSI/MSI-X pool, 16 vectors    */
-#define SYSCALL_VECTOR 0x80
+#define IRQ_BASE        0x20 /* PIC vectors are remapped to 0x20..0x2F */
+#define MSI_VECTOR_BASE 0xE0 /* dedicated MSI/MSI-X pool, 16 vectors    */
+#define SYSCALL_VECTOR  0x80
 
 typedef void (*irq_handler_t)(regs_t *r);
 
@@ -21,11 +21,11 @@ typedef void (*irq_handler_t)(regs_t *r);
 #define IRQSTAT_CPUS 4
 
 typedef struct {
-    uint32_t      pic[16][IRQSTAT_CPUS];
-    uint32_t      msi[16][IRQSTAT_CPUS];
-    uint32_t      lapic_timer[IRQSTAT_CPUS];
-    const char   *pic_name[16];       /* registered handler names or NULL */
-    const char   *msi_name[16];
+    uint32_t    pic[16][IRQSTAT_CPUS];
+    uint32_t    msi[16][IRQSTAT_CPUS];
+    uint32_t    lapic_timer[IRQSTAT_CPUS];
+    const char *pic_name[16]; /* registered handler names or NULL */
+    const char *msi_name[16];
 } irqstat_t;
 
 void irqstat_snapshot(irqstat_t *out);

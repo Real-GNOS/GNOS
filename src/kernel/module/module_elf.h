@@ -15,7 +15,7 @@
 #include <stddef.h>
 
 /* ---- ELF-64 constants (only what ET_REL module loading needs) ---------- */
-#define ELF64_ET_REL     1
+#define ELF64_ET_REL    1
 #define ELF64_EM_X86_64 62
 
 #define ELF64_SHT_NOBITS 8
@@ -23,20 +23,20 @@
 #define ELF64_SHT_STRTAB 3
 #define ELF64_SHT_RELA   4
 
-#define ELF64_SHN_UNDEF      0
-#define ELF64_SHN_ABS     0xfff1
-#define ELF64_SHN_COMMON  0xfff2
-#define ELF64_SHN_XINDEX  0xffff
+#define ELF64_SHN_UNDEF  0
+#define ELF64_SHN_ABS    0xfff1
+#define ELF64_SHN_COMMON 0xfff2
+#define ELF64_SHN_XINDEX 0xffff
 
-#define ELF64_SHF_ALLOC   0x2
-#define ELF64_SHF_WRITE   0x1
+#define ELF64_SHF_ALLOC     0x2
+#define ELF64_SHF_WRITE     0x1
 #define ELF64_SHF_EXECINSTR 0x4
 
-#define ELF64_STB_WEAK    2
-#define ELF64_ST_TYPE_M   0xf
+#define ELF64_STB_WEAK  2
+#define ELF64_ST_TYPE_M 0xf
 
-#define ELF64_R_SYM(i)    ((i) >> 32)
-#define ELF64_R_TYPE(i)   ((i) & 0xffffffffUL)
+#define ELF64_R_SYM(i)  ((i) >> 32)
+#define ELF64_R_TYPE(i) ((i) & 0xffffffffUL)
 
 typedef struct {
     unsigned char e_ident[16];
@@ -56,16 +56,16 @@ typedef struct {
 } elf64_ehdr_t;
 
 typedef struct {
-    uint32_t      sh_name;
-    uint32_t      sh_type;
-    uint64_t      sh_flags;
-    uint64_t      sh_addr;
-    uint64_t      sh_offset;
-    uint64_t      sh_size;
-    uint32_t      sh_link;
-    uint32_t      sh_info;
-    uint64_t      sh_addralign;
-    uint64_t      sh_entsize;
+    uint32_t sh_name;
+    uint32_t sh_type;
+    uint64_t sh_flags;
+    uint64_t sh_addr;
+    uint64_t sh_offset;
+    uint64_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint64_t sh_addralign;
+    uint64_t sh_entsize;
 } elf64_shdr_t;
 
 typedef struct {
@@ -87,12 +87,12 @@ typedef struct {
  * checked to lie inside the image, so the rest of the loader can index
  * these arrays without re-checking offsets. */
 typedef struct {
-    const void      *image;
-    size_t           size;
+    const void         *image;
+    size_t              size;
     const elf64_ehdr_t *header;
     const elf64_shdr_t *sections;
-    size_t           section_count;
-    size_t           section_name_index;
+    size_t              section_count;
+    size_t              section_name_index;
 } module_elf_view_t;
 
 /* Validate `size` bytes at `image` as an ET_REL x86-64 object and fill in
@@ -102,8 +102,7 @@ int module_elf_validate(const void *image, size_t size, module_elf_view_t *view)
 /* Apply one relocation of `type` at `location` (already mapped into kernel
  * memory): S + A for absolute types, S + A - P for PC-relative ones.
  * Returns 0 or a negative errno. */
-int module_elf_apply_relocation(uint32_t type, void *location,
-                                uint64_t symbol_value, int64_t addend,
-                                uintptr_t place);
+int module_elf_apply_relocation(uint32_t type, void *location, uint64_t symbol_value,
+                                int64_t addend, uintptr_t place);
 
 #endif /* GNUCOS_MODULE_ELF_H */

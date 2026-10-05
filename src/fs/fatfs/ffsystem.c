@@ -66,8 +66,8 @@ DWORD get_fattime(void)
     uint32_t hour = (uint32_t)((now / 3600u) % 24u);
     uint32_t day  = (uint32_t)((now / 86400u) % 31u) + 1u;
     uint32_t mon  = 1u;
-    uint32_t year = 1980u + 46u;         /* 2026 */
-    return ((year - 1980u) << 25) | (mon << 21) | (day << 16) |
-           (hour << 11) | (min << 5) | (sec >> 1);
+    uint32_t year = 1980u + 46u; /* 2026 */
+    return ((year - 1980u) << 25) | (mon << 21) | (day << 16) | (hour << 11) | (min << 5) |
+           (sec >> 1);
 }
 #endif

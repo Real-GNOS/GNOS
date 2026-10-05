@@ -31,11 +31,11 @@
 #define HID_REQ_SET_IDLE     0x0A
 #define HID_REQ_SET_PROTOCOL 0x0B
 
-#define HID_CLASS            0x03
+#define HID_CLASS             0x03
 #define HID_PROTOCOL_KEYBOARD 1
 #define HID_PROTOCOL_MOUSE    2
 
-#define USB_RT_HID  (0x21)                    /* class, interface, device->host */
+#define USB_RT_HID (0x21) /* class, interface, device->host */
 
 #define HID_MAX_DEVICES 4
 
@@ -44,59 +44,59 @@
  * usages 0x04..0x66 map to KEY_A..KEY_COMPOSE with a couple of holes.  The
  * table is indexed by usage - 4; 0 means "no key". */
 static const uint16_t hid_keytab[0x66 - 0x04 + 1] = {
-/* 04 a */ 30, /* 05 b */ 48, /* 06 c */ 46, /* 07 d */ 32,
-/* 08 e */ 18, /* 09 f */ 33, /* 0a g */ 34, /* 0b h */ 35,
-/* 0c i */ 23, /* 0d j */ 36, /* 0e k */ 37, /* 0f l */ 38,
-/* 10 m */ 50, /* 11 n */ 49, /* 12 o */ 24, /* 13 p */ 25,
-/* 14 q */ 16, /* 15 r */ 19, /* 16 s */ 31, /* 17 t */ 20,
-/* 18 u */ 22, /* 19 v */ 47, /* 1a w */ 17, /* 1b x */ 45,
-/* 1c y */ 21, /* 1d z */ 44, /* 1e 1 */ 2,  /* 1f 2 */ 3,
-/* 20 3 */ 4,  /* 21 4 */ 5,  /* 22 5 */ 6,  /* 23 6 */ 7,
-/* 24 7 */ 8,  /* 25 8 */ 9,  /* 26 9 */ 10, /* 27 0 */ 11,
-/* 28 ent */ 28, /* 29 esc */ 1, /* 2a bs */ 14, /* 2b tab */ 15,
-/* 2c spc */ 57, /* 2d - */ 12, /* 2e = */ 13, /* 2f [ */ 26,
-/* 30 ] */ 27, /* 31 \ */ 43, /* 32 (non-US) */ 0, /* 33 ; */ 39,
-/* 34 ' */ 40, /* 35 ` */ 41, /* 36 , */ 51, /* 37 . */ 52,
-/* 38 / */ 53, /* 39 caps */ 58, /* 3a F1 */ 59, /* 3b F2 */ 60,
-/* 3c F3 */ 61, /* 3d F4 */ 62, /* 3e F5 */ 63, /* 3f F6 */ 64,
-/* 40 F7 */ 65, /* 41 F8 */ 66, /* 42 F9 */ 67, /* 43 F10 */ 68,
-/* 44 F11 */ 87, /* 45 F12 */ 88, /* 46 prtsc */ 99, /* 47 sclk */ 70,
-/* 48 pause */ 119, /* 49 ins */ 110, /* 4a home */ 102, /* 4b pgup */ 104,
-/* 4c del */ 111, /* 4d end */ 107, /* 4e pgdn */ 109, /* 4f right */ 106,
-/* 50 left */ 105, /* 51 down */ 108, /* 52 up */ 103, /* 53 numlk */ 69,
-/* 54 KP/ */ 98, /* 55 KP* */ 55, /* 56 KP- */ 74, /* 57 KP+ */ 78,
-/* 58 KPent */ 96, /* 59 KP1 */ 79, /* 5a KP2 */ 80, /* 5b KP3 */ 81,
-/* 5c KP4 */ 75, /* 5d KP5 */ 76, /* 5e KP6 */ 77, /* 5f KP7 */ 71,
-/* 60 KP8 */ 72, /* 61 KP9 */ 73, /* 62 KP0 */ 82, /* 63 KP. */ 83,
-/* 64 (non-US \|) */ 0, /* 65 app */ 127, /* 66 power */ 116,
+    /* 04 a */ 30,          /* 05 b */ 48,     /* 06 c */ 46,       /* 07 d */ 32,
+    /* 08 e */ 18,          /* 09 f */ 33,     /* 0a g */ 34,       /* 0b h */ 35,
+    /* 0c i */ 23,          /* 0d j */ 36,     /* 0e k */ 37,       /* 0f l */ 38,
+    /* 10 m */ 50,          /* 11 n */ 49,     /* 12 o */ 24,       /* 13 p */ 25,
+    /* 14 q */ 16,          /* 15 r */ 19,     /* 16 s */ 31,       /* 17 t */ 20,
+    /* 18 u */ 22,          /* 19 v */ 47,     /* 1a w */ 17,       /* 1b x */ 45,
+    /* 1c y */ 21,          /* 1d z */ 44,     /* 1e 1 */ 2,        /* 1f 2 */ 3,
+    /* 20 3 */ 4,           /* 21 4 */ 5,      /* 22 5 */ 6,        /* 23 6 */ 7,
+    /* 24 7 */ 8,           /* 25 8 */ 9,      /* 26 9 */ 10,       /* 27 0 */ 11,
+    /* 28 ent */ 28,        /* 29 esc */ 1,    /* 2a bs */ 14,      /* 2b tab */ 15,
+    /* 2c spc */ 57,        /* 2d - */ 12,     /* 2e = */ 13,       /* 2f [ */ 26,
+    /* 30 ] */ 27,          /* 31 \ */ 43,     /* 32 (non-US) */ 0, /* 33 ; */ 39,
+    /* 34 ' */ 40,          /* 35 ` */ 41,     /* 36 , */ 51,       /* 37 . */ 52,
+    /* 38 / */ 53,          /* 39 caps */ 58,  /* 3a F1 */ 59,      /* 3b F2 */ 60,
+    /* 3c F3 */ 61,         /* 3d F4 */ 62,    /* 3e F5 */ 63,      /* 3f F6 */ 64,
+    /* 40 F7 */ 65,         /* 41 F8 */ 66,    /* 42 F9 */ 67,      /* 43 F10 */ 68,
+    /* 44 F11 */ 87,        /* 45 F12 */ 88,   /* 46 prtsc */ 99,   /* 47 sclk */ 70,
+    /* 48 pause */ 119,     /* 49 ins */ 110,  /* 4a home */ 102,   /* 4b pgup */ 104,
+    /* 4c del */ 111,       /* 4d end */ 107,  /* 4e pgdn */ 109,   /* 4f right */ 106,
+    /* 50 left */ 105,      /* 51 down */ 108, /* 52 up */ 103,     /* 53 numlk */ 69,
+    /* 54 KP/ */ 98,        /* 55 KP* */ 55,   /* 56 KP- */ 74,     /* 57 KP+ */ 78,
+    /* 58 KPent */ 96,      /* 59 KP1 */ 79,   /* 5a KP2 */ 80,     /* 5b KP3 */ 81,
+    /* 5c KP4 */ 75,        /* 5d KP5 */ 76,   /* 5e KP6 */ 77,     /* 5f KP7 */ 71,
+    /* 60 KP8 */ 72,        /* 61 KP9 */ 73,   /* 62 KP0 */ 82,     /* 63 KP. */ 83,
+    /* 64 (non-US \|) */ 0, /* 65 app */ 127,  /* 66 power */ 116,
 };
 
 /* The modifier usages appear in the report's modifier byte, one bit each. */
 static const uint16_t hid_modifier_keys[8] = {
-    29,   /* 0x01 LCtrl  -> KEY_LEFTCTRL  */
-    42,   /* 0x02 LShift -> KEY_LEFTSHIFT */
-    56,   /* 0x04 LAlt   -> KEY_LEFTALT   */
-    125,  /* 0x08 LGui   -> KEY_LEFTMETA  */
-    97,   /* 0x10 RCtrl  -> KEY_RIGHTCTRL */
-    54,   /* 0x20 RShift -> KEY_RIGHTSHIFT*/
-    100,  /* 0x40 RAlt   -> KEY_RIGHTALT  */
-    126,  /* 0x80 RGui   -> KEY_RIGHTMETA */
+    29,  /* 0x01 LCtrl  -> KEY_LEFTCTRL  */
+    42,  /* 0x02 LShift -> KEY_LEFTSHIFT */
+    56,  /* 0x04 LAlt   -> KEY_LEFTALT   */
+    125, /* 0x08 LGui   -> KEY_LEFTMETA  */
+    97,  /* 0x10 RCtrl  -> KEY_RIGHTCTRL */
+    54,  /* 0x20 RShift -> KEY_RIGHTSHIFT*/
+    100, /* 0x40 RAlt   -> KEY_RIGHTALT  */
+    126, /* 0x80 RGui   -> KEY_RIGHTMETA */
 };
 
 typedef struct {
-    int slot;
-    int type;                    /* HID_PROTOCOL_KEYBOARD / HID_PROTOCOL_MOUSE */
-    int ep_addr;                 /* interrupt IN endpoint address (0x81) */
-    uint8_t  ep_packet;          /* endpoint max packet size */
-    uint8_t  report[8];
-    uint8_t  last_report[8];
-    uint8_t  last_mod;
-    uint8_t  active;
+    int     slot;
+    int     type;      /* HID_PROTOCOL_KEYBOARD / HID_PROTOCOL_MOUSE */
+    int     ep_addr;   /* interrupt IN endpoint address (0x81) */
+    uint8_t ep_packet; /* endpoint max packet size */
+    uint8_t report[8];
+    uint8_t last_report[8];
+    uint8_t last_mod;
+    uint8_t active;
 } hid_dev_t;
 
 static hid_dev_t g_hid[HID_MAX_DEVICES];
-static int g_hid_count;
-static int g_hid_ready;
+static int       g_hid_count;
+static int       g_hid_ready;
 
 static uint16_t rd16(const uint8_t *p)
 {
@@ -105,14 +105,13 @@ static uint16_t rd16(const uint8_t *p)
 
 static int hid_set_protocol(int slot, int iface, uint8_t protocol)
 {
-    return xhci_control_transfer(slot, USB_RT_HID, HID_REQ_SET_PROTOCOL,
-                                 protocol, (uint16_t)iface, NULL, 0);
+    return xhci_control_transfer(slot, USB_RT_HID, HID_REQ_SET_PROTOCOL, protocol, (uint16_t)iface,
+                                 NULL, 0);
 }
 
 static int hid_set_idle(int slot, int iface)
 {
-    return xhci_control_transfer(slot, USB_RT_HID, HID_REQ_SET_IDLE,
-                                 0, (uint16_t)iface, NULL, 0);
+    return xhci_control_transfer(slot, USB_RT_HID, HID_REQ_SET_IDLE, 0, (uint16_t)iface, NULL, 0);
 }
 
 /* Find the first HID interface in the configuration descriptor and arm its
@@ -122,8 +121,7 @@ static int hid_probe_config(hid_dev_t *dev)
     int slot = dev->slot;
 
     uint8_t header[9];
-    if (xhci_control_transfer(slot, 0x80, 6, 0x0200, 0,
-                              header, sizeof(header)) < 0)
+    if (xhci_control_transfer(slot, 0x80, 6, 0x0200, 0, header, sizeof(header)) < 0)
         return 0;
     uint16_t total = rd16(header + 2);
     if (total < sizeof(header) || total > 4096)
@@ -139,27 +137,26 @@ static int hid_probe_config(hid_dev_t *dev)
     }
     uint16_t got = ret < total ? (uint16_t)ret : total;
 
-    int current_hid = 0;
-    int interface_num = 0;
-    int ep_addr = 0;
-    uint8_t ep_packet = 0;
+    int     current_hid   = 0;
+    int     interface_num = 0;
+    int     ep_addr       = 0;
+    uint8_t ep_packet     = 0;
 
-    for (uint16_t off = 0; off + 2 <= got; ) {
-        uint8_t len = cfg[off];
+    for (uint16_t off = 0; off + 2 <= got;) {
+        uint8_t len  = cfg[off];
         uint8_t type = cfg[off + 1];
         if (len < 2 || off + len > got)
             break;
 
-        if (type == 4 && len >= 9) {          /* interface descriptor */
-            current_hid = cfg[off + 5] == HID_CLASS &&
-                          cfg[off + 7] == dev->type;
+        if (type == 4 && len >= 9) { /* interface descriptor */
+            current_hid = cfg[off + 5] == HID_CLASS && cfg[off + 7] == dev->type;
             if (current_hid)
                 interface_num = cfg[off + 2];
         } else if (type == 5 && len >= 7 && current_hid &&
-                   (cfg[off + 3] & 0x03) == 0x03) {   /* interrupt EP */
+                   (cfg[off + 3] & 0x03) == 0x03) { /* interrupt EP */
             uint8_t addr = cfg[off + 2];
-            if (addr & 0x80) {                 /* IN endpoint */
-                ep_addr = addr;
+            if (addr & 0x80) { /* IN endpoint */
+                ep_addr   = addr;
                 ep_packet = (uint8_t)(rd16(cfg + off + 4) & 0x07FFu);
                 break;
             }
@@ -177,22 +174,20 @@ static int hid_probe_config(hid_dev_t *dev)
     hid_set_idle(slot, interface_num);
 
     uint64_t buf_phys = 0;
-    uint8_t *buf = (uint8_t *)xhci_alloc_page(&buf_phys);
+    uint8_t *buf      = (uint8_t *)xhci_alloc_page(&buf_phys);
     if (!buf)
         return 0;
 
-    dev->ep_addr = ep_addr;
+    dev->ep_addr   = ep_addr;
     dev->ep_packet = ep_packet ? ep_packet : 8;
 
     /* The xHCI core owns the persistent report buffer. */
-    if (xhci_setup_interrupt_in((uint32_t)slot, ep_addr,
-                                dev->ep_packet, 10,
-                                buf, buf_phys) < 0)
+    if (xhci_setup_interrupt_in((uint32_t)slot, ep_addr, dev->ep_packet, 10, buf, buf_phys) < 0)
         return 0;
 
     memset(dev->last_report, 0xFF, sizeof(dev->last_report));
     dev->last_mod = 0xFF;
-    dev->active = 1;
+    dev->active   = 1;
     return ep_addr;
 }
 
@@ -218,8 +213,7 @@ static void hid_emit_kbd(hid_dev_t *dev)
         for (int m = 2; m < 8; m++)
             if (dev->last_report[m] == usage)
                 seen = 1;
-        if (!seen && (uint32_t)(usage - 4) <
-                     sizeof(hid_keytab) / sizeof(hid_keytab[0])) {
+        if (!seen && (uint32_t)(usage - 4) < sizeof(hid_keytab) / sizeof(hid_keytab[0])) {
             uint16_t key = hid_keytab[usage - 4];
             if (key)
                 input_usb_kbd(key, 1);
@@ -233,8 +227,7 @@ static void hid_emit_kbd(hid_dev_t *dev)
         for (int m = 2; m < 8; m++)
             if (dev->report[m] == usage)
                 still = 1;
-        if (!still && (uint32_t)(usage - 4) <
-                      sizeof(hid_keytab) / sizeof(hid_keytab[0])) {
+        if (!still && (uint32_t)(usage - 4) < sizeof(hid_keytab) / sizeof(hid_keytab[0])) {
             uint16_t key = hid_keytab[usage - 4];
             if (key)
                 input_usb_kbd(key, 0);
@@ -245,12 +238,12 @@ static void hid_emit_kbd(hid_dev_t *dev)
 static void hid_emit_mouse(hid_dev_t *dev)
 {
     uint8_t buttons = dev->report[0];
-    int8_t dx = (int8_t)dev->report[1];
-    int8_t dy = (int8_t)dev->report[2];
+    int8_t  dx      = (int8_t)dev->report[1];
+    int8_t  dy      = (int8_t)dev->report[2];
     /* Drop spurious 255-delta reports (some mice report a single -1 on
      * first contact), keep everything else. */
-    if (dx == -1 && dy == -1 && dev->last_report[0] == 0 &&
-        dev->last_report[1] == 0 && dev->last_report[2] == 0)
+    if (dx == -1 && dy == -1 && dev->last_report[0] == 0 && dev->last_report[1] == 0 &&
+        dev->last_report[2] == 0)
         dx = dy = 0;
     input_usb_mouse(buttons, dx, dy);
 }
@@ -272,8 +265,7 @@ void usb_hid_poll(void)
             continue;
 
         uint8_t buf[8];
-        int ret = xhci_read_interrupt_report(dev->slot, dev->ep_addr,
-                                             buf, dev->ep_packet);
+        int     ret = xhci_read_interrupt_report(dev->slot, dev->ep_addr, buf, dev->ep_packet);
         if (ret < 0)
             continue;
 
@@ -299,7 +291,7 @@ void usb_hid_init(void)
         /* Device descriptor: class 0 means "per-interface", which is what
          * keyboards and mice use. */
         usb_device_desc_t dd;
-        uint8_t raw[18];
+        uint8_t           raw[18];
         if (xhci_control_transfer(slot, 0x80, 6, 0x0100, 0, raw, 18) < 0)
             continue;
         memcpy(&dd, raw, 18);
@@ -314,9 +306,8 @@ void usb_hid_init(void)
             dev->slot = slot;
             dev->type = proto;
             if (hid_probe_config(dev)) {
-                dbg_puts(proto == HID_PROTOCOL_KEYBOARD
-                         ? "USBHID: keyboard on slot "
-                         : "USBHID: mouse on slot ");
+                dbg_puts(proto == HID_PROTOCOL_KEYBOARD ? "USBHID: keyboard on slot "
+                                                        : "USBHID: mouse on slot ");
                 dbg_puts_dec(slot);
                 dbg_puts("\r\n");
                 g_hid_count++;

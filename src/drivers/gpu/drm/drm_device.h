@@ -88,13 +88,13 @@ struct drm_vblank_crtc {
     struct drm_device               *dev;
     spinlock_t                       lock;
     unsigned int                     pipe;
-    uint32_t                         count;        /* frames so far */
+    uint32_t                         count; /* frames so far */
     uint32_t                         last;
-    uint32_t                         refcount;     /* interested parties */
+    uint32_t                         refcount; /* interested parties */
     bool                             enabled;
     bool                             inmodeset;
     uint32_t                         max_vblank_count;
-    uint64_t                         period_ns;    /* nominal frame period */
+    uint64_t                         period_ns; /* nominal frame period */
     uint64_t                         next_vblank_ns;
     uint64_t                         timestamp_ns; /* when the last one was */
     struct drm_crtc                 *crtc;
@@ -202,7 +202,8 @@ struct drm_mode_object {
 };
 
 /* Look an object up by id and type.  NULL when there is no such object. */
-struct drm_mode_object *drm_mode_object_find(struct drm_device *dev, struct drm_file *file_priv, uint32_t id, uint32_t type);
+struct drm_mode_object *drm_mode_object_find(struct drm_device *dev, struct drm_file *file_priv,
+                                             uint32_t id, uint32_t type);
 
 void drm_mode_object_get(struct drm_mode_object *obj);
 void drm_mode_object_put(struct drm_mode_object *obj);
@@ -276,8 +277,10 @@ struct drm_crtc_helper_funcs {
     /* Called after a mode has been set on the CRTC */
     void (*mode_set)(struct drm_crtc *crtc, struct drm_framebuffer *fb);
     /* Called on page-flip ioctl */
-    int (*page_flip)(struct drm_crtc *crtc, struct drm_framebuffer *fb, struct drm_pending_vblank_event *event, uint32_t flags);
-    int (*cursor_set)(struct drm_crtc *crtc, struct drm_gem_object *obj, uint32_t width, uint32_t height, int32_t hot_x, int32_t hot_y);
+    int (*page_flip)(struct drm_crtc *crtc, struct drm_framebuffer *fb,
+                     struct drm_pending_vblank_event *event, uint32_t flags);
+    int (*cursor_set)(struct drm_crtc *crtc, struct drm_gem_object *obj, uint32_t width,
+                      uint32_t height, int32_t hot_x, int32_t hot_y);
     int (*cursor_move)(struct drm_crtc *crtc, int32_t x, int32_t y);
     /* Called when CRTC is being enabled after modeset */
     void (*atomic_enable)(struct drm_crtc *crtc, struct drm_crtc_state *old_state);
@@ -288,7 +291,8 @@ struct drm_crtc_helper_funcs {
 };
 
 struct drm_encoder_helper_funcs {
-    void (*atomic_mode_set)(struct drm_encoder *encoder, struct drm_crtc_state *crtc_state, struct drm_connector_state *conn_state);
+    void (*atomic_mode_set)(struct drm_encoder *encoder, struct drm_crtc_state *crtc_state,
+                            struct drm_connector_state *conn_state);
 };
 
 struct drm_connector_helper_funcs {
@@ -458,8 +462,8 @@ struct drm_connector {
 };
 
 struct drm_framebuffer_funcs {
-    int (*dirty)(struct drm_framebuffer *fb, struct drm_file *file_priv, unsigned int flags, unsigned int color, struct drm_clip_rect *clips,
-                 unsigned int num_clips);
+    int (*dirty)(struct drm_framebuffer *fb, struct drm_file *file_priv, unsigned int flags,
+                 unsigned int color, struct drm_clip_rect *clips, unsigned int num_clips);
 };
 
 /* Pixels plus their geometry: up to four planes for planar formats. */
@@ -489,7 +493,7 @@ struct __drm_planes_state {
     struct drm_plane_state *state;
     struct drm_plane_state *old_state;
     struct drm_plane_state *new_state;
-    uint32_t                commit  : 1;
+    uint32_t                commit : 1;
     uint32_t                changed : 1;
 };
 
@@ -499,15 +503,15 @@ struct __drm_crtcs_state {
     struct drm_crtc_state *state;
     struct drm_crtc_state *old_state;
     struct drm_crtc_state *new_state;
-    uint32_t               commit              : 1;
-    uint32_t               modeset             : 1;
-    uint32_t               active              : 1;
-    uint32_t               planes_changed      : 1;
-    uint32_t               zpos_changed        : 1;
-    uint32_t               connectors_changed  : 1;
-    uint32_t               active_changed      : 1;
+    uint32_t               commit : 1;
+    uint32_t               modeset : 1;
+    uint32_t               active : 1;
+    uint32_t               planes_changed : 1;
+    uint32_t               zpos_changed : 1;
+    uint32_t               connectors_changed : 1;
+    uint32_t               active_changed : 1;
     uint32_t               asynchronous_commit : 1;
-    uint32_t               mode_changed        : 1;
+    uint32_t               mode_changed : 1;
 };
 
 /*
@@ -519,11 +523,11 @@ struct drm_atomic_state {
     struct drm_device             *dev;
     struct drm_file               *file_priv;
     uint64_t                       user_data;
-    uint32_t                       allow_modeset        : 1;
+    uint32_t                       allow_modeset : 1;
     uint32_t                       legacy_cursor_update : 1;
-    uint32_t                       async_update         : 1;
-    uint32_t                       duplicated           : 1;
-    uint32_t                       page_flip_event      : 1;
+    uint32_t                       async_update : 1;
+    uint32_t                       duplicated : 1;
+    uint32_t                       page_flip_event : 1;
     uint64_t                       commit_seq; /* position in the commit queue */
     struct drm_modeset_acquire_ctx acquire_ctx;
     struct __drm_planes_state     *planes; /* array, indexed by plane index */
@@ -608,7 +612,8 @@ struct drm_mode_config {
     struct drm_property *prop_max_bpc;
     struct drm_property *prop_color_mode_unused;
     struct drm_property *prop_colorspace;
-    struct drm_property *prop_writeback_fb_id, *prop_writeback_pix_fmt, *prop_writeback_out_fence_ptr;
+    struct drm_property *prop_writeback_fb_id, *prop_writeback_pix_fmt,
+        *prop_writeback_out_fence_ptr;
 
     bool async_page_flip;
     bool fb_modifiers_not_supported;
@@ -688,8 +693,10 @@ struct drm_driver {
     struct drm_gem_object *(*gem_prime_import)(struct drm_device *dev, void *dma_buf);
 
     /* PRIME export/import hooks. */
-    int (*prime_handle_to_fd)(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle, uint32_t flags, int *prime_fd);
-    int (*prime_fd_to_handle)(struct drm_device *dev, struct drm_file *file_priv, int prime_fd, uint32_t *handle);
+    int (*prime_handle_to_fd)(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle,
+                              uint32_t flags, int *prime_fd);
+    int (*prime_fd_to_handle)(struct drm_device *dev, struct drm_file *file_priv, int prime_fd,
+                              uint32_t *handle);
 
     /* KMS hooks (driver-specific). */
     int (*mode_valid)(struct drm_device *dev, const struct drm_display_mode *mode);
@@ -700,8 +707,10 @@ struct drm_driver {
     void *fops_unused;
 
     /* dumb buffer callbacks. */
-    int (*dumb_create)(struct drm_file *file_priv, struct drm_device *dev, struct drm_mode_create_dumb *args);
-    int (*dumb_map_offset)(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle, uint64_t *offset);
+    int (*dumb_create)(struct drm_file *file_priv, struct drm_device *dev,
+                       struct drm_mode_create_dumb *args);
+    int (*dumb_map_offset)(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle,
+                           uint64_t *offset);
     int (*dumb_destroy)(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle);
 
     int      dev_priv_size_unused;
@@ -870,25 +879,30 @@ int drm_ioctl_permit(unsigned int flags, struct drm_file *file_priv);
 int drm_version(struct drm_device *dev, void *data, struct drm_file *file_priv);
 
 /* Dumb buffer ioctl handlers. */
-int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev, struct drm_mode_create_dumb *args);
-int drm_gem_dumb_map_offset(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle, uint64_t *offset);
+int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,
+                        struct drm_mode_create_dumb *args);
+int drm_gem_dumb_map_offset(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle,
+                            uint64_t *offset);
 int drm_gem_dumb_destroy(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle);
 
 /* GEM ioctl handlers. */
 int  drm_gem_open_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int  drm_gem_close_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int  drm_gem_flink_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int  drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle, uint32_t flags, int *prime_fd);
-int  drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv, int prime_fd, uint32_t *handle);
+int  drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle,
+                                uint32_t flags, int *prime_fd);
+int  drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv, int prime_fd,
+                                uint32_t *handle);
 void drm_gem_prime_fd_free(int fd);
 
 /* GEM object lifecycle. */
-int                    drm_gem_object_init(struct drm_device *dev, struct drm_gem_object *obj, size_t size);
-int                    drm_gem_create_mmap_offset(struct drm_gem_object *obj);
-void                   drm_gem_object_get(struct drm_gem_object *obj);
-void                   drm_gem_object_put(struct drm_gem_object *obj);
-int                    drm_gem_handle_create(struct drm_file *file_priv, struct drm_gem_object *obj, uint32_t *handle_out);
-int                    drm_gem_handle_delete(struct drm_file *file_priv, uint32_t handle);
+int  drm_gem_object_init(struct drm_device *dev, struct drm_gem_object *obj, size_t size);
+int  drm_gem_create_mmap_offset(struct drm_gem_object *obj);
+void drm_gem_object_get(struct drm_gem_object *obj);
+void drm_gem_object_put(struct drm_gem_object *obj);
+int  drm_gem_handle_create(struct drm_file *file_priv, struct drm_gem_object *obj,
+                           uint32_t *handle_out);
+int  drm_gem_handle_delete(struct drm_file *file_priv, uint32_t handle);
 struct drm_gem_object *drm_gem_object_lookup(struct drm_file *file_priv, uint32_t handle);
 struct drm_gem_object *drm_gem_object_lookup_by_offset(struct drm_file *file_priv, uint64_t offset);
 
@@ -897,74 +911,88 @@ int  drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *o
 bool drm_mode_object_put_dec_and_test(struct drm_mode_object *obj);
 
 /* KMS ioctl handlers. */
-int                         drm_mode_getresources(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_getcrtc(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_cursor_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_cursor2_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_getconnector(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_getencoder(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_getplane_res(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_getplane(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_setplane(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_getcrtc(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_cursor_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_cursor2_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_getconnector(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_getencoder(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_getplane_res(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_getplane(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_setplane(struct drm_device *dev, void *data, struct drm_file *file_priv);
 struct drm_atomic_state    *drm_atomic_state_alloc(struct drm_device *dev);
 void                        drm_atomic_state_free(struct drm_atomic_state *state);
-struct drm_crtc_state      *drm_atomic_get_crtc_state(struct drm_atomic_state *state, struct drm_crtc *crtc);
-struct drm_plane_state     *drm_atomic_get_plane_state(struct drm_atomic_state *state, struct drm_plane *plane);
-struct drm_connector_state *drm_atomic_get_connector_state(struct drm_atomic_state *state, struct drm_connector *connector);
+struct drm_crtc_state      *drm_atomic_get_crtc_state(struct drm_atomic_state *state,
+                                                      struct drm_crtc         *crtc);
+struct drm_plane_state     *drm_atomic_get_plane_state(struct drm_atomic_state *state,
+                                                       struct drm_plane        *plane);
+struct drm_connector_state *drm_atomic_get_connector_state(struct drm_atomic_state *state,
+                                                           struct drm_connector    *connector);
 int                         drm_atomic_commit(struct drm_atomic_state *state);
 int                         drm_atomic_nonblocking_commit(struct drm_atomic_state *state);
-int                         drm_mode_addfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_addfb2(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_framebuffer_init(struct drm_device *dev, struct drm_framebuffer *fb, const struct drm_framebuffer_funcs *funcs);
-struct drm_framebuffer     *drm_framebuffer_lookup(struct drm_device *dev, struct drm_file *file_priv, uint32_t id);
-void                        drm_framebuffer_cleanup(struct drm_framebuffer *fb);
-int                         drm_mode_rmfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_getfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_dirtyfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_page_flip_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_mode_atomic_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-void                        drm_mode_config_cleanup(struct drm_device *dev);
-int                         drm_mode_config_init(struct drm_device *dev);
-int                         drm_wait_vblank_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                         drm_vblank_init(struct drm_device *dev, unsigned int num_crtcs);
-void                        drm_handle_vblank(struct drm_device *dev, unsigned int pipe);
-void                        drm_vblank_tick(void);
-void                        drm_crtc_arm_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank_event *e);
-void                        drm_crtc_send_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank_event *e);
-uint32_t                    drm_crtc_vblank_count(struct drm_crtc *crtc);
-int                         drm_crtc_vblank_get(struct drm_crtc *crtc);
-void                        drm_crtc_vblank_put(struct drm_crtc *crtc);
-void                        drm_vblank_cancel_pending(struct drm_device *dev, struct drm_file *file_priv);
-void                        drm_vblank_cleanup(struct drm_device *dev);
+int drm_mode_addfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_addfb2(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_framebuffer_init(struct drm_device *dev, struct drm_framebuffer *fb,
+                         const struct drm_framebuffer_funcs *funcs);
+struct drm_framebuffer *drm_framebuffer_lookup(struct drm_device *dev, struct drm_file *file_priv,
+                                               uint32_t id);
+void                    drm_framebuffer_cleanup(struct drm_framebuffer *fb);
+int      drm_mode_rmfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int      drm_mode_getfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int      drm_mode_dirtyfb(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int      drm_mode_page_flip_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int      drm_mode_atomic_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+void     drm_mode_config_cleanup(struct drm_device *dev);
+int      drm_mode_config_init(struct drm_device *dev);
+int      drm_wait_vblank_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int      drm_vblank_init(struct drm_device *dev, unsigned int num_crtcs);
+void     drm_handle_vblank(struct drm_device *dev, unsigned int pipe);
+void     drm_vblank_tick(void);
+void     drm_crtc_arm_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank_event *e);
+void     drm_crtc_send_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank_event *e);
+uint32_t drm_crtc_vblank_count(struct drm_crtc *crtc);
+int      drm_crtc_vblank_get(struct drm_crtc *crtc);
+void     drm_crtc_vblank_put(struct drm_crtc *crtc);
+void     drm_vblank_cancel_pending(struct drm_device *dev, struct drm_file *file_priv);
+void     drm_vblank_cleanup(struct drm_device *dev);
 
 /* Capability ioctl handlers. */
 int drm_get_cap(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int drm_set_client_cap(struct drm_device *dev, void *data, struct drm_file *file_priv);
 
 /* KMS property ioctl handlers. */
-int                       drm_mode_getproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                       drm_mode_getpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                       drm_mode_createpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                       drm_mode_destroypropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                       drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                       drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                       drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_getproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_getpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_createpropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_destroypropblob_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data,
+                                     struct drm_file *file_priv);
+int drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 /* KMS gamma: the software display stores the LUTs and echoes them back. */
-int                       drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int                       drm_mode_setgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-struct drm_property      *drm_property_create(struct drm_device *dev, uint32_t flags, const char *name, int num_values);
-struct drm_property      *drm_property_create_range(struct drm_device *dev, uint32_t flags, const char *name, uint64_t min, uint64_t max);
-struct drm_property      *drm_property_create_enum(struct drm_device *dev, uint32_t flags, const char *name,
-                                                   const struct drm_mode_property_enum *enums, int num_enums);
-struct drm_property      *drm_property_find(struct drm_device *dev, struct drm_file *file_priv, uint32_t id);
+int drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_mode_setgamma_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+struct drm_property *drm_property_create(struct drm_device *dev, uint32_t flags, const char *name,
+                                         int num_values);
+struct drm_property *drm_property_create_range(struct drm_device *dev, uint32_t flags,
+                                               const char *name, uint64_t min, uint64_t max);
+struct drm_property *drm_property_create_enum(struct drm_device *dev, uint32_t flags,
+                                              const char                          *name,
+                                              const struct drm_mode_property_enum *enums,
+                                              int                                  num_enums);
+struct drm_property *drm_property_find(struct drm_device *dev, struct drm_file *file_priv,
+                                       uint32_t id);
 struct drm_property_blob *drm_property_lookup_blob(struct drm_device *dev, uint32_t id);
 void                      drm_property_blob_get(struct drm_property_blob *blob);
 void                      drm_property_blob_put(struct drm_property_blob *blob);
-int                       drm_object_attach_property(struct drm_mode_object *obj, struct drm_property *property, uint64_t init_val);
-int                       drm_object_property_set_value(struct drm_mode_object *obj, struct drm_property *property, uint64_t val);
-int                       drm_object_property_get_value(struct drm_mode_object *obj, struct drm_property *property, uint64_t *val_out);
-void                      drm_property_set_destroy(struct drm_property_set *set);
+int  drm_object_attach_property(struct drm_mode_object *obj, struct drm_property *property,
+                                uint64_t init_val);
+int  drm_object_property_set_value(struct drm_mode_object *obj, struct drm_property *property,
+                                   uint64_t val);
+int  drm_object_property_get_value(struct drm_mode_object *obj, struct drm_property *property,
+                                   uint64_t *val_out);
+void drm_property_set_destroy(struct drm_property_set *set);
 
 /* KMS getfb2 handler. */
 int drm_mode_getfb2_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
@@ -976,18 +1004,23 @@ int drm_setmaster(struct drm_device *dev, void *data, struct drm_file *file_priv
 int drm_dropmaster(struct drm_device *dev, void *data, struct drm_file *file_priv);
 
 /* KMS object initialisation. */
-int  drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, struct drm_plane *primary, struct drm_plane *cursor, void *funcs,
+int  drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
+                               struct drm_plane *primary, struct drm_plane *cursor, void *funcs,
                                const char *name);
 void drm_crtc_cleanup(struct drm_crtc *crtc);
-int  drm_encoder_init(struct drm_device *dev, struct drm_encoder *encoder, void *funcs, int encoder_type, const char *name);
-int  drm_plane_init(struct drm_device *dev, struct drm_plane *plane, uint32_t possible_crtcs, void *funcs, const uint32_t *formats,
-                    unsigned int format_count, const uint64_t *modifiers, enum drm_plane_type type, const char *name);
+int  drm_encoder_init(struct drm_device *dev, struct drm_encoder *encoder, void *funcs,
+                      int encoder_type, const char *name);
+int  drm_plane_init(struct drm_device *dev, struct drm_plane *plane, uint32_t possible_crtcs,
+                    void *funcs, const uint32_t *formats, unsigned int format_count,
+                    const uint64_t *modifiers, enum drm_plane_type type, const char *name);
 void drm_plane_cleanup(struct drm_plane *plane);
 void drm_connector_cleanup(struct drm_connector *connector);
-int  drm_connector_init(struct drm_device *dev, struct drm_connector *connector, void *funcs, int connector_type);
+int  drm_connector_init(struct drm_device *dev, struct drm_connector *connector, void *funcs,
+                        int connector_type);
 int  drm_connector_attach_encoder(struct drm_connector *connector, struct drm_encoder *encoder);
 int  drm_connector_register(struct drm_connector *connector);
-int  drm_connector_update_edid_property(struct drm_connector *connector, const unsigned char *edid, size_t size);
+int  drm_connector_update_edid_property(struct drm_connector *connector, const unsigned char *edid,
+                                        size_t size);
 
 /* drm_setversion handler. */
 int drm_setversion(struct drm_device *dev, void *data, struct drm_file *file_priv);

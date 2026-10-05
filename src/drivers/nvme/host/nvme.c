@@ -46,19 +46,19 @@ static uint64_t alloc_pages(uint64_t n)
 }
 
 /* ---- register map ------------------------------------------------------ */
-#define NVME_REG_CAP     0x0000    /* capabilities */
-#define NVME_REG_VS      0x0008    /* version */
-#define NVME_REG_INTMS   0x000C
-#define NVME_REG_INTMC   0x0010
-#define NVME_REG_CC      0x0014    /* configuration */
-#define NVME_REG_CSTS    0x001C    /* status */
-#define NVME_REG_AQA     0x0024    /* admin queue attributes */
-#define NVME_REG_ASQ     0x0028    /* admin submission queue base */
-#define NVME_REG_ACQ     0x0030    /* admin completion queue base */
-#define NVME_REG_DBS     0x1000    /* doorbell stride 0 */
+#define NVME_REG_CAP   0x0000 /* capabilities */
+#define NVME_REG_VS    0x0008 /* version */
+#define NVME_REG_INTMS 0x000C
+#define NVME_REG_INTMC 0x0010
+#define NVME_REG_CC    0x0014 /* configuration */
+#define NVME_REG_CSTS  0x001C /* status */
+#define NVME_REG_AQA   0x0024 /* admin queue attributes */
+#define NVME_REG_ASQ   0x0028 /* admin submission queue base */
+#define NVME_REG_ACQ   0x0030 /* admin completion queue base */
+#define NVME_REG_DBS   0x1000 /* doorbell stride 0 */
 
 /* CAP bits */
-#define CAP_TO_SHIFT     24        /* timeout unit: 500 ms */
+#define CAP_TO_SHIFT     24 /* timeout unit: 500 ms */
 #define CAP_TO_MASK      0xFFu
 #define CAP_DSTRD_SHIFT  32
 #define CAP_DSTRD_MASK   0xFu
@@ -66,61 +66,61 @@ static uint64_t alloc_pages(uint64_t n)
 #define CAP_MPSMIN_MASK  0xFu
 
 /* CC bits */
-#define CC_EN            0x1u
-#define CC_CSS_NVM       0x0u
-#define CC_MPS_MIN       (0x0u << 7)   /* 4 KiB host page size */
-#define CC_AMS_RR        (0x0u << 11)
-#define CC_SHN_NONE      (0x0u << 14)
-#define CC_IOSQES_64     (6u << 16)
-#define CC_IOCQES_16     (4u << 20)
+#define CC_EN        0x1u
+#define CC_CSS_NVM   0x0u
+#define CC_MPS_MIN   (0x0u << 7) /* 4 KiB host page size */
+#define CC_AMS_RR    (0x0u << 11)
+#define CC_SHN_NONE  (0x0u << 14)
+#define CC_IOSQES_64 (6u << 16)
+#define CC_IOCQES_16 (4u << 20)
 
 /* CSTS bits */
-#define CSTS_RDY         0x1u
-#define CSTS_CFS         0x2u
+#define CSTS_RDY 0x1u
+#define CSTS_CFS 0x2u
 
 /* Admin commands */
-#define AC_DELETE_SQ     0x00
-#define AC_CREATE_SQ     0x01
-#define AC_GET_LOG_PAGE  0x02
-#define AC_DELETE_CQ     0x04
-#define AC_CREATE_CQ     0x05
-#define AC_IDENTIFY      0x06
-#define AC_ABORT         0x08
-#define AC_SET_FEATURES  0x09
+#define AC_DELETE_SQ    0x00
+#define AC_CREATE_SQ    0x01
+#define AC_GET_LOG_PAGE 0x02
+#define AC_DELETE_CQ    0x04
+#define AC_CREATE_CQ    0x05
+#define AC_IDENTIFY     0x06
+#define AC_ABORT        0x08
+#define AC_SET_FEATURES 0x09
 
 /* I/O commands */
-#define IOC_FLUSH        0x00
-#define IOC_WRITE        0x01
-#define IOC_READ         0x02
+#define IOC_FLUSH 0x00
+#define IOC_WRITE 0x01
+#define IOC_READ  0x02
 
 /* Identify CNS values */
-#define CNS_NS           0x00
-#define CNS_CTRL         0x01
-#define CNS_ACTIVE_NS    0x02
+#define CNS_NS        0x00
+#define CNS_CTRL      0x01
+#define CNS_ACTIVE_NS 0x02
 
 /* Command dword 0 flag bits */
-#define CMD_FUSE_MASK    0xC0000000u
-#define CMD_PSDT         0x00400000u   /* PRPs, no offset */
+#define CMD_FUSE_MASK 0xC0000000u
+#define CMD_PSDT      0x00400000u /* PRPs, no offset */
 
 /* Completion status */
-#define CQE_PHASE        0x1u
-#define CQE_SC_MASK      0xFFu
+#define CQE_PHASE   0x1u
+#define CQE_SC_MASK 0xFFu
 
 /* PRP entries per 4 KiB page: one page covers 2 MiB of data, which the
  * 128 KiB worst-case transfer here never exceeds, so PRP2 suffices with
  * a single-page PRP list -- no chained lists to walk. */
-#define NVME_PAGE_SIZE   4096u
-#define NVME_QDEPTH      16u
-#define NVME_WAIT_SPINS  20000000u   /* seconds of patience at 40 ns/iter */
+#define NVME_PAGE_SIZE  4096u
+#define NVME_QDEPTH     16u
+#define NVME_WAIT_SPINS 20000000u /* seconds of patience at 40 ns/iter */
 
 /* ---- devices ----------------------------------------------------------- */
-#define NVME_MAX_CTRL    2
-#define NVME_MAX_NS      4       /* namespaces per controller we publish */
-#define NVME_MAX_PARTS   16
+#define NVME_MAX_CTRL  2
+#define NVME_MAX_NS    4 /* namespaces per controller we publish */
+#define NVME_MAX_PARTS 16
 
 /* One 64-byte submission command.  Field order is fixed by the spec. */
 typedef struct {
-    uint32_t cdw0;       /* opcode + flags */
+    uint32_t cdw0; /* opcode + flags */
     uint32_t nsid;
     uint64_t reserved[2];
     uint64_t prp1;
@@ -140,7 +140,7 @@ typedef struct {
     uint16_t sq_head;
     uint16_t sq_id;
     uint16_t cid;
-    uint16_t status;     /* low bit = phase tag */
+    uint16_t status; /* low bit = phase tag */
 } nvme_cqe_t;
 
 /* ---- the block-device ops ----------------------------------------------
@@ -148,8 +148,7 @@ typedef struct {
  * the read/write/ioctl bodies live further down with the device structs
  * they need. */
 static int32_t bdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len);
-static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
-                          uint32_t len);
+static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len);
 static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg);
 
 static const vfs_ops_t g_bdev_ops = {
@@ -161,39 +160,39 @@ static const vfs_ops_t g_bdev_ops = {
 
 typedef struct {
     volatile uint8_t *mmio;
-    uint32_t          dbs_stride;    /* doorbell stride in bytes */
+    uint32_t          dbs_stride; /* doorbell stride in bytes */
 
     /* Physically contiguous queue memory: 4 pages, see nvme_queues_phys. */
-    uint64_t          q_phys;
-    nvme_cmd_t       *asq;
-    nvme_cqe_t       *acq;
-    nvme_cmd_t       *iosq;
-    nvme_cqe_t       *iocq;
+    uint64_t    q_phys;
+    nvme_cmd_t *asq;
+    nvme_cqe_t *acq;
+    nvme_cmd_t *iosq;
+    nvme_cqe_t *iocq;
 
     /* Scratch: identify payloads (2 x 4 KiB) and the I/O staging page. */
-    uint64_t          scr_phys;
-    uint8_t          *id_ctrl;       /* 4096 bytes */
-    uint8_t          *id_ns;         /* 4096 bytes */
-    uint8_t          *io_page;       /* 4096 bytes, staging for split I/O */
+    uint64_t scr_phys;
+    uint8_t *id_ctrl; /* 4096 bytes */
+    uint8_t *id_ns;   /* 4096 bytes */
+    uint8_t *io_page; /* 4096 bytes, staging for split I/O */
 
-    uint16_t          qdepth;
-    uint16_t          asq_tail, acq_head;
-    uint16_t          iosq_tail, iocq_head;
-    uint16_t          next_cid;
-    uint8_t           acq_phase, iocq_phase;
-    uint8_t           ready;
-    uint32_t          nn;            /* reported namespace count */
-    char              model[41];
+    uint16_t qdepth;
+    uint16_t asq_tail, acq_head;
+    uint16_t iosq_tail, iocq_head;
+    uint16_t next_cid;
+    uint8_t  acq_phase, iocq_phase;
+    uint8_t  ready;
+    uint32_t nn; /* reported namespace count */
+    char     model[41];
 } nvme_ctrl_t;
 
 typedef struct {
     nvme_ctrl_t *ctrl;
     uint32_t     nsid;
-    uint64_t     nsect;              /* capacity in 512-byte sectors */
-    uint8_t      is_ns;              /* 1 = whole namespace, 0 = partition */
-    uint64_t     lba0;               /* partition window start */
-    uint64_t     nsect_win;          /* partition window length */
-    char         name[16];           /* "nvme0n1", "nvme0n1p3" */
+    uint64_t     nsect;     /* capacity in 512-byte sectors */
+    uint8_t      is_ns;     /* 1 = whole namespace, 0 = partition */
+    uint64_t     lba0;      /* partition window start */
+    uint64_t     nsect_win; /* partition window length */
+    char         name[16];  /* "nvme0n1", "nvme0n1p3" */
     uint8_t      used;
 } nvme_bdev_t;
 
@@ -237,12 +236,10 @@ static inline void wr32(nvme_ctrl_t *c, uint32_t off, uint32_t v)
 
 static inline uint32_t dbs_off(nvme_ctrl_t *c, uint16_t qid, int completion)
 {
-    return NVME_REG_DBS + ((uint32_t)qid * 2u + (completion ? 1u : 0u))
-                         * c->dbs_stride;
+    return NVME_REG_DBS + ((uint32_t)qid * 2u + (completion ? 1u : 0u)) * c->dbs_stride;
 }
 
-static inline void doorbell(nvme_ctrl_t *c, uint16_t qid, int completion,
-                            uint16_t value)
+static inline void doorbell(nvme_ctrl_t *c, uint16_t qid, int completion, uint16_t value)
 {
     wr32(c, dbs_off(c, qid, completion), value);
 }
@@ -254,7 +251,7 @@ static int wait_csts(nvme_ctrl_t *c, int want_ready)
     for (uint32_t i = 0; i < NVME_WAIT_SPINS; i++) {
         uint32_t s = rd32(c, NVME_REG_CSTS);
         if (s & CSTS_CFS)
-            return -1;                       /* controller fatal status */
+            return -1; /* controller fatal status */
         if (((s & CSTS_RDY) != 0) == (want_ready != 0))
             return 0;
     }
@@ -270,10 +267,10 @@ static int wait_csts(nvme_ctrl_t *c, int want_ready)
  * worker thread only has to take the lock it wants. */
 static int64_t nvme_submit(nvme_ctrl_t *c, int admin, nvme_cmd_t *cmd)
 {
-    nvme_cmd_t *sq  = admin ? c->asq : c->iosq;
-    nvme_cqe_t *cq  = admin ? c->acq : c->iocq;
-    uint16_t   *tail = admin ? &c->asq_tail : &c->iosq_tail;
-    uint16_t   *head = admin ? &c->acq_head : &c->iocq_head;
+    nvme_cmd_t *sq    = admin ? c->asq : c->iosq;
+    nvme_cqe_t *cq    = admin ? c->acq : c->iocq;
+    uint16_t   *tail  = admin ? &c->asq_tail : &c->iosq_tail;
+    uint16_t   *head  = admin ? &c->acq_head : &c->iocq_head;
     uint8_t    *phase = admin ? &c->acq_phase : &c->iocq_phase;
     uint16_t    qid   = admin ? 0u : 1u;
 
@@ -292,9 +289,9 @@ static int64_t nvme_submit(nvme_ctrl_t *c, int admin, nvme_cmd_t *cmd)
     for (uint32_t i = 0; i < NVME_WAIT_SPINS; i++) {
         nvme_cqe_t *e = &cq[*head];
         if ((e->status & CQE_PHASE) != *phase)
-            continue;                        /* slot not yet written */
+            continue; /* slot not yet written */
 
-        uint16_t st = e->status;
+        uint16_t st   = e->status;
         uint16_t ecid = e->cid;
 
         /* Consume the entry before acting on it: advance head, ring the
@@ -306,7 +303,7 @@ static int64_t nvme_submit(nvme_ctrl_t *c, int admin, nvme_cmd_t *cmd)
         doorbell(c, qid, 1, *head);
 
         if (ecid != cid)
-            return -E_IO;                    /* completion for another cid */
+            return -E_IO; /* completion for another cid */
         /* Status field: bit 0 = phase, bits 15:1 = SC.  SC != 0 is an
          * error (0 is "successful completion"). */
         if (st & ~CQE_PHASE) {
@@ -329,9 +326,9 @@ static int nvme_identify(nvme_ctrl_t *c, uint32_t cns, uint32_t nsid)
 {
     nvme_cmd_t cmd;
     memset(&cmd, 0, sizeof cmd);
-    cmd.cdw0 = AC_IDENTIFY;
-    cmd.nsid = nsid;
-    cmd.prp1 = (cns == CNS_NS) ? c->scr_phys + NVME_PAGE_SIZE : c->scr_phys;
+    cmd.cdw0  = AC_IDENTIFY;
+    cmd.nsid  = nsid;
+    cmd.prp1  = (cns == CNS_NS) ? c->scr_phys + NVME_PAGE_SIZE : c->scr_phys;
     cmd.cdw10 = cns;
     return nvme_submit(c, 1, &cmd) < 0 ? -1 : 0;
 }
@@ -344,7 +341,7 @@ static int nvme_create_queue(nvme_ctrl_t *c)
      * spec requires the CQ to exist before an SQ is bound to it. */
     memset(&cmd, 0, sizeof cmd);
     cmd.cdw0  = AC_CREATE_CQ;
-    cmd.prp1  = c->q_phys + NVME_PAGE_SIZE * 3;   /* iocq page */
+    cmd.prp1  = c->q_phys + NVME_PAGE_SIZE * 3; /* iocq page */
     cmd.cdw10 = 1u | ((uint32_t)(c->qdepth - 1) << 16);
     /* cdw11 for CREATE_CQ: IRQ vector [31:16] (unused, polled), flags
      * [0] = physically contiguous.  Completion entry size comes from
@@ -355,7 +352,7 @@ static int nvme_create_queue(nvme_ctrl_t *c)
 
     memset(&cmd, 0, sizeof cmd);
     cmd.cdw0  = AC_CREATE_SQ;
-    cmd.prp1  = c->q_phys + NVME_PAGE_SIZE * 2;   /* iosq page */
+    cmd.prp1  = c->q_phys + NVME_PAGE_SIZE * 2; /* iosq page */
     cmd.cdw10 = 1u | ((uint32_t)(c->qdepth - 1) << 16);
     /* cdw11 for CREATE_SQ: CQID it is bound to [31:16], flags [0] =
      * physically contiguous.  Submission entry size comes from CC.IOSQES. */
@@ -374,7 +371,7 @@ static int nvme_init_ctrl(nvme_ctrl_t *c)
 
     uint32_t timeout_unit = (uint32_t)((cap >> CAP_TO_SHIFT) & CAP_TO_MASK);
     uint32_t mpsmin       = (uint32_t)((cap >> CAP_MPSMIN_SHIFT) & CAP_MPSMIN_MASK);
-    c->dbs_stride = 4u << ((cap >> CAP_DSTRD_SHIFT) & CAP_DSTRD_MASK);
+    c->dbs_stride         = 4u << ((cap >> CAP_DSTRD_SHIFT) & CAP_DSTRD_MASK);
 
     /* MPSMIN is the minimum host page size as log2(2*(N+1)) KiB... in
      * practice QEMU reports 0 (= 4 KiB).  Anything else and our single-page
@@ -388,16 +385,16 @@ static int nvme_init_ctrl(nvme_ctrl_t *c)
     (void)timeout_unit;
 
     if (rd32(c, NVME_REG_CC) & CC_EN) {
-        wr32(c, NVME_REG_CC, 0);             /* disable to reconfigure */
+        wr32(c, NVME_REG_CC, 0); /* disable to reconfigure */
         if (wait_csts(c, 0) < 0)
             return -1;
     }
 
     /* One contiguous arena: [0]=asq, [1]=acq, [2]=iosq, [3]=iocq pages. */
-    c->q_phys = 0;
-    nvme_cmd_t   *qmem = 0;
-    uint64_t qframes = 4;
-    uint64_t qphys = 0;
+    c->q_phys           = 0;
+    nvme_cmd_t *qmem    = 0;
+    uint64_t    qframes = 4;
+    uint64_t    qphys   = 0;
     /* The queues need 4 KiB each and must be physically contiguous per
      * queue (CC.ASQ/ACQ take one base each, no PRP list) -- a 4-page run
      * gives each queue its own aligned page. */
@@ -423,21 +420,19 @@ static int nvme_init_ctrl(nvme_ctrl_t *c)
     c->id_ns    = smem + NVME_PAGE_SIZE;
     c->io_page  = smem + NVME_PAGE_SIZE * 2;
 
-    c->qdepth    = NVME_QDEPTH;
-    c->asq_tail  = c->acq_head = 0;
+    c->qdepth   = NVME_QDEPTH;
+    c->asq_tail = c->acq_head = 0;
     c->iosq_tail = c->iocq_head = 0;
-    c->next_cid  = 0;
+    c->next_cid                 = 0;
     c->acq_phase = c->iocq_phase = 1;
 
-    wr32(c, NVME_REG_AQA,
-         (uint32_t)(c->qdepth - 1) | ((uint32_t)(c->qdepth - 1) << 16));
+    wr32(c, NVME_REG_AQA, (uint32_t)(c->qdepth - 1) | ((uint32_t)(c->qdepth - 1) << 16));
     wr32(c, NVME_REG_ASQ, (uint32_t)c->q_phys);
     wr32(c, NVME_REG_ASQ + 4, (uint32_t)(c->q_phys >> 32));
     wr32(c, NVME_REG_ACQ, (uint32_t)(c->q_phys + NVME_PAGE_SIZE));
     wr32(c, NVME_REG_ACQ + 4, (uint32_t)((c->q_phys + NVME_PAGE_SIZE) >> 32));
 
-    wr32(c, NVME_REG_CC, CC_EN | CC_MPS_MIN | CC_AMS_RR |
-                         CC_IOSQES_64 | CC_IOCQES_16);
+    wr32(c, NVME_REG_CC, CC_EN | CC_MPS_MIN | CC_AMS_RR | CC_IOSQES_64 | CC_IOCQES_16);
     if (wait_csts(c, 1) < 0) {
         dbg_puts("NVMe: controller never became ready\n");
         return -1;
@@ -454,7 +449,7 @@ static int nvme_init_ctrl(nvme_ctrl_t *c)
     for (int i = 39; i >= 0 && (c->model[i] == ' ' || c->model[i] == 0); i--)
         c->model[i] = 0;
 
-    c->nn = *(volatile uint32_t *)(c->id_ctrl + 516);  /* NN at byte 516 */
+    c->nn = *(volatile uint32_t *)(c->id_ctrl + 516); /* NN at byte 516 */
 
     if (nvme_create_queue(c) < 0)
         return -1;
@@ -473,8 +468,8 @@ static int nvme_init_ctrl(nvme_ctrl_t *c)
  * pages go one command each; sub-sector tails are impossible because the
  * VFS block layer only ever asks for whole sectors.
  */
-static int nvme_rw(nvme_ctrl_t *c, uint32_t nsid, int write,
-                   uint64_t lba, uint32_t nsect, void *buf)
+static int nvme_rw(nvme_ctrl_t *c, uint32_t nsid, int write, uint64_t lba, uint32_t nsect,
+                   void *buf)
 {
     if (!c->ready || !nsect)
         return -1;
@@ -483,31 +478,29 @@ static int nvme_rw(nvme_ctrl_t *c, uint32_t nsid, int write,
     const uint32_t per_cmd = NVME_PAGE_SIZE / NVME_SECTOR;
 
     uint8_t *p = (uint8_t *)buf;
-    for (uint32_t done = 0; done < nsect; ) {
+    for (uint32_t done = 0; done < nsect;) {
         uint32_t take = nsect - done;
         if (take > per_cmd)
             take = per_cmd;
 
         if (write) {
-            memcpy(c->io_page, p + (uint64_t)done * NVME_SECTOR,
-                   (size_t)take * NVME_SECTOR);
+            memcpy(c->io_page, p + (uint64_t)done * NVME_SECTOR, (size_t)take * NVME_SECTOR);
         }
 
         nvme_cmd_t cmd;
         memset(&cmd, 0, sizeof cmd);
         cmd.cdw0  = write ? IOC_WRITE : IOC_READ;
         cmd.nsid  = nsid;
-        cmd.prp1  = c->scr_phys + NVME_PAGE_SIZE * 2;   /* the I/O page */
+        cmd.prp1  = c->scr_phys + NVME_PAGE_SIZE * 2; /* the I/O page */
         cmd.cdw10 = (uint32_t)(lba + done);
         cmd.cdw11 = (uint32_t)((lba + done) >> 32);
-        cmd.cdw12 = take - 1;                            /* 0-based count */
+        cmd.cdw12 = take - 1; /* 0-based count */
 
         if (nvme_submit(c, 0, &cmd) < 0)
             return -1;
 
         if (!write) {
-            memcpy(p + (uint64_t)done * NVME_SECTOR, c->io_page,
-                   (size_t)take * NVME_SECTOR);
+            memcpy(p + (uint64_t)done * NVME_SECTOR, c->io_page, (size_t)take * NVME_SECTOR);
         }
         done += take;
     }
@@ -518,19 +511,18 @@ static int nvme_rw(nvme_ctrl_t *c, uint32_t nsid, int write,
 /* Same layout ata.c parses; duplicated here rather than factored out so
  * each driver stays a single self-contained file. */
 
-#define MBR_SIG_OFF   510
-#define MBR_PART_OFF  446
-#define GPT_PROTECTIVE 0xEE
-#define GPT_ENTRY_LBA 72
-#define GPT_ENTRY_NUM 80
-#define GPT_ENTRY_SZ  84
-#define GPT_ENTRY_MIN 128
+#define MBR_SIG_OFF     510
+#define MBR_PART_OFF    446
+#define GPT_PROTECTIVE  0xEE
+#define GPT_ENTRY_LBA   72
+#define GPT_ENTRY_NUM   80
+#define GPT_ENTRY_SZ    84
+#define GPT_ENTRY_MIN   128
 #define GPT_ENTRY_FIRST 32
 
 static uint32_t rd32le(const uint8_t *p)
 {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static uint64_t rd64le(const uint8_t *p)
@@ -571,44 +563,40 @@ static int ns_scan_partitions(int ctrl_idx, nvme_bdev_t *ns)
 
         /* The entry array can be anywhere; read the first sectors' worth
          * that covers 80 entries (80 * 128 = 10240 bytes = 20 sectors). */
-        uint64_t ent_lba  = rd64le(hdr + GPT_ENTRY_LBA);
-        uint32_t ent_num  = rd32le(hdr + GPT_ENTRY_NUM);
-        uint32_t ent_sz   = rd32le(hdr + GPT_ENTRY_SZ);
+        uint64_t ent_lba = rd64le(hdr + GPT_ENTRY_LBA);
+        uint32_t ent_num = rd32le(hdr + GPT_ENTRY_NUM);
+        uint32_t ent_sz  = rd32le(hdr + GPT_ENTRY_SZ);
         if (ent_num > GPT_ENTRY_NUM)
             ent_num = GPT_ENTRY_NUM;
         if (ent_sz < GPT_ENTRY_MIN)
             ent_sz = GPT_ENTRY_MIN;
 
-        static uint8_t ents[NVME_PAGE_SIZE];   /* 4 KiB: 32 entries of 128 B */
-        uint32_t per_read = NVME_PAGE_SIZE / ent_sz;
-        for (uint32_t base = 0; base < ent_num && idx < NVME_MAX_PARTS;
-             base += per_read) {
+        static uint8_t ents[NVME_PAGE_SIZE]; /* 4 KiB: 32 entries of 128 B */
+        uint32_t       per_read = NVME_PAGE_SIZE / ent_sz;
+        for (uint32_t base = 0; base < ent_num && idx < NVME_MAX_PARTS; base += per_read) {
             uint32_t take = ent_num - base;
             if (take > per_read)
                 take = per_read;
             if (nvme_rw(c, ns->nsid, 0, ns->lba0 + ent_lba + base,
-                        (take * ent_sz + NVME_SECTOR - 1) / NVME_SECTOR,
-                        ents) < 0)
+                        (take * ent_sz + NVME_SECTOR - 1) / NVME_SECTOR, ents) < 0)
                 return -1;
             for (uint32_t i = 0; i < take && idx < NVME_MAX_PARTS; i++) {
-                const uint8_t *e = ents + i * ent_sz;
+                const uint8_t       *e = ents + i * ent_sz;
                 static const uint8_t zero[16];
                 if (!memcmp(e, zero, 16))
-                    continue;                /* empty slot */
+                    continue; /* empty slot */
                 uint64_t first = rd64le(e + GPT_ENTRY_FIRST);
                 uint64_t last  = rd64le(e + 40);
                 if (first < ns->nsect && last >= first && last < ns->nsect) {
-                    nvme_bdev_t *p = part_slot(ctrl_idx,
-                                               (int)(ns - ns_slot(ctrl_idx, 0)),
-                                               idx);
-                    p->used = 1;
-                    p->is_ns = 0;
-                    p->nsid  = ns->nsid;
-                    p->lba0  = ns->lba0 + first;
-                    p->nsect_win = last - first + 1;
+                    nvme_bdev_t *p = part_slot(ctrl_idx, (int)(ns - ns_slot(ctrl_idx, 0)), idx);
+                    p->used        = 1;
+                    p->is_ns       = 0;
+                    p->nsid        = ns->nsid;
+                    p->lba0        = ns->lba0 + first;
+                    p->nsect_win   = last - first + 1;
                     part_name(p->name, ns->name, idx);
-                    if (vfs_register_blkdev(p->name, &g_bdev_ops, p,
-                                            p->nsect_win * NVME_SECTOR) == 0) {
+                    if (vfs_register_blkdev(p->name, &g_bdev_ops, p, p->nsect_win * NVME_SECTOR) ==
+                        0) {
                         idx++;
                     } else {
                         p->used = 0;
@@ -627,16 +615,14 @@ static int ns_scan_partitions(int ctrl_idx, nvme_bdev_t *ns)
         uint64_t first = rd32le(e + 8);
         uint64_t count = rd32le(e + 12);
         if (first < ns->nsect && count && first + count <= ns->nsect) {
-            nvme_bdev_t *p = part_slot(ctrl_idx,
-                                       (int)(ns - ns_slot(ctrl_idx, 0)), idx);
-            p->used = 1;
-            p->is_ns = 0;
-            p->nsid  = ns->nsid;
-            p->lba0  = ns->lba0 + first;
-            p->nsect_win = count;
+            nvme_bdev_t *p = part_slot(ctrl_idx, (int)(ns - ns_slot(ctrl_idx, 0)), idx);
+            p->used        = 1;
+            p->is_ns       = 0;
+            p->nsid        = ns->nsid;
+            p->lba0        = ns->lba0 + first;
+            p->nsect_win   = count;
             part_name(p->name, ns->name, idx);
-            if (vfs_register_blkdev(p->name, &g_bdev_ops, p,
-                                    p->nsect_win * NVME_SECTOR) == 0) {
+            if (vfs_register_blkdev(p->name, &g_bdev_ops, p, p->nsect_win * NVME_SECTOR) == 0) {
                 idx++;
             } else {
                 p->used = 0;
@@ -655,21 +641,20 @@ static int ns_scan_partitions(int ctrl_idx, nvme_bdev_t *ns)
  * same discipline ata.c applies.  The middle is handed to nvme_rw whole;
  * nvme_rw further splits it into staging-page commands.
  */
-static int32_t bdev_rw_window(nvme_bdev_t *b, uint64_t off, void *buf,
-                              uint32_t len, int write)
+static int32_t bdev_rw_window(nvme_bdev_t *b, uint64_t off, void *buf, uint32_t len, int write)
 {
     uint64_t cap = (b->is_ns ? b->nsect : b->nsect_win) * NVME_SECTOR;
     if (off >= cap)
-        return 0;                          /* EOF */
+        return 0; /* EOF */
     if (off + len > cap)
         len = (uint32_t)(cap - off);
     if (!len)
         return 0;
 
     uint64_t lba0 = b->is_ns ? 0 : b->lba0;
-    uint8_t  *p   = (uint8_t *)buf;
-    uint64_t  pos = off;
-    int32_t   rc  = 0;
+    uint8_t *p    = (uint8_t *)buf;
+    uint64_t pos  = off;
+    int32_t  rc   = 0;
 
     uint8_t sec[NVME_SECTOR];
 
@@ -689,22 +674,21 @@ static int32_t bdev_rw_window(nvme_bdev_t *b, uint64_t off, void *buf,
         } else {
             memcpy(p, sec + skip, chunk);
         }
-        p    += chunk;
-        pos  += chunk;
-        len  -= chunk;
-        rc   += chunk;
+        p += chunk;
+        pos += chunk;
+        len -= chunk;
+        rc += chunk;
     }
 
     /* Middle: whole sectors straight through. */
     if (len >= NVME_SECTOR) {
         uint32_t whole = len / NVME_SECTOR;
-        if (nvme_rw(b->ctrl, b->nsid, write,
-                    lba0 + pos / NVME_SECTOR, whole, p) < 0)
+        if (nvme_rw(b->ctrl, b->nsid, write, lba0 + pos / NVME_SECTOR, whole, p) < 0)
             return rc ? rc : -E_IO;
-        p   += (uint64_t)whole * NVME_SECTOR;
+        p += (uint64_t)whole * NVME_SECTOR;
         pos += (uint64_t)whole * NVME_SECTOR;
         len -= whole * NVME_SECTOR;
-        rc  += (int32_t)whole * NVME_SECTOR;
+        rc += (int32_t)whole * NVME_SECTOR;
     }
 
     /* Tail: partial last sector, read-modify-write. */
@@ -732,8 +716,7 @@ static int32_t bdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return bdev_rw_window(b, off, buf, len, 0);
 }
 
-static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
-                          uint32_t len)
+static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     nvme_bdev_t *b = (nvme_bdev_t *)n->priv;
     if (!b || !b->used)
@@ -750,18 +733,19 @@ static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         return -E_IO;
 
     switch (cmd) {
-    case 0x1260:                          /* BLKGETSIZE: sector count */
-        if (!arg) return -E_FAULT;
-        *(unsigned long *)(uintptr_t)arg =
-            (unsigned long)(b->is_ns ? b->nsect : b->nsect_win);
+    case 0x1260: /* BLKGETSIZE: sector count */
+        if (!arg)
+            return -E_FAULT;
+        *(unsigned long *)(uintptr_t)arg = (unsigned long)(b->is_ns ? b->nsect : b->nsect_win);
         return 0;
-    case 0x80081272:                      /* BLKGETSIZE64 */
-        if (!arg) return -E_FAULT;
-        *(uint64_t *)(uintptr_t)arg =
-            (b->is_ns ? b->nsect : b->nsect_win) * NVME_SECTOR;
+    case 0x80081272: /* BLKGETSIZE64 */
+        if (!arg)
+            return -E_FAULT;
+        *(uint64_t *)(uintptr_t)arg = (b->is_ns ? b->nsect : b->nsect_win) * NVME_SECTOR;
         return 0;
-    case 0x1268:                          /* BLKSSZGET */
-        if (!arg) return -E_FAULT;
+    case 0x1268: /* BLKSSZGET */
+        if (!arg)
+            return -E_FAULT;
         *(int *)(uintptr_t)arg = NVME_SECTOR;
         return 0;
     default:
@@ -807,19 +791,22 @@ static int ns_register(nvme_ctrl_t *c, int ctrl_idx, uint32_t nsid)
         nvme_bdev_t *b = ns_slot(ctrl_idx, i);
         if (b->used)
             continue;
-        b->used  = 1;
-        b->is_ns = 1;
-        b->ctrl  = c;
-        b->nsid  = nsid;
-        b->nsect = nsze;
-        b->lba0  = 0;
+        b->used      = 1;
+        b->is_ns     = 1;
+        b->ctrl      = c;
+        b->nsid      = nsid;
+        b->nsect     = nsze;
+        b->lba0      = 0;
         b->nsect_win = 0;
 
         /* Name: "nvme<ctrl>n<ns>". */
         char *n = b->name;
-        *n++ = 'n'; *n++ = 'v'; *n++ = 'm'; *n++ = 'e';
-        *n++ = (char)('0' + ctrl_idx);
-        *n++ = 'n';
+        *n++    = 'n';
+        *n++    = 'v';
+        *n++    = 'm';
+        *n++    = 'e';
+        *n++    = (char)('0' + ctrl_idx);
+        *n++    = 'n';
         if (nsid < 10)
             *n++ = (char)('0' + nsid);
         else {
@@ -828,8 +815,7 @@ static int ns_register(nvme_ctrl_t *c, int ctrl_idx, uint32_t nsid)
         }
         *n = 0;
 
-        if (vfs_register_blkdev(b->name, &g_bdev_ops, b,
-                                nsze * NVME_SECTOR) != 0) {
+        if (vfs_register_blkdev(b->name, &g_bdev_ops, b, nsze * NVME_SECTOR) != 0) {
             b->used = 0;
             return -1;
         }
@@ -848,8 +834,8 @@ static int ns_register(nvme_ctrl_t *c, int ctrl_idx, uint32_t nsid)
 
 /* ---- PCI probing ------------------------------------------------------- */
 
-#define PCI_CLASS_MASS   0x01
-#define PCI_SUB_NVM      0x08
+#define PCI_CLASS_MASS 0x01
+#define PCI_SUB_NVM    0x08
 
 int nvme_init(void)
 {
@@ -893,11 +879,11 @@ int nvme_init(void)
 
         /* Enumerate active namespaces via the identify list; a controller
          * that rejects the list falls back to scanning 1..NN. */
-        uint32_t list[NVME_PAGE_SIZE / 4];
+        uint32_t   list[NVME_PAGE_SIZE / 4];
         nvme_cmd_t cmd;
         memset(&cmd, 0, sizeof cmd);
         cmd.cdw0  = AC_IDENTIFY;
-        cmd.prp1  = c->scr_phys + NVME_PAGE_SIZE;  /* id_ns page as scratch */
+        cmd.prp1  = c->scr_phys + NVME_PAGE_SIZE; /* id_ns page as scratch */
         cmd.cdw10 = CNS_ACTIVE_NS;
         /* The list lands in id_ns scratch; read through the mapping. */
         if (nvme_submit(c, 1, &cmd) >= 0) {

@@ -35,14 +35,14 @@ static int g_failed;
  * captured there.  A GNOS extension. */
 static void report(const char *fmt, ...)
 {
-    char buf[512];
+    char    buf[512];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(1001, buf);                  /* SYS_dbgputs */
+    syscall(1001, buf); /* SYS_dbgputs */
 }
 
 static void check(int ok, int n, const char *what)
@@ -54,7 +54,7 @@ static void check(int ok, int n, const char *what)
 
 /* ---- 1. mutex + shared counter ---------------------------------------- */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_count;
+static int             g_count;
 
 static void *counter_fn(void *arg)
 {
@@ -80,8 +80,8 @@ static void test_mutex(void)
 
 /* ---- 2/3. condvar broadcast + timed wait ------------------------------- */
 static pthread_mutex_t g_cv_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_cv = PTHREAD_COND_INITIALIZER;
-static int g_cv_ready, g_cv_woke;
+static pthread_cond_t  g_cv      = PTHREAD_COND_INITIALIZER;
+static int             g_cv_ready, g_cv_woke;
 
 static void *cv_waiter(void *arg)
 {
@@ -124,7 +124,7 @@ static void test_cond(void)
     /* A timed wait with a deadline in the past must return ETIMEDOUT. */
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += 0;                     /* deadline: now */
+    ts.tv_sec += 0; /* deadline: now */
     pthread_mutex_lock(&g_cv_lock);
     int rc = pthread_cond_timedwait(&g_cv, &g_cv_lock, &ts);
     pthread_mutex_unlock(&g_cv_lock);
@@ -136,13 +136,13 @@ static void *just_exit_fn(void *arg)
 {
     (void)arg;
     pthread_exit((void *)0x2a);
-    return NULL;                        /* not reached */
+    return NULL; /* not reached */
 }
 
 static void test_pexit(void)
 {
     pthread_t t;
-    void *ret = NULL;
+    void     *ret = NULL;
     pthread_create(&t, NULL, just_exit_fn, NULL);
     pthread_join(t, &ret);
     check(ret == (void *)0x2a, 4, "pthread_exit/join");
@@ -154,7 +154,7 @@ static int   g_tids[4];
 
 static void *tid_fn(void *arg)
 {
-    long i = (long)arg;
+    long i    = (long)arg;
     g_tids[i] = (int)syscall(SYS_gettid);
     check(getpid() == g_main_pid, 5, "thread getpid == tgid");
     return NULL;
@@ -181,7 +181,7 @@ static void *sleeper_fn(void *arg)
 {
     (void)arg;
     for (;;)
-        sleep(1000);                    /* parked in nanosleep when exit lands */
+        sleep(1000); /* parked in nanosleep when exit lands */
     return NULL;
 }
 
@@ -192,12 +192,11 @@ static void test_exit_group(void)
         pthread_t t[2];
         pthread_create(&t[0], NULL, sleeper_fn, NULL);
         pthread_create(&t[1], NULL, sleeper_fn, NULL);
-        exit(7);                        /* must take both sleepers down too */
+        exit(7); /* must take both sleepers down too */
     }
-    int st = 0;
-    pid_t w = waitpid(c, &st, 0);
-    check(w == c && WIFEXITED(st) && WEXITSTATUS(st) == 7, 6,
-          "exit() kills the whole group");
+    int   st = 0;
+    pid_t w  = waitpid(c, &st, 0);
+    check(w == c && WIFEXITED(st) && WEXITSTATUS(st) == 7, 6, "exit() kills the whole group");
 }
 
 int main(void)

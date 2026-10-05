@@ -1,0 +1,20 @@
+choice
+	prompt "Target architecture"
+	default ARCH_X86_64
+
+config ARCH_X86_64
+	bool "x86_64"
+	select ARCH_X86
+	select 64BIT
+
+config ARCH_AARCH64
+	bool "aarch64"
+	select 64BIT
+
+endchoice
+
+config ARCH_X86
+	bool
+
+config 64BIT
+	bool

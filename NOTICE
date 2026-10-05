@@ -1,0 +1,81 @@
+NOTICE
+======
+
+GNOS — a Linux-ABI-compatible x86_64 teaching operating system.
+ Copyright (C) 2026 and earlier GNOS project contributors.
+
+Except where otherwise noted, the original code and documentation of this
+project are free software, licensed under the GNU General Public License v2:
+  https://www.gnu.org/licenses/gpl-2.0.html
+
+The project draws in a number of third-party pieces, each under its own
+license; this file is the single place where those are acknowledged.  The
+per-directory copies of each upstream license text remain in the matching
+directories and always win over any summary below.
+
+Boot / firmware chain (bootloader)
+----------------------------------
+  * Limine boot protocol bootloader
+      https://github.com/Limine-Bootloader/Limine
+      2-clause BSD License
+
+In-kernel / directly linked third-party code (src/vendor/)
+-----------------------------------------------------------
+  * Intel ACPI Component Architecture (ACPICA)
+      src/vendor/acpica/
+      dual-licensed under BSD-3-Clause OR GPL-2.0-only
+      (this project takes it under GPL-2.0-only)
+
+  * Mbed TLS
+      src/vendor/mbedtls/
+      dual-licensed under Apache-2.0 OR GPL-2.0-or-later
+      (this project takes it under GPL-2.0-or-later)
+
+  * FatFs
+      src/vendor/fatfs/
+      ChaN's free-for-any-purpose license (see vendor source)
+
+  * LeonOS-4 (reference / compat parts)
+      src/vendor/LeonOS-4/
+      see the in-tree vendor directory for its license text
+
+Userland shipped in the boot image (build/alpine-rootfs,
+all of these keep their own license and copyright)
+--------------------------------------------------------
+  Alpine Linux base image and package set:
+      https://alpinelinux.org/
+      Primarily MIT/GPL mix by upstream package maintainers;
+      /etc/... control files, etc/apk, /etc/os-release are Alpine's.
+
+  * musl libc              https://musl-libc.org/       MIT
+  * BusyBox                https://busybox.net/         GPL-2.0-only
+  * Bash                   https://www.gnu.org/software/bash/   GPL-3.0-or-later
+  * GNU coreutils          https://www.gnu.org/software/coreutils/  GPL-3.0-or-later
+  * GNU nano               https://www.nano-editor.org/          GPL-3.0-or-later
+  * Python                 https://www.python.org/      Python-2.0
+  * OpenRC                 https://github.com/OpenRC/openrc   BSD-2-Clause
+  * curl                   https://curl.se/             curl license
+  * fastfetch              https://github.com/fastfetch-cli/fastfetch  MIT
+  * X.Org / Xorg-server, Xlib, pixman etc.
+                           https://www.x.org/           MIT/X11 + others
+  * ncurses, readline, libffi, expat, libxml2, zlib, OpenSSL
+                           see the corresponding upstream project pages
+
+Toolchains / adjacent artifacts that are *not* shipped in the image
+-------------------------------------------------------------------
+  * cross-built clang/llvm under build/desk/ (if present): Apache-2.0 WITH
+    LLVM-exception; only used to compile this tree, not redistributed as
+    part of the ISO
+  * Limine stage files in boot/limine/: BSD-2-Clause (see above)
+
+How to source a tarball
+-----------------------
+  The initrd folds build/alpine-rootfs (an unmodified Alpine minirootfs
+  plus a curated apk set installed by tools/build-alpine-rootfs.sh).
+  Nothing in the image is downloaded from a distro that does not publish
+  its own license; reproducible build artefacts in /build are kept out of
+  version control per the notice in Makefile.
+
+If any inconsistency between this file and an upstream license is found,
+the upstream license text governs.  Please notify the maintainers so this
+file can be corrected.

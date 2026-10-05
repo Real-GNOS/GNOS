@@ -32,7 +32,7 @@
 #include "vfs.h"
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 /* --------------------------------------------------------- flink name table */
@@ -54,7 +54,9 @@ static struct drm_gem_object *gem_find_by_name(uint32_t name)
     int i;
 
     for (i = 0; i < GEM_MAX_NAMES; i++) {
-        if (gem_name_table[i].obj != NULL && gem_name_table[i].name == name) { return gem_name_table[i].obj; }
+        if (gem_name_table[i].obj != NULL && gem_name_table[i].name == name) {
+            return gem_name_table[i].obj;
+        }
     }
     return NULL;
 }
@@ -66,7 +68,9 @@ static int gem_alloc_name(struct drm_gem_object *obj, uint32_t *name_out)
     spin_lock(&gem_name_lock);
 
     for (i = 0; i < GEM_MAX_NAMES; i++) {
-        if (gem_name_table[i].obj == NULL) { break; }
+        if (gem_name_table[i].obj == NULL) {
+            break;
+        }
     }
 
     if (i >= GEM_MAX_NAMES) {
@@ -135,18 +139,24 @@ static uint32_t               dumb_range_pool_used = 0;
 
 static inline int dumb_bitmap_get(uint32_t slot)
 {
-    if (slot >= DUMB_OFFSET_MAX_SLOTS) { return -1; }
+    if (slot >= DUMB_OFFSET_MAX_SLOTS) {
+        return -1;
+    }
     return (dumb_bitmap[slot / 8] >> (slot % 8)) & 1;
 }
 
 static inline void dumb_bitmap_set(uint32_t slot)
 {
-    if (slot < DUMB_OFFSET_MAX_SLOTS) { dumb_bitmap[slot / 8] |= (uint8_t)(1U << (slot % 8)); }
+    if (slot < DUMB_OFFSET_MAX_SLOTS) {
+        dumb_bitmap[slot / 8] |= (uint8_t)(1U << (slot % 8));
+    }
 }
 
 static inline void dumb_bitmap_clear(uint32_t slot)
 {
-    if (slot < DUMB_OFFSET_MAX_SLOTS) { dumb_bitmap[slot / 8] &= (uint8_t) ~(1U << (slot % 8)); }
+    if (slot < DUMB_OFFSET_MAX_SLOTS) {
+        dumb_bitmap[slot / 8] &= (uint8_t) ~(1U << (slot % 8));
+    }
 }
 
 static struct dumb_slot_range *dumb_range_alloc_node(void)
@@ -157,7 +167,9 @@ static struct dumb_slot_range *dumb_range_alloc_node(void)
         r = &dumb_range_pool[dumb_range_pool_used++];
     } else {
         r = malloc(sizeof(*r)); /* pool exhausted */
-        if (r == NULL) { return NULL; }
+        if (r == NULL) {
+            return NULL;
+        }
     }
 
     memset(r, 0, sizeof(*r));
@@ -167,7 +179,9 @@ static struct dumb_slot_range *dumb_range_alloc_node(void)
 static void dumb_range_free_node(struct dumb_slot_range *r)
 {
     /* Pool nodes are never handed back; only heap ones can be freed. */
-    if (r < dumb_range_pool || r >= dumb_range_pool + DUMB_RANGE_POOL_SIZE) { free(r); }
+    if (r < dumb_range_pool || r >= dumb_range_pool + DUMB_RANGE_POOL_SIZE) {
+        free(r);
+    }
 }
 
 static void dumb_offset_init(void)
@@ -188,7 +202,9 @@ static void dumb_mark_slots(uint32_t start, uint32_t count)
 {
     uint32_t i;
 
-    for (i = 0; i < count; i++) { dumb_bitmap_set(start + i); }
+    for (i = 0; i < count; i++) {
+        dumb_bitmap_set(start + i);
+    }
 }
 
 /* Hand out @size bytes' worth of offset space.  0 means "none left". */
@@ -197,9 +213,13 @@ static uint64_t dumb_offset_alloc(size_t size)
     uint32_t need = dumb_slots_needed(size);
     uint32_t start;
 
-    if (need == 0) { need = 1; }
+    if (need == 0) {
+        need = 1;
+    }
 
-    if (!dumb_offset_inited) { dumb_offset_init(); }
+    if (!dumb_offset_inited) {
+        dumb_offset_init();
+    }
 
     spin_lock(&dumb_alloc_lock);
 
@@ -250,15 +270,21 @@ static void dumb_offset_free(uint64_t offset, size_t size)
 {
     uint32_t start, count, i;
 
-    if (offset < DUMB_OFFSET_BASE) { return; }
+    if (offset < DUMB_OFFSET_BASE) {
+        return;
+    }
 
     start = (uint32_t)((offset - DUMB_OFFSET_BASE) >> DUMB_OFFSET_SHIFT);
     count = dumb_slots_needed(size);
-    if (count == 0) { count = 1; }
+    if (count == 0) {
+        count = 1;
+    }
 
     spin_lock(&dumb_alloc_lock);
 
-    for (i = 0; i < count && (start + i) < DUMB_OFFSET_MAX_SLOTS; i++) { dumb_bitmap_clear(start + i); }
+    for (i = 0; i < count && (start + i) < DUMB_OFFSET_MAX_SLOTS; i++) {
+        dumb_bitmap_clear(start + i);
+    }
 
     {
         struct dumb_slot_range **prev = &dumb_free_list;
@@ -298,7 +324,9 @@ static void dumb_offset_free(uint64_t offset, size_t size)
 
 int drm_gem_object_init(struct drm_device *dev, struct drm_gem_object *obj, size_t size)
 {
-    if (obj == NULL) { return -EINVAL; }
+    if (obj == NULL) {
+        return -EINVAL;
+    }
 
     obj->dev          = dev;
     obj->size         = (uint32_t)size;
@@ -316,7 +344,9 @@ int drm_gem_private_object_init(struct drm_device *dev, struct drm_gem_object *o
 
 void drm_gem_object_get(struct drm_gem_object *obj)
 {
-    if (obj == NULL) { return; }
+    if (obj == NULL) {
+        return;
+    }
 
     spin_lock(&obj->ref_lock);
     obj->refcount++;
@@ -332,13 +362,17 @@ void drm_gem_object_put(struct drm_gem_object *obj)
 {
     int refcount;
 
-    if (obj == NULL) { return; }
+    if (obj == NULL) {
+        return;
+    }
 
     spin_lock(&obj->ref_lock);
     refcount = --obj->refcount;
     spin_unlock(&obj->ref_lock);
 
-    if (refcount != 0) { return; }
+    if (refcount != 0) {
+        return;
+    }
 
     if (obj->prime_fd > 0) {
         drm_gem_prime_fd_free(obj->prime_fd);
@@ -362,15 +396,20 @@ void drm_gem_object_put(struct drm_gem_object *obj)
  * so the object outlives whoever created it for as long as the client
  * keeps the handle.
  */
-int drm_gem_handle_create(struct drm_file *file_priv, struct drm_gem_object *obj, uint32_t *handle_out)
+int drm_gem_handle_create(struct drm_file *file_priv, struct drm_gem_object *obj,
+                          uint32_t *handle_out)
 {
     struct drm_gem_handle_entry *entry;
     int                          ret;
 
-    if (file_priv == NULL || obj == NULL || handle_out == NULL) { return -EINVAL; }
+    if (file_priv == NULL || obj == NULL || handle_out == NULL) {
+        return -EINVAL;
+    }
 
     entry = malloc(sizeof(*entry));
-    if (entry == NULL) { return -ENOMEM; }
+    if (entry == NULL) {
+        return -ENOMEM;
+    }
     memset(entry, 0, sizeof(*entry));
 
     spin_lock(&file_priv->table_lock);
@@ -397,7 +436,9 @@ int drm_gem_handle_delete(struct drm_file *file_priv, uint32_t handle)
 {
     struct drm_gem_object *obj;
 
-    if (file_priv == NULL) { return -EINVAL; }
+    if (file_priv == NULL) {
+        return -EINVAL;
+    }
 
     spin_lock(&file_priv->table_lock);
 
@@ -406,7 +447,8 @@ int drm_gem_handle_delete(struct drm_file *file_priv, uint32_t handle)
         ilist_node_t *node = file_priv->object_list.next;
 
         while (node != NULL && node != &file_priv->object_list) {
-            struct drm_gem_handle_entry *entry = container_of(node, struct drm_gem_handle_entry, head);
+            struct drm_gem_handle_entry *entry =
+                container_of(node, struct drm_gem_handle_entry, head);
 
             node = node->next;
             if (entry->handle == handle) {
@@ -420,7 +462,9 @@ int drm_gem_handle_delete(struct drm_file *file_priv, uint32_t handle)
 
     spin_unlock(&file_priv->table_lock);
 
-    if (obj != NULL) { drm_gem_object_put(obj); }
+    if (obj != NULL) {
+        drm_gem_object_put(obj);
+    }
 
     return (obj != NULL) ? 0 : -ENOENT;
 }
@@ -429,11 +473,15 @@ struct drm_gem_object *drm_gem_object_lookup(struct drm_file *file_priv, uint32_
 {
     struct drm_gem_object *obj;
 
-    if (file_priv == NULL) { return NULL; }
+    if (file_priv == NULL) {
+        return NULL;
+    }
 
     spin_lock(&file_priv->table_lock);
     obj = drm_idr_find(&file_priv->object_idr, handle);
-    if (obj != NULL) { drm_gem_object_get(obj); }
+    if (obj != NULL) {
+        drm_gem_object_get(obj);
+    }
     spin_unlock(&file_priv->table_lock);
 
     return obj;
@@ -445,11 +493,14 @@ struct drm_gem_object *drm_gem_object_lookup_by_offset(struct drm_file *file_pri
     struct drm_gem_object *obj = NULL;
     ilist_node_t          *node;
 
-    if (file_priv == NULL) { return NULL; }
+    if (file_priv == NULL) {
+        return NULL;
+    }
 
     spin_lock(&file_priv->table_lock);
 
-    for (node = file_priv->object_list.next; node != NULL && node != &file_priv->object_list; node = node->next) {
+    for (node = file_priv->object_list.next; node != NULL && node != &file_priv->object_list;
+         node = node->next) {
         struct drm_gem_handle_entry *entry = container_of(node, struct drm_gem_handle_entry, head);
 
         if (entry->obj != NULL && entry->obj->mmap_offset == offset) {
@@ -471,23 +522,32 @@ struct drm_gem_object *drm_gem_object_lookup_by_offset(struct drm_file *file_pri
  * up by the caller's own width, and the backing memory is page-aligned
  * because it gets mapped straight into user space.
  */
-int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev, struct drm_mode_create_dumb *args)
+int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,
+                        struct drm_mode_create_dumb *args)
 {
     struct drm_gem_object *obj;
     uint32_t               handle;
     size_t                 size;
     int                    ret;
 
-    if (file_priv == NULL || dev == NULL || args == NULL) { return -EINVAL; }
-    if (args->width == 0 || args->height == 0 || args->bpp == 0) { return -EINVAL; }
-    if (args->bpp % 8 != 0) { return -EINVAL; }
+    if (file_priv == NULL || dev == NULL || args == NULL) {
+        return -EINVAL;
+    }
+    if (args->width == 0 || args->height == 0 || args->bpp == 0) {
+        return -EINVAL;
+    }
+    if (args->bpp % 8 != 0) {
+        return -EINVAL;
+    }
 
     args->pitch = args->width * (args->bpp / 8);
     size        = (size_t)args->pitch * args->height;
     args->size  = (uint64_t)size;
 
     obj = malloc(sizeof(*obj));
-    if (obj == NULL) { return -ENOMEM; }
+    if (obj == NULL) {
+        return -ENOMEM;
+    }
     memset(obj, 0, sizeof(*obj));
 
     drm_gem_object_init(dev, obj, size);
@@ -524,7 +584,8 @@ int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev, stru
 }
 
 /* DRM_IOCTL_MODE_MAP_DUMB: hand back the offset the client should mmap. */
-int drm_gem_dumb_map_offset(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle, uint64_t *offset)
+int drm_gem_dumb_map_offset(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle,
+                            uint64_t *offset)
 {
     struct drm_gem_object *obj;
 
@@ -540,7 +601,9 @@ int drm_gem_dumb_map_offset(struct drm_file *file_priv, struct drm_device *dev, 
     dbg_puts_hex((obj != NULL) ? obj->mmap_offset : 0);
     dbg_puts("\r\n");
 
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
 
     *offset = obj->mmap_offset;
 
@@ -571,10 +634,14 @@ int drm_gem_open_ioctl(struct drm_device *dev, void *data, struct drm_file *file
 
     spin_lock(&gem_name_lock);
     obj = gem_find_by_name(args->name);
-    if (obj != NULL) { drm_gem_object_get(obj); }
+    if (obj != NULL) {
+        drm_gem_object_get(obj);
+    }
     spin_unlock(&gem_name_lock);
 
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
 
     ret = drm_gem_handle_create(file_priv, obj, &handle);
     if (ret < 0) {
@@ -612,7 +679,9 @@ int drm_gem_flink_ioctl(struct drm_device *dev, void *data, struct drm_file *fil
     (void)dev;
 
     obj = drm_gem_object_lookup(file_priv, args->handle);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
 
     ret = gem_alloc_name(obj, &name);
     if (ret < 0) {
@@ -664,12 +733,16 @@ static struct drm_gem_object *prime_fd_lookup(int fd)
     struct drm_gem_object *obj = NULL;
     int                    idx = fd - 1;
 
-    if (idx < 0 || idx >= PRIME_FD_MAX) { return NULL; }
+    if (idx < 0 || idx >= PRIME_FD_MAX) {
+        return NULL;
+    }
 
     spin_lock(&prime_fd_lock);
     if (prime_fd_table[idx].in_use) {
         obj = prime_fd_table[idx].obj;
-        if (obj != NULL) { drm_gem_object_get(obj); }
+        if (obj != NULL) {
+            drm_gem_object_get(obj);
+        }
     }
     spin_unlock(&prime_fd_lock);
 
@@ -680,7 +753,9 @@ void drm_gem_prime_fd_free(int fd)
 {
     int idx = fd - 1;
 
-    if (idx < 0 || idx >= PRIME_FD_MAX) { return; }
+    if (idx < 0 || idx >= PRIME_FD_MAX) {
+        return;
+    }
 
     spin_lock(&prime_fd_lock);
     if (prime_fd_table[idx].in_use) {
@@ -690,8 +765,8 @@ void drm_gem_prime_fd_free(int fd)
     spin_unlock(&prime_fd_lock);
 }
 
-int drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle, uint32_t flags,
-                               int *prime_fd)
+int drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle,
+                               uint32_t flags, int *prime_fd)
 {
     struct drm_gem_object *obj;
     int                    fd;
@@ -701,7 +776,9 @@ int drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_pri
     (void)flags;
 
     obj = drm_gem_object_lookup(file_priv, handle);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
 
     /* Exporting twice gives the same fd: two different numbers for one
      * buffer would only confuse the importer. */
@@ -722,7 +799,8 @@ int drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_pri
     return 0;
 }
 
-int drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv, int prime_fd, uint32_t *handle)
+int drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv, int prime_fd,
+                               uint32_t *handle)
 {
     struct drm_gem_object *obj;
     uint32_t               new_handle;
@@ -731,7 +809,9 @@ int drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_pri
     (void)dev;
 
     obj = prime_fd_lookup(prime_fd);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
 
     ret = drm_gem_handle_create(file_priv, obj, &new_handle);
     if (ret < 0) {
@@ -747,8 +827,12 @@ int drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_pri
 /* Ensure @obj has an offset a client can mmap; idempotent. */
 int drm_gem_create_mmap_offset(struct drm_gem_object *obj)
 {
-    if (obj == NULL || obj->size == 0) { return -EINVAL; }
-    if (obj->mmap_offset != 0) { return 0; }
+    if (obj == NULL || obj->size == 0) {
+        return -EINVAL;
+    }
+    if (obj->mmap_offset != 0) {
+        return 0;
+    }
 
     obj->mmap_offset = dumb_offset_alloc(obj->size);
     return (obj->mmap_offset != 0) ? 0 : -ENOSPC;

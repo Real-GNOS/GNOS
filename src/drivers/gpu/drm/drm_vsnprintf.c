@@ -32,11 +32,10 @@ static size_t kput(char *buf, size_t size, size_t *idx, char c)
 }
 
 /* Emit an unsigned value in base 10 or 16, right-to-left. */
-static size_t kuint(char *buf, size_t size, size_t *idx, uint64_t v, int base,
-                    bool upper)
+static size_t kuint(char *buf, size_t size, size_t *idx, uint64_t v, int base, bool upper)
 {
-    char tmp[24];
-    int  n = 0;
+    char        tmp[24];
+    int         n   = 0;
     const char *dig = upper ? "0123456789ABCDEF" : "0123456789abcdef";
 
     if (v == 0) {
@@ -79,7 +78,8 @@ int vsnprintf(char *str, size_t size, const char *fmt, va_list args)
         /* Flags: only '0' is understood; skip others. */
         int pad0 = 0;
         while (c == '0' || c == '-') {
-            if (c == '0') pad0 = 1;
+            if (c == '0')
+                pad0 = 1;
             c = *fmt++;
         }
         /* Skip a field width (digits). */
@@ -128,12 +128,11 @@ int vsnprintf(char *str, size_t size, const char *fmt, va_list args)
             break;
         case 'p':
             kstr(str, size, &idx, "0x");
-            kuint(str, size, &idx, (uint64_t)(uintptr_t)va_arg(args, void *),
-                  16, false);
+            kuint(str, size, &idx, (uint64_t)(uintptr_t)va_arg(args, void *), 16, false);
             break;
         case 'l': {
             c = *fmt++;
-            if (c == 'l') {                 /* %ll */
+            if (c == 'l') { /* %ll */
                 c = *fmt++;
                 if (c == 'd' || c == 'i') {
                     int64_t v = va_arg(args, int64_t);
@@ -183,11 +182,9 @@ int vsnprintf(char *str, size_t size, const char *fmt, va_list args)
                     kuint(str, size, &idx, (uint64_t)v, 10, false);
                 }
             } else if (c == 'u') {
-                kuint(str, size, &idx, (uint64_t)va_arg(args, size_t), 10,
-                      false);
+                kuint(str, size, &idx, (uint64_t)va_arg(args, size_t), 10, false);
             } else if (c == 'x') {
-                kuint(str, size, &idx, (uint64_t)va_arg(args, size_t), 16,
-                      false);
+                kuint(str, size, &idx, (uint64_t)va_arg(args, size_t), 16, false);
             } else {
                 kput(str, size, &idx, '%');
                 kput(str, size, &idx, 'z');
@@ -226,8 +223,8 @@ int snprintf(char *str, size_t size, const char *fmt, ...)
 void plogk(const char *format, ...)
 {
     extern void dbg_puts(const char *s);
-    char    buf[512];
-    va_list args;
+    char        buf[512];
+    va_list     args;
 
     va_start(args, format);
     vsnprintf(buf, sizeof(buf), format, args);

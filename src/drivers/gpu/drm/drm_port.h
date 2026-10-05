@@ -30,13 +30,13 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#include "kstring.h"    /* memcpy/memset/strlen/strncmp */
-#include "heap.h"       /* kmalloc/kfree */
-#include "smp.h"        /* spinlock_t, spin_lock, spin_unlock */
-#include "vfs.h"        /* E_* errno values */
-#include "debugcon.h"   /* dbg_puts & friends */
+#include "kstring.h"        /* memcpy/memset/strlen/strncmp */
+#include "heap.h"           /* kmalloc/kfree */
+#include "smp.h"            /* spinlock_t, spin_lock, spin_unlock */
+#include "vfs.h"            /* E_* errno values */
+#include "debugcon.h"       /* dbg_puts & friends */
 #include "intrusive_list.h" /* ilist_node_t (wait_queue_t below) */
-#include "proc.h"       /* proc_current/sched_block/sched_wake_queue */
+#include "proc.h"           /* proc_current/sched_block/sched_wake_queue */
 
 /* ---- user-memory copy (Uinxed <proc/uaccess.h>) ---------------------
  * Uinxed spells the helpers copy_from_user(dst, void *src, size) /
@@ -70,55 +70,55 @@ static inline int drm_port_copy_to_user(void *dst, const void *src, size_t size)
 
 /* ---- freestanding libc helpers supplied by drm_libc.c ---------------- */
 uint64_t nano_time(void);
-void *aligned_alloc(size_t align, size_t size);
-void aligned_free(void *p);
-char *strdup(const char *s);
+void    *aligned_alloc(size_t align, size_t size);
+void     aligned_free(void *p);
+char    *strdup(const char *s);
 
 /* ---- Linux errno spelling -> GNOS values ---------------------------- */
 #ifndef ENOENT
-#define ENOENT  E_NOENT
+#define ENOENT E_NOENT
 #endif
 #ifndef ESRCH
-#define ESRCH   E_SRCH
+#define ESRCH E_SRCH
 #endif
 #ifndef EINTR
-#define EINTR   E_INTR
+#define EINTR E_INTR
 #endif
 #ifndef EIO
-#define EIO     E_IO
+#define EIO E_IO
 #endif
 #ifndef ENOMEM
-#define ENOMEM  E_NOMEM
+#define ENOMEM E_NOMEM
 #endif
 #ifndef EACCES
-#define EACCES  E_ACCES
+#define EACCES E_ACCES
 #endif
 #ifndef EFAULT
-#define EFAULT  E_FAULT
+#define EFAULT E_FAULT
 #endif
 #ifndef EBUSY
-#define EBUSY   E_BUSY
+#define EBUSY E_BUSY
 #endif
 #ifndef EEXIST
-#define EEXIST  E_EXIST
+#define EEXIST E_EXIST
 #endif
 #ifndef ENODEV
-#define ENODEV  E_NODEV
+#define ENODEV E_NODEV
 #endif
 #ifndef EINVAL
-#define EINVAL  E_INVAL
+#define EINVAL E_INVAL
 #endif
 #ifndef ENOSPC
-#define ENOSPC  E_NOSPC
+#define ENOSPC E_NOSPC
 #endif
 #ifndef ERANGE
-#define ERANGE  E_RANGE
+#define ERANGE E_RANGE
 #endif
 #ifndef EBADF
-#define EBADF   E_BADF
+#define EBADF E_BADF
 #endif
 #ifndef ENOSYS
-#define ENOSYS  E_NOSYS
+#define ENOSYS E_NOSYS
 #endif
 #ifndef EOPNOTSUPP
 #define EOPNOTSUPP E_OPNOTSUPP

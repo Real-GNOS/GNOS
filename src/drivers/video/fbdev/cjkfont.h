@@ -15,9 +15,9 @@
 /* Every glyph in this font is 16 rows of 16 pixels, stored two bytes per row
  * with the leftmost pixel in the high bit of the first byte.  Halfwidth
  * glyphs simply leave the right-hand eight columns clear. */
-#define CJK_HEIGHT  16
-#define CJK_STRIDE  2
-#define CJK_BYTES   (CJK_HEIGHT * CJK_STRIDE)
+#define CJK_HEIGHT 16
+#define CJK_STRIDE 2
+#define CJK_BYTES  (CJK_HEIGHT * CJK_STRIDE)
 
 /* Validate the blob and report how many glyphs it holds (0 if it is missing
  * or malformed, in which case every lookup below fails and the console falls

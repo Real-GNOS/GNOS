@@ -1,0 +1,70 @@
+# Contributing to GNOS
+
+(中文版：`CONTRIBUTING.md`)
+
+Thanks for looking at GNOS.  The point of this kernel is to be readable teaching
+material that still runs a real userspace — so contributions should land the same
+way.
+
+## 1. Get it running before you change anything
+
+```sh
+make                # GNOSKr.elf + initrd + ISO
+make guistart       # boot in a QEMU GTK window, log tee'd to build/dbg.log
+make headless       # no window, full debugcon capture -- the CI stance
+make test           # headless self-test with PASS lines + snapshot
+```
+
+Kernel changes are only acceptable if `make headless; grep PASS build/dbg.log`
+stays all-green afterwards.  Run it before and after; any PASS turning into FAIL
+blocks the merge.
+
+## 2. The code contract
+
+- **One contract only: the Linux/x86_64 syscall ABI.**  Syscall numbers,
+  register conventions and negative errno all live in `src/shared/sysnum.h`,
+  shared verbatim by kernel and userland.  Do not shadow it.
+- Adding a syscall is: assign a number in `src/shared/sysnum.h`, implement it in
+  `src/kernel/syscall.c`, then prove it with a minimal userland caller in the
+  initrd.
+- Return Linux-compatible negative errno, never ad-hoc numbers.
+- New files keep the existing header:
+  `/* SPDX-License-Identifier: GPL-2.0 */` + a paragraph explaining why the file
+  exists and what it deliberately does not solve.
+- OpenRC is the flow, full stop.  Do not invent a second boot script beside it.
+- No copy-paste from third parties into the main tree: vendor it under
+  `src/vendor/` (or `vendor/`) with its LICENSE/NOTICE side by side.
+
+## 3. Writing a driver
+
+No loadable modules here: every driver links into the kernel and registers
+itself at boot.  For a new one:
+
+1. Implement it in `src/kernel/driver/*.c` and register it from its `init` via
+   `subsys_register()` / `vfs_register_dev()`;
+2. add its object to `KOBJS` in the Makefile and check the boot log for its
+   registration line under `make headless`.
+
+## 4. Debugging
+
+- The debug console is the main channel: isa-debugcon + `build/dbg.log`.
+- Start from the triple: `USERFAULT` / `MMAP-RECORDS` / `LAZY`.
+- Temporary probes use `dbg_puts` and say `TEMPORARY` in their comment; no raw
+  noise in the mainline.
+- Userspace mishaps: boot to `/bin/sh`, `help` lists what's there.
+
+## 5. Branches and commits
+
+- Small, single-purpose commits; message style mirrors the existing history.
+- Drop third-party code in verbatim (no format-forcing, so diffing against
+  upstream stays possible).
+- Big changes: open an issue stating the problem and the chosen approach first.
+- No artifacts in version control: `build/*src`, `build/alpine-root*` and the
+  like re-resolve/rebuild; only kernel manifests, module lists and sysroot
+  fixes belong in a diff.
+
+## 6. Licensing
+
+By submitting code you agree it is published under the project's GPL-2.0 license.
+Patches touching third-party trees must note the upstream source and license,
+and the `NOTICE` file needs the matching entry.

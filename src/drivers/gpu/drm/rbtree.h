@@ -46,10 +46,7 @@ typedef int (*rb_less_fn)(const rb_node_t *a, const rb_node_t *b);
 /* Recompute one node's summary after the tree moved its children. */
 typedef void (*rb_augment_fn)(rb_node_t *node, void *data);
 
-#define RB_ROOT_INIT \
-    {                \
-        NULL, NULL   \
-    }
+#define RB_ROOT_INIT {NULL, NULL}
 
 /* Recover the object that owns a tree node: @ptr is an rb_node_t member
  * called @member inside @type. */
@@ -62,7 +59,8 @@ void rb_init_root(rb_root_t *root);
  * Place @node in @root.  @less decides where it belongs and @augment (may
  * be NULL) refreshes summaries along the way.
  */
-void rb_insert_augmented(rb_root_t *root, rb_node_t *node, rb_less_fn less, rb_augment_fn augment, void *data);
+void rb_insert_augmented(rb_root_t *root, rb_node_t *node, rb_less_fn less, rb_augment_fn augment,
+                         void *data);
 
 /*
  * Take @node out of @root.  @node must be in the tree; afterwards no tree

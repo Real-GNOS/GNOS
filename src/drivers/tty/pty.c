@@ -34,32 +34,32 @@
 #include "vfs.h"
 #include "sysnum.h"
 
-#define PTY_MAX    16
-#define PTY_RING   4096
-#define PTY_LINE   4096              /* canonical line buffer */
+#define PTY_MAX  16
+#define PTY_RING 4096
+#define PTY_LINE 4096 /* canonical line buffer */
 
 typedef struct {
-    int       used;
-    int       index;
-    int       slave_registered;      /* /dev/pts/N is in the dev table */
-    int       slave_open;            /* an fd holds the slave end */
-    int       master_open;
+    int used;
+    int index;
+    int slave_registered; /* /dev/pts/N is in the dev table */
+    int slave_open;       /* an fd holds the slave end */
+    int master_open;
 
     /* master -> slave: the input stream (what the shell reads). */
-    uint8_t  *to_slave;
-    uint32_t  sh, st, scount;
+    uint8_t *to_slave;
+    uint32_t sh, st, scount;
     /* slave -> master: the output stream (what the emulator paints). */
-    uint8_t  *to_master;
-    uint32_t  mh, mt, mcount;
+    uint8_t *to_master;
+    uint32_t mh, mt, mcount;
 
-    char      line[PTY_LINE];        /* canonical assembly buffer */
+    char      line[PTY_LINE]; /* canonical assembly buffer */
     uint32_t  line_len;
-    int       eof_pending;           /* ^D: next slave read returns 0 once */
-    int       stopped;               /* IXON: ^S seen, output held */
-    int       pktmode;               /* TIOCPKT on this master */
-    int       excl;                  /* TIOCEXCL: no second master open */
-    int       fg_pgid;               /* foreground process group */
-    int       session;               /* session id of the controlling side */
+    int       eof_pending; /* ^D: next slave read returns 0 once */
+    int       stopped;     /* IXON: ^S seen, output held */
+    int       pktmode;     /* TIOCPKT on this master */
+    int       excl;        /* TIOCEXCL: no second master open */
+    int       fg_pgid;     /* foreground process group */
+    int       session;     /* session id of the controlling side */
     termios_t tio;
     winsize_t ws;
 } pty_t;
@@ -68,20 +68,19 @@ static pty_t g_pty[PTY_MAX];
 
 /* ---- rings -------------------------------------------------------------- */
 
-static void ring_put(uint8_t *ring, uint32_t cap, uint32_t *head, uint32_t *count,
-                     uint8_t b)
+static void ring_put(uint8_t *ring, uint32_t cap, uint32_t *head, uint32_t *count, uint8_t b)
 {
     if (*count == cap)
         return;
     ring[*head] = b;
-    *head = (*head + 1) % cap;
+    *head       = (*head + 1) % cap;
     (*count)++;
 }
 
 static uint8_t ring_get(uint8_t *ring, uint32_t cap, uint32_t *tail, uint32_t *count)
 {
     uint8_t b = ring[*tail];
-    *tail = (*tail + 1) % cap;
+    *tail     = (*tail + 1) % cap;
     (*count)--;
     return b;
 }
@@ -119,8 +118,7 @@ static void echo_char(pty_t *p, uint8_t c)
     if (!(p->tio.c_lflag & ECHO))
         return;
 
-    if ((p->tio.c_lflag & ECHOCTL) && c < 0x20 &&
-        c != '\n' && c != '\r' && c != '\t') {
+    if ((p->tio.c_lflag & ECHOCTL) && c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
         pty_out(p, '^');
         pty_out(p, (char)(c + '@'));
         return;
@@ -168,8 +166,7 @@ static void pty_output(pty_t *p, const char *buf, uint32_t len)
 static void line_deliver(pty_t *p)
 {
     for (uint32_t i = 0; i < p->line_len; i++)
-        ring_put(p->to_slave, PTY_RING, &p->sh, &p->scount,
-                 (uint8_t)p->line[i]);
+        ring_put(p->to_slave, PTY_RING, &p->sh, &p->scount, (uint8_t)p->line[i]);
     p->line_len = 0;
 }
 
@@ -191,15 +188,18 @@ static void pty_input(pty_t *p, uint8_t c)
     /* ISIG: the keys that generate signals go to the foreground group. */
     if (p->tio.c_lflag & ISIG) {
         int sig = 0;
-        if (c == p->tio.c_cc[VINTR])      sig = SIGINT;
-        else if (c == p->tio.c_cc[VQUIT]) sig = SIGQUIT;
-        else if (c == p->tio.c_cc[VSUSP]) sig = SIGTSTP;
+        if (c == p->tio.c_cc[VINTR])
+            sig = SIGINT;
+        else if (c == p->tio.c_cc[VQUIT])
+            sig = SIGQUIT;
+        else if (c == p->tio.c_cc[VSUSP])
+            sig = SIGTSTP;
 
         if (sig) {
             echo_char(p, c);
             if (p->tio.c_lflag & ECHO)
                 pty_out(p, '\n');
-            p->line_len = 0;            /* the half-typed line is gone */
+            p->line_len = 0; /* the half-typed line is gone */
             if (p->fg_pgid)
                 proc_signal_group(p->fg_pgid, sig);
             pty_wake();
@@ -235,9 +235,9 @@ static void pty_input(pty_t *p, uint8_t c)
     /* ---- canonical: assemble a line ------------------------------------- */
     if (c == p->tio.c_cc[VEOF]) {
         if (p->line_len)
-            line_deliver(p);           /* deliver the partial line first */
+            line_deliver(p); /* deliver the partial line first */
         else
-            p->eof_pending = 1;        /* a bare ^D reads as EOF */
+            p->eof_pending = 1; /* a bare ^D reads as EOF */
         pty_wake();
         return;
     }
@@ -306,7 +306,7 @@ static int32_t pty_master_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t 
     }
 
     uint32_t nout = 0;
-    uint8_t *dst = (uint8_t *)buf;
+    uint8_t *dst  = (uint8_t *)buf;
     /* Packet mode: one status byte in front of every read. */
     if (p->pktmode && len > 1) {
         dst[nout++] = TIOCPKT_DATA;
@@ -318,8 +318,7 @@ static int32_t pty_master_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t 
     return (int32_t)nout;
 }
 
-static int32_t pty_master_write(vfs_node_t *n, uint64_t off, const void *buf,
-                                uint32_t len)
+static int32_t pty_master_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)off;
     pty_t *p = (pty_t *)n->priv;
@@ -401,7 +400,7 @@ static int pty_common_ioctl(pty_t *p, uint64_t cmd, uint64_t arg)
         if (what == TCIFLUSH || what == TCIOFLUSH) {
             p->scount = 0;
             p->sh = p->st = 0;
-            p->line_len = 0;
+            p->line_len   = 0;
         }
         if (what == TCOFLUSH || what == TCIOFLUSH) {
             p->mcount = 0;
@@ -421,14 +420,14 @@ static int32_t pty_master_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         return -E_BADF;
 
     switch (cmd) {
-    case TIOCGPTN:                     /* int: the pts index */
+    case TIOCGPTN: /* int: the pts index */
         if (!user_ptr_ok(arg, 4))
             return -E_FAULT;
         *(int32_t *)(uintptr_t)arg = p->index;
         return 0;
-    case TIOCSPTLCK:                   /* unlock: accepted, locks unsupported */
+    case TIOCSPTLCK: /* unlock: accepted, locks unsupported */
         return 0;
-    case FIONREAD:                     /* bytes ready for the next read */
+    case FIONREAD: /* bytes ready for the next read */
         if (!user_ptr_ok(arg, 4))
             return -E_FAULT;
         *(int32_t *)(uintptr_t)arg = (int32_t)p->mcount;
@@ -446,7 +445,7 @@ static int32_t pty_master_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         memcpy(&p->tio, (const void *)(uintptr_t)arg, sizeof(p->tio));
         if (cmd == TCSETSF) {
             p->line_len = 0;
-            p->scount = 0;
+            p->scount   = 0;
             p->sh = p->st = 0;
         }
         return 0;
@@ -510,15 +509,14 @@ static int32_t pty_slave_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t l
     }
 
     uint32_t nout = 0;
-    uint8_t *dst = (uint8_t *)buf;
+    uint8_t *dst  = (uint8_t *)buf;
     while (nout < len && p->scount)
         dst[nout++] = ring_get(p->to_slave, PTY_RING, &p->st, &p->scount);
     asm volatile("sti");
     return (int32_t)nout;
 }
 
-static int32_t pty_slave_write(vfs_node_t *n, uint64_t off, const void *buf,
-                               uint32_t len)
+static int32_t pty_slave_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)off;
     pty_t *p = (pty_t *)n->priv;
@@ -569,11 +567,11 @@ static int32_t pty_slave_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         memcpy(&p->tio, (const void *)(uintptr_t)arg, sizeof(p->tio));
         if (cmd == TCSETSF) {
             p->line_len = 0;
-            p->scount = 0;
+            p->scount   = 0;
             p->sh = p->st = 0;
         }
         return 0;
-    case TIOCSCTTY:                    /* become my controlling terminal */
+    case TIOCSCTTY: /* become my controlling terminal */
         if (me) {
             p->session = me->sid;
             p->fg_pgid = me->pgid;
@@ -591,7 +589,7 @@ static int32_t pty_slave_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
             return -E_FAULT;
         *(int32_t *)(uintptr_t)arg = (int32_t)p->scount;
         return 0;
-    case TIOCSTI:                      /* push a byte back as input */
+    case TIOCSTI: /* push a byte back as input */
         pty_input(p, (uint8_t)arg);
         pty_wake();
         return 0;
@@ -651,8 +649,8 @@ static void pty_pair_release(pty_t *p)
     kfree(p->to_slave);
     kfree(p->to_master);
     p->to_slave = p->to_master = NULL;
-    p->used = 0;
-    p->index = -1;
+    p->used                    = 0;
+    p->index                   = -1;
     pty_wake();
 }
 
@@ -752,21 +750,21 @@ int pty_reattach_master(vfs_node_t *n)
      * the local side, ICRNL|IXON|OPOST on the I/O sides, ^C/^\/^D/^U/^Z
      * control characters, VMIN=1/VTIME=0. */
     memset(&p->tio, 0, sizeof(p->tio));
-    p->tio.c_iflag = ICRNL | IXON;
-    p->tio.c_oflag = OPOST | ONLCR;
-    p->tio.c_cflag = 0x004B;                       /* CS8 | CREAD */
-    p->tio.c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE;
-    p->tio.c_line  = 0;
-    p->tio.c_cc[VINTR]  = 0x03;                    /* ^C */
-    p->tio.c_cc[VQUIT]  = 0x1C;                    /* ^\ */
-    p->tio.c_cc[VERASE] = 0x7F;                    /* DEL */
-    p->tio.c_cc[VKILL]  = 0x15;                    /* ^U */
-    p->tio.c_cc[VEOF]   = 0x04;                    /* ^D */
+    p->tio.c_iflag      = ICRNL | IXON;
+    p->tio.c_oflag      = OPOST | ONLCR;
+    p->tio.c_cflag      = 0x004B; /* CS8 | CREAD */
+    p->tio.c_lflag      = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE;
+    p->tio.c_line       = 0;
+    p->tio.c_cc[VINTR]  = 0x03; /* ^C */
+    p->tio.c_cc[VQUIT]  = 0x1C; /* ^\ */
+    p->tio.c_cc[VERASE] = 0x7F; /* DEL */
+    p->tio.c_cc[VKILL]  = 0x15; /* ^U */
+    p->tio.c_cc[VEOF]   = 0x04; /* ^D */
     p->tio.c_cc[VTIME]  = 0;
     p->tio.c_cc[VMIN]   = 1;
-    p->tio.c_cc[VSTART] = 0x11;                    /* ^Q */
-    p->tio.c_cc[VSTOP]  = 0x13;                    /* ^S */
-    p->tio.c_cc[VSUSP]  = 0x1A;                    /* ^Z */
+    p->tio.c_cc[VSTART] = 0x11; /* ^Q */
+    p->tio.c_cc[VSTOP]  = 0x13; /* ^S */
+    p->tio.c_cc[VSUSP]  = 0x1A; /* ^Z */
 
     p->ws.ws_row = 25;
     p->ws.ws_col = 80;
@@ -775,8 +773,7 @@ int pty_reattach_master(vfs_node_t *n)
      * pair pointer in its own (per-open) node. */
     char name[16];
     pts_name(name, sizeof(name), p->index);
-    if (vfs_register_devnum(name, &pty_slave_ops, p, 136,
-                            (uint32_t)p->index) != 0) {
+    if (vfs_register_devnum(name, &pty_slave_ops, p, 136, (uint32_t)p->index) != 0) {
         kfree(p->to_slave);
         kfree(p->to_master);
         p->used = 0;

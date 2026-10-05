@@ -10,13 +10,13 @@
 #include "module_elf.h"
 #include "vfs.h"
 
-#define ELF64_EI_MAG0 0
-#define ELF64_EI_CLASS 4
-#define ELF64_EI_DATA 5
-#define ELF64_EI_VERSION 6
-#define ELF64_ELFCLASS64 2
+#define ELF64_EI_MAG0     0
+#define ELF64_EI_CLASS    4
+#define ELF64_EI_DATA     5
+#define ELF64_EI_VERSION  6
+#define ELF64_ELFCLASS64  2
 #define ELF64_ELFDATA2LSB 1
-#define ELF64_EV_CURRENT 1
+#define ELF64_EV_CURRENT  1
 
 /* R_X86_64_* relocation types the relocatable-object linker emits. */
 #define R_X86_64_NONE   0
@@ -53,19 +53,17 @@ int module_elf_validate(const void *image, size_t size, module_elf_view_t *view)
         header->e_ident[2] != 'L' || header->e_ident[3] != 'F' ||
         header->e_ident[ELF64_EI_CLASS] != ELF64_ELFCLASS64 ||
         header->e_ident[ELF64_EI_DATA] != ELF64_ELFDATA2LSB ||
-        header->e_ident[ELF64_EI_VERSION] != ELF64_EV_CURRENT ||
-        header->e_type != ELF64_ET_REL ||
-        header->e_machine != ELF64_EM_X86_64 ||
-        header->e_version != ELF64_EV_CURRENT ||
-        header->e_ehsize != sizeof(elf64_ehdr_t) ||
-        header->e_shentsize != sizeof(elf64_shdr_t))
+        header->e_ident[ELF64_EI_VERSION] != ELF64_EV_CURRENT || header->e_type != ELF64_ET_REL ||
+        header->e_machine != ELF64_EM_X86_64 || header->e_version != ELF64_EV_CURRENT ||
+        header->e_ehsize != sizeof(elf64_ehdr_t) || header->e_shentsize != sizeof(elf64_shdr_t))
         return -E_NOEXEC;
 
     if (!header->e_shoff || !range_valid(header->e_shoff, sizeof(elf64_shdr_t), size))
         return -E_NOEXEC;
     const elf64_shdr_t *sections = (const elf64_shdr_t *)((const uint8_t *)image + header->e_shoff);
-    size_t count = header->e_shnum ? header->e_shnum : sections[0].sh_size;
-    size_t names = header->e_shstrndx == ELF64_SHN_XINDEX ? sections[0].sh_link : header->e_shstrndx;
+    size_t              count    = header->e_shnum ? header->e_shnum : sections[0].sh_size;
+    size_t              names =
+        header->e_shstrndx == ELF64_SHN_XINDEX ? sections[0].sh_link : header->e_shstrndx;
     if (!count || count > 0xffff ||
         !range_valid(header->e_shoff, count * sizeof(elf64_shdr_t), size))
         return -E_NOEXEC;
@@ -80,14 +78,12 @@ int module_elf_validate(const void *image, size_t size, module_elf_view_t *view)
             !range_valid(section->sh_offset, section->sh_size, size))
             return -E_NOEXEC;
         if (section->sh_type == ELF64_SHT_SYMTAB &&
-            (section->sh_entsize != sizeof(elf64_sym_t) ||
-             section->sh_link >= count ||
+            (section->sh_entsize != sizeof(elf64_sym_t) || section->sh_link >= count ||
              section->sh_size % sizeof(elf64_sym_t)))
             return -E_NOEXEC;
         if (section->sh_type == ELF64_SHT_RELA &&
-            (section->sh_entsize != sizeof(elf64_rela_t) ||
-             section->sh_link >= count || section->sh_info >= count ||
-             section->sh_size % sizeof(elf64_rela_t)))
+            (section->sh_entsize != sizeof(elf64_rela_t) || section->sh_link >= count ||
+             section->sh_info >= count || section->sh_size % sizeof(elf64_rela_t)))
             return -E_NOEXEC;
     }
     if (names != ELF64_SHN_UNDEF && sections[names].sh_type != ELF64_SHT_STRTAB)
@@ -135,19 +131,16 @@ static int store_unsigned(void *location, __int128 value, unsigned int bits)
     return 0;
 }
 
-int module_elf_apply_relocation(uint32_t type, void *location,
-                                uint64_t symbol_value, int64_t addend,
-                                uintptr_t place)
+int module_elf_apply_relocation(uint32_t type, void *location, uint64_t symbol_value,
+                                int64_t addend, uintptr_t place)
 {
     if (!location)
         return -E_INVAL;
     /* Symbol addresses live in the upper half of the canonical range, so
      * reinterpret them as signed 64-bit: an absolute reference to such an
      * address must be stored as a sign-extended 32-bit word. */
-    __int128 absolute =
-        (__int128)(int64_t)symbol_value + (__int128)addend;
-    __int128 relative =
-        absolute - (__int128)(int64_t)place;
+    __int128 absolute = (__int128)(int64_t)symbol_value + (__int128)addend;
+    __int128 relative = absolute - (__int128)(int64_t)place;
 
     switch (type) {
     case R_X86_64_NONE:

@@ -22,10 +22,7 @@ static long syscall3(long nr, long a, long b, long c)
 static long syscall1(long nr, long a)
 {
     long ret;
-    asm volatile("int $0x80"
-                 : "=a"(ret)
-                 : "a"(nr), "D"(a)
-                 : "memory", "rcx", "r11");
+    asm volatile("int $0x80" : "=a"(ret) : "a"(nr), "D"(a) : "memory", "rcx", "r11");
     return ret;
 }
 
@@ -51,9 +48,18 @@ int sys_open(const char *path, int flags)
     return (int)syscall3(SYS_open, (long)path, flags, 0);
 }
 
-int sys_close(int fd)          { return (int)syscall3(SYS_close, fd, 0, 0); }
-int sys_dup(int fd)            { return (int)syscall3(SYS_dup, fd, 0, 0); }
-int sys_dup2(int o, int n)     { return (int)syscall3(SYS_dup2, o, n, 0); }
+int sys_close(int fd)
+{
+    return (int)syscall3(SYS_close, fd, 0, 0);
+}
+int sys_dup(int fd)
+{
+    return (int)syscall3(SYS_dup, fd, 0, 0);
+}
+int sys_dup2(int o, int n)
+{
+    return (int)syscall3(SYS_dup2, o, n, 0);
+}
 
 long sys_lseek(int fd, long off, int whence)
 {
@@ -65,13 +71,31 @@ int sys_stat(const char *path, gstat_t *st)
     return (int)syscall3(SYS_gstat, (long)path, (long)st, 0);
 }
 
-int mkdir(const char *path)    { return (int)syscall3(SYS_mkdir, (long)path, 0, 0); }
-int unlink(const char *path)   { return (int)syscall3(SYS_unlink, (long)path, 0, 0); }
-int pipe(int fds[2])           { return (int)syscall3(SYS_pipe, (long)fds, 0, 0); }
+int mkdir(const char *path)
+{
+    return (int)syscall3(SYS_mkdir, (long)path, 0, 0);
+}
+int unlink(const char *path)
+{
+    return (int)syscall3(SYS_unlink, (long)path, 0, 0);
+}
+int pipe(int fds[2])
+{
+    return (int)syscall3(SYS_pipe, (long)fds, 0, 0);
+}
 
-int getpid(void)               { return (int)syscall3(SYS_getpid, 0, 0, 0); }
-int getppid(void)              { return (int)syscall3(SYS_getppid, 0, 0, 0); }
-int fork(void)                 { return (int)syscall3(SYS_fork, 0, 0, 0); }
+int getpid(void)
+{
+    return (int)syscall3(SYS_getpid, 0, 0, 0);
+}
+int getppid(void)
+{
+    return (int)syscall3(SYS_getppid, 0, 0, 0);
+}
+int fork(void)
+{
+    return (int)syscall3(SYS_fork, 0, 0, 0);
+}
 
 int execv(const char *path, char *const argv[])
 {
@@ -86,7 +110,8 @@ int execve(const char *path, char *const argv[], char *const envp[])
 void exit(int status)
 {
     syscall3(SYS_exit, status, 0, 0);
-    for (;;) { }                       /* the kernel never lets us get here */
+    for (;;) {
+    } /* the kernel never lets us get here */
 }
 
 int waitpid(int pid, int *status, int options)
@@ -94,12 +119,27 @@ int waitpid(int pid, int *status, int options)
     return (int)syscall3(SYS_wait4, pid, (long)status, options);
 }
 
-int kill(int pid, int sig)     { return (int)syscall3(SYS_kill, pid, sig, 0); }
-int signal(int sig, int disp)  { return (int)syscall3(SYS_signal, sig, disp, 0); }
+int kill(int pid, int sig)
+{
+    return (int)syscall3(SYS_kill, pid, sig, 0);
+}
+int signal(int sig, int disp)
+{
+    return (int)syscall3(SYS_signal, sig, disp, 0);
+}
 
-int setpgid(int pid, int pgid) { return (int)syscall3(SYS_setpgid, pid, pgid, 0); }
-int getpgid(int pid)           { return (int)syscall3(SYS_getpgid, pid, 0, 0); }
-void sched_yield(void)         { syscall3(SYS_sched_yield, 0, 0, 0); }
+int setpgid(int pid, int pgid)
+{
+    return (int)syscall3(SYS_setpgid, pid, pgid, 0);
+}
+int getpgid(int pid)
+{
+    return (int)syscall3(SYS_getpgid, pid, 0, 0);
+}
+void sched_yield(void)
+{
+    syscall3(SYS_sched_yield, 0, 0, 0);
+}
 
 int ioctl(int fd, unsigned long req, void *arg)
 {
@@ -120,7 +160,7 @@ int tcsetpgrp(int fd, int pgid)
 int tcgetpgrp(int fd)
 {
     int pgid = 0;
-    int r = ioctl(fd, TIOCGPGRP, &pgid);
+    int r    = ioctl(fd, TIOCGPGRP, &pgid);
     return r < 0 ? r : pgid;
 }
 
@@ -197,7 +237,7 @@ void *memset(void *dst, int c, size_t n)
 
 void *memcpy(void *dst, const void *src, size_t n)
 {
-    unsigned char *d = dst;
+    unsigned char       *d = dst;
     const unsigned char *s = src;
     while (n--)
         *d++ = *s++;
@@ -226,7 +266,7 @@ const char *abspath(const char *name, char *buf, int cap)
     if (!name || name[0] == '/')
         return name;
 
-    int n = 0;
+    int n    = 0;
     buf[n++] = '/';
     while (*name && n < cap - 1)
         buf[n++] = *name++;
@@ -243,11 +283,11 @@ void puts_fd(int fd, const char *s)
 void putn_fd(int fd, long v)
 {
     char tmp[24], out[24];
-    int i = 0, n = 0;
+    int  i = 0, n = 0;
 
     if (v < 0) {
         out[n++] = '-';
-        v = -v;
+        v        = -v;
     }
     if (v == 0)
         tmp[i++] = '0';
@@ -261,5 +301,11 @@ void putn_fd(int fd, long v)
     sys_write(fd, out, n);
 }
 
-void print(const char *s)  { puts_fd(1, s); }
-void printn(long v)        { putn_fd(1, v); }
+void print(const char *s)
+{
+    puts_fd(1, s);
+}
+void printn(long v)
+{
+    putn_fd(1, v);
+}

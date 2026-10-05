@@ -32,29 +32,29 @@
 
 #include <stdint.h>
 
-#define EXT2_SUPER_OFF     1024      /* the superblock never moves */
-#define EXT2_MAGIC         0xEF53
-#define EXT2_ROOT_INO      2
-#define EXT2_GOOD_OLD_ISIZE 128      /* rev 0 has no s_inode_size field */
-#define EXT2_NAME_MAX      64        /* what we report, not what we match */
+#define EXT2_SUPER_OFF      1024 /* the superblock never moves */
+#define EXT2_MAGIC          0xEF53
+#define EXT2_ROOT_INO       2
+#define EXT2_GOOD_OLD_ISIZE 128 /* rev 0 has no s_inode_size field */
+#define EXT2_NAME_MAX       64  /* what we report, not what we match */
 
 /* i_mode type bits */
-#define EXT2_S_IFMT        0xF000
-#define EXT2_S_IFREG       0x8000
-#define EXT2_S_IFDIR       0x4000
-#define EXT2_S_IFLNK       0xA000
+#define EXT2_S_IFMT  0xF000
+#define EXT2_S_IFREG 0x8000
+#define EXT2_S_IFDIR 0x4000
+#define EXT2_S_IFLNK 0xA000
 
 /* directory entry file_type values (the `filetype` feature) */
-#define EXT2_FT_REG        1
-#define EXT2_FT_DIR        2
-#define EXT2_FT_SYMLINK    7
+#define EXT2_FT_REG     1
+#define EXT2_FT_DIR     2
+#define EXT2_FT_SYMLINK 7
 
 /* i_block[] layout: 12 direct, then one of each indirect level */
-#define EXT2_NDIR_BLOCKS   12
-#define EXT2_IND_BLOCK     12
-#define EXT2_DIND_BLOCK    13
-#define EXT2_TIND_BLOCK    14
-#define EXT2_N_BLOCKS      15
+#define EXT2_NDIR_BLOCKS 12
+#define EXT2_IND_BLOCK   12
+#define EXT2_DIND_BLOCK  13
+#define EXT2_TIND_BLOCK  14
+#define EXT2_N_BLOCKS    15
 
 /*
  * The only incompatible feature we can cope with.  FILETYPE merely says the
@@ -64,15 +64,15 @@
 #define EXT2_FEATURE_INCOMPAT_FILETYPE 0x0002
 
 /* Failure codes from the mutating calls; the VFS maps them onto errno. */
-#define EXT2_OK          0
-#define EXT2_ENOENT     (-1)
-#define EXT2_EEXIST     (-2)
-#define EXT2_ENOSPC     (-3)
-#define EXT2_ENOTDIR    (-4)
-#define EXT2_ENOTEMPTY  (-5)
-#define EXT2_EINVAL     (-6)
-#define EXT2_EISDIR     (-7)
-#define EXT2_EROFS      (-8)
+#define EXT2_OK        0
+#define EXT2_ENOENT    (-1)
+#define EXT2_EEXIST    (-2)
+#define EXT2_ENOSPC    (-3)
+#define EXT2_ENOTDIR   (-4)
+#define EXT2_ENOTEMPTY (-5)
+#define EXT2_EINVAL    (-6)
+#define EXT2_EISDIR    (-7)
+#define EXT2_EROFS     (-8)
 
 /*
  * Block cache geometry for disk mode.  The cache is a fixed array of
@@ -81,8 +81,8 @@
  * eight simultaneously-borrowed blocks -- and each borrow pins its slot, so
  * a live pointer can never be evicted out from under its user.
  */
-#define EXT2_CACHE_SLOTS   16
-#define EXT2_MAX_BLOCK     4096
+#define EXT2_CACHE_SLOTS 16
+#define EXT2_MAX_BLOCK   4096
 
 /*
  * EXT4 features this driver reads.  EXTENTS moves file block maps into a
@@ -92,16 +92,16 @@
  * three are tolerated; files with extent trees are read-only, ext2-style
  * indirect files remain fully read-write either way.
  */
-#define EXT4_FEATURE_INCOMPAT_EXTENTS  0x0040
-#define EXT4_FEATURE_INCOMPAT_64BIT    0x0080
-#define EXT4_FEATURE_INCOMPAT_MMP      0x0100
-#define EXT4_FEATURE_INCOMPAT_FLEX_BG  0x0200
-#define EXT4_FEATURE_INCOMPAT_INLINE   0x8000
-#define EXT4_EXTENTS_FL                0x00080000   /* i_flags */
+#define EXT4_FEATURE_INCOMPAT_EXTENTS 0x0040
+#define EXT4_FEATURE_INCOMPAT_64BIT   0x0080
+#define EXT4_FEATURE_INCOMPAT_MMP     0x0100
+#define EXT4_FEATURE_INCOMPAT_FLEX_BG 0x0200
+#define EXT4_FEATURE_INCOMPAT_INLINE  0x8000
+#define EXT4_EXTENTS_FL               0x00080000 /* i_flags */
 
 /* i_size_high sits at byte 108 -- the directory-ACL slot on rev-0 ext2,
  * repurposed by ext4 (and rev-1 ext2/3 with HUGE_FILE) for regular files. */
-#define I_SIZE_HIGH         108
+#define I_SIZE_HIGH 108
 
 /*
  * Raw block I/O for disk mode.  `ctx` is whatever the caller passed to
@@ -112,7 +112,7 @@
 typedef struct {
     int32_t (*read)(void *ctx, uint64_t off, void *buf, uint32_t len);
     int32_t (*write)(void *ctx, uint64_t off, const void *buf, uint32_t len);
-    void    *ctx;
+    void *ctx;
 } ext2_blkio_t;
 
 typedef struct {
@@ -124,24 +124,24 @@ typedef struct {
 
     /* Block cache (disk mode only): one whole block per slot. */
     uint8_t  cache_data[EXT2_CACHE_SLOTS][EXT2_MAX_BLOCK];
-    uint32_t cache_blk[EXT2_CACHE_SLOTS];     /* 0xFFFFFFFF = free */
-    uint8_t  cache_borrow[EXT2_CACHE_SLOTS];  /* borrowed slots are never evicted */
-    uint32_t cache_tick;                      /* LRU clock */
+    uint32_t cache_blk[EXT2_CACHE_SLOTS];    /* 0xFFFFFFFF = free */
+    uint8_t  cache_borrow[EXT2_CACHE_SLOTS]; /* borrowed slots are never evicted */
+    uint32_t cache_tick;                     /* LRU clock */
     uint32_t cache_age[EXT2_CACHE_SLOTS];
 
     uint32_t block_size;
     uint32_t inodes_count;
     uint32_t blocks_count;
-    uint32_t first_data_block;   /* 1 when block_size == 1024, else 0 */
+    uint32_t first_data_block; /* 1 when block_size == 1024, else 0 */
     uint32_t blocks_per_group;
     uint32_t inodes_per_group;
     uint32_t inode_size;
-    uint32_t first_ino;          /* first inode a file may use (11 on rev 1) */
+    uint32_t first_ino; /* first inode a file may use (11 on rev 1) */
     uint32_t group_count;
-    uint32_t gdt_off;            /* byte offset of the group descriptor table */
+    uint32_t gdt_off; /* byte offset of the group descriptor table */
 
-    uint32_t alloc_hint;         /* block number the last search stopped at */
-    int      has_filetype;       /* directory entries carry a type byte */
+    uint32_t alloc_hint;   /* block number the last search stopped at */
+    int      has_filetype; /* directory entries carry a type byte */
 
     /* EXT4 geometry.  desc_size is 32 on ext2/3 and 64 on 64-bit ext4
      * volumes; has_extents marks a volume whose files may use extent
@@ -164,12 +164,12 @@ typedef struct {
  * step as the file grows.
  */
 typedef struct {
-    char     name[EXT2_NAME_MAX];  /* leaf name, NUL-terminated */
-    uint32_t ino;                  /* 0 means "no such entry" */
+    char     name[EXT2_NAME_MAX]; /* leaf name, NUL-terminated */
+    uint32_t ino;                 /* 0 means "no such entry" */
     uint32_t size;
-    uint16_t mode;                 /* i_mode, so EXT2_S_IFDIR & co. apply */
-    uint16_t uid;                  /* i_uid  — owning user  */
-    uint16_t gid;                  /* i_gid  — owning group */
+    uint16_t mode; /* i_mode, so EXT2_S_IFDIR & co. apply */
+    uint16_t uid;  /* i_uid  — owning user  */
+    uint16_t gid;  /* i_gid  — owning group */
 } ext2_dirent_t;
 
 /* Directory cursor: a byte offset into the directory's own data stream. */
@@ -207,22 +207,19 @@ uint32_t ext2_parent_ino(ext2_fs_t *fs, uint32_t ino);
 /* Resolve an absolute path such as "/init.elf".  Case sensitive, as ext2 is.
  * When `follow_final` is set, a symlink at the very end of the path is
  * followed; when clear, the symlink inode itself is returned (lstat/readlink). */
-int ext2_lookup(ext2_fs_t *fs, const char *path, ext2_dirent_t *out,
-                int follow_final);
+int ext2_lookup(ext2_fs_t *fs, const char *path, ext2_dirent_t *out, int follow_final);
 
 /* True when the entry names a directory. */
 int ext2_is_dir(const ext2_dirent_t *ent);
 
 /* Copy up to `len` bytes from `off`.  Returns the number of bytes copied. */
-uint32_t ext2_read(ext2_fs_t *fs, const ext2_dirent_t *ent,
-                   uint32_t off, void *buf, uint32_t len);
+uint32_t ext2_read(ext2_fs_t *fs, const ext2_dirent_t *ent, uint32_t off, void *buf, uint32_t len);
 
 /* ---- the mutating half ------------------------------------------------ */
 
 /* Store `len` bytes at `off`, allocating blocks and growing i_size as needed.
  * `ent->size` is updated to match the inode.  Returns bytes stored. */
-uint32_t ext2_write(ext2_fs_t *fs, ext2_dirent_t *ent,
-                    uint32_t off, const void *buf, uint32_t len);
+uint32_t ext2_write(ext2_fs_t *fs, ext2_dirent_t *ent, uint32_t off, const void *buf, uint32_t len);
 
 /* Create an empty regular file, or a directory complete with "." and "..". */
 int ext2_create(ext2_fs_t *fs, const char *path, int isdir, ext2_dirent_t *out);
@@ -251,8 +248,7 @@ int ext2_truncate(ext2_fs_t *fs, ext2_dirent_t *ent);
 int ext2_setsize(ext2_fs_t *fs, ext2_dirent_t *ent, uint64_t len);
 
 /* Live block/inode counters for statfs(2). */
-void ext2_usage(ext2_fs_t *fs, uint64_t *blocks, uint64_t *bfree,
-                uint64_t *files, uint64_t *ffree);
+void ext2_usage(ext2_fs_t *fs, uint64_t *blocks, uint64_t *bfree, uint64_t *files, uint64_t *ffree);
 
 /* Replace the permission bits (low 12) of an inode; the type bits survive. */
 int ext2_chmod(ext2_fs_t *fs, ext2_dirent_t *ent, uint16_t mode);

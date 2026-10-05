@@ -1,0 +1,8 @@
+{
+  "name": "Cocokalo",
+  "short_name": "Cocokalo",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#b388ff"
+}

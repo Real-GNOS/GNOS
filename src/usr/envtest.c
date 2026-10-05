@@ -2,7 +2,8 @@
 #include "ulib.h"
 int main(int argc, char **argv, char **envp)
 {
-    (void)argc; (void)argv;
+    (void)argc;
+    (void)argv;
     int n = 0;
     for (; envp && envp[n]; n++) {
         print("ENV[");

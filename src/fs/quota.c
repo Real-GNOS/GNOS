@@ -18,18 +18,18 @@
 #include "proc.h"
 
 /* include/uapi/linux/quota.h */
-#define Q_SYNC          0x800001
-#define Q_QUOTAON       0x800002
-#define Q_QUOTAOFF      0x800003
-#define Q_GETFMT        0x800004
-#define Q_GETINFO       0x800005
-#define Q_SETINFO       0x800006
-#define Q_GETQUOTA      0x800007
-#define Q_SETQUOTA      0x800008
-#define Q_GETNEXTQUOTA  0x800009
+#define Q_SYNC         0x800001
+#define Q_QUOTAON      0x800002
+#define Q_QUOTAOFF     0x800003
+#define Q_GETFMT       0x800004
+#define Q_GETINFO      0x800005
+#define Q_SETINFO      0x800006
+#define Q_GETQUOTA     0x800007
+#define Q_SETQUOTA     0x800008
+#define Q_GETNEXTQUOTA 0x800009
 
-#define SUBCMDSHIFT     8
-#define SUBCMDMASK      0x00ff
+#define SUBCMDSHIFT 8
+#define SUBCMDMASK  0x00ff
 
 enum { USRQUOTA = 0, GRPQUOTA = 1, PRJQUOTA = 2 };
 
@@ -38,13 +38,14 @@ enum { USRQUOTA = 0, GRPQUOTA = 1, PRJQUOTA = 2 };
  * register); taking it as 32 bits is what makes the encoding decode. */
 int64_t sys_quotactl_fd(uint64_t fd, uint32_t cmd, uint64_t id, uint64_t addr)
 {
-    (void)id; (void)addr;
+    (void)id;
+    (void)addr;
 
     /* The descriptor must be open: quotactl_fd acts on its filesystem. */
     if (fd_handle((int)fd) < 0)
         return -E_BADF;
 
-    uint32_t sub = (uint32_t)(cmd >> SUBCMDSHIFT);
+    uint32_t sub  = (uint32_t)(cmd >> SUBCMDSHIFT);
     uint32_t type = (uint32_t)(cmd & SUBCMDMASK);
 
     switch (sub) {
@@ -59,10 +60,10 @@ int64_t sys_quotactl_fd(uint64_t fd, uint32_t cmd, uint64_t id, uint64_t addr)
     case Q_GETNEXTQUOTA:
         break;
     default:
-        return -E_INVAL;             /* not a quota subcommand */
+        return -E_INVAL; /* not a quota subcommand */
     }
     if (type > PRJQUOTA)
-        return -E_INVAL;             /* not user/group/project */
+        return -E_INVAL; /* not user/group/project */
 
     /* No quota operations on this filesystem -- Linux's own answer when a
      * superblock has none.  Refusing is better than answering Q_GETQUOTA

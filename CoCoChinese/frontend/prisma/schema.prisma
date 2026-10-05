@@ -1,0 +1,254 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Carousel {
+  id           Int      @id @default(autoincrement())
+  imageUrl     String?  @map("image_url")
+  link         String?  @map("link")
+  title        String?  @map("title")
+  author       String?  @map("author")
+  authorImg    String?  @map("author_img")
+  watchVolue   String   @default("0") @map("watch_volue")
+  likeVolue    String   @default("0") @map("like_volue")
+  introduction String?  @map("introduction")
+  videoTime    String?  @map("video_time")
+  description  String?  @map("description")
+  order        Int      @default(0) @map("order")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("carousels")
+}
+
+model MediaFile {
+  id        Int      @id @default(autoincrement())
+  fileId    String?  @unique @map("file_id")
+  filePath  String   @map("file_path")
+  name      String?  @map("name")
+  fileType  String?  @map("file_type")
+  fileSize  BigInt?  @map("file_size")
+  fileHash  String?  @map("file_hash")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("media_files")
+}
+
+model User {
+  id          Int             @id @default(autoincrement())
+  slug        String?         @unique
+  username    String          @unique
+  password    String
+  email       String?         @unique
+  role        String          @default("user")
+  avatarUrl   String?         @map("avatar_url")
+  displayName String          @default("") @map("display_name")
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @default(now()) @map("updated_at")
+
+  profile     UserProfile?
+  bans        UserBan[]
+  operBans    UserBan[]       @relation("operator")
+  activities  Activity[]
+  comments    Comment[]
+  danmaku     Danmaku[]
+  favorites   Favorite[]
+  folders     FavoriteFolder[]
+  history     WatchHistory[]
+  sentMsgs    Message[]       @relation("from_user")
+  receivedMsgs Message[]      @relation("to_user")
+
+  @@map("users")
+}
+
+model Video {
+  id          Int        @id @default(autoincrement())
+  slug        String?    @unique
+  title       String
+  description String?
+  author      String?
+  authorImg   String?    @map("author_img")
+  imageUrl    String?    @map("image_url")
+  videoUrl    String?    @map("video_url")
+  videoUrlHls String?    @default("") @map("video_url_hls")
+  videoUrl360p String?   @default("") @map("video_url_360p")
+  videoUrl720p String?   @default("") @map("video_url_720p")
+  videoUrl1080p String?  @default("") @map("video_url_1080p")
+  videoType   String?    @map("video_type")
+  videoTime   String?    @map("video_time")
+  watchVolue  String     @default("0") @map("watch_volue")
+  likeVolue   String     @default("0") @map("like_volue")
+  watchPeople String     @default("0") @map("watch_people")
+  recommend   String?    @map("recommend")
+  introduction String?   @map("introduction")
+  category    String?    @map("category")
+  tags        String[]
+  order       Int        @default(0) @map("order")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @default(now()) @map("updated_at")
+
+  comments   Comment[]
+  danmaku    Danmaku[]
+  favorites  Favorite[]
+  histories  WatchHistory[]
+
+  @@map("videos")
+}
+
+model Category {
+  id        Int         @id @default(autoincrement())
+  name      String
+  icon      String?
+  order     Int         @default(0) @map("order")
+  parentId  Int?        @map("parent_id")
+  parent    Category?   @relation("CategoryToParent", fields: [parentId], references: [id])
+  children  Category[]  @relation("CategoryToParent")
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  @@map("categories")
+}
+
+model UserProfile {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique @map("user_id")
+  bio       String   @default("")
+  gender    String   @default("")
+  birthday  DateTime? @map("birthday") @db.Date
+  location  String   @default("") @map("location")
+  website   String   @default("")
+  followers Int      @default(0)
+  following Int      @default(0) @map("following")
+  likes     Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+model FavoriteFolder {
+  id          Int        @id @default(autoincrement())
+  userId      Int        @map("user_id")
+  name        String
+  description String     @default("")
+  isPublic    Boolean    @default(true) @map("is_public")
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items  Favorite[]
+
+  @@map("favorite_folders")
+}
+
+model Favorite {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  folderId  Int?     @map("folder_id")
+  videoId   Int      @map("video_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user   User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folder FavoriteFolder? @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  video  Video           @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@map("favorites")
+}
+
+model WatchHistory {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  videoId   Int      @map("video_id")
+  progress  Float    @default(0)
+  watchedAt DateTime @default(now()) @map("watched_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@map("watch_history")
+}
+
+model Message {
+  id         Int      @id @default(autoincrement())
+  fromUserId Int      @map("from_user_id")
+  toUserId   Int      @map("to_user_id")
+  content    String
+  isRead     Boolean  @default(false) @map("is_read")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  from User @relation("from_user", fields: [fromUserId], references: [id], onDelete: Cascade)
+  to   User @relation("to_user", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@map("messages")
+}
+
+model Activity {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  type      String
+  targetId  Int?     @map("target_id")
+  content   String   @default("")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("activities")
+}
+
+model Comment {
+  id        Int       @id @default(autoincrement())
+  videoSlug String    @map("video_slug")
+  userId    Int       @map("user_id")
+  username  String
+  avatarUrl String?   @map("avatar_url")
+  content   String
+  parentId  Int?      @map("parent_id")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  video    Video     @relation(fields: [videoSlug], references: [slug], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent   Comment?  @relation("CommentToParent", fields: [parentId], references: [id], onDelete: Cascade)
+  replies  Comment[] @relation("CommentToParent")
+
+  @@map("comments")
+}
+
+model Danmaku {
+  id        Int      @id @default(autoincrement())
+  videoSlug String   @map("video_slug")
+  userId    Int?     @map("user_id")
+  username  String   @default("匿名")
+  content   String
+  time      Float
+  type      String   @default("scroll")
+  color     String   @default("#ffffff")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  video Video @relation(fields: [videoSlug], references: [slug], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("danmaku")
+}
+
+model UserBan {
+  id         Int       @id @default(autoincrement())
+  userId     Int       @map("user_id")
+  operatorId Int       @map("operator_id")
+  type       String    @default("ban")
+  reason     String
+  duration   Int?
+  expiresAt  DateTime? @map("expires_at")
+  isActive   Boolean   @default(true) @map("is_active")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @default(now()) @map("updated_at")
+
+  user     User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  operator User @relation("operator", fields: [operatorId], references: [id], onDelete: SetNull)
+
+  @@map("user_bans")
+}

@@ -8,22 +8,22 @@
 /* ptrace(2) request numbers, Linux UAPI values.  These are a stable ABI --
  * glibc and musl both hand them through raw -- so they are hardcoded rather
  * than derived from anything. */
-#define PTRACE_TRACEME    0
-#define PTRACE_PEEKTEXT   1
-#define PTRACE_PEEKDATA   2
-#define PTRACE_PEEKUSR    3
-#define PTRACE_POKETEXT   4
-#define PTRACE_POKEDATA   5
-#define PTRACE_POKEUSR    6
-#define PTRACE_CONT       7
-#define PTRACE_KILL       8
-#define PTRACE_SINGLESTEP 9
-#define PTRACE_GETREGS    12
-#define PTRACE_SETREGS    13
-#define PTRACE_ATTACH     16
-#define PTRACE_DETACH     17
-#define PTRACE_SYSCALL    24
-#define PTRACE_SETOPTIONS 0x4200
+#define PTRACE_TRACEME     0
+#define PTRACE_PEEKTEXT    1
+#define PTRACE_PEEKDATA    2
+#define PTRACE_PEEKUSR     3
+#define PTRACE_POKETEXT    4
+#define PTRACE_POKEDATA    5
+#define PTRACE_POKEUSR     6
+#define PTRACE_CONT        7
+#define PTRACE_KILL        8
+#define PTRACE_SINGLESTEP  9
+#define PTRACE_GETREGS     12
+#define PTRACE_SETREGS     13
+#define PTRACE_ATTACH      16
+#define PTRACE_DETACH      17
+#define PTRACE_SYSCALL     24
+#define PTRACE_SETOPTIONS  0x4200
 #define PTRACE_GETEVENTMSG 0x4201
 #define PTRACE_GETSIGINFO  0x4202
 #define PTRACE_SETSIGINFO  0x4203
@@ -53,7 +53,7 @@ typedef struct {
 } ptrace_user_regs_t;
 
 /* The kernel-side face of ptrace(2). */
-int  sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data);
+int sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data);
 
 /* Hooked into syscall_handler(): a tracee in PTRACE_RUN_SYSCALL mode stops
  * once before the call dispatches (the tracer sees the original register

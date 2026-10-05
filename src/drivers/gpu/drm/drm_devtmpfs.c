@@ -21,10 +21,10 @@
  */
 #include "drm_devtmpfs.h"
 #include "kstring.h"
-#include "drm_device.h"     /* drm_open */
-#include "drm_init.h"       /* drm_get_singleton */
+#include "drm_device.h" /* drm_open */
+#include "drm_init.h"   /* drm_get_singleton */
 
-extern uint64_t g_hhdm;    /* HHDM offset, defined in kernel.c */
+extern uint64_t g_hhdm; /* HHDM offset, defined in kernel.c */
 
 /* GNOS's VFS has no per-open callbacks, so the ported per-open drm_file
  * cannot be created on open().  Keep one lazily-initialised file for the
@@ -78,14 +78,13 @@ static int32_t drm_bridge_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     return ops->file_ioctl(ops->ctx, fp, 0, (size_t)cmd, (void *)(uintptr_t)arg);
 }
 
-static int drm_bridge_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys,
-                           uint64_t *size)
+static int drm_bridge_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys, uint64_t *size)
 {
-    tmpfs_device_ops_t *ops = (tmpfs_device_ops_t *)n->priv;
-    struct drm_file    *fp  = drm_get_file();
-    struct vm_area      fake_vma = {0};   /* GNOS has no VMAs; Uinxed's
-                                             mmap callback wants one anyway */
-    void               *p;
+    tmpfs_device_ops_t *ops      = (tmpfs_device_ops_t *)n->priv;
+    struct drm_file    *fp       = drm_get_file();
+    struct vm_area      fake_vma = {0}; /* GNOS has no VMAs; Uinxed's
+                                           mmap callback wants one anyway */
+    void *p;
 
     dbg_puts("DRMBRIDGE: n=");
     dbg_puts_hex((uint64_t)(uintptr_t)n);
@@ -110,23 +109,21 @@ static int drm_bridge_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys,
         return -E_INVAL;
     /* p is a kernel-virtual (HHDM) pointer to the backing memory; sys_mmap
      * needs the *physical* address to build the user PTEs, so convert it. */
-    *phys = ((uint64_t)(uintptr_t)p >= g_hhdm)
-                ? (uint64_t)(uintptr_t)p - g_hhdm
-                : (uint64_t)(uintptr_t)p;
+    *phys = ((uint64_t)(uintptr_t)p >= g_hhdm) ? (uint64_t)(uintptr_t)p - g_hhdm
+                                               : (uint64_t)(uintptr_t)p;
     if (size) {
         /* Report the real GEM buffer size so sys_mmap() maps the whole
          * span; returning 0 would clamp the request to zero and leave the
          * mapping with no PTEs (user write -> page fault). */
         struct drm_gem_object *obj = drm_gem_object_lookup_by_offset(fp, offset);
-        *size = obj ? obj->size : 0;
+        *size                      = obj ? obj->size : 0;
         if (obj)
             drm_gem_object_put(obj);
     }
     return 0;
 }
 
-static int32_t drm_bridge_read(vfs_node_t *n, uint64_t off, void *buf,
-                               uint32_t len)
+static int32_t drm_bridge_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     tmpfs_device_ops_t *ops = (tmpfs_device_ops_t *)n->priv;
     struct drm_file    *fp  = drm_get_file();
@@ -139,12 +136,10 @@ static int32_t drm_bridge_read(vfs_node_t *n, uint64_t off, void *buf,
      * span at 4000 iterations a second. */
     if (!fp)
         return -E_NOMEM;
-    return (int32_t)ops->file_read(ops->ctx, fp, 0, buf, (size_t)off,
-                                   (size_t)len);
+    return (int32_t)ops->file_read(ops->ctx, fp, 0, buf, (size_t)off, (size_t)len);
 }
 
-static int32_t drm_bridge_write(vfs_node_t *n, uint64_t off, const void *buf,
-                                uint32_t len)
+static int32_t drm_bridge_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     tmpfs_device_ops_t *ops = (tmpfs_device_ops_t *)n->priv;
     struct drm_file    *fp  = drm_get_file();
@@ -153,8 +148,7 @@ static int32_t drm_bridge_write(vfs_node_t *n, uint64_t off, const void *buf,
         return 0;
     if (!fp)
         return -E_NOMEM;
-    return (int32_t)ops->file_write(ops->ctx, fp, 0, buf, (size_t)off,
-                                    (size_t)len);
+    return (int32_t)ops->file_write(ops->ctx, fp, 0, buf, (size_t)off, (size_t)len);
 }
 
 static int drm_bridge_poll(vfs_node_t *n, int16_t events, int16_t *revents)
@@ -164,7 +158,9 @@ static int drm_bridge_poll(vfs_node_t *n, int16_t events, int16_t *revents)
     int                 mask;
 
     if (!ops || !ops->file_poll || !fp) {
-        if (revents) { *revents = 0; }
+        if (revents) {
+            *revents = 0;
+        }
         return 0;
     }
     mask = ops->file_poll(ops->ctx, fp, 0, (size_t)events);
@@ -172,13 +168,14 @@ static int drm_bridge_poll(vfs_node_t *n, int16_t events, int16_t *revents)
      * POLLOUT=0x4.  revents must carry the READY bits, not the requested
      * ones -- reporting the requested mask unconditionally (the old
      * behaviour) made every epoll wait succeed instantly. */
-    if (revents) { *revents = (int16_t)(mask & ((int)events & (POLLIN | POLLOUT))); }
+    if (revents) {
+        *revents = (int16_t)(mask & ((int)events & (POLLIN | POLLOUT)));
+    }
     return 0;
 }
 
-int devtmpfs_register_char_device(const char *path, uint64_t devt,
-                                  uint64_t devt2, int file_stream_flags,
-                                  tmpfs_device_ops_t *ops)
+int devtmpfs_register_char_device(const char *path, uint64_t devt, uint64_t devt2,
+                                  int file_stream_flags, tmpfs_device_ops_t *ops)
 {
     static const vfs_ops_t g_drm_ops = {
         .ioctl = drm_bridge_ioctl,
@@ -187,7 +184,7 @@ int devtmpfs_register_char_device(const char *path, uint64_t devt,
         .write = drm_bridge_write,
         .poll  = drm_bridge_poll,
     };
-    char name[64];
+    char     name[64];
     uint32_t maj = (uint32_t)((devt >> 8) & 0xfff);
     uint32_t min = (uint32_t)((devt & 0xff) | ((devt >> 12) & 0xfffff00));
 

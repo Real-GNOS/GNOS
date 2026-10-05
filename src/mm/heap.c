@@ -24,22 +24,22 @@
 #include "debugcon.h"
 #include "panic.h"
 
-#define KHEAP_HDR_MAGIC  0x4B484452534Au   /* "KHDR"-ish, sanity tag */
-#define KHEAP_MIN_BLOCK  48                /* smallest block we will split off */
+#define KHEAP_HDR_MAGIC 0x4B484452534Au /* "KHDR"-ish, sanity tag */
+#define KHEAP_MIN_BLOCK 48              /* smallest block we will split off */
 #define KHEAP_ALIGN     16u
 
 typedef struct kheap_hdr {
-    uint64_t size;        /* total block size (header + payload + footer) */
-    uint64_t free;        /* 1 = free, 0 = used */
-    uint32_t magic;       /* every initialised header carries KHEAP_MAGIC */
-    uint32_t _pad;
+    uint64_t          size;  /* total block size (header + payload + footer) */
+    uint64_t          free;  /* 1 = free, 0 = used */
+    uint32_t          magic; /* every initialised header carries KHEAP_MAGIC */
+    uint32_t          _pad;
     struct kheap_hdr *prev;
     struct kheap_hdr *next;
 } kheap_hdr_t;
 
-#define KHEAP_MAGIC   0x4B484541u   /* "KHEA" */
-#define HDR_SIZE    (sizeof(kheap_hdr_t))   /* 40 bytes on LP64 */
-#define FOOT_SIZE   8u                       /* footer holds the size only */
+#define KHEAP_MAGIC 0x4B484541u           /* "KHEA" */
+#define HDR_SIZE    (sizeof(kheap_hdr_t)) /* 40 bytes on LP64 */
+#define FOOT_SIZE   8u                    /* footer holds the size only */
 
 /* Read/write the footer of the block that starts at `h`. */
 static uint64_t *footer_of(kheap_hdr_t *h)
@@ -62,9 +62,9 @@ static kheap_hdr_t *block_after(kheap_hdr_t *h)
  * the 8 bytes just before this header's start; we read that inline in kfree()
  * rather than through a helper. */
 
-static uint8_t      *g_base;
-static uint64_t      g_size;
-static kheap_hdr_t  *g_free_head;   /* head of the doubly-linked free list */
+static uint8_t     *g_base;
+static uint64_t     g_size;
+static kheap_hdr_t *g_free_head; /* head of the doubly-linked free list */
 
 static uint64_t align_up(uint64_t v, uint64_t a)
 {
@@ -98,11 +98,11 @@ void kheap_init(void)
 {
     /* 16 MiB to start; fall back to smaller sizes if contiguous RAM is tight.
      * The heap is fixed-size and does not grow. */
-    static const uint64_t tries[] = { 16, 8, 4, 2, 1 };
-    uint64_t chosen = 0;
+    static const uint64_t tries[] = {16, 8, 4, 2, 1};
+    uint64_t              chosen  = 0;
     for (uint64_t i = 0; i < sizeof(tries) / sizeof(tries[0]); i++) {
         uint64_t frames = tries[i] * 1024 * 1024 / PAGE_SIZE;
-        uint64_t phys = pmm_alloc_contiguous(frames);
+        uint64_t phys   = pmm_alloc_contiguous(frames);
         if (phys) {
             g_base = (uint8_t *)pmm_virt(phys);
             g_size = frames * PAGE_SIZE;
@@ -118,16 +118,16 @@ void kheap_init(void)
     /* One free block spanning the whole region, bounded by a permanent
      * sentinel at the very end so forward coalescing never runs off. */
     kheap_hdr_t *b = (kheap_hdr_t *)g_base;
-    b->size  = g_size - HDR_SIZE - FOOT_SIZE;
-    b->free  = 1;
-    b->magic = KHEAP_MAGIC;
-    b->prev  = NULL;
-    b->next  = NULL;
+    b->size        = g_size - HDR_SIZE - FOOT_SIZE;
+    b->free        = 1;
+    b->magic       = KHEAP_MAGIC;
+    b->prev        = NULL;
+    b->next        = NULL;
     set_footer(b);
 
     kheap_hdr_t *sentinel = (kheap_hdr_t *)(g_base + g_size - HDR_SIZE);
-    sentinel->size = 0;        /* size 0 marks "end of heap" */
-    sentinel->free = 0;
+    sentinel->size        = 0; /* size 0 marks "end of heap" */
+    sentinel->free        = 0;
     sentinel->prev = sentinel->next = NULL;
 
     g_free_head = b;
@@ -165,11 +165,11 @@ void *kmalloc(size_t size)
             /* Split: keep `need` for the allocation, carve the remainder as a
              * fresh free block right after it. */
             kheap_hdr_t *rest = (kheap_hdr_t *)((uint8_t *)b + need);
-            rest->size  = b->size - need;
-            rest->free  = 1;
-            rest->magic = KHEAP_MAGIC;
-            rest->prev  = NULL;
-            rest->next  = NULL;
+            rest->size        = b->size - need;
+            rest->free        = 1;
+            rest->magic       = KHEAP_MAGIC;
+            rest->prev        = NULL;
+            rest->next        = NULL;
             set_footer(rest);
             free_link(rest);
 
@@ -197,8 +197,8 @@ void *krealloc(void *p, size_t size)
         return NULL;
     }
 
-    kheap_hdr_t *b  = (kheap_hdr_t *)((uint8_t *)p - HDR_SIZE);
-    uint64_t oldpay = b->size - HDR_SIZE - FOOT_SIZE;
+    kheap_hdr_t *b      = (kheap_hdr_t *)((uint8_t *)p - HDR_SIZE);
+    uint64_t     oldpay = b->size - HDR_SIZE - FOOT_SIZE;
 
     void *np = kmalloc(size);
     if (!np)
@@ -215,8 +215,7 @@ void kfree(void *p)
         return;
 
     kheap_hdr_t *b = (kheap_hdr_t *)((uint8_t *)p - HDR_SIZE);
-    if (b->magic != KHEAP_MAGIC || b->free ||
-        b->size < KHEAP_MIN_BLOCK ||
+    if (b->magic != KHEAP_MAGIC || b->free || b->size < KHEAP_MIN_BLOCK ||
         (uint8_t *)b + b->size > g_base + g_size) {
         dbg_puts("KHEAP: bad free at ");
         dbg_puts_hex((uint64_t)(uintptr_t)p);
@@ -230,11 +229,10 @@ void kfree(void *p)
 
     /* Coalesce forward: merge with the next block if it is free and inside
      * the heap region. */
-    kheap_hdr_t *after = block_after(b);
-    uintptr_t after_end = (uintptr_t)after + HDR_SIZE;
-    if ((uintptr_t)after >= (uintptr_t)g_base + g_size ||
-        after_end > (uintptr_t)g_base + g_size) {
-        after = NULL;   /* sentinel / out of region */
+    kheap_hdr_t *after     = block_after(b);
+    uintptr_t    after_end = (uintptr_t)after + HDR_SIZE;
+    if ((uintptr_t)after >= (uintptr_t)g_base + g_size || after_end > (uintptr_t)g_base + g_size) {
+        after = NULL; /* sentinel / out of region */
     }
     if (after && after->free) {
         free_unlink(after);
@@ -243,8 +241,8 @@ void kfree(void *p)
 
     /* Coalesce backward: merge with the previous block if it is free. */
     if ((uintptr_t)b > (uintptr_t)g_base) {
-        uint64_t prev_size = *(uint64_t *)((uint8_t *)b - FOOT_SIZE);
-        kheap_hdr_t *before = (kheap_hdr_t *)((uint8_t *)b - prev_size);
+        uint64_t     prev_size = *(uint64_t *)((uint8_t *)b - FOOT_SIZE);
+        kheap_hdr_t *before    = (kheap_hdr_t *)((uint8_t *)b - prev_size);
         if (before >= (kheap_hdr_t *)(void *)g_base && before->free) {
             free_unlink(before);
             before->size += b->size;
@@ -273,15 +271,14 @@ void kheap_self_test(void)
 {
     dbg_puts("KHEAP: self-test ... ");
 
-    void *a = kmalloc(100);
-    void *b = kmalloc(200);
-    void *c = kmalloc(50);
+    void     *a  = kmalloc(100);
+    void     *b  = kmalloc(200);
+    void     *c  = kmalloc(50);
     uintptr_t pa = (uintptr_t)a, pb = (uintptr_t)b, pc = (uintptr_t)c;
-    int ok = (a && b && c);
+    int       ok = (a && b && c);
     /* No two live allocations may overlap. */
     if (ok) {
-        ok = (pa + 100 <= pb) && (pb + 200 <= pc) &&
-             (pa != pb) && (pb != pc) && (pa != pc);
+        ok = (pa + 100 <= pb) && (pb + 200 <= pc) && (pa != pb) && (pb != pc) && (pa != pc);
     }
     /* Writes must not fault and must stick. */
     if (ok) {
@@ -294,19 +291,20 @@ void kheap_self_test(void)
     if (ok) {
         kfree(b);
         void *d = kmalloc(150);
-        ok = (d != NULL);
+        ok      = (d != NULL);
         if (ok) {
             uintptr_t pd = (uintptr_t)d;
-            ok = (pd + 150 <= pc) && (pd != pa) && (pd != pc);
+            ok           = (pd + 150 <= pc) && (pd != pa) && (pd != pc);
             memset(d, 0xEF, 150);
             ok = ok && (*(uint8_t *)d == 0xEF);
         }
     }
     /* Free everything; the region should be usable again. */
     if (ok) {
-        kfree(a); kfree(c);
+        kfree(a);
+        kfree(c);
         void *e = kmalloc(64);
-        ok = (e != NULL);
+        ok      = (e != NULL);
         if (e)
             kfree(e);
     }
@@ -317,16 +315,19 @@ void kheap_self_test(void)
      * subsystem started allocating in earnest. */
     if (ok) {
         enum { CHURN = 300 };
-        static void *slots[CHURN];
+        static void    *slots[CHURN];
         static uint32_t lens[CHURN];
-        unsigned live = 0;
-        uint32_t seed = 0x1234567;
+        unsigned        live = 0;
+        uint32_t        seed = 0x1234567;
         for (int round = 0; round < 3 && ok; round++) {
             for (int i = 0; i < CHURN && ok; i++) {
-                seed = seed * 1103515245u + 12345u;
+                seed         = seed * 1103515245u + 12345u;
                 uint32_t len = 24 + (seed >> 16) % 512;
-                slots[i] = kmalloc(len);
-                if (!slots[i]) { ok = 0; break; }
+                slots[i]     = kmalloc(len);
+                if (!slots[i]) {
+                    ok = 0;
+                    break;
+                }
                 lens[i] = len;
                 memset(slots[i], (uint8_t)(i & 0xFF), len);
                 live++;
@@ -334,7 +335,10 @@ void kheap_self_test(void)
             for (int i = 0; i < CHURN && ok; i++) {
                 uint8_t *q = slots[i];
                 for (uint32_t j = 0; j < lens[i]; j++)
-                    if (q[j] != (uint8_t)(i & 0xFF)) { ok = 0; break; }
+                    if (q[j] != (uint8_t)(i & 0xFF)) {
+                        ok = 0;
+                        break;
+                    }
                 kfree(slots[i]);
                 slots[i] = NULL;
                 live--;

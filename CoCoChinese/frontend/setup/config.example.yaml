@@ -1,0 +1,114 @@
+# Cocokalo 配置示例
+# 复制此文件为 config.yaml 并修改配置
+
+app:
+  name: "Cocokalo"
+  debug: false
+  port: 3000
+  host: "0.0.0.0"
+  secret: "your-jwt-secret-here"
+  site_url: "http://localhost:3000"
+
+database:
+  type: "postgresql"
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  password: "123"
+  name: "cocokalo"
+
+redis:
+  host: "localhost"
+  port: 6379
+  password: ""
+
+features:
+  registration: true
+  danmaku: true
+  comments: true
+  forums: true
+  live: false
+  recommendations: true
+  oauth: false
+
+oauth:
+  google:
+    enabled: false
+    client_id: ""
+    client_secret: ""
+  discord:
+    enabled: false
+    client_id: ""
+    client_secret: ""
+  github:
+    enabled: false
+    client_id: ""
+    client_secret: ""
+
+payment:
+  provider: "stripe"  # stripe | lemon_squeezy | paypal
+  stripe:
+    secret_key: ""
+    webhook_secret: ""
+    price_monthly: "price_monthly_id"
+    price_yearly: "price_yearly_id"
+  lemon_squeezy:
+    store_id: ""
+    api_key: ""
+  paypal:
+    client_id: ""
+    client_secret: ""
+
+email:
+  provider: "smtp"  # smtp | sendgrid | resend
+  smtp:
+    host: "smtp.gmail.com"
+    port: 587
+    user: ""
+    password: ""
+    from: "noreply@cocokalo.com"
+  sendgrid:
+    api_key: ""
+
+storage:
+  type: "local"  # local | s3 | r2
+  local_path: "./storage"
+  s3:
+    bucket: ""
+    region: ""
+    access_key: ""
+    secret_key: ""
+    endpoint: ""
+
+cdn:
+  enabled: false
+  url: ""
+  provider: "cloudflare"  # cloudflare | bunny | custom
+
+encoding:
+  ffmpeg_path: "/usr/bin/ffmpeg"
+  ffprobe_path: "/usr/bin/ffprobe"
+  hls_enabled: true
+  qualities:
+    - "360p"
+    - "720p"
+    - "1080p"
+
+pwa:
+  enabled: true
+  app_name: "Cocokalo"
+  app_short_name: "Cocokalo"
+  theme_color: "#0078d4"
+  background_color: "#faf9f8"
+
+ratelimit:
+  enabled: true
+  window: 60
+  max_requests: 100
+
+i18n:
+  default: "zh-CN"
+  languages:
+    - "zh-CN"
+    - "en-US"
+    - "ja-JP"

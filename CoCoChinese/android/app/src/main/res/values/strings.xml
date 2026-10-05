@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cocokalo</string>
+    <string name="splash_tagline">Anime 精彩无限</string>
+    <string name="error_title">加载失败</string>
+    <string name="error_desc">网络连接异常，请检查网络后重试</string>
+    <string name="retry">重新加载</string>
+    <string name="base_url">https://cocokalo.app</string>
+</resources>

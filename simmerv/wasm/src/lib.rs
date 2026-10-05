@@ -1,0 +1,400 @@
+use simmerv::Emulator;
+use simmerv::buffered_serial_backend::BufferedSerialBackend;
+use std::collections::HashMap;
+use wasm_bindgen::prelude::*;
+
+const WASM_MEMORY_SIZE: usize = 512 * 1024 * 1024;
+
+/// `WasmRiscv` is an interface between user JavaScript code and
+/// WebAssembly RISC-V emulator. The following code is example
+/// JavaScript user code.
+///
+/// ```ignore
+/// // JavaScript code
+/// const riscv = WasmRiscv.new();
+/// // Setup program content binary
+/// riscv.load_image(new Uint8Array(elfBuffer));
+/// // Setup filesystem content binary
+/// riscv.setup_filesystem(new Uint8Array(fsBuffer));
+///
+/// // Emulator needs to break program regularly to handle input/output
+/// // because the emulator is currenlty designed to run in a single thread.
+/// // Once `SharedArrayBuffer` lands by default in major browsers
+/// // we would run input/output handler in another thread.
+/// const runCycles = () => {
+///   // Run 0x100000 (or certain) cycles, handle input/out,
+///   // and fire next cycles.
+///   // Note: Evety instruction is completed in a cycle.
+///   setTimeout(runCycles, 0);
+///   riscv.run_cycles(0x100000);
+///
+///   // Output handling
+///   while (true) {
+///     const data = riscv.get_output();
+///     if (data !== 0) {
+///       // print data
+///     } else {
+///       break;
+///     }
+///   }
+///
+///   // Input handling. Assuming inputs holds
+///   // input ascii data.
+///   while (inputs.length > 0) {
+///     riscv.put_input(inputs.shift());
+///   }
+/// };
+/// runCycles();
+/// ```
+#[wasm_bindgen]
+pub struct WasmRiscv {
+    emulator: Emulator,
+    /// Set by `setup_streamed_filesystem`; shared with the block device.
+    streamed: Option<simmerv::device::streamed_disk::StreamedHandle>,
+}
+
+#[wasm_bindgen]
+impl WasmRiscv {
+    /// Creates a new `WasmRiscv`.
+    #[allow(clippy::new_without_default)] // #[wasm_bindgen] trait impls are not supported
+    pub fn new() -> Self { Self::with_memory(0) }
+
+    /// A machine with `mb` megabytes of guest RAM, or the default if `mb` is 0.
+    ///
+    /// Worth choosing deliberately in a browser: a snapshot save and a restore
+    /// each transiently need about twice the guest RAM, and mobile Safari kills
+    /// a tab that asks for too much -- while wasm linear memory, once grown,
+    /// never shrinks back.
+    #[must_use]
+    pub fn with_memory(mb: u32) -> Self {
+        let bytes = if mb == 0 {
+            WASM_MEMORY_SIZE
+        } else {
+            (mb as usize).clamp(64, 4096) * 1024 * 1024
+        };
+        WasmRiscv {
+            streamed: None,
+            emulator: Emulator::new(
+                Box::new(BufferedSerialBackend::new()),
+                bytes,
+                simmerv::uop_cache::DEFAULT_UOP_ENTRIES,
+                simmerv::uop_cache::CacheMode::Skew,
+            ),
+        }
+    }
+
+    /// Sets up program run by the program. This method is expected to be called
+    /// only once.
+    ///
+    /// # Arguments
+    /// * `content` Program binary
+    pub fn load_image(&mut self, content: Vec<u8>) {
+        let startpc = self
+            .emulator
+            .load_image(
+                "unknown in WASM",
+                &content,
+                Some(0x80000000),
+                &mut std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+        self.emulator.cpu.update_pc(startpc);
+    }
+
+    /// Sets up filesystem. Use this method if program (e.g. Linux) uses
+    /// filesystem. This method is expected to be called up to only once.
+    ///
+    /// # Arguments
+    /// * `content` File system content binary
+    pub fn setup_filesystem(&mut self, content: Vec<u8>) {
+        self.emulator.setup_filesystem(content);
+    }
+
+    /// Sets up device tree. The emulator has default device tree configuration.
+    /// If you want to override it, use this method. This method is expected to
+    /// to be called up to only once.
+    ///
+    /// # Arguments
+    /// * `content` DTB content binary
+    pub fn setup_dtb(&mut self, content: Vec<u8>) { self.emulator.setup_dtb(&content).unwrap(); }
+
+    /// Loads an initial ramdisk (a cpio archive) and points the device tree at
+    /// it.
+    ///
+    /// The ramdisk is placed in RAM below the device tree, page-aligned, and
+    /// `linux,initrd-start` / `linux,initrd-end` are inserted into the tree's
+    /// `/chosen` node so the kernel finds it. Nothing else has to be arranged:
+    /// there is no address to choose and no device tree to hand-write.
+    ///
+    /// This replaces a pair of calls -- `setup_dtb` with a tree that had the
+    /// two properties baked in, and `load_blob_at` with the matching address --
+    /// which had to agree with each other and with the tree's builder. The tree
+    /// in force is whichever is already loaded, so call this *after*
+    /// `setup_dtb` if you are supplying a tree of your own.
+    ///
+    /// Panics if the tree already defines those properties, naming which one:
+    /// that tree is stating where its own ramdisk lives, and contradicting it
+    /// silently would leave the two disagreeing. Also panics if the ramdisk
+    /// does not fit in RAM, or would land on an already-loaded image.
+    ///
+    /// # Arguments
+    /// * `content` The cpio archive
+    pub fn setup_initrd(&mut self, content: Vec<u8>) {
+        self.emulator.setup_initrd(&content).unwrap();
+    }
+
+    /// Attaches a disk whose blocks JavaScript fetches on demand.
+    ///
+    /// Use instead of [`Self::setup_filesystem`] when the image is too large
+    /// to download up front. The emulator never blocks on a fetch: a read of
+    /// an absent block is deferred and retried, so the guest just sees a slow
+    /// disk. Drive it from the run loop:
+    ///
+    /// ```ignore
+    /// riscv.setup_streamed_filesystem(totalBytes, 65536);
+    /// // ...after each run_cycles():
+    /// for (const b of riscv.take_wanted_blocks()) {
+    ///   const lo = b * 65536, hi = Math.min(lo + 65535, totalBytes - 1);
+    ///   fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } })
+    ///     .then(r => r.arrayBuffer())
+    ///     .then(a => riscv.provide_block(b, new Uint8Array(a)));
+    /// }
+    /// ```
+    ///
+    /// # Arguments
+    /// * `total_bytes` Size of the base image (from a HEAD request)
+    /// * `block_size` Fetch granularity in bytes
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn setup_streamed_filesystem(&mut self, total_bytes: f64, block_size: u32) {
+        self.streamed = Some(
+            self.emulator
+                .setup_filesystem_streamed(total_bytes as u64, u64::from(block_size)),
+        );
+    }
+
+    /// Blocks the disk is waiting for, as block indices. Each is reported
+    /// once, so a block already being fetched is not requested again.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn take_wanted_blocks(&mut self) -> Vec<u32> {
+        self.streamed.as_ref().map_or_else(Vec::new, |s| {
+            s.borrow_mut()
+                .take_wanted()
+                .into_iter()
+                .map(|b| b as u32)
+                .collect()
+        })
+    }
+
+    /// Hands a fetched block to the disk. The deferred read completes on the
+    /// next `run_cycles`.
+    pub fn provide_block(&mut self, index: u32, bytes: Vec<u8>) {
+        if let Some(s) = &self.streamed {
+            s.borrow_mut().provide(u64::from(index), bytes);
+        }
+    }
+
+    /// Instructions retired so far.
+    ///
+    /// Exposed so the page can report MIPS: divide the delta by wall-clock
+    /// elapsed on the JS side. Returned as `f64` because JS numbers are
+    /// doubles -- exact up to 2^53, far beyond anything a browser session
+    /// will retire.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn instructions_retired(&self) -> f64 { self.emulator.cpu.cycle as f64 }
+
+    /// Bytes of wasm linear memory currently reserved by this module.
+    ///
+    /// The number a browser actually kills a tab over, and not otherwise
+    /// visible: it only ever grows, so it records the high-water mark of every
+    /// allocation the emulator has made, including the transient ones during a
+    /// snapshot save or restore.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn heap_bytes(&self) -> f64 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            (core::arch::wasm32::memory_size(0) as f64) * 65536.0
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            0.0
+        }
+    }
+
+    /// The whole machine as a byte string: RAM, CPU and device state, brotli
+    /// compressed. Empty if the snapshot could not be produced.
+    ///
+    /// A streamed base image is deliberately *not* included -- it lives at the
+    /// URL it is fetched from -- so a snapshot is only valid against the same
+    /// image, and restoring re-fetches blocks on demand.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<u8> { self.emulator.snapshot_bytes().unwrap_or_default() }
+
+    /// Restores a snapshot taken by `snapshot()`. Returns `false` if the data
+    /// is not a valid snapshot, leaving the machine untouched.
+    ///
+    /// Set the streamed filesystem up *before* calling this: the restore keeps
+    /// whatever storage the disk already has, and that is how the base image
+    /// gets re-attached.
+    pub fn restore(&mut self, data: Vec<u8>) -> bool { self.emulator.load_snapshot(&data).is_ok() }
+
+    /// Runs program set by `load_image()`. The emulator won't stop forever
+    /// unless [`riscv-tests`](https://github.com/riscv/riscv-tests) programs.
+    /// The emulator stops if program is `riscv-tests` program and it finishes.
+    pub fn run(&mut self) { self.emulator.run(false); }
+
+    /// Runs program set by `load_image()` in `cycles` cycles.
+    ///
+    /// One "cycle" is 40 retired instructions, which is what this ran per
+    /// iteration when it was a plain `for` loop over `tick(40)`.  The budget is
+    /// unchanged; it is just spent in far fewer, larger ticks.
+    ///
+    /// `tick(n)` services devices, compares `stimecmp` and polls for interrupts
+    /// once per call, so `n` sets how often that happens.  At 40 it happened 15
+    /// times more often than the CLI's 600, which measured 148.5 vs 169.1 MIPS
+    /// natively on a Debian boot — a 14% tax for latency nobody can observe
+    /// (600 instructions is a few microseconds).
+    ///
+    /// In a browser it is worse than 14%.  Each `tick` reads the wall clock
+    /// twice, and in wasm a reading is three JS calls through wasm-bindgen (see
+    /// `CLOCK_SAMPLE_INTERVAL` in `device/clint.rs`, which caches 64 of them).
+    /// At `tick(40)` a real reading landed roughly every 1300 instructions;
+    /// at 600 it is every ~19000.  Engines differ a lot in what a wasm→JS
+    /// crossing costs, so this was also a source of browser-to-browser spread.
+    ///
+    /// # Arguments
+    /// * `cycles`
+    pub fn run_cycles(&mut self, cycles: u32) {
+        /// Instructions per `tick`, matching the CLI's run loop.
+        const TICK: usize = 600;
+
+        let budget = cycles as usize * 40;
+        // Short budgets (the debugger's `step`) still run in one go, so
+        // stepping keeps its old granularity instead of overshooting to 600.
+        let tick = if budget >= TICK { TICK } else { budget.max(1) };
+        // Round up, matching `tick`'s own "run at least n" semantics, so a
+        // budget that is not a multiple of TICK is never short-changed.
+        for _ in 0..budget.div_ceil(tick) {
+            self.emulator.tick(tick);
+        }
+    }
+
+    /// Runs program until breakpoints. Also known as debugger's continue
+    /// command. This method takes `max_cycles`. If the program doesn't hit
+    /// any breakpoint in `max_cycles` cycles this method returns `false`.
+    /// Otherwise `true`.
+    ///
+    /// Even without this method, you can write the same behavior JavaScript
+    /// code as the following code. But JS-WASM bridge cost isn't ignorable
+    /// now. So this method has been introduced.
+    ///
+    /// ```ignore
+    /// const runUntilBreakpoints = (riscv, breakpoints, maxCycles) => {
+    ///   for (let i = 0; i < maxCycles; i++) {
+    ///     riscv.run_cycles(1);
+    ///     const pc = riscv.read_pc()
+    ///     if (breakpoints.includes(pc)) {
+    ///       return true;
+    ///     }
+    ///   }
+    ///   return false;
+    /// };
+    /// ```
+    ///
+    /// # Arguments
+    /// * `breakpoints` An array including breakpoint virtual addresses
+    /// * `max_cycles` See the above description
+    pub fn run_until_breakpoints(&mut self, breakpoints: Vec<u64>, max_cycles: u32) -> bool {
+        let mut table = HashMap::new();
+        for breakpoint in breakpoints {
+            table.insert(breakpoint, true);
+        }
+        for _i in 0..max_cycles {
+            self.emulator.tick(40);
+            let pc = self.emulator.get_cpu().read_pc();
+            if table.contains_key(&pc) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Disassembles an instruction Program Counter points to.
+    /// Use `get_output()` to get the disassembled strings.
+    pub fn disassemble(&mut self) {
+        let cpu = self.emulator.get_mut_cpu();
+        let mut s = String::new();
+        cpu.disassemble(&mut s);
+        let bytes = s.as_bytes().to_vec();
+        for b in bytes {
+            if let Some(b_end) = self.emulator.get_mut_serial_backend() {
+                b_end.put_byte(b);
+            }
+        }
+    }
+
+    /// Reads integer register content.
+    ///
+    /// # Arguments
+    /// * `reg` register number. Must be 0-31.
+    pub fn read_register(&mut self, _reg: u8) -> u64 {
+        todo!("re-enable reading registers from WASM")
+        // self.emulator.get_mut_cpu().read_register(reg) as u64
+    }
+
+    /// Reads Program Counter content.
+    pub fn read_pc(&self) -> u64 { self.emulator.get_cpu().read_pc() }
+
+    /// Gets ascii code byte sent from the emulator to terminal.
+    /// The emulator holds output buffer inside. This method returns zero
+    /// if the output buffer is empty. So if you want to read all buffered
+    /// output content, repeatedly call this method until zero is returned.
+    ///
+    /// ```ignore
+    /// // JavaScript code
+    /// while (true) {
+    ///   const data = riscv.get_output();
+    ///   if (data !== 0) {
+    ///     // print data
+    ///   } else {
+    ///     break;
+    ///   }
+    /// }
+    /// ```
+    pub fn get_output(&mut self) -> u8 {
+        self.emulator
+            .get_mut_serial_backend()
+            .map_or(0, |b| b.get_output())
+    }
+
+    /// Puts ascii code byte sent from terminal to the emulator.
+    ///
+    /// # Arguments
+    /// * `data` Ascii code byte
+    pub fn put_input(&mut self, data: u8) {
+        if let Some(b) = self.emulator.get_mut_serial_backend() {
+            b.put_input(data);
+        }
+    }
+
+    /// Gets virtual address corresponding to symbol strings.
+    ///
+    /// # Arguments
+    /// * `s` Symbol strings
+    /// * `error` If symbol is not found error[0] holds non-zero. Otherwize
+    ///   zero.
+    pub fn get_address_of_symbol(&mut self, s: String, error: &mut [u8]) -> u64 {
+        match self.emulator.get_addredd_of_symbol(&s) {
+            Some(address) => {
+                error[0] = 0;
+                address
+            }
+            None => {
+                error[0] = 1;
+                0
+            }
+        }
+    }
+}

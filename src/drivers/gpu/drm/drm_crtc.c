@@ -30,26 +30,33 @@
 #include "vfs.h"
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 #define DRM_S32_MAX ((int32_t)0x7fffffff)
 
 /* From drm_mode_object.c / drm_framebuffer.c. */
-extern int                     drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type);
-extern struct drm_framebuffer *drm_framebuffer_lookup(struct drm_device *dev, struct drm_file *file_priv, uint32_t id);
+extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj,
+                                     uint32_t type);
+extern struct drm_framebuffer *drm_framebuffer_lookup(struct drm_device *dev,
+                                                      struct drm_file *file_priv, uint32_t id);
 
-int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, struct drm_plane *primary,
-                              struct drm_plane *cursor, void *funcs, const char *name)
+int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
+                              struct drm_plane *primary, struct drm_plane *cursor, void *funcs,
+                              const char *name)
 {
     int ret;
 
     (void)name;
 
-    if (dev == NULL || crtc == NULL) { return -EINVAL; }
+    if (dev == NULL || crtc == NULL) {
+        return -EINVAL;
+    }
 
     ret = drm_mode_object_idr_alloc(dev, &crtc->base, DRM_MODE_OBJECT_CRTC);
-    if (ret != 0) { return ret; }
+    if (ret != 0) {
+        return ret;
+    }
 
     drm_modeset_lock_init(&crtc->mutex);
 
@@ -80,7 +87,9 @@ int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, str
     /* ACTIVE and MODE_ID are what an atomic commit sets on a CRTC; the
      * rest of the standard set is still to come. */
     ret = drm_object_attach_property(&crtc->base, dev->mode_config.prop_active, 0);
-    if (ret == 0) { ret = drm_object_attach_property(&crtc->base, dev->mode_config.prop_mode_id, 0); }
+    if (ret == 0) {
+        ret = drm_object_attach_property(&crtc->base, dev->mode_config.prop_mode_id, 0);
+    }
     if (ret != 0) {
         drm_crtc_cleanup(crtc);
         return ret;
@@ -91,7 +100,9 @@ int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc, str
 
 int drm_crtc_create_properties(struct drm_device *dev)
 {
-    if (dev == NULL) { return -EINVAL; }
+    if (dev == NULL) {
+        return -EINVAL;
+    }
 
     /* The properties a CRTC needs are created once for the device in
      * drm_mode_config_init and attached per CRTC above, so there is
@@ -102,7 +113,9 @@ int drm_crtc_create_properties(struct drm_device *dev)
 /* Record a mode as the CRTC's current one and switch it on. */
 void drm_crtc_set_mode_prop_for_crtc(struct drm_crtc *crtc, const struct drm_display_mode *mode)
 {
-    if (crtc == NULL || mode == NULL) { return; }
+    if (crtc == NULL || mode == NULL) {
+        return;
+    }
 
     memcpy(&crtc->mode, mode, sizeof(crtc->mode));
     crtc->enabled = true;
@@ -115,7 +128,9 @@ int drm_mode_getcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
     struct drm_mode_object *obj;
     struct drm_crtc        *crtc;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     dbg_puts("PSETCRTC id=");
     dbg_puts_dec((uint32_t)req->crtc_id);
@@ -172,7 +187,7 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
     struct drm_mode_crtc    *req = (struct drm_mode_crtc *)data;
     struct drm_mode_object  *obj;
     struct drm_crtc         *crtc;
-    struct drm_framebuffer  *fb   = NULL;
+    struct drm_framebuffer  *fb    = NULL;
     struct drm_atomic_state *state = NULL;
     struct drm_crtc_state   *crtc_state;
     struct drm_plane_state  *plane_state;
@@ -180,7 +195,9 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
     uint32_t                *connector_ids = NULL;
     int                      ret           = 0;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     dbg_puts("PSETCRTC id=");
     dbg_puts_dec((uint32_t)req->crtc_id);
@@ -209,7 +226,8 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
     if (req->mode_valid != 0) {
         /* A mode has to be a mode: a clock, a visible area, and timings
          * that run forwards. */
-        if (fb == NULL || req->mode.clock == 0 || req->mode.hdisplay == 0 || req->mode.vdisplay == 0) {
+        if (fb == NULL || req->mode.clock == 0 || req->mode.hdisplay == 0 ||
+            req->mode.vdisplay == 0) {
             ret = -EINVAL;
             goto out;
         }
@@ -225,20 +243,21 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
             ret = -EINVAL;
             goto out;
         }
-        if (req->mode.hdisplay > dev->mode_config.max_width || req->mode.vdisplay > dev->mode_config.max_height) {
+        if (req->mode.hdisplay > dev->mode_config.max_width ||
+            req->mode.vdisplay > dev->mode_config.max_height) {
             ret = -EINVAL;
             goto out;
         }
         /* Position plus size has to stay inside signed 32 bits too. */
-        if (req->x > DRM_S32_MAX || req->y > DRM_S32_MAX
-            || (uint64_t)req->x + req->mode.hdisplay > DRM_S32_MAX
-            || (uint64_t)req->y + req->mode.vdisplay > DRM_S32_MAX) {
+        if (req->x > DRM_S32_MAX || req->y > DRM_S32_MAX ||
+            (uint64_t)req->x + req->mode.hdisplay > DRM_S32_MAX ||
+            (uint64_t)req->y + req->mode.vdisplay > DRM_S32_MAX) {
             ret = -EINVAL;
             goto out;
         }
 
-        if (req->count_connectors > (uint32_t)dev->mode_config.num_connector
-            || (req->count_connectors != 0 && req->set_connectors_ptr == 0)) {
+        if (req->count_connectors > (uint32_t)dev->mode_config.num_connector ||
+            (req->count_connectors != 0 && req->set_connectors_ptr == 0)) {
             ret = -EINVAL;
             goto out;
         }
@@ -295,7 +314,9 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
     crtc_state->enable         = req->mode_valid;
     crtc_state->active_changed = (crtc_state->active != 0) != (crtc->enabled != 0);
     crtc_state->mode_changed   = true;
-    if (req->mode_valid != 0) { crtc_state->mode = mode; }
+    if (req->mode_valid != 0) {
+        crtc_state->mode = mode;
+    }
 
     /* The primary plane is what actually shows the framebuffer, so it gets
      * the source rectangle (the whole buffer, 16.16) and the destination
@@ -309,11 +330,13 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
 
         plane_state->crtc = (req->mode_valid != 0) ? crtc : NULL;
         plane_state->fb   = (req->mode_valid != 0) ? fb : NULL;
-        plane_state->src  = (struct drm_rect) {0, 0, (req->mode_valid != 0) ? (int32_t)(fb->width << 16) : 0,
-                                               (req->mode_valid != 0) ? (int32_t)(fb->height << 16) : 0};
-        plane_state->dst  = (struct drm_rect) {(int32_t)req->x, (int32_t)req->y,
-                                               (req->mode_valid != 0) ? (int32_t)(req->x + mode.hdisplay) : 0,
-                                               (req->mode_valid != 0) ? (int32_t)(req->y + mode.vdisplay) : 0};
+        plane_state->src =
+            (struct drm_rect){0, 0, (req->mode_valid != 0) ? (int32_t)(fb->width << 16) : 0,
+                              (req->mode_valid != 0) ? (int32_t)(fb->height << 16) : 0};
+        plane_state->dst =
+            (struct drm_rect){(int32_t)req->x, (int32_t)req->y,
+                              (req->mode_valid != 0) ? (int32_t)(req->x + mode.hdisplay) : 0,
+                              (req->mode_valid != 0) ? (int32_t)(req->y + mode.vdisplay) : 0};
         crtc_state->planes_changed = true;
     }
 
@@ -328,7 +351,8 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
             }
         }
 
-        conn_obj = drm_mode_object_find(dev, file_priv, connector_ids[i], DRM_MODE_OBJECT_CONNECTOR);
+        conn_obj =
+            drm_mode_object_find(dev, file_priv, connector_ids[i], DRM_MODE_OBJECT_CONNECTOR);
         if (conn_obj == NULL) {
             ret = -ENOENT;
             goto out;
@@ -338,8 +362,8 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
 
     /* Rewire the connectors: away from this CRTC if they were on it and
      * are not named, onto it if they are. */
-    for (ilist_node_t *node = dev->mode_config.connector_list.next; node != &dev->mode_config.connector_list;
-         node = node->next) {
+    for (ilist_node_t *node                             = dev->mode_config.connector_list.next;
+         node != &dev->mode_config.connector_list; node = node->next) {
         struct drm_connector       *connector = container_of(node, struct drm_connector, head);
         struct drm_connector_state *conn_state;
         bool                        selected = false;
@@ -351,7 +375,9 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
             }
         }
 
-        if (!selected && (connector->state == NULL || connector->state->crtc != crtc)) { continue; }
+        if (!selected && (connector->state == NULL || connector->state->crtc != crtc)) {
+            continue;
+        }
 
         conn_state = drm_atomic_get_connector_state(state, connector);
         if (conn_state == NULL) {
@@ -364,10 +390,14 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
     }
 
     ret = drm_atomic_commit(state);
-    if (ret == 0) { state = NULL; /* ownership passed to the commit */ }
+    if (ret == 0) {
+        state = NULL; /* ownership passed to the commit */
+    }
 
 out:
-    if (state != NULL) { drm_atomic_state_free(state); }
+    if (state != NULL) {
+        drm_atomic_state_free(state);
+    }
     free(connector_ids);
     drm_mode_object_put(obj);
     return ret;
@@ -377,7 +407,9 @@ void drm_crtc_cleanup(struct drm_crtc *crtc)
 {
     struct drm_device *dev;
 
-    if (crtc == NULL) { return; }
+    if (crtc == NULL) {
+        return;
+    }
 
     dev = crtc->dev;
 
@@ -388,7 +420,9 @@ void drm_crtc_cleanup(struct drm_crtc *crtc)
         drm_idr_remove(&dev->mode_config.object_idr, crtc->base.id);
         spin_unlock(&dev->mode_config.idr_mutex);
 
-        if (dev->mode_config.num_crtc > 0) { dev->mode_config.num_crtc--; }
+        if (dev->mode_config.num_crtc > 0) {
+            dev->mode_config.num_crtc--;
+        }
     }
 
     free(crtc->gamma_store);
@@ -415,14 +449,14 @@ void drm_crtc_cleanup(struct drm_crtc *crtc)
 #define GAMMA_ENTRIES 256
 
 typedef struct {
-    uint32_t id;                       /* crtc object id, 0 = unused */
+    uint32_t id; /* crtc object id, 0 = unused */
     uint16_t red[GAMMA_ENTRIES];
     uint16_t green[GAMMA_ENTRIES];
     uint16_t blue[GAMMA_ENTRIES];
 } gamma_lut_t;
 
-static gamma_lut_t       g_gamma_luts[4];
-static spinlock_t        g_gamma_lock;
+static gamma_lut_t g_gamma_luts[4];
+static spinlock_t  g_gamma_lock;
 
 static gamma_lut_t *gamma_lut_for(struct drm_device *dev, uint32_t crtc_id)
 {
@@ -446,12 +480,9 @@ static int gamma_copy_in(gamma_lut_t *dst, const struct drm_mode_crtc_lut *req)
         return -EINVAL;
     if (req->red == 0 || req->green == 0 || req->blue == 0)
         return -EINVAL;
-    if (copy_from_user(dst->red, (const void *)(uintptr_t)req->red,
-                       sizeof(dst->red)) != 0 ||
-        copy_from_user(dst->green, (const void *)(uintptr_t)req->green,
-                       sizeof(dst->green)) != 0 ||
-        copy_from_user(dst->blue, (const void *)(uintptr_t)req->blue,
-                       sizeof(dst->blue)) != 0)
+    if (copy_from_user(dst->red, (const void *)(uintptr_t)req->red, sizeof(dst->red)) != 0 ||
+        copy_from_user(dst->green, (const void *)(uintptr_t)req->green, sizeof(dst->green)) != 0 ||
+        copy_from_user(dst->blue, (const void *)(uintptr_t)req->blue, sizeof(dst->blue)) != 0)
         return -EFAULT;
     return 0;
 }
@@ -470,10 +501,14 @@ int drm_mode_setgamma_ioctl(struct drm_device *dev, void *data, struct drm_file 
 
     (void)file_priv;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
     crtc = container_of(obj, struct drm_crtc, base);
 
     if (req->gamma_size != (uint32_t)crtc->gamma_size) {
@@ -504,14 +539,18 @@ int drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file 
 
     (void)file_priv;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
     crtc = container_of(obj, struct drm_crtc, base);
 
-    if (req->gamma_size != (uint32_t)crtc->gamma_size ||
-        req->red == 0 || req->green == 0 || req->blue == 0) {
+    if (req->gamma_size != (uint32_t)crtc->gamma_size || req->red == 0 || req->green == 0 ||
+        req->blue == 0) {
         drm_mode_object_put(obj);
         return -EINVAL;
     }
@@ -521,7 +560,7 @@ int drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file 
     if (lut == NULL || lut->red[0] == 0) {
         /* Identity ramp: entry i reads i scaled to 16 bit. */
         for (int i = 0; i < GAMMA_ENTRIES; i++) {
-            uint16_t v = (uint16_t)((i * 0xFFFF) / (GAMMA_ENTRIES - 1));
+            uint16_t v      = (uint16_t)((i * 0xFFFF) / (GAMMA_ENTRIES - 1));
             req->gamma_size = (uint32_t)GAMMA_ENTRIES;
             /* build the ramp in the stored slot so future reads are cheap */
             if (lut == NULL)
@@ -529,12 +568,9 @@ int drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file 
             lut->red[i] = lut->green[i] = lut->blue[i] = v;
         }
         if (lut != NULL) {
-            if (copy_to_user((void *)(uintptr_t)req->red, lut->red,
-                             sizeof(lut->red)) != 0 ||
-                copy_to_user((void *)(uintptr_t)req->green, lut->green,
-                             sizeof(lut->green)) != 0 ||
-                copy_to_user((void *)(uintptr_t)req->blue, lut->blue,
-                             sizeof(lut->blue)) != 0) {
+            if (copy_to_user((void *)(uintptr_t)req->red, lut->red, sizeof(lut->red)) != 0 ||
+                copy_to_user((void *)(uintptr_t)req->green, lut->green, sizeof(lut->green)) != 0 ||
+                copy_to_user((void *)(uintptr_t)req->blue, lut->blue, sizeof(lut->blue)) != 0) {
                 spin_unlock(&g_gamma_lock);
                 drm_mode_object_put(obj);
                 return -EFAULT;
@@ -545,12 +581,9 @@ int drm_mode_getgamma_ioctl(struct drm_device *dev, void *data, struct drm_file 
         return 0;
     }
 
-    if (copy_to_user((void *)(uintptr_t)req->red, lut->red,
-                     sizeof(lut->red)) != 0 ||
-        copy_to_user((void *)(uintptr_t)req->green, lut->green,
-                     sizeof(lut->green)) != 0 ||
-        copy_to_user((void *)(uintptr_t)req->blue, lut->blue,
-                     sizeof(lut->blue)) != 0) {
+    if (copy_to_user((void *)(uintptr_t)req->red, lut->red, sizeof(lut->red)) != 0 ||
+        copy_to_user((void *)(uintptr_t)req->green, lut->green, sizeof(lut->green)) != 0 ||
+        copy_to_user((void *)(uintptr_t)req->blue, lut->blue, sizeof(lut->blue)) != 0) {
         spin_unlock(&g_gamma_lock);
         drm_mode_object_put(obj);
         return -EFAULT;

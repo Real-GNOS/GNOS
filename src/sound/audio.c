@@ -33,53 +33,55 @@
 #include "debugcon.h"
 
 /* ---- BAR0: native audio mixer (the codec) --------------------------- */
-#define NAM_RESET        0x00   /* any write resets the codec */
-#define NAM_MASTER_VOL   0x02   /* 0 = loudest, 0x8000 = mute */
-#define NAM_PCM_OUT_VOL  0x18
-#define NAM_EXT_AUDIO_ID 0x28   /* bit0: variable rate audio supported */
-#define NAM_EXT_AUDIO_CTL 0x2A  /* bit0: enable variable rate audio */
-#define NAM_PCM_DAC_RATE 0x2C   /* sample rate in Hz, once VRA is on */
+#define NAM_RESET         0x00 /* any write resets the codec */
+#define NAM_MASTER_VOL    0x02 /* 0 = loudest, 0x8000 = mute */
+#define NAM_PCM_OUT_VOL   0x18
+#define NAM_EXT_AUDIO_ID  0x28 /* bit0: variable rate audio supported */
+#define NAM_EXT_AUDIO_CTL 0x2A /* bit0: enable variable rate audio */
+#define NAM_PCM_DAC_RATE  0x2C /* sample rate in Hz, once VRA is on */
 
 /* ---- BAR1: native audio bus master (the DMA engine) ------------------ */
 /* The PCM *out* channel's register box starts at 0x10; there are identical
  * boxes at 0x00 (PCM in) and 0x20 (mic in) that we do not use. */
-#define NABM_PO_BDBAR    0x10   /* 32-bit physical base of the descriptor list */
-#define NABM_PO_CIV      0x14   /* 8-bit  current index */
-#define NABM_PO_LVI      0x15   /* 8-bit  last valid index */
-#define NABM_PO_SR       0x16   /* 16-bit status */
-#define NABM_PO_PICB     0x18   /* 16-bit samples left in the current buffer */
-#define NABM_PO_CR       0x1B   /* 8-bit  control */
-#define NABM_GLOB_CNT    0x2C   /* 32-bit global control */
+#define NABM_PO_BDBAR 0x10 /* 32-bit physical base of the descriptor list */
+#define NABM_PO_CIV   0x14 /* 8-bit  current index */
+#define NABM_PO_LVI   0x15 /* 8-bit  last valid index */
+#define NABM_PO_SR    0x16 /* 16-bit status */
+#define NABM_PO_PICB  0x18 /* 16-bit samples left in the current buffer */
+#define NABM_PO_CR    0x1B /* 8-bit  control */
+#define NABM_GLOB_CNT 0x2C /* 32-bit global control */
 
-#define PO_CR_RPBM       0x01   /* run/pause bus master: 1 = play */
-#define PO_CR_RR         0x02   /* reset this channel's registers */
-#define PO_SR_DCH        0x01   /* DMA controller halted */
+#define PO_CR_RPBM 0x01 /* run/pause bus master: 1 = play */
+#define PO_CR_RR   0x02 /* reset this channel's registers */
+#define PO_SR_DCH  0x01 /* DMA controller halted */
 
-#define GLOB_CNT_COLD    0x02   /* 0 = hold cold reset, 1 = release */
+#define GLOB_CNT_COLD 0x02 /* 0 = hold cold reset, 1 = release */
 
 /* 16-bit signed stereo at 48 kHz is the one format every AC'97 codec has to
  * support, so it needs no negotiation. */
-#define SAMPLE_RATE  48000
-#define CHANNELS     2
-#define TONE_HZ      440
+#define SAMPLE_RATE 48000
+#define CHANNELS    2
+#define TONE_HZ     440
 
 /* One page per buffer: 4096 bytes = 2048 samples = 1024 stereo frames,
  * about 21 ms of audio each.  Two of them is a tone long enough to hear and
  * short enough that the self-test does not stall the boot. */
-#define NBUF     16
+#define NBUF        16
 #define BUF_BYTES   4096
-#define BUF_SAMPLES (BUF_BYTES / 2)          /* the BDL counts 16-bit samples */
+#define BUF_SAMPLES (BUF_BYTES / 2) /* the BDL counts 16-bit samples */
 
 typedef struct __attribute__((packed)) {
-    uint32_t addr;        /* physical address of the audio data */
-    uint16_t samples;     /* number of 16-bit samples, NOT bytes */
-    uint16_t flags;       /* bit15 = interrupt on completion, bit14 = BUP */
+    uint32_t addr;    /* physical address of the audio data */
+    uint16_t samples; /* number of 16-bit samples, NOT bytes */
+    uint16_t flags;   /* bit15 = interrupt on completion, bit14 = BUP */
 } ac97_bd_t;
 
-static uint16_t g_nam, g_nabm;     /* I/O port bases of the two banks */
-static int      g_ok;
-static ac97_bd_t *g_bdl;  static uint64_t g_bdl_phys;
-static int16_t   *g_buf[NBUF];  static uint64_t g_buf_phys[NBUF];
+static uint16_t   g_nam, g_nabm; /* I/O port bases of the two banks */
+static int        g_ok;
+static ac97_bd_t *g_bdl;
+static uint64_t   g_bdl_phys;
+static int16_t   *g_buf[NBUF];
+static uint64_t   g_buf_phys[NBUF];
 
 static void spin(unsigned n)
 {
@@ -87,7 +89,10 @@ static void spin(unsigned n)
         io_delay();
 }
 
-int ac97_present(void) { return g_ok; }
+int ac97_present(void)
+{
+    return g_ok;
+}
 
 /* A square wave is the honest choice here: it is exactly representable in
  * integers, so a wrong sample rate or a swapped channel is audible and
@@ -96,7 +101,7 @@ static void fill_tone(int16_t *dst, uint32_t frames, uint32_t *phase)
 {
     const uint32_t period = SAMPLE_RATE / TONE_HZ;
     for (uint32_t i = 0; i < frames; i++) {
-        int16_t v = (*phase % period) < period / 2 ? 8000 : -8000;
+        int16_t v             = (*phase % period) < period / 2 ? 8000 : -8000;
         dst[i * CHANNELS + 0] = v;
         dst[i * CHANNELS + 1] = v;
         (*phase)++;
@@ -111,7 +116,7 @@ int ac97_init(void)
         return 0;
     }
 
-    pci_enable(d);                       /* I/O space + bus master */
+    pci_enable(d); /* I/O space + bus master */
     g_nam  = pci_bar_io(d, 0);
     g_nabm = pci_bar_io(d, 1);
     if (!g_nam || !g_nabm) {
@@ -137,8 +142,7 @@ int ac97_init(void)
      * are fixed at 48 kHz already, which is what we wanted anyway. */
     uint16_t ext = inw(g_nam + NAM_EXT_AUDIO_ID);
     if (ext & 0x1) {
-        outw(g_nam + NAM_EXT_AUDIO_CTL,
-             (uint16_t)(inw(g_nam + NAM_EXT_AUDIO_CTL) | 0x1));
+        outw(g_nam + NAM_EXT_AUDIO_CTL, (uint16_t)(inw(g_nam + NAM_EXT_AUDIO_CTL) | 0x1));
         outw(g_nam + NAM_PCM_DAC_RATE, SAMPLE_RATE);
     }
 
@@ -181,9 +185,9 @@ int ac97_init(void)
  * has moved past the buffer it is about to refill (CIV is polled -- the
  * completion interrupt is not wired up), then extends LVI.  The first two
  * fills arm the engine without waiting. */
-static int g_w;                 /* next buffer to refill */
-static int g_started;
-static uint32_t g_total_frames;  /* frames written since the last reset */
+static int      g_w; /* next buffer to refill */
+static int      g_started;
+static uint32_t g_total_frames; /* frames written since the last reset */
 
 int audio_start(void)
 {
@@ -193,7 +197,7 @@ int audio_start(void)
     for (int i = 0; i < 1000 && (inb(g_nabm + NABM_PO_CR) & PO_CR_RR); i++)
         io_delay();
     outl(g_nabm + NABM_PO_BDBAR, (uint32_t)g_bdl_phys);
-    g_w = 0;
+    g_w       = 0;
     g_started = 0;
     return 0;
 }
@@ -203,8 +207,8 @@ int audio_start(void)
  * engine always has a descriptor queued ahead of it. */
 static int audio_free_buffers(void)
 {
-    uint8_t civ = inb(g_nabm + NABM_PO_CIV);
-    int in_flight = (g_w - (int)civ + NBUF) % NBUF;
+    uint8_t civ       = inb(g_nabm + NABM_PO_CIV);
+    int     in_flight = (g_w - (int)civ + NBUF) % NBUF;
     return NBUF - 1 - in_flight;
 }
 
@@ -215,7 +219,7 @@ int audio_write(const int16_t *src, uint32_t frames)
 
     uint32_t done = 0;
     while (done < frames) {
-        uint32_t f = frames - done;
+        uint32_t f    = frames - done;
         uint32_t fmax = BUF_SAMPLES / CHANNELS;
         if (f > fmax)
             f = fmax;
@@ -235,12 +239,11 @@ int audio_write(const int16_t *src, uint32_t frames)
             return (int)(done > 0 ? done : -1);
         }
 
-        memcpy(g_buf[g_w], src + done * CHANNELS,
-               f * CHANNELS * sizeof(int16_t));
+        memcpy(g_buf[g_w], src + done * CHANNELS, f * CHANNELS * sizeof(int16_t));
         g_bdl[g_w].addr    = (uint32_t)g_buf_phys[g_w];
         g_bdl[g_w].samples = (uint16_t)(f * CHANNELS);
         g_bdl[g_w].flags   = 0;
-        outb(g_nabm + NABM_PO_LVI, g_w);      /* extend the valid ring */
+        outb(g_nabm + NABM_PO_LVI, g_w); /* extend the valid ring */
         g_total_frames += f;
         if (!g_started || (inw(g_nabm + NABM_PO_SR) & PO_SR_DCH)) {
             /* first start, or underrun halt: (re)kick the engine */
@@ -259,7 +262,7 @@ void audio_drain(void)
         return;
     /* Let the engine play out what LVI already covers, then stop. */
     for (unsigned t = 0; t < 4000000u; t++) {
-        uint8_t civ = inb(g_nabm + NABM_PO_CIV);
+        uint8_t  civ  = inb(g_nabm + NABM_PO_CIV);
         uint16_t picb = inw(g_nabm + NABM_PO_PICB);
         if (civ == (uint8_t)g_w && picb < 64)
             break;
@@ -277,8 +280,8 @@ void audio_reset_ring(void)
     for (int i = 0; i < 1000 && (inb(g_nabm + NABM_PO_CR) & PO_CR_RR); i++)
         io_delay();
     outl(g_nabm + NABM_PO_BDBAR, (uint32_t)g_bdl_phys);
-    g_w = 0;
-    g_started = 0;
+    g_w            = 0;
+    g_started      = 0;
     g_total_frames = 0;
 }
 
@@ -312,10 +315,10 @@ uint32_t audio_frames_total(void)
 /* Frames the DMA has not consumed yet (the filled tail of the ring). */
 uint32_t audio_in_flight_frames(void)
 {
-    uint8_t civ = inb(g_nabm + NABM_PO_CIV);
+    uint8_t  civ       = inb(g_nabm + NABM_PO_CIV);
     uint32_t in_flight = 0;
     for (int i = 0; i < NBUF; i++) {
-        int rel = (i - (int)civ + NBUF) % NBUF;
+        int rel   = (i - (int)civ + NBUF) % NBUF;
         int depth = (g_w - (int)civ + NBUF) % NBUF;
         if (rel < depth)
             in_flight += g_bdl[i].samples;
@@ -348,10 +351,10 @@ int ac97_selftest(void)
      * did not accept the list -- almost always a missing bus-master enable
      * or a BDL address the card cannot reach. */
     uint16_t picb0 = 0;
-    int armed = 0;
+    int      armed = 0;
     for (int i = 0; i < 100000; i++) {
         uint16_t sr = inw(g_nabm + NABM_PO_SR);
-        picb0 = inw(g_nabm + NABM_PO_PICB);
+        picb0       = inw(g_nabm + NABM_PO_PICB);
         if (!(sr & PO_SR_DCH) && picb0 != 0) {
             armed = 1;
             break;
@@ -378,7 +381,7 @@ int ac97_selftest(void)
         io_delay();
     }
 
-    outb(g_nabm + NABM_PO_CR, 0);        /* stop; do not tie up the codec */
+    outb(g_nabm + NABM_PO_CR, 0); /* stop; do not tie up the codec */
 
     if (!consumed) {
         dbg_puts("AC97: self-test FAIL (armed but no samples were played)\r\n");
@@ -393,7 +396,6 @@ int ac97_selftest(void)
     return 1;
 }
 
-
 /* ---- /dev/dsp (OSS-lite) ------------------------------------------------ */
 
 #define SNDCTL_DSP_RESET    0x5000
@@ -403,10 +405,10 @@ int ac97_selftest(void)
 #define SNDCTL_DSP_SETFMT   0x5008
 #define AFMT_S16_LE         0x10
 
-static int32_t dsp_write(vfs_node_t *n, uint64_t off, const void *buf,
-                         uint32_t len)
+static int32_t dsp_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off;
+    (void)n;
+    (void)off;
     uint32_t frames = len / (CHANNELS * 2);
     if (frames == 0)
         return 0;
@@ -420,8 +422,11 @@ static int32_t dsp_write(vfs_node_t *n, uint64_t off, const void *buf,
 
 static int32_t dsp_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
-    return 0;                              /* capture not implemented */
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
+    return 0; /* capture not implemented */
 }
 
 static int32_t dsp_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)

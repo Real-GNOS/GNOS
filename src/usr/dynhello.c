@@ -16,7 +16,8 @@
 
 int main(int argc, char **argv, char **envp)
 {
-    (void)argc; (void)argv;
+    (void)argc;
+    (void)argv;
     printf("DYNHELLO: dynamically linked hello from GNOS\n");
     int n = 0;
     for (; envp[n]; n++)

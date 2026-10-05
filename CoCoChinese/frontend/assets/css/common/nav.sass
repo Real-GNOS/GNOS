@@ -1,0 +1,85 @@
+@import "../global/variable"
+
+
+.main_nav
+  padding: 10px 0
+
+  ul
+    list-style: none
+    margin: 0
+    padding: 0
+
+    li
+      padding: 10px 0
+
+      img
+        position: relative
+        top: -2px
+        max-width: 100%
+        max-height: $fontSize + 1px
+        height: $fontSize + 1px
+        width: auto
+
+  div
+    display: inline-block
+
+  .left-list
+    width: 100%
+
+    li
+      margin: 0 auto
+
+  .searchBarBox
+    position: relative
+    padding: 4px 0
+    margin: 0 15px
+    height: 40px
+
+    .searchBar
+      margin: 0
+      width: 100%
+      height: 100%
+
+      label
+        width: 100%
+        height: 100%
+
+        input
+          position: absolute
+          left: 0
+          width: 85%
+          height: 100%
+          border: 1px solid #767676
+          border-radius: 0
+
+      div
+        background: $lightGray
+
+      div
+        display: block
+        position: absolute
+        margin: 4px 0
+        height: 100%
+        width: 15%
+        right: 0
+        top: 0
+        font-size: 24px
+
+        button
+          position: relative
+          display: inline-block
+          height: 100%
+          width: 100%
+          top: 50%
+          transform: translateY(-50%)
+          border: 1px solid #767676
+          border-left: none
+          background: none
+          margin: auto 0
+          padding: 0
+
+  .right-list
+    width: 100%
+
+    li
+      margin: 0 auto

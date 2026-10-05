@@ -29,12 +29,12 @@ long sys_lseek(int fd, long off, int whence);
 /* Names: stat() is how you find out whether something exists *before* trying
  * to use it, which is the difference between "no such program" and a failed
  * exec that has already forked a process. */
-int  sys_stat(const char *path, gstat_t *st);
-int  mkdir(const char *path);
-int  unlink(const char *path);
+int sys_stat(const char *path, gstat_t *st);
+int mkdir(const char *path);
+int unlink(const char *path);
 
 /* pipe(): fds[0] is the read end, fds[1] the write end. */
-int  pipe(int fds[2]);
+int pipe(int fds[2]);
 
 int  getpid(void);
 int  getppid(void);
@@ -44,8 +44,8 @@ int  execve(const char *path, char *const argv[], char *const envp[]);
 void exit(int status) __attribute__((noreturn));
 int  waitpid(int pid, int *status, int options);
 
-int  kill(int pid, int sig);
-int  signal(int sig, int disposition);
+int kill(int pid, int sig);
+int signal(int sig, int disposition);
 
 int  setpgid(int pid, int pgid);
 int  getpgid(int pid);
@@ -57,12 +57,12 @@ void sched_yield(void);
  * one.  tcsetpgrp() on a descriptor that is not the terminal fails with
  * ENOTTY, which is how a program can tell it has been redirected.
  */
-int  ioctl(int fd, unsigned long req, void *arg);
-int  tcsetpgrp(int fd, int pgid);
-int  tcgetpgrp(int fd);
-int  tcgetattr(int fd, termios_t *t);
-int  tcsetattr(int fd, int action, const termios_t *t);
-int  isatty(int fd);
+int ioctl(int fd, unsigned long req, void *arg);
+int tcsetpgrp(int fd, int pgid);
+int tcgetpgrp(int fd);
+int tcgetattr(int fd, termios_t *t);
+int tcsetattr(int fd, int action, const termios_t *t);
+int isatty(int fd);
 
 /* ---- strings and memory ------------------------------------------------ */
 size_t strlen(const char *s);
@@ -82,9 +82,9 @@ int    atoi(const char *s);
 const char *abspath(const char *name, char *buf, int cap);
 
 /* ---- output ------------------------------------------------------------ */
-void puts_fd(int fd, const char *s);      /* no newline appended */
+void puts_fd(int fd, const char *s); /* no newline appended */
 void putn_fd(int fd, long v);
-void print(const char *s);                /* to stdout */
+void print(const char *s); /* to stdout */
 void printn(long v);
 
 #endif

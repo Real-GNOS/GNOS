@@ -38,12 +38,12 @@
 #include "input.h"
 
 /* ---- i8042 -------------------------------------------------------------- */
-#define KBD_DATA 0x60
-#define KBD_CMD  0x64
-#define KBD_STATUS 0x64
-#define ST_OUT_BUF   0x01
-#define ST_INPT_BUF  0x02
-#define ST_AUX_DATA  0x20
+#define KBD_DATA    0x60
+#define KBD_CMD     0x64
+#define KBD_STATUS  0x64
+#define ST_OUT_BUF  0x01
+#define ST_INPT_BUF 0x02
+#define ST_AUX_DATA 0x20
 
 /* ---- Linux input UAPI (values from <linux/input.h>) --------------------- */
 #define EV_SYN 0x00
@@ -81,44 +81,41 @@ typedef struct {
 } input_event_t;
 
 typedef struct {
-    uint32_t     head, tail, count;
+    uint32_t      head, tail, count;
     input_event_t ev[64];
 } evdev_q_t;
 
 typedef struct {
-    evdev_q_t    *q;
-    const char   *name;
-    uint16_t      vendor;
-    uint16_t      product;
-    uint16_t      kind_bits[8];        /* EV_SYN/EV_KEY/EV_REL/EV_LED mask */
-    uint16_t      key_bits[64];        /* 1024 keycodes */
-    uint16_t      rel_bits[2];         /* 32 relative axes */
-    int           grabbed;
-    int           nonblock;
+    evdev_q_t  *q;
+    const char *name;
+    uint16_t    vendor;
+    uint16_t    product;
+    uint16_t    kind_bits[8]; /* EV_SYN/EV_KEY/EV_REL/EV_LED mask */
+    uint16_t    key_bits[64]; /* 1024 keycodes */
+    uint16_t    rel_bits[2];  /* 32 relative axes */
+    int         grabbed;
+    int         nonblock;
 } evdev_dev_t;
 
-static evdev_q_t  g_kbd_q, g_mouse_q;
-static evdev_dev_t g_kbd_dev = { .q = &g_kbd_q,
-                                 .name = "GNOS i8042 keyboard",
-                                 .vendor = 0x0001, .product = 0x0001 };
-static evdev_dev_t g_mouse_dev = { .q = &g_mouse_q,
-                                   .name = "GNOS i8042 mouse",
-                                   .vendor = 0x0002, .product = 0x0002 };
+static evdev_q_t   g_kbd_q, g_mouse_q;
+static evdev_dev_t g_kbd_dev = {
+    .q = &g_kbd_q, .name = "GNOS i8042 keyboard", .vendor = 0x0001, .product = 0x0001};
+static evdev_dev_t g_mouse_dev = {
+    .q = &g_mouse_q, .name = "GNOS i8042 mouse", .vendor = 0x0002, .product = 0x0002};
 
-static void evdev_push(evdev_dev_t *d, uint16_t type, uint16_t code,
-                       int32_t value)
+static void evdev_push(evdev_dev_t *d, uint16_t type, uint16_t code, int32_t value)
 {
     evdev_q_t *q = d->q;
     if (q->count == 64)
-        return;                          /* full: drop, like Linux's overflow */
-    uint32_t i = q->tail;
+        return; /* full: drop, like Linux's overflow */
+    uint32_t       i = q->tail;
     input_event_t *e = &q->ev[i];
-    e->tv_sec  = (int64_t)(timer_ticks() / SCHED_HZ + timer_boot_epoch());
-    e->tv_usec = (int64_t)((timer_ticks() % SCHED_HZ) * (1000000ULL / SCHED_HZ));
-    e->type  = type;
-    e->code  = code;
-    e->value = value;
-    q->tail = (q->tail + 1) % 64;
+    e->tv_sec        = (int64_t)(timer_ticks() / SCHED_HZ + timer_boot_epoch());
+    e->tv_usec       = (int64_t)((timer_ticks() % SCHED_HZ) * (1000000ULL / SCHED_HZ));
+    e->type          = type;
+    e->code          = code;
+    e->value         = value;
+    q->tail          = (q->tail + 1) % 64;
     q->count++;
 }
 
@@ -145,30 +142,50 @@ static uint16_t scancode_to_key(uint8_t sc, int ext)
 {
     if (ext) {
         switch (sc) {
-        case 0x1C: return 96;   /* keypad enter */
-        case 0x1D: return 97;   /* right ctrl */
-        case 0x35: return 98;   /* keypad / */
-        case 0x38: return 100;  /* right alt */
-        case 0x47: return 102;  /* home */
-        case 0x48: return 103;  /* up */
-        case 0x49: return 104;  /* page up */
-        case 0x4B: return 105;  /* left */
-        case 0x4D: return 106;  /* right */
-        case 0x4F: return 107;  /* end */
-        case 0x50: return 108;  /* down */
-        case 0x51: return 109;  /* page down */
-        case 0x52: return 110;  /* insert */
-        case 0x53: return 111;  /* delete */
-        case 0x5B: return 125;  /* left meta */
-        case 0x5C: return 126;  /* right meta */
-        case 0x5D: return 127;  /* menu */
+        case 0x1C:
+            return 96; /* keypad enter */
+        case 0x1D:
+            return 97; /* right ctrl */
+        case 0x35:
+            return 98; /* keypad / */
+        case 0x38:
+            return 100; /* right alt */
+        case 0x47:
+            return 102; /* home */
+        case 0x48:
+            return 103; /* up */
+        case 0x49:
+            return 104; /* page up */
+        case 0x4B:
+            return 105; /* left */
+        case 0x4D:
+            return 106; /* right */
+        case 0x4F:
+            return 107; /* end */
+        case 0x50:
+            return 108; /* down */
+        case 0x51:
+            return 109; /* page down */
+        case 0x52:
+            return 110; /* insert */
+        case 0x53:
+            return 111; /* delete */
+        case 0x5B:
+            return 125; /* left meta */
+        case 0x5C:
+            return 126; /* right meta */
+        case 0x5D:
+            return 127; /* menu */
         }
         return KEY_RESERVED;
     }
     switch (sc) {
-    case 0x54: return 84;   /* sysrq */
-    case 0x57: return 87;   /* f11 */
-    case 0x58: return 88;   /* f12 */
+    case 0x54:
+        return 84; /* sysrq */
+    case 0x57:
+        return 87; /* f11 */
+    case 0x58:
+        return 88; /* f12 */
     }
     return sc;
 }
@@ -178,7 +195,7 @@ static void kbd_translate(uint8_t sc)
     static int ext;
     static int e1;
 
-    if (e1) {                            /* 0xE1 pause: swallow the tail */
+    if (e1) { /* 0xE1 pause: swallow the tail */
         e1 = 0;
         return;
     }
@@ -192,7 +209,7 @@ static void kbd_translate(uint8_t sc)
     }
 
     uint16_t key = scancode_to_key(sc & 0x7F, ext);
-    ext = 0;
+    ext          = 0;
     if (!key)
         return;
 
@@ -225,12 +242,12 @@ static void mouse_byte(uint8_t b)
         return;
     g_mouse_n = 0;
 
-    uint8_t  flags = g_mouse_pkt[0];
-    int8_t   dx = (int8_t)g_mouse_pkt[1];
-    int8_t   dy = (int8_t)g_mouse_pkt[2];
+    uint8_t flags = g_mouse_pkt[0];
+    int8_t  dx    = (int8_t)g_mouse_pkt[1];
+    int8_t  dy    = (int8_t)g_mouse_pkt[2];
 
-    evdev_push(&g_mouse_dev, EV_KEY, BTN_LEFT,   flags & 0x01);
-    evdev_push(&g_mouse_dev, EV_KEY, BTN_RIGHT,  (flags >> 1) & 0x01);
+    evdev_push(&g_mouse_dev, EV_KEY, BTN_LEFT, flags & 0x01);
+    evdev_push(&g_mouse_dev, EV_KEY, BTN_RIGHT, (flags >> 1) & 0x01);
     evdev_push(&g_mouse_dev, EV_KEY, BTN_MIDDLE, (flags >> 2) & 0x01);
     evdev_push(&g_mouse_dev, EV_REL, REL_X, dx);
     /* The PS/2 device reports "up = positive" while evdev's REL_Y follows
@@ -243,8 +260,7 @@ static void mouse_byte(uint8_t b)
 static void mouse_irq(regs_t *r)
 {
     (void)r;
-    while ((inb(KBD_STATUS) & (ST_OUT_BUF | ST_AUX_DATA)) ==
-           (ST_OUT_BUF | ST_AUX_DATA))
+    while ((inb(KBD_STATUS) & (ST_OUT_BUF | ST_AUX_DATA)) == (ST_OUT_BUF | ST_AUX_DATA))
         mouse_byte(inb(KBD_DATA));
 }
 
@@ -252,11 +268,11 @@ static void mouse_irq(regs_t *r)
 static int32_t evdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     (void)off;
-    evdev_dev_t *d = (evdev_dev_t *)n->priv;
-    evdev_q_t   *q = d->q;
-    uint32_t want = len / sizeof(input_event_t);
+    evdev_dev_t *d    = (evdev_dev_t *)n->priv;
+    evdev_q_t   *q    = d->q;
+    uint32_t     want = len / sizeof(input_event_t);
     if (want == 0)
-        return 0;                        /* whole events only */
+        return 0; /* whole events only */
 
     /* Test-and-sleep atomic against the IRQ, the same cli/schedule dance
      * pipe_node_read uses. */
@@ -276,8 +292,7 @@ static int32_t evdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 
     uint32_t nout = want < q->count ? want : q->count;
     for (uint32_t i = 0; i < nout; i++) {
-        memcpy((uint8_t *)buf + i * sizeof(input_event_t),
-               &q->ev[q->head], sizeof(input_event_t));
+        memcpy((uint8_t *)buf + i * sizeof(input_event_t), &q->ev[q->head], sizeof(input_event_t));
         q->head = (q->head + 1) % 64;
         q->count--;
     }
@@ -306,11 +321,11 @@ int input_pull(int mouse, uint16_t *type, uint16_t *code, int32_t *value)
         return 0;
     }
     input_event_t e = q->ev[q->head];
-    q->head = (q->head + 1) % 64;
+    q->head         = (q->head + 1) % 64;
     q->count--;
     asm volatile("sti");
-    *type = e.type;
-    *code = e.code;
+    *type  = e.type;
+    *code  = e.code;
     *value = e.value;
     return 1;
 }
@@ -318,7 +333,7 @@ int input_pull(int mouse, uint16_t *type, uint16_t *code, int32_t *value)
 static int evdev_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
     evdev_dev_t *d = (evdev_dev_t *)n->priv;
-    int16_t r = 0;
+    int16_t      r = 0;
     if ((events & POLLIN) && d->q->count)
         r |= POLLIN;
     *revents = r;
@@ -336,50 +351,53 @@ void input_set_nonblock(vfs_node_t *n, int nb)
 }
 
 /* ---- EVIOC* ioctls (the Linux numbers) ----------------------------------- */
-#define EVIOCGVERSION   0x80044501
-#define EVIOCGID        0x80084502
-#define EVIOCGNAME(len) (0x80000000 | ((len) << 16) | 0x4506)
+#define EVIOCGVERSION      0x80044501
+#define EVIOCGID           0x80084502
+#define EVIOCGNAME(len)    (0x80000000 | ((len) << 16) | 0x4506)
 #define EVIOCGBIT(ev, len) (0x80000000 | ((len) << 16) | (0x45 << 8) | 0x20)
-#define EVIOCGRAB       0x40044590
-#define EVIOCSCLOCKID   0x400445A0
+#define EVIOCGRAB          0x40044590
+#define EVIOCSCLOCKID      0x400445A0
 
 #define EV_CNT (EV_LED + 1)
 
 static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
 {
     evdev_dev_t *d = (evdev_dev_t *)n->priv;
-    uint64_t u = arg;
+    uint64_t     u = arg;
 
     switch (cmd) {
     case EVIOCGVERSION: {
-        if (!user_ptr_ok(u, 4)) return -E_FAULT;
-        uint32_t v = (EV_VERSION_MAJOR << 16) | (EV_VERSION_MINOR << 8) |
-                     EV_VERSION_PATCH;
+        if (!user_ptr_ok(u, 4))
+            return -E_FAULT;
+        uint32_t v = (EV_VERSION_MAJOR << 16) | (EV_VERSION_MINOR << 8) | EV_VERSION_PATCH;
         memcpy((void *)(uintptr_t)u, &v, 4);
         return 0;
     }
     case EVIOCGID: {
-        if (!user_ptr_ok(u, 8)) return -E_FAULT;
+        if (!user_ptr_ok(u, 8))
+            return -E_FAULT;
         /* struct input_id { bus, vendor, product, version }: 4 shorts. */
-        uint16_t id[4] = { BUS_I8042, d->vendor, d->product, 0x0100 };
+        uint16_t id[4] = {BUS_I8042, d->vendor, d->product, 0x0100};
         memcpy((void *)(uintptr_t)u, id, sizeof(id));
         return 0;
     }
     case EVIOCGRAB: {
-        if (!user_ptr_ok(u, 4)) return -E_FAULT;
+        if (!user_ptr_ok(u, 4))
+            return -E_FAULT;
         d->grabbed = (int)(*(int32_t *)(uintptr_t)u);
         return 0;
     }
     case EVIOCSCLOCKID:
-        return 0;                        /* we always report realtime */
+        return 0; /* we always report realtime */
     }
     /* Repeat-rate get/set: Xorg's evdev driver programs these on every
      * keyboard open; refusing them is logged as a device error. */
     if ((cmd >> 30) == 1 /* _IOC_WRITE */ && (cmd & 0xFF) == 0x04)
-        return 0;                        /* EVIOCSREP */
+        return 0; /* EVIOCSREP */
     if ((cmd >> 30) == 2 /* _IOC_READ */ && (cmd & 0xFF) == 0x03) {
-        uint16_t rep[2] = { 250, 33 };   /* delay ms, period ms */
-        if (!user_ptr_ok(u, sizeof(rep))) return -E_FAULT;
+        uint16_t rep[2] = {250, 33}; /* delay ms, period ms */
+        if (!user_ptr_ok(u, sizeof(rep)))
+            return -E_FAULT;
         memcpy((void *)(uintptr_t)u, rep, sizeof(rep));
         return 0;
     }
@@ -391,25 +409,28 @@ static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     unsigned nr   = (unsigned)(cmd & 0xFF);
 
     if (dir == 2 /* _IOC_READ */) {
-        if (nr == 0x06) {                /* EVIOCGNAME */
+        if (nr == 0x06) { /* EVIOCGNAME */
             const char *name = d->name;
-            uint32_t len = (uint32_t)size;
-            if (!user_ptr_ok(u, len)) return -E_FAULT;
+            uint32_t    len  = (uint32_t)size;
+            if (!user_ptr_ok(u, len))
+                return -E_FAULT;
             uint32_t n = (uint32_t)strlen(name);
-            if (n > len) n = len;
+            if (n > len)
+                n = len;
             memcpy((void *)(uintptr_t)u, name, n);
             return (int32_t)n;
         }
         /* GBIT covers every event type 0..EV_MAX, so nr runs 0x20..0x3F:
          * libevdev probes each type in turn (including EV_FF at 0x35) and
          * a rejected query aborts the whole device init. */
-        if (nr >= 0x20 && nr < 0x40) {            /* EVIOCGBIT(ev, len) */
-            unsigned ev = nr - 0x20;
+        if (nr >= 0x20 && nr < 0x40) { /* EVIOCGBIT(ev, len) */
+            unsigned ev  = nr - 0x20;
             uint32_t len = (uint32_t)size;
-            if (!user_ptr_ok(u, len)) return -E_FAULT;
+            if (!user_ptr_ok(u, len))
+                return -E_FAULT;
             memset((void *)(uintptr_t)u, 0, len);
-            uint16_t *bits = NULL;
-            uint32_t nbits = 0;
+            uint16_t *bits  = NULL;
+            uint32_t  nbits = 0;
             if (ev == EV_SYN) {
                 /* The SYN query asks "which event types does this device
                  * emit?" as a plain Linux bitmap: bit T set = type T.  The
@@ -417,33 +438,40 @@ static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
                  * the bitmap here -- handing the words back raw made every
                  * type except EV_SYN invisible and Xorg's evdev driver
                  * dropped both devices ("Don't know how to use device"). */
-                if (!user_ptr_ok(u, len)) return -E_FAULT;
+                if (!user_ptr_ok(u, len))
+                    return -E_FAULT;
                 memset((void *)(uintptr_t)u, 0, len);
                 uint32_t bytes = (EV_CNT + 7) / 8;
-                if (bytes > len) bytes = len;
+                if (bytes > len)
+                    bytes = len;
                 for (unsigned t = 0; t < EV_CNT; t++)
                     if (d->kind_bits[t] & (1u << t))
-                        ((uint8_t *)(uintptr_t)u)[t >> 3] |=
-                            (uint8_t)(1u << (t & 7));
+                        ((uint8_t *)(uintptr_t)u)[t >> 3] |= (uint8_t)(1u << (t & 7));
                 return 0;
+            } else if (ev == EV_KEY) {
+                bits  = d->key_bits;
+                nbits = 1024;
+            } else if (ev == EV_REL) {
+                bits  = d->rel_bits;
+                nbits = 32;
             }
-            else if (ev == EV_KEY) { bits = d->key_bits; nbits = 1024; }
-            else if (ev == EV_REL) { bits = d->rel_bits; nbits = 32; }
             if (bits) {
                 uint32_t bytes = (nbits + 7) / 8;
-                if (bytes > len) bytes = len;
+                if (bytes > len)
+                    bytes = len;
                 memcpy((void *)(uintptr_t)u, bits, bytes);
             }
             return 0;
         }
-        if (nr == 0x07 || nr == 0x08) {  /* EVIOCGPHYS / EVIOCGUNIQ: none */
+        if (nr == 0x07 || nr == 0x08) { /* EVIOCGPHYS / EVIOCGUNIQ: none */
             uint32_t len = (uint32_t)size;
-            if (!user_ptr_ok(u, len)) return -E_FAULT;
-            if (len) ((char *)(uintptr_t)u)[0] = 0;
+            if (!user_ptr_ok(u, len))
+                return -E_FAULT;
+            if (len)
+                ((char *)(uintptr_t)u)[0] = 0;
             return 0;
         }
-        if (nr == 0x09 || nr == 0x18 || nr == 0x19 ||
-            nr == 0x1a || nr == 0x1b) {
+        if (nr == 0x09 || nr == 0x18 || nr == 0x19 || nr == 0x1a || nr == 0x1b) {
             /* EVIOCGPROP / EVIOCGKEY / EVIOCGLED / EVIOCGSND / EVIOCGSW:
              * state queries libevdev makes while initialising the device.
              * We keep no state bits beyond the capability maps, so every
@@ -451,7 +479,8 @@ static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
              * query fails and libevdev refuses the whole fd ("Unable to
              * query fd") and Xorg's evdev driver drops the device. */
             uint32_t len = (uint32_t)size;
-            if (!user_ptr_ok(u, len)) return -E_FAULT;
+            if (!user_ptr_ok(u, len))
+                return -E_FAULT;
             memset((void *)(uintptr_t)u, 0, len);
             return 0;
         }
@@ -474,7 +503,7 @@ static void kbd_enable_aux(void)
 {
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
-    outb(KBD_CMD, 0xA8);                 /* enable auxiliary port */
+    outb(KBD_CMD, 0xA8); /* enable auxiliary port */
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
     /*
@@ -488,14 +517,14 @@ static void kbd_enable_aux(void)
      * whole session -- the "login cannot accept input" symptom.  Reading the
      * command byte is a separate 0x20 command; 0x60 is write-only.
      */
-    outb(KBD_CMD, 0x20);                 /* read command byte */
+    outb(KBD_CMD, 0x20); /* read command byte */
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
     uint8_t cmd = inb(KBD_DATA);
-    cmd |= 0x03;                          /* enable IRQ 1 (kbd) + IRQ 12 (mouse) */
+    cmd |= 0x03; /* enable IRQ 1 (kbd) + IRQ 12 (mouse) */
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
-    outb(KBD_CMD, 0x60);                 /* write command byte */
+    outb(KBD_CMD, 0x60); /* write command byte */
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
     outb(KBD_DATA, cmd);
@@ -509,14 +538,14 @@ static void kbd_enable_aux(void)
     outb(KBD_CMD, 0xD4);
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
-    outb(KBD_DATA, 0xF6);                /* mouse: set defaults */
-    while (inb(KBD_STATUS) & 1)          /* drain its ack (0xFA) */
+    outb(KBD_DATA, 0xF6);       /* mouse: set defaults */
+    while (inb(KBD_STATUS) & 1) /* drain its ack (0xFA) */
         (void)inb(KBD_DATA);
     outb(KBD_CMD, 0xD4);
     while (inb(KBD_STATUS) & ST_INPT_BUF)
         ;
-    outb(KBD_DATA, 0xF4);                /* mouse: start reporting */
-    while (inb(KBD_STATUS) & 1)          /* drain its ack (0xFA) */
+    outb(KBD_DATA, 0xF4);       /* mouse: start reporting */
+    while (inb(KBD_STATUS) & 1) /* drain its ack (0xFA) */
         (void)inb(KBD_DATA);
 }
 
@@ -525,27 +554,25 @@ void input_init(void)
     /* Capability bitmaps, built once: the keyboard says SYN/KEY/LED, the
      * mouse says SYN/KEY/REL.  Keys cover every code scancode_to_key can
      * produce, so libinput's probe finds everything it might ask for. */
-    g_kbd_dev.kind_bits[EV_SYN]  |= (1u << EV_SYN);
-    g_kbd_dev.kind_bits[EV_KEY]  |= (1u << EV_KEY);
-    g_kbd_dev.kind_bits[EV_LED]  |= (1u << EV_LED);
+    g_kbd_dev.kind_bits[EV_SYN] |= (1u << EV_SYN);
+    g_kbd_dev.kind_bits[EV_KEY] |= (1u << EV_KEY);
+    g_kbd_dev.kind_bits[EV_LED] |= (1u << EV_LED);
     for (uint16_t sc = 1; sc < 128; sc++) {
         uint16_t k = scancode_to_key((uint8_t)sc, 0);
         if (k && k < 1024)
             g_kbd_dev.key_bits[k >> 4] |= (uint16_t)(1u << (k & 15));
     }
     static const uint16_t extkeys[] = {
-        96, 97, 98, 100, 102, 103, 104, 105, 106, 107, 108, 109,
-        110, 111, 125, 126, 127,
+        96, 97, 98, 100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 125, 126, 127,
     };
     for (uint32_t i = 0; i < sizeof(extkeys) / sizeof(extkeys[0]); i++)
-        g_kbd_dev.key_bits[extkeys[i] >> 4] |=
-            (uint16_t)(1u << (extkeys[i] & 15));
+        g_kbd_dev.key_bits[extkeys[i] >> 4] |= (uint16_t)(1u << (extkeys[i] & 15));
 
     g_mouse_dev.kind_bits[EV_SYN] |= (1u << EV_SYN);
     g_mouse_dev.kind_bits[EV_KEY] |= (1u << EV_KEY);
     g_mouse_dev.kind_bits[EV_REL] |= (1u << EV_REL);
-    g_mouse_dev.key_bits[BTN_LEFT >> 4]   |= (uint16_t)(1u << (BTN_LEFT & 15));
-    g_mouse_dev.key_bits[BTN_RIGHT >> 4]  |= (uint16_t)(1u << (BTN_RIGHT & 15));
+    g_mouse_dev.key_bits[BTN_LEFT >> 4] |= (uint16_t)(1u << (BTN_LEFT & 15));
+    g_mouse_dev.key_bits[BTN_RIGHT >> 4] |= (uint16_t)(1u << (BTN_RIGHT & 15));
     g_mouse_dev.key_bits[BTN_MIDDLE >> 4] |= (uint16_t)(1u << (BTN_MIDDLE & 15));
     g_mouse_dev.rel_bits[REL_X >> 4] |= (uint16_t)(1u << (REL_X & 15));
     g_mouse_dev.rel_bits[REL_Y >> 4] |= (uint16_t)(1u << (REL_Y & 15));
@@ -576,15 +603,13 @@ int64_t sys_inputinject(uint64_t type, uint64_t code, uint64_t value)
      * X server's pointer sprite only materialises once the pointer has
      * actually moved, so headless tests inject REL events here. */
     if (type == EV_REL || (code >= 0x110 && code <= 0x117)) {
-        evdev_push(&g_mouse_dev, (uint16_t)type, (uint16_t)code,
-                   (int32_t)value);
+        evdev_push(&g_mouse_dev, (uint16_t)type, (uint16_t)code, (int32_t)value);
         /* TEMPORARY: confirm injection lands and is consumed. */
         dbg_puts("INJ: m count=");
         dbg_puts_dec(g_mouse_dev.q->count);
         dbg_puts("\r\n");
     } else {
-        evdev_push(&g_kbd_dev, (uint16_t)type, (uint16_t)code,
-                   (int32_t)value);
+        evdev_push(&g_kbd_dev, (uint16_t)type, (uint16_t)code, (int32_t)value);
     }
     evdev_signal();
     return 0;
@@ -605,8 +630,8 @@ void input_usb_kbd(uint16_t key, int pressed)
 
 void input_usb_mouse(uint16_t btn_mask, int dx, int dy)
 {
-    evdev_push(&g_mouse_dev, EV_KEY, BTN_LEFT,   btn_mask & 0x01);
-    evdev_push(&g_mouse_dev, EV_KEY, BTN_RIGHT,  (btn_mask >> 1) & 0x01);
+    evdev_push(&g_mouse_dev, EV_KEY, BTN_LEFT, btn_mask & 0x01);
+    evdev_push(&g_mouse_dev, EV_KEY, BTN_RIGHT, (btn_mask >> 1) & 0x01);
     evdev_push(&g_mouse_dev, EV_KEY, BTN_MIDDLE, (btn_mask >> 2) & 0x01);
     evdev_push(&g_mouse_dev, EV_REL, REL_X, dx);
     evdev_push(&g_mouse_dev, EV_REL, REL_Y, dy);

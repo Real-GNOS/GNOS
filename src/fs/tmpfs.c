@@ -32,27 +32,27 @@ static const vfs_ops_t g_tmpfs_file_ops;
 
 /* ---- node ------------------------------------------------------------- */
 struct tmpfs_node {
-    char             name[VFS_NAME_MAX];
-    int              kind;          /* VFS_DIR / VFS_FILE / VFS_SYMLINK */
-    uint64_t         size;
-    uint32_t         mode;          /* low 12 permission bits */
-    uint32_t         ino;
-    uint8_t         *data;          /* file payload (into g_arena) */
-    uint32_t         datacap;       /* allocated payload capacity */
+    char     name[VFS_NAME_MAX];
+    int      kind; /* VFS_DIR / VFS_FILE / VFS_SYMLINK */
+    uint64_t size;
+    uint32_t mode; /* low 12 permission bits */
+    uint32_t ino;
+    uint8_t *data;    /* file payload (into g_arena) */
+    uint32_t datacap; /* allocated payload capacity */
     /* Frame-backed payload (POSIX shm / MAP_SHARED): when shm is non-NULL
      * the file's bytes live in node-owned frames that every mapping of the
      * file shares, instead of in g_arena.  shm_mappers counts the address
      * spaces currently mapping the node; a node is only freed once that is
      * zero too, so unlink + last-close cannot free a still-mapped file. */
-    uint64_t        *shm;
-    uint32_t         shm_npages;
-    uint32_t         shm_mappers;
-    char            *target;        /* symlink target (into g_arena) */
+    uint64_t          *shm;
+    uint32_t           shm_npages;
+    uint32_t           shm_mappers;
+    char              *target; /* symlink target (into g_arena) */
     struct tmpfs_node *parent;
-    struct tmpfs_node *children;     /* linked list of children */
-    struct tmpfs_node *next;         /* sibling link */
-    int              refs;          /* 1 = the tree, +1 per open fd */
-    int              unlinked;      /* detached; lives until last fd closes */
+    struct tmpfs_node *children; /* linked list of children */
+    struct tmpfs_node *next;     /* sibling link */
+    int                refs;     /* 1 = the tree, +1 per open fd */
+    int                unlinked; /* detached; lives until last fd closes */
 };
 
 static int tmpfs_node_setsize(struct tmpfs_node *n, uint64_t len);
@@ -64,15 +64,15 @@ struct tmpfs_inst {
 
 /* ---- static storage --------------------------------------------------- */
 static struct tmpfs_node g_pool[MAX_TMPFS_NODES];
-static int  g_free_stack[MAX_TMPFS_NODES];
-static int  g_free_sp = 0;
-static int  g_pool_inited = 0;
+static int               g_free_stack[MAX_TMPFS_NODES];
+static int               g_free_sp     = 0;
+static int               g_pool_inited = 0;
 
-static uint8_t g_arena[TMPFS_ARENA];
+static uint8_t  g_arena[TMPFS_ARENA];
 static uint32_t g_arena_off = 0;
 
 static struct tmpfs_inst g_insts[TMPFS_MAX_INST];
-static int g_inst_used = 0;
+static int               g_inst_used = 0;
 
 /* ---- low-level alloc -------------------------------------------------- */
 static void pool_ensure_init(void)
@@ -81,7 +81,7 @@ static void pool_ensure_init(void)
         return;
     for (int i = 0; i < MAX_TMPFS_NODES; i++)
         g_free_stack[i] = MAX_TMPFS_NODES - 1 - i;
-    g_free_sp = MAX_TMPFS_NODES;
+    g_free_sp     = MAX_TMPFS_NODES;
     g_pool_inited = 1;
 }
 
@@ -90,10 +90,10 @@ static struct tmpfs_node *node_alloc(void)
     pool_ensure_init();
     if (g_free_sp == 0)
         return NULL;
-    int idx = g_free_stack[--g_free_sp];
-    struct tmpfs_node *n = &g_pool[idx];
+    int                idx = g_free_stack[--g_free_sp];
+    struct tmpfs_node *n   = &g_pool[idx];
     memset(n, 0, sizeof *n);
-    n->refs = 1;                  /* the directory tree owns one reference */
+    n->refs = 1; /* the directory tree owns one reference */
     return n;
 }
 
@@ -105,7 +105,7 @@ static void node_free(struct tmpfs_node *n)
         for (uint32_t i = 0; i < n->shm_npages; i++)
             pmm_free(n->shm[i]);
         kfree(n->shm);
-        n->shm = NULL;
+        n->shm        = NULL;
         n->shm_npages = 0;
     }
     int idx = (int)(n - g_pool);
@@ -158,7 +158,7 @@ static int shm_grow(struct tmpfs_node *n, uint64_t bytes)
         memcpy(nf, n->shm, sizeof(uint64_t) * n->shm_npages);
         kfree(n->shm);
     }
-    n->shm = nf;
+    n->shm        = nf;
     n->shm_npages = need;
     return 0;
 }
@@ -178,12 +178,10 @@ int tmpfs_node_shm_start(struct tmpfs_node *n, uint64_t bytes)
      * file became frame-backed (a semaphore's ftruncate + prefill). */
     if (n->data && n->size) {
         uint64_t remain = n->size;
-        uint32_t idx = 0;
+        uint32_t idx    = 0;
         while (remain && idx < n->shm_npages) {
-            uint32_t chunk = remain < PAGE_SIZE ? (uint32_t)remain
-                                                : (uint32_t)PAGE_SIZE;
-            memcpy(pmm_virt(n->shm[idx]), n->data + (uint64_t)idx * PAGE_SIZE,
-                   chunk);
+            uint32_t chunk = remain < PAGE_SIZE ? (uint32_t)remain : (uint32_t)PAGE_SIZE;
+            memcpy(pmm_virt(n->shm[idx]), n->data + (uint64_t)idx * PAGE_SIZE, chunk);
             remain -= chunk;
             idx++;
         }
@@ -218,8 +216,7 @@ static uint8_t *arena_alloc(uint32_t n)
 }
 
 /* ---- tree helpers ----------------------------------------------------- */
-static struct tmpfs_node *find_child(struct tmpfs_node *dir,
-                                     const char *name, size_t len)
+static struct tmpfs_node *find_child(struct tmpfs_node *dir, const char *name, size_t len)
 {
     for (struct tmpfs_node *c = dir->children; c; c = c->next)
         if (strlen(c->name) == len && memcmp(c->name, name, len) == 0)
@@ -247,7 +244,7 @@ static struct tmpfs_node *walk(struct tmpfs_node *root, const char *rel)
     if (!rel || rel[0] != '/')
         return NULL;
     struct tmpfs_node *cur = root;
-    const char *p = rel;
+    const char        *p   = rel;
     while (*p == '/')
         p++;
     while (*p) {
@@ -279,8 +276,7 @@ static struct tmpfs_node *walk(struct tmpfs_node *root, const char *rel)
 /* Resolve the parent directory and leaf name of `rel`.  Returns the parent
  * node (never root) or NULL when `rel` names the root itself or is malformed.
  * `leaf` receives the NUL-terminated basename. */
-static struct tmpfs_node *split_parent(struct tmpfs_node *root,
-                                       const char *rel, char *leaf,
+static struct tmpfs_node *split_parent(struct tmpfs_node *root, const char *rel, char *leaf,
                                        size_t leafcap)
 {
     char tmp[GNUOS_PATH_MAX];
@@ -298,9 +294,9 @@ static struct tmpfs_node *split_parent(struct tmpfs_node *root,
     for (size_t i = 0; i <= L; i++)
         if (tmp[i] == '/')
             slash = i;
-    tmp[slash] = 0;
+    tmp[slash]        = 0;
     const char *leafp = tmp + slash + 1;
-    size_t llen = strlen(leafp);
+    size_t      llen  = strlen(leafp);
     if (llen == 0 || llen >= leafcap)
         return NULL;
     memcpy(leaf, leafp, llen + 1);
@@ -315,12 +311,12 @@ static void fill_vfs(struct tmpfs_node *n, vfs_node_t *out)
     memset(out, 0, sizeof *out);
     strncpy(out->name, n->name, VFS_NAME_MAX - 1);
     out->name[VFS_NAME_MAX - 1] = 0;
-    out->kind  = n->kind;
-    out->size  = n->size;
-    out->ops   = (n->kind == VFS_DIR) ? &g_tmpfs_dir_ops : &g_tmpfs_file_ops;
-    out->priv  = n;
-    out->e2.ino  = n->ino;
-    out->e2.mode = (uint16_t)(n->mode & 0x0FFF);
+    out->kind                   = n->kind;
+    out->size                   = n->size;
+    out->ops                    = (n->kind == VFS_DIR) ? &g_tmpfs_dir_ops : &g_tmpfs_file_ops;
+    out->priv                   = n;
+    out->e2.ino                 = n->ino;
+    out->e2.mode                = (uint16_t)(n->mode & 0x0FFF);
 }
 
 /* ---- instance factory ------------------------------------------------- */
@@ -328,7 +324,7 @@ tmpfs_t *tmpfs_create(void)
 {
     if (g_inst_used >= TMPFS_MAX_INST)
         return NULL;
-    struct tmpfs_inst *fs = &g_insts[g_inst_used++];
+    struct tmpfs_inst *fs   = &g_insts[g_inst_used++];
     struct tmpfs_node *root = node_alloc();
     if (!root)
         return NULL;
@@ -337,24 +333,23 @@ tmpfs_t *tmpfs_create(void)
     root->ino  = 1;
     strncpy(root->name, "/", VFS_NAME_MAX - 1);
     root->name[VFS_NAME_MAX - 1] = 0;
-    fs->root     = root;
-    fs->next_ino = 2;
+    fs->root                     = root;
+    fs->next_ino                 = 2;
     return fs;
 }
 
 /* ---- read / write (file nodes) --------------------------------------- */
 /* Bytes of a frame-backed node are read straight from its frames; an
  * arena-backed node reads from the arena as before. */
-static void node_bytes_in(struct tmpfs_node *node, uint64_t off, void *buf,
-                          uint32_t len)
+static void node_bytes_in(struct tmpfs_node *node, uint64_t off, void *buf, uint32_t len)
 {
     if (node->shm) {
         uint64_t pos = off;
         uint8_t *dst = (uint8_t *)buf;
         while (len) {
-            uint32_t idx = (uint32_t)(pos >> 12);
+            uint32_t idx    = (uint32_t)(pos >> 12);
             uint32_t inpage = (uint32_t)(pos & (PAGE_SIZE - 1));
-            uint32_t chunk = PAGE_SIZE - inpage;
+            uint32_t chunk  = PAGE_SIZE - inpage;
             if (chunk > len)
                 chunk = len;
             memcpy(dst, (uint8_t *)pmm_virt(node->shm[idx]) + inpage, chunk);
@@ -367,16 +362,15 @@ static void node_bytes_in(struct tmpfs_node *node, uint64_t off, void *buf,
     }
 }
 
-static void node_bytes_out(struct tmpfs_node *node, uint64_t off,
-                           const void *buf, uint32_t len)
+static void node_bytes_out(struct tmpfs_node *node, uint64_t off, const void *buf, uint32_t len)
 {
     if (node->shm) {
-        uint64_t pos = off;
+        uint64_t       pos = off;
         const uint8_t *src = (const uint8_t *)buf;
         while (len) {
-            uint32_t idx = (uint32_t)(pos >> 12);
+            uint32_t idx    = (uint32_t)(pos >> 12);
             uint32_t inpage = (uint32_t)(pos & (PAGE_SIZE - 1));
-            uint32_t chunk = PAGE_SIZE - inpage;
+            uint32_t chunk  = PAGE_SIZE - inpage;
             if (chunk > len)
                 chunk = len;
             memcpy((uint8_t *)pmm_virt(node->shm[idx]) + inpage, src, chunk);
@@ -423,8 +417,8 @@ int tmpfs_write(struct vfs_node *n, uint64_t off, const void *buf, uint32_t len)
     } else {
         if (end > node->datacap) {
             uint32_t newcap = (uint32_t)end;
-            newcap = (newcap + 4095u) & ~(uint32_t)4095u;
-            uint8_t *nd = arena_alloc(newcap);
+            newcap          = (newcap + 4095u) & ~(uint32_t)4095u;
+            uint8_t *nd     = arena_alloc(newcap);
             if (!nd)
                 return -E_NOSPC;
             if (node->data && node->size)
@@ -440,21 +434,25 @@ int tmpfs_write(struct vfs_node *n, uint64_t off, const void *buf, uint32_t len)
     return (int32_t)len;
 }
 
-static int32_t tmpfs_dir_read(struct vfs_node *n, uint64_t off, void *buf,
-                              uint32_t len)
+static int32_t tmpfs_dir_read(struct vfs_node *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
-static int32_t tmpfs_dir_write(struct vfs_node *n, uint64_t off,
-                               const void *buf, uint32_t len)
+static int32_t tmpfs_dir_write(struct vfs_node *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
-static const vfs_ops_t g_tmpfs_dir_ops  = { .read = tmpfs_dir_read, .write = tmpfs_dir_write };
+static const vfs_ops_t g_tmpfs_dir_ops = {.read = tmpfs_dir_read, .write = tmpfs_dir_write};
 /* ---- open-file references (POSIX shm semantics) -----------------------
  * A vfs_file_t holds a copy of the resolved node whose priv points back at
  * the tmpfs_node.  Opening a file takes a reference and the last close
@@ -473,7 +471,7 @@ static void tmpfs_node_release(vfs_node_t *n)
     if (!t)
         return;
     if (--t->refs == 0 && t->unlinked)
-        node_release_check(t);   /* still held by mappers? defer the free */
+        node_release_check(t); /* still held by mappers? defer the free */
 }
 
 /* Does this resolved node name a tmpfs file?  (fchmod/ftruncate by fd need
@@ -524,8 +522,7 @@ int tmpfs_resolve(tmpfs_t *fs, const char *rel, vfs_node_t *out)
     return 0;
 }
 
-int tmpfs_readdir(tmpfs_t *fs, const char *rel, uint32_t index,
-                  char *name, uint8_t *type)
+int tmpfs_readdir(tmpfs_t *fs, const char *rel, uint32_t index, char *name, uint8_t *type)
 {
     struct tmpfs_node *dir = walk(fs->root, rel);
     if (!dir || dir->kind != VFS_DIR)
@@ -533,13 +530,13 @@ int tmpfs_readdir(tmpfs_t *fs, const char *rel, uint32_t index,
     if (index == 0) {
         strncpy(name, ".", VFS_NAME_MAX - 1);
         name[VFS_NAME_MAX - 1] = 0;
-        *type = DT_DIR;
+        *type                  = DT_DIR;
         return 0;
     }
     if (index == 1) {
         strncpy(name, "..", VFS_NAME_MAX - 1);
         name[VFS_NAME_MAX - 1] = 0;
-        *type = DT_DIR;
+        *type                  = DT_DIR;
         return 0;
     }
     uint32_t i = 2;
@@ -547,9 +544,7 @@ int tmpfs_readdir(tmpfs_t *fs, const char *rel, uint32_t index,
         if (i == index) {
             strncpy(name, c->name, VFS_NAME_MAX - 1);
             name[VFS_NAME_MAX - 1] = 0;
-            *type = (c->kind == VFS_DIR)  ? DT_DIR
-                  : (c->kind == VFS_SYMLINK) ? DT_LNK
-                  : DT_REG;
+            *type = (c->kind == VFS_DIR) ? DT_DIR : (c->kind == VFS_SYMLINK) ? DT_LNK : DT_REG;
             return 0;
         }
         i++;
@@ -579,7 +574,7 @@ int tmpfs_mkdir(tmpfs_t *fs, const char *rel, uint32_t mode)
 {
     char leaf[VFS_NAME_MAX];
     if (is_fs_root(rel))
-        return -E_EXIST;          /* the mount point is already a directory */
+        return -E_EXIST; /* the mount point is already a directory */
     struct tmpfs_node *parent = split_parent(fs->root, rel, leaf, sizeof leaf);
     if (!parent || parent->kind != VFS_DIR)
         return -E_NOENT;
@@ -593,9 +588,9 @@ int tmpfs_mkdir(tmpfs_t *fs, const char *rel, uint32_t mode)
     n->ino  = fs->next_ino++;
     strncpy(n->name, leaf, VFS_NAME_MAX - 1);
     n->name[VFS_NAME_MAX - 1] = 0;
-    n->parent  = parent;
-    n->next    = parent->children;
-    parent->children = n;
+    n->parent                 = parent;
+    n->next                   = parent->children;
+    parent->children          = n;
     return 0;
 }
 
@@ -603,7 +598,7 @@ int tmpfs_create_file(tmpfs_t *fs, const char *rel, uint32_t mode)
 {
     char leaf[VFS_NAME_MAX];
     if (is_fs_root(rel))
-        return -E_ISDIR;          /* O_CREAT on a directory */
+        return -E_ISDIR; /* O_CREAT on a directory */
     struct tmpfs_node *parent = split_parent(fs->root, rel, leaf, sizeof leaf);
     if (!parent || parent->kind != VFS_DIR)
         return -E_NOENT;
@@ -617,9 +612,9 @@ int tmpfs_create_file(tmpfs_t *fs, const char *rel, uint32_t mode)
     n->ino  = fs->next_ino++;
     strncpy(n->name, leaf, VFS_NAME_MAX - 1);
     n->name[VFS_NAME_MAX - 1] = 0;
-    n->parent  = parent;
-    n->next    = parent->children;
-    parent->children = n;
+    n->parent                 = parent;
+    n->next                   = parent->children;
+    parent->children          = n;
     return 0;
 }
 
@@ -635,7 +630,7 @@ int tmpfs_unlink(tmpfs_t *fs, const char *rel)
     if (!n)
         return -E_NOENT;
     if (n->kind == VFS_DIR)
-        return -E_ISDIR;          /* use rmdir for directories */
+        return -E_ISDIR; /* use rmdir for directories */
     detach(parent, n);
     /* POSIX: an unlinked file lives until the last fd referencing it closes
      * (that is what makes shm_open + unlink + ftruncate work).  The tree
@@ -652,7 +647,7 @@ int tmpfs_rmdir(tmpfs_t *fs, const char *rel)
 {
     char leaf[VFS_NAME_MAX];
     if (is_fs_root(rel))
-        return -E_BUSY;           /* umount(2) is the way to remove a mount */
+        return -E_BUSY; /* umount(2) is the way to remove a mount */
     struct tmpfs_node *parent = split_parent(fs->root, rel, leaf, sizeof leaf);
     if (!parent)
         return -E_NOENT;
@@ -686,16 +681,16 @@ int tmpfs_symlink(tmpfs_t *fs, const char *target, const char *rel)
     n->ino  = fs->next_ino++;
     strncpy(n->name, leaf, VFS_NAME_MAX - 1);
     n->name[VFS_NAME_MAX - 1] = 0;
-    size_t tl = strlen(target);
-    char *tp = (char *)arena_alloc((uint32_t)(tl + 1));
+    size_t tl                 = strlen(target);
+    char  *tp                 = (char *)arena_alloc((uint32_t)(tl + 1));
     if (!tp) {
         node_free(n);
         return -E_NOSPC;
     }
     memcpy(tp, target, tl + 1);
-    n->target = tp;
-    n->parent  = parent;
-    n->next    = parent->children;
+    n->target        = tp;
+    n->parent        = parent;
+    n->next          = parent->children;
     parent->children = n;
     return 0;
 }
@@ -715,7 +710,7 @@ int tmpfs_truncate(tmpfs_t *fs, const char *rel)
     struct tmpfs_node *n = walk(fs->root, rel);
     if (!n)
         return -E_NOENT;
-    n->size = 0;                 /* payload bytes are leaked; writes restart at 0 */
+    n->size = 0; /* payload bytes are leaked; writes restart at 0 */
     return 0;
 }
 
@@ -765,7 +760,7 @@ int tmpfs_node_setsize(struct tmpfs_node *n, uint64_t len)
 
     if (len > n->datacap) {
         uint32_t newcap = ((uint32_t)len + 4095u) & ~(uint32_t)4095u;
-        uint8_t *nd = arena_alloc(newcap);
+        uint8_t *nd     = arena_alloc(newcap);
         if (!nd)
             return -E_NOSPC;
         if (n->data && n->size)
@@ -852,8 +847,8 @@ int tmpfs_rename(tmpfs_t *fs, const char *srel, const char *drel)
     detach(sp, src);
     strncpy(src->name, dleaf, VFS_NAME_MAX - 1);
     src->name[VFS_NAME_MAX - 1] = 0;
-    src->parent   = dp;
-    src->next     = dp->children;
-    dp->children  = src;
+    src->parent                 = dp;
+    src->next                   = dp->children;
+    dp->children                = src;
     return 0;
 }

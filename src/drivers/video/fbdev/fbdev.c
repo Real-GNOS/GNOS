@@ -59,7 +59,7 @@ typedef struct {
     fb_bitfield_t red, green, blue, transp;
     uint32_t      nonstd;
     uint32_t      activate;
-    uint32_t      height, width;      /* physical mm, -1 when unknown */
+    uint32_t      height, width; /* physical mm, -1 when unknown */
     uint32_t      accel_flags;
     uint32_t      pixclock;
     uint32_t      left_margin, right_margin, upper_margin, lower_margin;
@@ -72,7 +72,7 @@ typedef struct {
  * the uint16_t.  struct fb_fix_screeninfo is 80 bytes on x86-64 too. */
 typedef struct {
     char     id[16];
-    uint64_t smem_start;      /* physical address of the pixels */
+    uint64_t smem_start; /* physical address of the pixels */
     uint32_t smem_len;
     uint32_t type;
     uint32_t type_aux;
@@ -86,18 +86,18 @@ typedef struct {
     uint16_t reserved[2];
 } fb_fix_screeninfo_t;
 
-#define FB_TYPE_PACKED_PIXELS  0
-#define FB_VISUAL_TRUECOLOR    2
+#define FB_TYPE_PACKED_PIXELS 0
+#define FB_VISUAL_TRUECOLOR   2
 
 /* ---- device state ------------------------------------------------------ */
 
 static struct {
-    uint8_t *base;      /* virtual, via the HHDM */
-    uint64_t phys;      /* what mmap() hands out */
-    uint64_t len;       /* pitch * height, the whole visible span */
+    uint8_t *base; /* virtual, via the HHDM */
+    uint64_t phys; /* what mmap() hands out */
+    uint64_t len;  /* pitch * height, the whole visible span */
     uint32_t w, h;
-    uint32_t pitch;     /* bytes per scanline */
-    uint32_t bpp;       /* bits per pixel; we only support 32 */
+    uint32_t pitch; /* bytes per scanline */
+    uint32_t bpp;   /* bits per pixel; we only support 32 */
     int      live;
 } g_fb;
 
@@ -109,21 +109,20 @@ static int32_t fb_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     if (!g_fb.live)
         return -E_NODEV;
     if (off >= g_fb.len)
-        return 0;                       /* EOF, like a regular short file */
+        return 0; /* EOF, like a regular short file */
     if (off + len > g_fb.len)
         len = (uint32_t)(g_fb.len - off);
     memcpy(buf, g_fb.base + off, len);
     return (int32_t)len;
 }
 
-static int32_t fb_write(vfs_node_t *n, uint64_t off, const void *buf,
-                        uint32_t len)
+static int32_t fb_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)n;
     if (!g_fb.live)
         return -E_NODEV;
     if (off >= g_fb.len)
-        return -E_NOSPC;                /* a framebuffer cannot grow */
+        return -E_NOSPC; /* a framebuffer cannot grow */
     if (off + len > g_fb.len)
         len = (uint32_t)(g_fb.len - off);
     memcpy(g_fb.base + off, buf, len);
@@ -142,14 +141,18 @@ static void fill_var(fb_var_screeninfo_t *v)
     memset(v, 0, sizeof(*v));
     v->xres = v->xres_virtual = g_fb.w;
     v->yres = v->yres_virtual = g_fb.h;
-    v->bits_per_pixel = g_fb.bpp;
+    v->bits_per_pixel         = g_fb.bpp;
     /* XRGB8888, which is what Limine gives us and what gfx writes. */
-    v->red.offset   = 16; v->red.length   = 8;
-    v->green.offset =  8; v->green.length = 8;
-    v->blue.offset  =  0; v->blue.length  = 8;
-    v->transp.offset = 0; v->transp.length = 0;
-    v->height = v->width = (uint32_t)-1;   /* physical size unknown */
-    v->vmode  = 0;                          /* FB_VMODE_NONINTERLACED */
+    v->red.offset    = 16;
+    v->red.length    = 8;
+    v->green.offset  = 8;
+    v->green.length  = 8;
+    v->blue.offset   = 0;
+    v->blue.length   = 8;
+    v->transp.offset = 0;
+    v->transp.length = 0;
+    v->height = v->width = (uint32_t)-1; /* physical size unknown */
+    v->vmode             = 0;            /* FB_VMODE_NONINTERLACED */
 }
 
 static void fill_fix(fb_fix_screeninfo_t *f)
@@ -224,14 +227,13 @@ static int32_t fb_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
 
 /* ---- mmap -------------------------------------------------------------- */
 
-static int fb_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys,
-                   uint64_t *size)
+static int fb_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys, uint64_t *size)
 {
     (void)n;
     if (!g_fb.live)
         return -E_NODEV;
     if (offset != 0)
-        return -E_INVAL;                /* one framebuffer, one window */
+        return -E_INVAL; /* one framebuffer, one window */
     fbcon_geometry(&g_fb.w, &g_fb.h, &g_fb.pitch);
     *phys = g_fb.phys;
     *size = (uint64_t)g_fb.pitch * g_fb.h;
@@ -251,8 +253,7 @@ gfx_surface_t fbdev_screen(void)
 {
     /* gfx treats a NULL base as "draw nothing", so a machine that booted
      * without a framebuffer needs no special case at the call sites. */
-    return gfx_surface(g_fb.live ? g_fb.base : 0, g_fb.w, g_fb.h,
-                       g_fb.pitch, 4);
+    return gfx_surface(g_fb.live ? g_fb.base : 0, g_fb.w, g_fb.h, g_fb.pitch, 4);
 }
 
 int fbdev_init(const bootinfo_t *bi)
@@ -336,14 +337,13 @@ void fbdev_self_test(void)
     if (ok) {
         for (int y = 0; y < BOX; y++)
             for (int x = 0; x < BOX; x++)
-                saved[y * BOX + x] =
-                    ((uint32_t *)g_fb.base)[(uint64_t)y * stride_px + x];
+                saved[y * BOX + x] = ((uint32_t *)g_fb.base)[(uint64_t)y * stride_px + x];
     }
 
     /* 1. gfx writes land where read() can see them. */
     if (ok) {
-        gfx_surface_t s = fbdev_screen();
-        uint32_t want = gfx_rgb(0x12, 0x34, 0x56);
+        gfx_surface_t s    = fbdev_screen();
+        uint32_t      want = gfx_rgb(0x12, 0x34, 0x56);
         gfx_putpixel(&s, 3, 2, want);
 
         uint32_t got = 0;
@@ -377,27 +377,24 @@ void fbdev_self_test(void)
         fb_var_screeninfo_t v;
         fill_fix(&f);
         fill_var(&v);
-        if (f.line_length != g_fb.pitch || f.smem_len != g_fb.len ||
-            v.xres != g_fb.w || v.yres != g_fb.h ||
-            f.smem_start != g_fb.phys)
+        if (f.line_length != g_fb.pitch || f.smem_len != g_fb.len || v.xres != g_fb.w ||
+            v.yres != g_fb.h || f.smem_start != g_fb.phys)
             ok = 0;
     }
 
     /* 5. mmap hands back a physical span, not the HHDM alias. */
     if (ok) {
         uint64_t p = 0, sz = 0;
-        if (fb_mmap(0, 0, &p, &sz) != 0 || p != g_fb.phys ||
-            sz != (uint64_t)g_fb.pitch * g_fb.h)
+        if (fb_mmap(0, 0, &p, &sz) != 0 || p != g_fb.phys || sz != (uint64_t)g_fb.pitch * g_fb.h)
             ok = 0;
-        if (p >= g_hhdm)               /* a virtual address leaked out */
+        if (p >= g_hhdm) /* a virtual address leaked out */
             ok = 0;
     }
 
     if (ok) {
         for (int y = 0; y < BOX; y++)
             for (int x = 0; x < BOX; x++)
-                ((uint32_t *)g_fb.base)[(uint64_t)y * stride_px + x] =
-                    saved[y * BOX + x];
+                ((uint32_t *)g_fb.base)[(uint64_t)y * stride_px + x] = saved[y * BOX + x];
     }
 
     dbg_puts(ok ? "FBDEV: self test ok\n" : "FBDEV: self test FAILED\n");

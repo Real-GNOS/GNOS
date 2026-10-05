@@ -30,7 +30,7 @@
 #include "vfs.h"
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 #define DRM_S32_MAX ((int32_t)0x7fffffff)
@@ -48,18 +48,24 @@ extern void drm_plane_cleanup(struct drm_plane *plane);
 extern void drm_framebuffer_cleanup(struct drm_framebuffer *fb);
 
 /* A property whose value is the id of another KMS object. */
-static struct drm_property *drm_object_property(struct drm_device *dev, const char *name, uint32_t object_type)
+static struct drm_property *drm_object_property(struct drm_device *dev, const char *name,
+                                                uint32_t object_type)
 {
-    struct drm_property *prop = drm_property_create(dev, DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC, name, 1);
+    struct drm_property *prop =
+        drm_property_create(dev, DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC, name, 1);
 
-    if (prop != NULL) { prop->values[0] = object_type; }
+    if (prop != NULL) {
+        prop->values[0] = object_type;
+    }
     return prop;
 }
 
 /* A property accepting any signed 32-bit value (positions may be negative). */
-static struct drm_property *drm_signed_property(struct drm_device *dev, const char *name, int32_t min, int32_t max)
+static struct drm_property *drm_signed_property(struct drm_device *dev, const char *name,
+                                                int32_t min, int32_t max)
 {
-    struct drm_property *prop = drm_property_create(dev, DRM_MODE_PROP_SIGNED_RANGE | DRM_MODE_PROP_ATOMIC, name, 2);
+    struct drm_property *prop =
+        drm_property_create(dev, DRM_MODE_PROP_SIGNED_RANGE | DRM_MODE_PROP_ATOMIC, name, 2);
 
     if (prop != NULL) {
         prop->values[0] = (uint64_t)(int64_t)min;
@@ -70,7 +76,9 @@ static struct drm_property *drm_signed_property(struct drm_device *dev, const ch
 
 int drm_mode_config_init(struct drm_device *dev)
 {
-    if (dev == NULL) { return -EINVAL; }
+    if (dev == NULL) {
+        return -EINVAL;
+    }
 
     memset(&dev->mode_config.mutex, 0, sizeof(dev->mode_config.mutex));
     memset(&dev->mode_config.idr_mutex, 0, sizeof(dev->mode_config.idr_mutex));
@@ -172,39 +180,49 @@ int drm_mode_config_init(struct drm_device *dev)
     /* Plane properties: what is shown, where it comes from, where it goes. */
     dev->mode_config.prop_fb_id   = drm_object_property(dev, "FB_ID", DRM_MODE_OBJECT_FB);
     dev->mode_config.prop_crtc_id = drm_object_property(dev, "CRTC_ID", DRM_MODE_OBJECT_CRTC);
-    dev->mode_config.prop_active  = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "ACTIVE", 0, 1);
-    dev->mode_config.prop_mode_id = drm_property_create(dev, DRM_MODE_PROP_BLOB | DRM_MODE_PROP_ATOMIC, "MODE_ID", 0);
-    dev->mode_config.prop_src_x   = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "SRC_X", 0, UINT32_MAX);
-    dev->mode_config.prop_src_y   = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "SRC_Y", 0, UINT32_MAX);
-    dev->mode_config.prop_src_w   = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "SRC_W", 0, UINT32_MAX);
-    dev->mode_config.prop_src_h   = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "SRC_H", 0, UINT32_MAX);
-    dev->mode_config.prop_crtc_x  = drm_signed_property(dev, "CRTC_X", DRM_S32_MIN, DRM_S32_MAX);
-    dev->mode_config.prop_crtc_y  = drm_signed_property(dev, "CRTC_Y", DRM_S32_MIN, DRM_S32_MAX);
-    dev->mode_config.prop_crtc_w  = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "CRTC_W", 0, UINT32_MAX);
-    dev->mode_config.prop_crtc_h  = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "CRTC_H", 0, UINT32_MAX);
-    dev->mode_config.prop_zpos    = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "zpos", 0, 255);
-    dev->mode_config.prop_alpha   = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "alpha", 0, UINT16_MAX);
+    dev->mode_config.prop_active =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "ACTIVE", 0, 1);
+    dev->mode_config.prop_mode_id =
+        drm_property_create(dev, DRM_MODE_PROP_BLOB | DRM_MODE_PROP_ATOMIC, "MODE_ID", 0);
+    dev->mode_config.prop_src_x =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "SRC_X", 0, UINT32_MAX);
+    dev->mode_config.prop_src_y =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "SRC_Y", 0, UINT32_MAX);
+    dev->mode_config.prop_src_w =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "SRC_W", 0, UINT32_MAX);
+    dev->mode_config.prop_src_h =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "SRC_H", 0, UINT32_MAX);
+    dev->mode_config.prop_crtc_x = drm_signed_property(dev, "CRTC_X", DRM_S32_MIN, DRM_S32_MAX);
+    dev->mode_config.prop_crtc_y = drm_signed_property(dev, "CRTC_Y", DRM_S32_MIN, DRM_S32_MAX);
+    dev->mode_config.prop_crtc_w =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "CRTC_W", 0, UINT32_MAX);
+    dev->mode_config.prop_crtc_h =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "CRTC_H", 0, UINT32_MAX);
+    dev->mode_config.prop_zpos =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "zpos", 0, 255);
+    dev->mode_config.prop_alpha =
+        drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC, "alpha", 0, UINT16_MAX);
 
     {
         static const struct drm_mode_property_enum plane_types[] = {
             {DRM_PLANE_TYPE_OVERLAY, "Overlay"},
             {DRM_PLANE_TYPE_PRIMARY, "Primary"},
-            {DRM_PLANE_TYPE_CURSOR,  "Cursor" },
+            {DRM_PLANE_TYPE_CURSOR, "Cursor"},
         };
-        dev->mode_config.prop_plane_type =
-            drm_property_create_enum(dev, DRM_MODE_PROP_IMMUTABLE | DRM_MODE_PROP_ATOMIC, "type", plane_types, 3);
+        dev->mode_config.prop_plane_type = drm_property_create_enum(
+            dev, DRM_MODE_PROP_IMMUTABLE | DRM_MODE_PROP_ATOMIC, "type", plane_types, 3);
     }
 
     /* Any one of these missing means every atomic commit would fail in a
      * confusing way later, so fail here instead. */
-    if (dev->mode_config.prop_fb_id == NULL || dev->mode_config.prop_crtc_id == NULL
-        || dev->mode_config.prop_active == NULL || dev->mode_config.prop_mode_id == NULL
-        || dev->mode_config.prop_src_x == NULL || dev->mode_config.prop_src_y == NULL
-        || dev->mode_config.prop_src_w == NULL || dev->mode_config.prop_src_h == NULL
-        || dev->mode_config.prop_crtc_x == NULL || dev->mode_config.prop_crtc_y == NULL
-        || dev->mode_config.prop_crtc_w == NULL || dev->mode_config.prop_crtc_h == NULL
-        || dev->mode_config.prop_zpos == NULL || dev->mode_config.prop_alpha == NULL
-        || dev->mode_config.prop_plane_type == NULL) {
+    if (dev->mode_config.prop_fb_id == NULL || dev->mode_config.prop_crtc_id == NULL ||
+        dev->mode_config.prop_active == NULL || dev->mode_config.prop_mode_id == NULL ||
+        dev->mode_config.prop_src_x == NULL || dev->mode_config.prop_src_y == NULL ||
+        dev->mode_config.prop_src_w == NULL || dev->mode_config.prop_src_h == NULL ||
+        dev->mode_config.prop_crtc_x == NULL || dev->mode_config.prop_crtc_y == NULL ||
+        dev->mode_config.prop_crtc_w == NULL || dev->mode_config.prop_crtc_h == NULL ||
+        dev->mode_config.prop_zpos == NULL || dev->mode_config.prop_alpha == NULL ||
+        dev->mode_config.prop_plane_type == NULL) {
         drm_mode_config_cleanup(dev);
         return -ENOMEM;
     }
@@ -217,14 +235,17 @@ int drm_mode_config_init(struct drm_device *dev)
  * The next node is read before the callback runs, because cleaning an
  * object up unlinks it.
  */
-static void __attribute__((unused)) drm_mode_config_cleanup_list(ilist_node_t *list, void (*cleanup)(void *obj))
+static void __attribute__((unused)) drm_mode_config_cleanup_list(ilist_node_t *list,
+                                                                 void (*cleanup)(void *obj))
 {
     ilist_node_t *node = list->next;
 
     while (node != NULL && node != list) {
         ilist_node_t *next = node->next;
 
-        if (cleanup != NULL) { cleanup(node); }
+        if (cleanup != NULL) {
+            cleanup(node);
+        }
         node = next;
     }
 
@@ -233,15 +254,17 @@ static void __attribute__((unused)) drm_mode_config_cleanup_list(ilist_node_t *l
 
 void drm_mode_config_cleanup(struct drm_device *dev)
 {
-    if (dev == NULL) { return; }
+    if (dev == NULL) {
+        return;
+    }
 
     /* Framebuffers first: they hold references to the buffers behind them. */
     {
         ilist_node_t *node = dev->mode_config.fb_list.next;
 
         while (node != NULL && node != &dev->mode_config.fb_list) {
-            ilist_node_t          *next = node->next;
-            struct drm_framebuffer *fb  = container_of(node, struct drm_framebuffer, head);
+            ilist_node_t           *next = node->next;
+            struct drm_framebuffer *fb   = container_of(node, struct drm_framebuffer, head);
 
             drm_framebuffer_cleanup(fb);
             free(fb);
@@ -281,8 +304,8 @@ void drm_mode_config_cleanup(struct drm_device *dev)
         ilist_node_t *node = dev->mode_config.connector_list.next;
 
         while (node != NULL && node != &dev->mode_config.connector_list) {
-            ilist_node_t          *next      = node->next;
-            struct drm_connector  *connector = container_of(node, struct drm_connector, head);
+            ilist_node_t         *next      = node->next;
+            struct drm_connector *connector = container_of(node, struct drm_connector, head);
 
             drm_connector_cleanup(connector);
             node = next;
@@ -307,7 +330,7 @@ void drm_mode_config_cleanup(struct drm_device *dev)
         ilist_node_t *node = dev->mode_config.property_list.next;
 
         while (node != NULL && node != &dev->mode_config.property_list) {
-            ilist_node_t       *next = node->next;
+            ilist_node_t        *next = node->next;
             struct drm_property *prop = container_of(node, struct drm_property, dev_head);
 
             drm_property_destroy(dev, prop);
@@ -320,8 +343,9 @@ void drm_mode_config_cleanup(struct drm_device *dev)
         ilist_node_t *node = dev->mode_config.property_blob_list.next;
 
         while (node != NULL && node != &dev->mode_config.property_blob_list) {
-            ilist_node_t           *next = node->next;
-            struct drm_property_blob *blob = container_of(node, struct drm_property_blob, head_global);
+            ilist_node_t             *next = node->next;
+            struct drm_property_blob *blob =
+                container_of(node, struct drm_property_blob, head_global);
 
             drm_property_blob_put(blob);
             node = next;
@@ -356,21 +380,32 @@ int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_file *f
 
     (void)file_priv;
 
-    if (dev == NULL || res == NULL) { return -EINVAL; }
+    if (dev == NULL || res == NULL) {
+        return -EINVAL;
+    }
 
     wanted_fbs        = res->count_fbs;
     wanted_crtcs      = res->count_crtcs;
     wanted_connectors = res->count_connectors;
     wanted_encoders   = res->count_encoders;
 
-    if (dev->mode_config.num_fb != 0) { fbs = malloc((size_t)dev->mode_config.num_fb * sizeof(*fbs)); }
-    if (dev->mode_config.num_crtc != 0) { crtcs = malloc((size_t)dev->mode_config.num_crtc * sizeof(*crtcs)); }
-    if (dev->mode_config.num_connector != 0) { connectors = malloc((size_t)dev->mode_config.num_connector * sizeof(*connectors)); }
-    if (dev->mode_config.num_encoder != 0) { encoders = malloc((size_t)dev->mode_config.num_encoder * sizeof(*encoders)); }
+    if (dev->mode_config.num_fb != 0) {
+        fbs = malloc((size_t)dev->mode_config.num_fb * sizeof(*fbs));
+    }
+    if (dev->mode_config.num_crtc != 0) {
+        crtcs = malloc((size_t)dev->mode_config.num_crtc * sizeof(*crtcs));
+    }
+    if (dev->mode_config.num_connector != 0) {
+        connectors = malloc((size_t)dev->mode_config.num_connector * sizeof(*connectors));
+    }
+    if (dev->mode_config.num_encoder != 0) {
+        encoders = malloc((size_t)dev->mode_config.num_encoder * sizeof(*encoders));
+    }
 
-    if ((dev->mode_config.num_fb != 0 && fbs == NULL) || (dev->mode_config.num_crtc != 0 && crtcs == NULL)
-        || (dev->mode_config.num_connector != 0 && connectors == NULL)
-        || (dev->mode_config.num_encoder != 0 && encoders == NULL)) {
+    if ((dev->mode_config.num_fb != 0 && fbs == NULL) ||
+        (dev->mode_config.num_crtc != 0 && crtcs == NULL) ||
+        (dev->mode_config.num_connector != 0 && connectors == NULL) ||
+        (dev->mode_config.num_encoder != 0 && encoders == NULL)) {
         free(fbs);
         free(crtcs);
         free(connectors);
@@ -379,26 +414,34 @@ int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_file *f
     }
 
     n = 0;
-    for (node = dev->mode_config.fb_list.next; node != &dev->mode_config.fb_list; node = node->next) {
+    for (node = dev->mode_config.fb_list.next; node != &dev->mode_config.fb_list;
+         node = node->next) {
         fbs[n++] = container_of(node, struct drm_framebuffer, head)->base.id;
     }
     n = 0;
-    for (node = dev->mode_config.crtc_list.next; node != &dev->mode_config.crtc_list; node = node->next) {
+    for (node = dev->mode_config.crtc_list.next; node != &dev->mode_config.crtc_list;
+         node = node->next) {
         crtcs[n++] = container_of(node, struct drm_crtc, head)->base.id;
     }
     n = 0;
-    for (node = dev->mode_config.connector_list.next; node != &dev->mode_config.connector_list; node = node->next) {
+    for (node = dev->mode_config.connector_list.next; node != &dev->mode_config.connector_list;
+         node = node->next) {
         connectors[n++] = container_of(node, struct drm_connector, head)->base.id;
     }
     n = 0;
-    for (node = dev->mode_config.encoder_list.next; node != &dev->mode_config.encoder_list; node = node->next) {
+    for (node = dev->mode_config.encoder_list.next; node != &dev->mode_config.encoder_list;
+         node = node->next) {
         encoders[n++] = container_of(node, struct drm_encoder, head)->base.id;
     }
 
     /* Copy out whichever arrays the caller asked for and has room for. */
     {
-        uint32_t give_fbs        = (wanted_fbs < (uint32_t)dev->mode_config.num_fb) ? wanted_fbs : (uint32_t)dev->mode_config.num_fb;
-        uint32_t give_crtcs      = (wanted_crtcs < (uint32_t)dev->mode_config.num_crtc) ? wanted_crtcs : (uint32_t)dev->mode_config.num_crtc;
+        uint32_t give_fbs        = (wanted_fbs < (uint32_t)dev->mode_config.num_fb)
+                                       ? wanted_fbs
+                                       : (uint32_t)dev->mode_config.num_fb;
+        uint32_t give_crtcs      = (wanted_crtcs < (uint32_t)dev->mode_config.num_crtc)
+                                       ? wanted_crtcs
+                                       : (uint32_t)dev->mode_config.num_crtc;
         uint32_t give_connectors = (wanted_connectors < (uint32_t)dev->mode_config.num_connector)
                                        ? wanted_connectors
                                        : (uint32_t)dev->mode_config.num_connector;
@@ -407,25 +450,26 @@ int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_file *f
                                        : (uint32_t)dev->mode_config.num_encoder;
         int      failed          = 0;
 
-        if (give_fbs != 0
-            && (res->fb_id_ptr == 0
-                || copy_to_user((void *)(uintptr_t)res->fb_id_ptr, fbs, (size_t)give_fbs * sizeof(*fbs)) != 0)) {
+        if (give_fbs != 0 &&
+            (res->fb_id_ptr == 0 || copy_to_user((void *)(uintptr_t)res->fb_id_ptr, fbs,
+                                                 (size_t)give_fbs * sizeof(*fbs)) != 0)) {
             failed = 1;
         }
-        if (!failed && give_crtcs != 0
-            && (res->crtc_id_ptr == 0
-                || copy_to_user((void *)(uintptr_t)res->crtc_id_ptr, crtcs, (size_t)give_crtcs * sizeof(*crtcs)) != 0)) {
+        if (!failed && give_crtcs != 0 &&
+            (res->crtc_id_ptr == 0 || copy_to_user((void *)(uintptr_t)res->crtc_id_ptr, crtcs,
+                                                   (size_t)give_crtcs * sizeof(*crtcs)) != 0)) {
             failed = 1;
         }
-        if (!failed && give_connectors != 0
-            && (res->connector_id_ptr == 0
-                || copy_to_user((void *)(uintptr_t)res->connector_id_ptr, connectors,
-                                (size_t)give_connectors * sizeof(*connectors)) != 0)) {
+        if (!failed && give_connectors != 0 &&
+            (res->connector_id_ptr == 0 ||
+             copy_to_user((void *)(uintptr_t)res->connector_id_ptr, connectors,
+                          (size_t)give_connectors * sizeof(*connectors)) != 0)) {
             failed = 1;
         }
-        if (!failed && give_encoders != 0
-            && (res->encoder_id_ptr == 0
-                || copy_to_user((void *)(uintptr_t)res->encoder_id_ptr, encoders, (size_t)give_encoders * sizeof(*encoders)) != 0)) {
+        if (!failed && give_encoders != 0 &&
+            (res->encoder_id_ptr == 0 ||
+             copy_to_user((void *)(uintptr_t)res->encoder_id_ptr, encoders,
+                          (size_t)give_encoders * sizeof(*encoders)) != 0)) {
             failed = 1;
         }
 
@@ -434,7 +478,9 @@ int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_file *f
         free(connectors);
         free(encoders);
 
-        if (failed) { return -EFAULT; }
+        if (failed) {
+            return -EFAULT;
+        }
     }
 
     res->min_width        = dev->mode_config.min_width;
@@ -453,7 +499,9 @@ int drm_mode_getresources(struct drm_device *dev, void *data, struct drm_file *f
  * the plain initialiser under its other name. */
 int drmm_mode_config_init(struct drm_device *dev)
 {
-    if (dev == NULL) { return -EINVAL; }
+    if (dev == NULL) {
+        return -EINVAL;
+    }
 
     return drm_mode_config_init(dev);
 }

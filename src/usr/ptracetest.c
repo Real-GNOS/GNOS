@@ -20,12 +20,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static int g_failed;
-static long g_child_word;   /* the word PEEKDATA/POKEDATA reach for */
+static int  g_failed;
+static long g_child_word; /* the word PEEKDATA/POKEDATA reach for */
 
 static void report(const char *fmt, ...)
 {
-    char buf[128];
+    char    buf[128];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
@@ -56,13 +56,13 @@ int main(void)
         if (ptrace(PTRACE_TRACEME, 0, 0, 0) != 0)
             _exit(2);
 
-        raise(SIGSTOP);                 /* the first ptrace stop */
+        raise(SIGSTOP); /* the first ptrace stop */
 
         /* Resumed by PTRACE_SYSCALL: the tracer has poked g_child_word. */
         if (g_child_word != 43)
             _exit(3);
 
-        _exit(43);                      /* its exit syscall-entry stops first */
+        _exit(43); /* its exit syscall-entry stops first */
     }
 
     int st;
@@ -70,13 +70,11 @@ int main(void)
         report("PTRACETEST: waitpid: %s", strerror(2)); /* ENOSYS-ish */
         return 1;
     }
-    check(WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP, 1,
-          "SIGSTOP stop reported, no WUNTRACED");
+    check(WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP, 1, "SIGSTOP stop reported, no WUNTRACED");
 
     /* SIGCONT must not resume a ptrace stop: only PTRACE_CONT/SYSCALL can. */
     kill(pid, SIGCONT);
-    check(waitpid(pid, &st, WNOHANG) == 0, 2,
-          "SIGCONT does not resume a ptrace stop");
+    check(waitpid(pid, &st, WNOHANG) == 0, 2, "SIGCONT does not resume a ptrace stop");
 
     long w = ptrace(PTRACE_PEEKDATA, pid, &g_child_word, 0);
     check(w == 0, 3, "PEEKDATA reads the tracee's word");
@@ -103,8 +101,7 @@ int main(void)
     check(ptrace(PTRACE_CONT, pid, 0, 0) == 0, 10, "PTRACE_CONT lets it die");
     if (waitpid(pid, &st, 0) < 0)
         return 1;
-    check(WIFEXITED(st) && WEXITSTATUS(st) == 43, 11,
-          "tracer-injected exit status 43");
+    check(WIFEXITED(st) && WEXITSTATUS(st) == 43, 11, "tracer-injected exit status 43");
 
     report("PTRACETEST: done (%s)", g_failed ? "FAILED" : "ALL PASS");
     return g_failed;

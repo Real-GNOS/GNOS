@@ -50,8 +50,8 @@ typedef struct {
 #define ELF_PT_INTERP 3
 #define ELF_EM_X86_64 62
 
-#define ELF_PF_X      1
-#define ELF_PF_W      2
+#define ELF_PF_X 1
+#define ELF_PF_W 2
 
 /* Nothing user-space is allowed to live at or above this line. */
 #define USER_VA_LIMIT 0x0000800000000000ULL
@@ -64,17 +64,17 @@ typedef struct {
  * far below the mmap arena (USER_MMAP_BASE), which is where musl's malloc
  * expects to be able to grow.
  */
-#define DYN_PROG_BASE 0x0000000000400000ULL   /* same slot as a static ET_EXEC */
-#define LDSO_BASE     0x0000000004000000ULL   /* 64 MiB, clear of the program */
+#define DYN_PROG_BASE 0x0000000000400000ULL /* same slot as a static ET_EXEC */
+#define LDSO_BASE     0x0000000004000000ULL /* 64 MiB, clear of the program */
 
 static int is_elf(const uint8_t *img)
 {
     return img[0] == 0x7F && img[1] == 'E' && img[2] == 'L' && img[3] == 'F';
 }
 
-static int load_elf(addrspace_t *as, const uint8_t *img, uint32_t size,
-                    uint64_t dyn_base, uint64_t *entry, uint64_t *phdr,
-                    uint16_t *phnum, char *interp, uint32_t interp_cap)
+static int load_elf(addrspace_t *as, const uint8_t *img, uint32_t size, uint64_t dyn_base,
+                    uint64_t *entry, uint64_t *phdr, uint16_t *phnum, char *interp,
+                    uint32_t interp_cap)
 {
     const elf64_ehdr_t *eh = (const elf64_ehdr_t *)img;
 
@@ -104,20 +104,17 @@ static int load_elf(addrspace_t *as, const uint8_t *img, uint32_t size,
 
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         const elf64_phdr_t *ph =
-            (const elf64_phdr_t *)(img + eh->e_phoff +
-                                   (uint64_t)i * eh->e_phentsize);
+            (const elf64_phdr_t *)(img + eh->e_phoff + (uint64_t)i * eh->e_phentsize);
         if (ph->p_type != ELF_PT_LOAD)
             continue;
         if (ph->p_filesz > ph->p_memsz)
             return -1;
         if (ph->p_offset + ph->p_filesz > size)
             return -1;
-        if (base + ph->p_vaddr >= USER_VA_LIMIT ||
-            base + ph->p_vaddr + ph->p_memsz > USER_VA_LIMIT)
+        if (base + ph->p_vaddr >= USER_VA_LIMIT || base + ph->p_vaddr + ph->p_memsz > USER_VA_LIMIT)
             return -1;
 
-        if (!phdr_vaddr && eh->e_phoff >= ph->p_offset &&
-            eh->e_phoff < ph->p_offset + ph->p_filesz)
+        if (!phdr_vaddr && eh->e_phoff >= ph->p_offset && eh->e_phoff < ph->p_offset + ph->p_filesz)
             phdr_vaddr = base + ph->p_vaddr + (eh->e_phoff - ph->p_offset);
 
         /* We map every segment writable for the fill-in below; read-only
@@ -136,8 +133,7 @@ static int load_elf(addrspace_t *as, const uint8_t *img, uint32_t size,
 
         /* Frames come out of the allocator zeroed, so .bss needs no work. */
         if (ph->p_filesz &&
-            !vmm_copy_to_user(as, base + ph->p_vaddr,
-                              img + ph->p_offset, ph->p_filesz))
+            !vmm_copy_to_user(as, base + ph->p_vaddr, img + ph->p_offset, ph->p_filesz))
             return -1;
 
         /* Take back write on segments the ELF marks read-only.  PROT_READ=1,
@@ -146,8 +142,7 @@ static int load_elf(addrspace_t *as, const uint8_t *img, uint32_t size,
             uint64_t prot = 1;
             if (ph->p_flags & ELF_PF_X)
                 prot |= 4;
-            vmm_protect(as, base + ph->p_vaddr,
-                        (ph->p_memsz + 0xFFF) & ~0xFFFULL, prot);
+            vmm_protect(as, base + ph->p_vaddr, (ph->p_memsz + 0xFFF) & ~0xFFFULL, prot);
         }
     }
 
@@ -159,14 +154,12 @@ static int load_elf(addrspace_t *as, const uint8_t *img, uint32_t size,
         interp[0] = 0;
         for (uint16_t i = 0; i < eh->e_phnum; i++) {
             const elf64_phdr_t *ph =
-                (const elf64_phdr_t *)(img + eh->e_phoff +
-                                       (uint64_t)i * eh->e_phentsize);
+                (const elf64_phdr_t *)(img + eh->e_phoff + (uint64_t)i * eh->e_phentsize);
             if (ph->p_type != ELF_PT_INTERP)
                 continue;
             if (ph->p_offset + ph->p_filesz > size || ph->p_filesz == 0)
                 return -1;
-            uint32_t n = ph->p_filesz < interp_cap - 1
-                         ? ph->p_filesz : interp_cap - 1;
+            uint32_t n = ph->p_filesz < interp_cap - 1 ? ph->p_filesz : interp_cap - 1;
             memcpy(interp, img + ph->p_offset, n);
             interp[n] = 0;
             break;
@@ -221,13 +214,11 @@ static int is_aout(const uint8_t *img, uint32_t size)
     return m == AOUT_OMAGIC || m == AOUT_NMAGIC || m == AOUT_ZMAGIC;
 }
 
-static int load_aout(addrspace_t *as, const uint8_t *img, uint32_t size,
-                     uint64_t *entry)
+static int load_aout(addrspace_t *as, const uint8_t *img, uint32_t size, uint64_t *entry)
 {
-    const aout_exec_t *e = (const aout_exec_t *)img;
-    uint64_t text_off = (aout_magic(img) == AOUT_ZMAGIC)
-                        ? 0x1000 : sizeof(aout_exec_t);
-    uint64_t data_off = text_off + e->a_text;
+    const aout_exec_t *e        = (const aout_exec_t *)img;
+    uint64_t           text_off = (aout_magic(img) == AOUT_ZMAGIC) ? 0x1000 : sizeof(aout_exec_t);
+    uint64_t           data_off = text_off + e->a_text;
 
     if (data_off > size)
         return -2;
@@ -239,15 +230,13 @@ static int load_aout(addrspace_t *as, const uint8_t *img, uint32_t size,
     if (!vmm_alloc_range(as, AOUT_BASE, total, VM_USER | VM_WRITE | VM_EXEC))
         return -2;
 
-    if (e->a_text &&
-        !vmm_copy_to_user(as, AOUT_BASE, img + text_off, e->a_text))
+    if (e->a_text && !vmm_copy_to_user(as, AOUT_BASE, img + text_off, e->a_text))
         return -2;
 
     uint64_t dsize = e->a_data;
     if (data_off + dsize > size)
         dsize = size - data_off;
-    if (dsize &&
-        !vmm_copy_to_user(as, AOUT_BASE + e->a_text, img + data_off, dsize))
+    if (dsize && !vmm_copy_to_user(as, AOUT_BASE + e->a_text, img + data_off, dsize))
         return -2;
 
     *entry = AOUT_BASE + e->a_entry;
@@ -255,9 +244,9 @@ static int load_aout(addrspace_t *as, const uint8_t *img, uint32_t size,
 }
 
 /* --------------------------- dispatch --------------------------- */
-int load_executable(addrspace_t *as, const uint8_t *img, uint32_t size,
-                    uint64_t dyn_base, uint64_t *entry, uint64_t *phdr,
-                    uint16_t *phnum, char *interp, uint32_t interp_cap)
+int load_executable(addrspace_t *as, const uint8_t *img, uint32_t size, uint64_t dyn_base,
+                    uint64_t *entry, uint64_t *phdr, uint16_t *phnum, char *interp,
+                    uint32_t interp_cap)
 {
     if (phdr)
         *phdr = 0;
@@ -268,8 +257,7 @@ int load_executable(addrspace_t *as, const uint8_t *img, uint32_t size,
     if (size < 4)
         return 0;
     if (is_elf(img))
-        return load_elf(as, img, size, dyn_base, entry, phdr, phnum,
-                        interp, interp_cap);
+        return load_elf(as, img, size, dyn_base, entry, phdr, phnum, interp, interp_cap);
     if (is_aout(img, size))
         return load_aout(as, img, size, entry);
     return 0;

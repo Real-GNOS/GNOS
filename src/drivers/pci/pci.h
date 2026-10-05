@@ -21,13 +21,13 @@ typedef struct {
     uint16_t vendor, device;
     uint8_t  class_code, subclass, progif;
     uint8_t  hdr_type;
-    uint32_t bar[6];          /* raw BAR values as read from config space */
+    uint32_t bar[6]; /* raw BAR values as read from config space */
     uint8_t  irq_line, irq_pin;
     /* Capability list (offset 0x34): which capability ids this function
      * carries, so a driver can ask for MSI/MSI-X/PM without walking config
      * space again. */
-    uint8_t  caps[8];
-    uint8_t  n_caps;
+    uint8_t caps[8];
+    uint8_t n_caps;
 } pci_dev_t;
 
 extern pci_dev_t g_pci_devs[PCI_MAX_DEVICES];
@@ -87,14 +87,14 @@ int pci_enable_msix(const pci_dev_t *d, pci_msi_handler_t handler, uint8_t *out_
 int pci_has_cap(const pci_dev_t *d, uint8_t cap_id);
 
 /* Class codes we care about. */
-#define PCI_CLASS_NETWORK   0x02
+#define PCI_CLASS_NETWORK    0x02
 #define PCI_CLASS_MULTIMEDIA 0x04
-#define PCI_SUBCLASS_AUDIO   0x01   /* AC'97 and older: "multimedia audio" */
-#define PCI_SUBCLASS_HDA     0x03   /* Intel High Definition Audio */
+#define PCI_SUBCLASS_AUDIO   0x01 /* AC'97 and older: "multimedia audio" */
+#define PCI_SUBCLASS_HDA     0x03 /* Intel High Definition Audio */
 
 /* A few well-known ids. */
-#define PCI_VENDOR_INTEL 0x8086
-#define E1000_DEV_82540EM 0x100E   /* QEMU `-device e1000` */
-#define AC97_DEV_82801AA  0x2415   /* QEMU `-device ac97` (Intel ICH AC97) */
+#define PCI_VENDOR_INTEL  0x8086
+#define E1000_DEV_82540EM 0x100E /* QEMU `-device e1000` */
+#define AC97_DEV_82801AA  0x2415 /* QEMU `-device ac97` (Intel ICH AC97) */
 
 #endif

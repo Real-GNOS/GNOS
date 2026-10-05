@@ -36,55 +36,55 @@
 #include "kstring.h"
 
 /* Segment flags, as they appear in the flags byte. */
-#define TCP_FIN  0x01
-#define TCP_SYN  0x02
-#define TCP_RST  0x04
-#define TCP_PSH  0x08
-#define TCP_ACK  0x10
+#define TCP_FIN 0x01
+#define TCP_SYN 0x02
+#define TCP_RST 0x04
+#define TCP_PSH 0x08
+#define TCP_ACK 0x10
 
-#define TCP_MSS       (NET_MTU - 40)   /* 1460: 20-byte IP and TCP headers */
-#define TCP_BUF_SIZE  4096             /* one page each way, indexed by seq */
-#define TCP_MAX_PCB   8
-#define TCP_BACKLOG   4
+#define TCP_MSS      (NET_MTU - 40) /* 1460: 20-byte IP and TCP headers */
+#define TCP_BUF_SIZE 4096           /* one page each way, indexed by seq */
+#define TCP_MAX_PCB  8
+#define TCP_BACKLOG  4
 
 /* All timers in 100 Hz ticks.  The RTO is fixed (tcp.h explains why); one
  * second is a defensible value on a LAN or a slirp link, and five retries
  * is where we concede. */
-#define TCP_RTO_TICKS    100
-#define TCP_MAX_RETRIES  5
-#define TCP_TIME_WAIT    200           /* 2 s standing in for 2*MSL */
-#define TCP_CONN_TICKS   500           /* connect() gives up after 5 s */
+#define TCP_RTO_TICKS   100
+#define TCP_MAX_RETRIES 5
+#define TCP_TIME_WAIT   200 /* 2 s standing in for 2*MSL */
+#define TCP_CONN_TICKS  500 /* connect() gives up after 5 s */
 
-#define EPHEMERAL_FIRST  49152
+#define EPHEMERAL_FIRST 49152
 
 struct tcp_pcb {
     int      used;
     int      state;
-    uint32_t lip, rip;          /* host byte order, like everywhere above L3 */
+    uint32_t lip, rip; /* host byte order, like everywhere above L3 */
     uint16_t lport, rport;
 
     /* Send side: [snd_una, snd_end) lives in the tx ring, with snd_nxt
      * between them marking what has actually been transmitted. */
     uint32_t snd_una, snd_nxt, snd_end;
-    uint16_t snd_wnd;           /* the peer's latest advertised window */
-    uint16_t snd_mss;           /* the peer's MSS, clamped to ours */
-    int      fin_queued;        /* shutdown(SHUT_WR): FIN goes out at snd_end */
-    int      fin_sent;          /* FIN occupies sequence number snd_end */
+    uint16_t snd_wnd;    /* the peer's latest advertised window */
+    uint16_t snd_mss;    /* the peer's MSS, clamped to ours */
+    int      fin_queued; /* shutdown(SHUT_WR): FIN goes out at snd_end */
+    int      fin_sent;   /* FIN occupies sequence number snd_end */
 
     /* Receive side: [rcv_read, rcv_nxt) waits in the rx ring for the
      * application.  In-order only, so this interval is the whole story. */
     uint32_t rcv_nxt, rcv_read;
-    int      fin_seen;          /* the peer's FIN consumed a sequence number */
-    int      rx_shutdown;       /* shutdown(SHUT_RD): ACK, but keep nothing */
+    int      fin_seen;    /* the peer's FIN consumed a sequence number */
+    int      rx_shutdown; /* shutdown(SHUT_RD): ACK, but keep nothing */
 
-    uint64_t rx_phys, tx_phys;  /* the pages behind the rings */
+    uint64_t rx_phys, tx_phys; /* the pages behind the rings */
 
-    uint64_t rto_at;            /* retransmission deadline, 0 = disarmed */
+    uint64_t rto_at; /* retransmission deadline, 0 = disarmed */
     int      retries;
-    uint64_t tw_at;             /* TIME_WAIT expiry, 0 = not in TIME_WAIT */
-    uint64_t conn_at;           /* connect() deadline, 0 = none */
+    uint64_t tw_at;   /* TIME_WAIT expiry, 0 = not in TIME_WAIT */
+    uint64_t conn_at; /* connect() deadline, 0 = none */
 
-    int      error;             /* pending async error, SO_ERROR style */
+    int error; /* pending async error, SO_ERROR style */
 
     /* Listen bookkeeping: a child remembers its parent until accepted; the
      * parent keeps a fixed queue of established children.  A full queue
@@ -98,8 +98,14 @@ struct tcp_pcb {
 static tcp_pcb_t g_pcbs[TCP_MAX_PCB];
 
 /* "a is before b" in a 32-bit sequence space that wraps. */
-static int seq_lt(uint32_t a, uint32_t b) { return (int32_t)(a - b) < 0; }
-static int seq_leq(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
+static int seq_lt(uint32_t a, uint32_t b)
+{
+    return (int32_t)(a - b) < 0;
+}
+static int seq_leq(uint32_t a, uint32_t b)
+{
+    return (int32_t)(a - b) <= 0;
+}
 
 static uint32_t min3(uint32_t a, uint32_t b, uint32_t c)
 {
@@ -113,7 +119,7 @@ static uint32_t min3(uint32_t a, uint32_t b, uint32_t c)
 static uint32_t next_iss(void)
 {
     static uint32_t salt = 0x9E3779B9u;
-    salt = salt * 1664525u + 1013904223u;
+    salt                 = salt * 1664525u + 1013904223u;
     return (uint32_t)timer_ticks() * 64000u + salt;
 }
 
@@ -121,9 +127,11 @@ static uint32_t next_iss(void)
 
 static void pcb_free(tcp_pcb_t *p)
 {
-    if (p->rx_phys) pmm_free(p->rx_phys);
-    if (p->tx_phys) pmm_free(p->tx_phys);
-    p->used = 0;               /* the rest of the struct is now stale by definition */
+    if (p->rx_phys)
+        pmm_free(p->rx_phys);
+    if (p->tx_phys)
+        pmm_free(p->tx_phys);
+    p->used = 0; /* the rest of the struct is now stale by definition */
 }
 
 static tcp_pcb_t *pcb_alloc(void)
@@ -136,12 +144,12 @@ static tcp_pcb_t *pcb_alloc(void)
         p->rx_phys = pmm_alloc_zeroed();
         p->tx_phys = pmm_alloc_zeroed();
         if (!p->rx_phys || !p->tx_phys) {
-            pcb_free(p);       /* tolerates the half-allocated case */
+            pcb_free(p); /* tolerates the half-allocated case */
             return NULL;
         }
-        p->used = 1;
-        p->state = TCPS_CLOSED;
-        p->snd_wnd = TCP_BUF_SIZE;   /* until the peer says otherwise */
+        p->used    = 1;
+        p->state   = TCPS_CLOSED;
+        p->snd_wnd = TCP_BUF_SIZE; /* until the peer says otherwise */
         p->snd_mss = TCP_MSS;
         return p;
     }
@@ -157,12 +165,11 @@ void tcp_destroy(tcp_pcb_t *p)
 {
     /* An open connection is aborted, not closed: close() on a socket with
      * unread data is precisely the case where the peer must hear about it. */
-    if (p->state == TCPS_SYN_RCVD   || p->state == TCPS_ESTABLISHED ||
-        p->state == TCPS_FIN_WAIT_1 || p->state == TCPS_FIN_WAIT_2  ||
-        p->state == TCPS_CLOSE_WAIT || p->state == TCPS_CLOSING     ||
+    if (p->state == TCPS_SYN_RCVD || p->state == TCPS_ESTABLISHED || p->state == TCPS_FIN_WAIT_1 ||
+        p->state == TCPS_FIN_WAIT_2 || p->state == TCPS_CLOSE_WAIT || p->state == TCPS_CLOSING ||
         p->state == TCPS_LAST_ACK) {
         uint32_t src = p->lip ? p->lip : net_route_src(p->rip);
-        uint8_t seg[20];
+        uint8_t  seg[20];
         memset(seg, 0, sizeof(seg));
         net_put16(seg + 0, p->lport);
         net_put16(seg + 2, p->rport);
@@ -170,8 +177,7 @@ void tcp_destroy(tcp_pcb_t *p)
         net_put32(seg + 8, p->rcv_nxt);
         seg[12] = 5 << 4;
         seg[13] = TCP_RST | TCP_ACK;
-        net_put16(seg + 16, net_checksum_pseudo(src, p->rip, IP_PROTO_TCP,
-                                                seg, sizeof(seg)));
+        net_put16(seg + 16, net_checksum_pseudo(src, p->rip, IP_PROTO_TCP, seg, sizeof(seg)));
         net_ip_output(p->rip, IP_PROTO_TCP, seg, sizeof(seg));
     }
 
@@ -213,7 +219,7 @@ int tcp_bind(tcp_pcb_t *p, uint32_t ip, uint16_t port)
         return -E_INVAL;
     if (port_in_use(ip, port))
         return -E_ADDRINUSE;
-    p->lip = ip;
+    p->lip   = ip;
     p->lport = port;
     return 0;
 }
@@ -242,8 +248,7 @@ static uint16_t ephemeral_port(void)
  * segment.  SYNs carry our MSS option and nothing else; everything else is
  * a plain 20-byte header.
  */
-static void tcp_emit(tcp_pcb_t *p, uint32_t seq, uint8_t flags,
-                     const void *data, uint32_t len)
+static void tcp_emit(tcp_pcb_t *p, uint32_t seq, uint8_t flags, const void *data, uint32_t len)
 {
     uint8_t  hdr[24];
     uint32_t hdrlen = (flags & TCP_SYN) ? 24 : 20;
@@ -261,7 +266,7 @@ static void tcp_emit(tcp_pcb_t *p, uint32_t seq, uint8_t flags,
     hdr[13] = flags;
     net_put16(hdr + 14, (uint16_t)wnd);
     if (flags & TCP_SYN) {
-        hdr[20] = 2;                    /* MSS option */
+        hdr[20] = 2; /* MSS option */
         hdr[21] = 4;
         net_put16(hdr + 22, TCP_MSS);
     }
@@ -269,8 +274,7 @@ static void tcp_emit(tcp_pcb_t *p, uint32_t seq, uint8_t flags,
     memcpy(seg, hdr, hdrlen);
     if (len)
         memcpy(seg + hdrlen, data, len);
-    net_put16(seg + 16, net_checksum_pseudo(src, p->rip, IP_PROTO_TCP,
-                                            seg, total));
+    net_put16(seg + 16, net_checksum_pseudo(src, p->rip, IP_PROTO_TCP, seg, total));
     net_ip_output(p->rip, IP_PROTO_TCP, seg, (uint16_t)total);
 }
 
@@ -281,8 +285,8 @@ static void tcp_send_ack(tcp_pcb_t *p)
 
 /* RFC 793's reset generation for a segment that matched no socket: never
  * answer a RST, steal the ACK's sequence number when there is one. */
-static void tcp_send_rst(uint32_t src, uint32_t dst, const uint8_t *seg,
-                         uint32_t dlen, uint8_t flags)
+static void tcp_send_rst(uint32_t src, uint32_t dst, const uint8_t *seg, uint32_t dlen,
+                         uint8_t flags)
 {
     if (flags & TCP_RST)
         return;
@@ -295,8 +299,8 @@ static void tcp_send_rst(uint32_t src, uint32_t dst, const uint8_t *seg,
     if (flags & TCP_ACK) {
         tcp_emit(&tmp, net_get32(seg + 8), TCP_RST, NULL, 0);
     } else {
-        tmp.rcv_nxt = net_get32(seg + 4) + dlen +
-                      ((flags & TCP_SYN) ? 1 : 0) + ((flags & TCP_FIN) ? 1 : 0);
+        tmp.rcv_nxt =
+            net_get32(seg + 4) + dlen + ((flags & TCP_SYN) ? 1 : 0) + ((flags & TCP_FIN) ? 1 : 0);
         tcp_emit(&tmp, 0, TCP_RST | TCP_ACK, NULL, 0);
     }
 }
@@ -341,7 +345,7 @@ static void tcp_output(tcp_pcb_t *p)
     if (p->fin_queued && !p->fin_sent && p->snd_nxt == p->snd_end) {
         tcp_emit(p, p->snd_nxt, TCP_ACK | TCP_FIN, NULL, 0);
         p->fin_sent = 1;
-        p->snd_nxt++;                 /* the FIN owns a sequence number */
+        p->snd_nxt++; /* the FIN owns a sequence number */
         rto_arm(p);
         if (p->state == TCPS_ESTABLISHED)
             p->state = TCPS_FIN_WAIT_1;
@@ -358,11 +362,11 @@ int tcp_write(tcp_pcb_t *p, const void *buf, uint32_t len)
         return -E_PIPE;
 
     uint32_t space = TCP_BUF_SIZE - (p->snd_end - p->snd_una);
-    uint32_t n = len < space ? len : space;
+    uint32_t n     = len < space ? len : space;
     if (!n)
-        return 0;                     /* windowed out; the caller may block */
+        return 0; /* windowed out; the caller may block */
 
-    uint8_t *tx = pmm_virt(p->tx_phys);
+    uint8_t       *tx  = pmm_virt(p->tx_phys);
     const uint8_t *src = buf;
     for (uint32_t i = 0; i < n; i++)
         tx[(p->snd_end + i) & (TCP_BUF_SIZE - 1)] = src[i];
@@ -382,7 +386,7 @@ int tcp_close_write(tcp_pcb_t *p)
 
 void tcp_shutdown_read(tcp_pcb_t *p)
 {
-    p->rcv_read = p->rcv_nxt;         /* drop whatever is buffered */
+    p->rcv_read    = p->rcv_nxt; /* drop whatever is buffered */
     p->rx_shutdown = 1;
 }
 
@@ -395,13 +399,16 @@ static void mss_from_options(tcp_pcb_t *p, const uint8_t *seg, uint32_t hdrlen)
         uint8_t kind = seg[i];
         if (kind == 0)
             break;
-        if (kind == 1) { i++; continue; }
+        if (kind == 1) {
+            i++;
+            continue;
+        }
         uint8_t olen = seg[i + 1];
         if (olen < 2 || i + olen > hdrlen)
             break;
         if (kind == 2 && olen == 4) {
             uint16_t mss = net_get16(seg + i + 2);
-            p->snd_mss = mss < TCP_MSS ? mss : TCP_MSS;
+            p->snd_mss   = mss < TCP_MSS ? mss : TCP_MSS;
         }
         i += olen;
     }
@@ -410,8 +417,7 @@ static void mss_from_options(tcp_pcb_t *p, const uint8_t *seg, uint32_t hdrlen)
 /* Find the pcb a segment belongs to: an exact four-tuple match first, a
  * listener on the port second.  Returns the *matched* pcb, which for a
  * listener is the listener itself. */
-static tcp_pcb_t *pcb_lookup(uint32_t src, uint32_t dst,
-                             uint16_t sport, uint16_t dport)
+static tcp_pcb_t *pcb_lookup(uint32_t src, uint32_t dst, uint16_t sport, uint16_t dport)
 {
     tcp_pcb_t *listener = NULL;
     for (int i = 0; i < TCP_MAX_PCB; i++) {
@@ -425,34 +431,33 @@ static tcp_pcb_t *pcb_lookup(uint32_t src, uint32_t dst,
         }
         if (p->state == TCPS_CLOSED)
             continue;
-        if (p->rport == sport && p->rip == src &&
-            (p->lip == IP_ANY || p->lip == dst))
+        if (p->rport == sport && p->rip == src && (p->lip == IP_ANY || p->lip == dst))
             return p;
     }
     return listener;
 }
 
-static void syn_arrived(tcp_pcb_t *listener, uint32_t src, uint32_t dst,
-                        const uint8_t *seg, uint32_t hdrlen)
+static void syn_arrived(tcp_pcb_t *listener, uint32_t src, uint32_t dst, const uint8_t *seg,
+                        uint32_t hdrlen)
 {
     tcp_pcb_t *c = pcb_alloc();
     if (!c)
-        return;                       /* no resources: stay silent, they'll retry */
+        return; /* no resources: stay silent, they'll retry */
 
-    c->lip     = dst;
-    c->lport   = listener->lport;
-    c->rip     = src;
-    c->rport   = net_get16(seg + 0);
-    c->rcv_nxt = net_get32(seg + 4) + 1;
+    c->lip      = dst;
+    c->lport    = listener->lport;
+    c->rip      = src;
+    c->rport    = net_get16(seg + 0);
+    c->rcv_nxt  = net_get32(seg + 4) + 1;
     c->rcv_read = c->rcv_nxt;
     c->snd_una = c->snd_nxt = c->snd_end = next_iss();
-    c->snd_wnd = net_get16(seg + 14);
-    c->parent  = listener;
-    c->state   = TCPS_SYN_RCVD;
+    c->snd_wnd                           = net_get16(seg + 14);
+    c->parent                            = listener;
+    c->state                             = TCPS_SYN_RCVD;
     mss_from_options(c, seg, hdrlen);
 
     tcp_emit(c, c->snd_una, TCP_SYN | TCP_ACK, NULL, 0);
-    c->snd_nxt++;                     /* the SYN owns a sequence number */
+    c->snd_nxt++; /* the SYN owns a sequence number */
     rto_arm(c);
 }
 
@@ -461,7 +466,7 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
     if (len < 20)
         return;
     if (net_checksum_pseudo(src, dst, IP_PROTO_TCP, seg, len) != 0)
-        return;                       /* a bad checksum means the segment never happened */
+        return; /* a bad checksum means the segment never happened */
 
     uint16_t sport  = net_get16(seg + 0);
     uint16_t dport  = net_get16(seg + 2);
@@ -498,15 +503,14 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
             p->error = E_CONNREFUSED;
         else
             p->error = E_CONNRESET;
-        p->state = TCPS_CLOSED;       /* the struct lingers for SO_ERROR */
+        p->state  = TCPS_CLOSED; /* the struct lingers for SO_ERROR */
         p->rto_at = 0;
         return;
     }
 
     /* ---- SYN_SENT: the handshake's second leg --------------------------- */
     if (p->state == TCPS_SYN_SENT) {
-        if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK) &&
-            sack == p->snd_nxt) {
+        if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK) && sack == p->snd_nxt) {
             p->rcv_nxt  = sseq + 1;
             p->rcv_read = p->rcv_nxt;
             p->snd_una  = sack;
@@ -517,7 +521,7 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
             mss_from_options(p, seg, hdrlen);
             tcp_send_ack(p);
         }
-        return;                       /* anything else: wait for retransmit */
+        return; /* anything else: wait for retransmit */
     }
 
     /* Every state from here on acknowledges. */
@@ -527,13 +531,12 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
                 tcp_send_rst(src, dst, seg, dlen, flags);
                 return;
             }
-            p->snd_una = sack;
-            p->rto_at  = 0;
-            p->state   = TCPS_ESTABLISHED;
+            p->snd_una     = sack;
+            p->rto_at      = 0;
+            p->state       = TCPS_ESTABLISHED;
             tcp_pcb_t *par = p->parent;
             /* par->used: a closed listener's pcb may already be recycled. */
-            if (par && par->used && par->state == TCPS_LISTEN &&
-                par->accept_n < TCP_BACKLOG)
+            if (par && par->used && par->state == TCPS_LISTEN && par->accept_n < TCP_BACKLOG)
                 par->accept_q[par->accept_n++] = p;
             /* else: the pcb stays SYN_RCVD-less but established; a full
              * backlog is the application's problem to drain, the connection
@@ -542,10 +545,10 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
             p->snd_una = sack;
             p->retries = 0;
             if (p->snd_una == p->snd_nxt)
-                p->rto_at = 0;        /* everything acknowledged */
+                p->rto_at = 0; /* everything acknowledged */
             else
-                rto_arm(p);           /* partial progress: fresh timer */
-            tcp_output(p);            /* the window may have opened */
+                rto_arm(p); /* partial progress: fresh timer */
+            tcp_output(p);  /* the window may have opened */
         }
 
         /* FIN-acknowledged transitions.  fin_sent means the FIN owns
@@ -578,7 +581,7 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
 
     if (dlen) {
         uint32_t space = TCP_BUF_SIZE - (p->rcv_nxt - p->rcv_read);
-        uint32_t n = dlen < space ? dlen : space;
+        uint32_t n     = dlen < space ? dlen : space;
         if (!p->rx_shutdown && n) {
             uint8_t *rx = pmm_virt(p->rx_phys);
             for (uint32_t i = 0; i < n; i++)
@@ -590,7 +593,7 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
     }
 
     if (flags & TCP_FIN) {
-        p->rcv_nxt++;                 /* the FIN owns a sequence number */
+        p->rcv_nxt++; /* the FIN owns a sequence number */
         p->fin_seen = 1;
         if (p->state == TCPS_ESTABLISHED)
             p->state = TCPS_CLOSE_WAIT;
@@ -617,8 +620,8 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
 static void tcp_retransmit(tcp_pcb_t *p)
 {
     if (++p->retries > TCP_MAX_RETRIES) {
-        p->error = E_TIMEDOUT;
-        p->state = TCPS_CLOSED;
+        p->error  = E_TIMEDOUT;
+        p->state  = TCPS_CLOSED;
         p->rto_at = 0;
         return;
     }
@@ -631,10 +634,10 @@ static void tcp_retransmit(tcp_pcb_t *p)
         /* Data from snd_una, with the FIN re-attached if it was the last
          * thing out.  snd_una == snd_end with fin_sent means the FIN alone
          * is outstanding, and this degenerates to a bare FIN. */
-        uint32_t have = p->snd_end - p->snd_una;
-        uint32_t n = have < p->snd_mss ? have : p->snd_mss;
-        int with_fin = p->fin_sent && (p->snd_una + n == p->snd_end);
-        uint8_t flags = TCP_ACK | (n ? TCP_PSH : 0) | (with_fin ? TCP_FIN : 0);
+        uint32_t have     = p->snd_end - p->snd_una;
+        uint32_t n        = have < p->snd_mss ? have : p->snd_mss;
+        int      with_fin = p->fin_sent && (p->snd_una + n == p->snd_end);
+        uint8_t  flags    = TCP_ACK | (n ? TCP_PSH : 0) | (with_fin ? TCP_FIN : 0);
         if (n) {
             uint8_t *tx = pmm_virt(p->tx_phys);
             uint8_t  scratch[TCP_MSS];
@@ -658,10 +661,10 @@ void tcp_tick(void)
         if (p->rto_at && now >= p->rto_at)
             tcp_retransmit(p);
         if (p->conn_at && now >= p->conn_at) {
-            p->error  = E_TIMEDOUT;
-            p->state  = TCPS_CLOSED;
+            p->error   = E_TIMEDOUT;
+            p->state   = TCPS_CLOSED;
             p->conn_at = 0;
-            p->rto_at = 0;
+            p->rto_at  = 0;
         }
         if (p->tw_at && now >= p->tw_at) {
             p->state = TCPS_CLOSED;
@@ -674,7 +677,7 @@ void tcp_tick(void)
 
 int tcp_listen(tcp_pcb_t *p, int backlog)
 {
-    (void)backlog;                    /* the queue is fixed at TCP_BACKLOG */
+    (void)backlog; /* the queue is fixed at TCP_BACKLOG */
     if (p->state != TCPS_CLOSED)
         return -E_INVAL;
     if (!p->lport) {
@@ -701,9 +704,9 @@ int tcp_connect(tcp_pcb_t *p, uint32_t ip, uint16_t port)
     p->rip     = ip;
     p->rport   = port;
     p->snd_una = p->snd_nxt = p->snd_end = next_iss();
-    p->state   = TCPS_SYN_SENT;
+    p->state                             = TCPS_SYN_SENT;
     tcp_emit(p, p->snd_una, TCP_SYN, NULL, 0);
-    p->snd_nxt++;                     /* the SYN owns a sequence number */
+    p->snd_nxt++; /* the SYN owns a sequence number */
     rto_arm(p);
     p->conn_at = timer_ticks() + TCP_CONN_TICKS;
     return 0;
@@ -717,17 +720,17 @@ tcp_pcb_t *tcp_accept(tcp_pcb_t *p)
     for (int i = 1; i < p->accept_n; i++)
         p->accept_q[i - 1] = p->accept_q[i];
     p->accept_n--;
-    c->parent = NULL;                 /* accepted children outlive the listener */
+    c->parent = NULL; /* accepted children outlive the listener */
     return c;
 }
 
 int tcp_read(tcp_pcb_t *p, void *buf, uint32_t len, int peek)
 {
     uint32_t avail = p->rcv_nxt - p->rcv_read;
-    uint32_t n = len < avail ? len : avail;
+    uint32_t n     = len < avail ? len : avail;
     if (n) {
-        const uint8_t *rx = pmm_virt(p->rx_phys);
-        uint8_t *dst = buf;
+        const uint8_t *rx  = pmm_virt(p->rx_phys);
+        uint8_t       *dst = buf;
         for (uint32_t i = 0; i < n; i++)
             dst[i] = rx[(p->rcv_read + i) & (TCP_BUF_SIZE - 1)];
         if (!peek)
@@ -736,11 +739,14 @@ int tcp_read(tcp_pcb_t *p, void *buf, uint32_t len, int peek)
     return (int)n;
 }
 
-int tcp_state(const tcp_pcb_t *p) { return p->state; }
+int tcp_state(const tcp_pcb_t *p)
+{
+    return p->state;
+}
 
 int tcp_take_error(tcp_pcb_t *p)
 {
-    int e = p->error;
+    int e    = p->error;
     p->error = 0;
     return e;
 }
@@ -765,11 +771,15 @@ int tcp_accept_ready(const tcp_pcb_t *p)
     return p->accept_n > 0;
 }
 
-void tcp_endpoints(const tcp_pcb_t *p, uint32_t *lip, uint16_t *lport,
-                   uint32_t *rip, uint16_t *rport)
+void tcp_endpoints(const tcp_pcb_t *p, uint32_t *lip, uint16_t *lport, uint32_t *rip,
+                   uint16_t *rport)
 {
-    if (lip)   *lip   = p->lip ? p->lip : net_route_src(p->rip);
-    if (lport) *lport = p->lport;
-    if (rip)   *rip   = p->rip;
-    if (rport) *rport = p->rport;
+    if (lip)
+        *lip = p->lip ? p->lip : net_route_src(p->rip);
+    if (lport)
+        *lport = p->lport;
+    if (rip)
+        *rip = p->rip;
+    if (rport)
+        *rport = p->rport;
 }

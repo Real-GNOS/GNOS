@@ -23,7 +23,9 @@
 #define VT_ACTIVATE   0x5606
 #define VT_WAITACTIVE 0x5607
 
-struct vt_stat { unsigned short v_active, v_signal, v_state; };
+struct vt_stat {
+    unsigned short v_active, v_signal, v_state;
+};
 
 int main(int argc, char **argv)
 {
@@ -50,7 +52,7 @@ int main(int argc, char **argv)
     }
 
     char *end;
-    long n = strtol(argv[1], &end, 10);
+    long  n = strtol(argv[1], &end, 10);
     if (*end || n < 1 || n > 63) {
         fprintf(stderr, "usage: chvt N\n");
         return 1;

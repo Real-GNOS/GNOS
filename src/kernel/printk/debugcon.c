@@ -28,7 +28,7 @@ void dbg_puts(const char *s)
 void dbg_puts_dec(uint32_t v)
 {
     char buf[12];
-    int i = 0;
+    int  i = 0;
     if (v == 0)
         buf[i++] = '0';
     while (v) {
@@ -49,10 +49,12 @@ void dbg_puts_hex(uint64_t v)
  * printed as 0x000000000000005A tells you nothing you did not know. */
 void dbg_puts_hexn(uint64_t v, int digits)
 {
-    char buf[17];
+    char        buf[17];
     const char *hx = "0123456789ABCDEF";
-    if (digits < 1) digits = 1;
-    if (digits > 16) digits = 16;
+    if (digits < 1)
+        digits = 1;
+    if (digits > 16)
+        digits = 16;
     for (int i = 0; i < digits; i++)
         buf[i] = hx[(v >> ((digits - 1 - i) * 4)) & 0xF];
     buf[digits] = 0;

@@ -1,0 +1,120 @@
+/* 基础样式定义 */
+:root {
+  --primary-color: #fb7299;
+  --secondary-color: #f3f3f3;
+  --text-color: #212121;
+  --text-light: #757575;
+  --border-radius: 4px;
+  --transition-speed: 0.3s;
+}
+
+/* 响应式断点 */
+@media (max-width: 480px) {
+  :root {
+    --font-size-base: 12px;
+    --padding-base: 8px;
+  }
+}
+
+@media (min-width: 481px) and (max-width: 768px) {
+  :root {
+    --font-size-base: 14px;
+    --padding-base: 12px;
+  }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+  :root {
+    --font-size-base: 16px;
+    --padding-base: 16px;
+  }
+}
+
+@media (min-width: 1025px) {
+  :root {
+    --font-size-base: 18px;
+    --padding-base: 20px;
+  }
+}
+
+/* 基础重置 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: var(--font-size-base);
+  color: var(--text-color);
+  line-height: 1.5;
+  background-color: #fff;
+}
+
+/* BEM命名规范示例 */
+.block {
+  display: block;
+}
+
+.block__element {
+  color: var(--primary-color);
+}
+
+.block--modifier {
+  background-color: var(--secondary-color);
+}
+
+/* 链接样式 */
+a {
+  color: var(--text-color);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--primary-color);
+}
+
+/* 高级交互效果 */
+.hover-effect {
+  transition: all var(--transition-speed) ease;
+  will-change: transform, opacity;
+}
+
+.hover-effect:hover {
+  opacity: 0.8;
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.press-effect {
+  transition: all var(--transition-speed) ease;
+}
+
+.press-effect:active {
+  transform: scale(0.98);
+}
+
+.focus-effect {
+  transition: all var(--transition-speed) ease;
+}
+
+.focus-effect:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(251, 114, 153, 0.3);
+}
+
+.slide-in {
+  animation: slideIn 0.5s ease forwards;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}

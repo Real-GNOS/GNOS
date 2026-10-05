@@ -34,16 +34,16 @@
 
 /* RFC 793's states, in its order.  Kept as an enum the socket layer can read
  * because "am I connected yet?" is a question only this table can answer. */
-#define TCPS_CLOSED       0
-#define TCPS_LISTEN       1
-#define TCPS_SYN_SENT     2
-#define TCPS_SYN_RCVD     3
-#define TCPS_ESTABLISHED  4
-#define TCPS_FIN_WAIT_1   5
-#define TCPS_FIN_WAIT_2   6
-#define TCPS_CLOSE_WAIT   7
-#define TCPS_CLOSING      8
-#define TCPS_LAST_ACK     9
+#define TCPS_CLOSED      0
+#define TCPS_LISTEN      1
+#define TCPS_SYN_SENT    2
+#define TCPS_SYN_RCVD    3
+#define TCPS_ESTABLISHED 4
+#define TCPS_FIN_WAIT_1  5
+#define TCPS_FIN_WAIT_2  6
+#define TCPS_CLOSE_WAIT  7
+#define TCPS_CLOSING     8
+#define TCPS_LAST_ACK    9
 #define TCPS_TIME_WAIT   10
 
 typedef struct tcp_pcb tcp_pcb_t;
@@ -64,40 +64,40 @@ tcp_pcb_t *tcp_new(void);
  */
 void tcp_destroy(tcp_pcb_t *p);
 
-int  tcp_bind(tcp_pcb_t *p, uint32_t ip, uint16_t port);
-int  tcp_listen(tcp_pcb_t *p, int backlog);
+int tcp_bind(tcp_pcb_t *p, uint32_t ip, uint16_t port);
+int tcp_listen(tcp_pcb_t *p, int backlog);
 
 /* Dequeue one fully established child, or NULL if none is waiting. */
 tcp_pcb_t *tcp_accept(tcp_pcb_t *p);
 
 /* Start the handshake.  Returns 0 -- completion is observed through
  * tcp_state(), because connect() may or may not be allowed to block. */
-int  tcp_connect(tcp_pcb_t *p, uint32_t ip, uint16_t port);
+int tcp_connect(tcp_pcb_t *p, uint32_t ip, uint16_t port);
 
 /* Copy into the send buffer and transmit what the window allows.  Returns the
  * number of bytes accepted (may be less than `len`), or a negative errno. */
-int  tcp_write(tcp_pcb_t *p, const void *buf, uint32_t len);
+int tcp_write(tcp_pcb_t *p, const void *buf, uint32_t len);
 
 /* Copy out of the receive buffer.  0 means "nothing right now"; use
  * tcp_eof() to tell that apart from end of stream. */
-int  tcp_read(tcp_pcb_t *p, void *buf, uint32_t len, int peek);
+int tcp_read(tcp_pcb_t *p, void *buf, uint32_t len, int peek);
 
 /* shutdown(SHUT_WR): send a FIN once the send buffer drains. */
 int  tcp_close_write(tcp_pcb_t *p);
 void tcp_shutdown_read(tcp_pcb_t *p);
 
-int  tcp_state(const tcp_pcb_t *p);
+int tcp_state(const tcp_pcb_t *p);
 
 /* The pending asynchronous error (ECONNREFUSED, ECONNRESET, ETIMEDOUT...),
  * consumed by the read -- exactly SO_ERROR's contract. */
-int  tcp_take_error(tcp_pcb_t *p);
+int tcp_take_error(tcp_pcb_t *p);
 
-int  tcp_rx_avail(const tcp_pcb_t *p);
-int  tcp_tx_space(const tcp_pcb_t *p);
-int  tcp_eof(const tcp_pcb_t *p);            /* peer sent FIN and we drained */
-int  tcp_accept_ready(const tcp_pcb_t *p);
+int tcp_rx_avail(const tcp_pcb_t *p);
+int tcp_tx_space(const tcp_pcb_t *p);
+int tcp_eof(const tcp_pcb_t *p); /* peer sent FIN and we drained */
+int tcp_accept_ready(const tcp_pcb_t *p);
 
-void tcp_endpoints(const tcp_pcb_t *p, uint32_t *lip, uint16_t *lport,
-                   uint32_t *rip, uint16_t *rport);
+void tcp_endpoints(const tcp_pcb_t *p, uint32_t *lip, uint16_t *lport, uint32_t *rip,
+                   uint16_t *rport);
 
 #endif

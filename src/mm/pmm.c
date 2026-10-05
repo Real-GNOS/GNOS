@@ -20,16 +20,19 @@
 #include "smp.h"
 
 extern volatile struct limine_memmap_request memmap_request;
-extern uint64_t g_hhdm;
+extern uint64_t                              g_hhdm;
 
-static uint8_t  *g_bitmap;          /* 1 = allocated, 0 = free */
-static uint64_t  g_bitmap_bytes;
-static uint64_t  g_total;           /* frames covered by the bitmap */
-static uint64_t  g_free;
+static uint8_t *g_bitmap; /* 1 = allocated, 0 = free */
+static uint64_t g_bitmap_bytes;
+static uint64_t g_total; /* frames covered by the bitmap */
+static uint64_t g_free;
 /* TEMPORARY Xorg debugging: release history ring. */
-static struct { uint64_t frame; uint64_t ra; } g_free_log[4096];
-static int         g_free_log_idx;
-static uint64_t  g_next_hint;       /* where the last search stopped */
+static struct {
+    uint64_t frame;
+    uint64_t ra;
+} g_free_log[4096];
+static int      g_free_log_idx;
+static uint64_t g_next_hint; /* where the last search stopped */
 /* The physical allocator runs on every CPU (syscall paths hold the BKL, but
  * kernel threads -- the DRM refresh tick, for one -- allocate without it), so
  * the bitmap itself needs its own IRQ-safe lock. */
@@ -40,9 +43,18 @@ void *pmm_virt(uint64_t phys)
     return (void *)(uintptr_t)(phys + g_hhdm);
 }
 
-static void bit_set(uint64_t f)   { g_bitmap[f >> 3] |=  (uint8_t)(1u << (f & 7)); }
-static void bit_clear(uint64_t f) { g_bitmap[f >> 3] &= (uint8_t)~(1u << (f & 7)); }
-static int  bit_test(uint64_t f)  { return (g_bitmap[f >> 3] >> (f & 7)) & 1; }
+static void bit_set(uint64_t f)
+{
+    g_bitmap[f >> 3] |= (uint8_t)(1u << (f & 7));
+}
+static void bit_clear(uint64_t f)
+{
+    g_bitmap[f >> 3] &= (uint8_t) ~(1u << (f & 7));
+}
+static int bit_test(uint64_t f)
+{
+    return (g_bitmap[f >> 3] >> (f & 7)) & 1;
+}
 
 static void mark_used(uint64_t base, uint64_t size)
 {
@@ -180,9 +192,8 @@ void pmm_free(uint64_t phys)
     /* TEMPORARY Xorg debugging: ring-buffer the last frees so a
      * freed-while-still-mapped frame can be traced to its release site. */
     g_free_log[g_free_log_idx].frame = f;
-    g_free_log[g_free_log_idx].ra = (uint64_t)__builtin_return_address(0);
-    g_free_log_idx = (g_free_log_idx + 1) %
-                     (int)(sizeof(g_free_log) / sizeof(g_free_log[0]));
+    g_free_log[g_free_log_idx].ra    = (uint64_t)__builtin_return_address(0);
+    g_free_log_idx = (g_free_log_idx + 1) % (int)(sizeof(g_free_log) / sizeof(g_free_log[0]));
     spin_unlock_irq(&pmm_lock);
 }
 
@@ -197,7 +208,7 @@ void pmm_dump_free_log(uint64_t lo, uint64_t hi)
     dbg_puts_hex(hi);
     dbg_puts("):\r\n");
     for (int n = 0; n < cap; n++) {
-        int idx = (g_free_log_idx + n) % cap; /* oldest first */
+        int      idx   = (g_free_log_idx + n) % cap; /* oldest first */
         uint64_t bytes = g_free_log[idx].frame * PAGE_SIZE;
         if (bytes < lo || bytes >= hi)
             continue;
@@ -209,8 +220,14 @@ void pmm_dump_free_log(uint64_t lo, uint64_t hi)
     }
 }
 
-uint64_t pmm_total_frames(void) { return g_total; }
-uint64_t pmm_free_frames(void)  { return g_free; }
+uint64_t pmm_total_frames(void)
+{
+    return g_total;
+}
+uint64_t pmm_free_frames(void)
+{
+    return g_free;
+}
 
 /*
  * Allocate `n` *consecutive* free frames and mark them used.  The kernel heap
@@ -230,7 +247,7 @@ uint64_t pmm_alloc_contiguous(uint64_t n)
         uint64_t k = 0;
         while (k < n && !bit_test(f + k))
             k++;
-        if (k == n) {                       /* all free: take it */
+        if (k == n) { /* all free: take it */
             for (uint64_t j = 0; j < n; j++) {
                 bit_set(f + j);
                 g_free--;

@@ -31,16 +31,15 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     unsigned int flags = 0;
-    int opt;
+    int          opt;
     while ((opt = getopt(argc, argv, "fkpvsV")) != -1) {
         switch (opt) {
         case 'f':
-            flags |= MODULE_INIT_IGNORE_MODVERSIONS |
-                     MODULE_INIT_IGNORE_VERMAGIC;
+            flags |= MODULE_INIT_IGNORE_MODVERSIONS | MODULE_INIT_IGNORE_VERMAGIC;
             break;
-        case 'k':                    /* autoclean: GNOS unloads only on demand */
-        case 'p':                    /* probe: nothing to probe here         */
-        case 's':                    /* syslog: we have no syslog            */
+        case 'k': /* autoclean: GNOS unloads only on demand */
+        case 'p': /* probe: nothing to probe here         */
+        case 's': /* syslog: we have no syslog            */
             break;
         case 'V':
             printf("insmod: GNOS insmod 1.0\n");
@@ -55,14 +54,12 @@ int main(int argc, char **argv)
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        fprintf(stderr, "insmod: can't open '%s': %s\n", path,
-                strerror(errno));
+        fprintf(stderr, "insmod: can't open '%s': %s\n", path, strerror(errno));
         return 1;
     }
     long r = syscall(SYS_finit_module, fd, "", flags);
     if (r != 0) {
-        fprintf(stderr, "insmod: error inserting '%s': %s\n", path,
-                strerror(errno));
+        fprintf(stderr, "insmod: error inserting '%s': %s\n", path, strerror(errno));
         close(fd);
         return 1;
     }

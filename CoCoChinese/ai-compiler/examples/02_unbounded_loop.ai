@@ -1,0 +1,7 @@
+Sorry, eh?
+//eh 修复点 3：循环不再卡在 10 万次（要设安全阀：AIFOLIA_MAX_ITER=2000 aifolia run ...）
+D. [ [baiun: _i=(0)]; ] ]
+revolve: [_i < 300000] {
+D. [ [baiun: _i=(_i + 1)]; ] ]
+}
+D. [ [shoutToTheVoid:～「looped _i times」; ] ]

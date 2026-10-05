@@ -37,28 +37,52 @@
 
 /* ---- Linux register-image conversion --------------------------------- */
 
-static void regs_to_user(ptrace_user_regs_t *u, const regs_t *r,
-                         uint64_t orig_rax)
+static void regs_to_user(ptrace_user_regs_t *u, const regs_t *r, uint64_t orig_rax)
 {
     memset(u, 0, sizeof *u);
-    u->r15 = r->r15;  u->r14 = r->r14;  u->r13 = r->r13;  u->r12 = r->r12;
-    u->rbp = r->rbp;  u->rbx = r->rbx;  u->r11 = r->r11;  u->r10 = r->r10;
-    u->r9  = r->r9;   u->r8  = r->r8;
-    u->rax = r->rax;  u->rcx = r->rcx;  u->rdx = r->rdx;
-    u->rsi = r->rsi;  u->rdi = r->rdi;
+    u->r15      = r->r15;
+    u->r14      = r->r14;
+    u->r13      = r->r13;
+    u->r12      = r->r12;
+    u->rbp      = r->rbp;
+    u->rbx      = r->rbx;
+    u->r11      = r->r11;
+    u->r10      = r->r10;
+    u->r9       = r->r9;
+    u->r8       = r->r8;
+    u->rax      = r->rax;
+    u->rcx      = r->rcx;
+    u->rdx      = r->rdx;
+    u->rsi      = r->rsi;
+    u->rdi      = r->rdi;
     u->orig_rax = orig_rax;
-    u->rip = r->rip;  u->cs = r->cs;    u->eflags = r->rflags;
-    u->rsp = r->rsp;  u->ss = r->ss;
+    u->rip      = r->rip;
+    u->cs       = r->cs;
+    u->eflags   = r->rflags;
+    u->rsp      = r->rsp;
+    u->ss       = r->ss;
 }
 
 static void regs_from_user(regs_t *r, const ptrace_user_regs_t *u)
 {
-    r->r15 = u->r15;  r->r14 = u->r14;  r->r13 = u->r13;  r->r12 = u->r12;
-    r->rbp = u->rbp;  r->rbx = u->rbx;  r->r11 = u->r11;  r->r10 = u->r10;
-    r->r9  = u->r9;   r->r8  = u->r8;
-    r->rax = u->rax;  r->rcx = u->rcx;  r->rdx = u->rdx;
-    r->rsi = u->rsi;  r->rdi = u->rdi;
-    r->rip = u->rip;  r->rflags = u->eflags;  r->rsp = u->rsp;
+    r->r15    = u->r15;
+    r->r14    = u->r14;
+    r->r13    = u->r13;
+    r->r12    = u->r12;
+    r->rbp    = u->rbp;
+    r->rbx    = u->rbx;
+    r->r11    = u->r11;
+    r->r10    = u->r10;
+    r->r9     = u->r9;
+    r->r8     = u->r8;
+    r->rax    = u->rax;
+    r->rcx    = u->rcx;
+    r->rdx    = u->rdx;
+    r->rsi    = u->rsi;
+    r->rdi    = u->rdi;
+    r->rip    = u->rip;
+    r->rflags = u->eflags;
+    r->rsp    = u->rsp;
     /* cs/ss belong to the trap, not the program: the caller gets to keep
      * its own ring-3 selectors. */
 }
@@ -75,20 +99,18 @@ static void regs_from_user(regs_t *r, const ptrace_user_regs_t *u)
  */
 void ptrace_stop(proc_t *p, regs_t *r, int sig)
 {
-    p->ptrace_stopped = 1;
+    p->ptrace_stopped       = 1;
     p->ptrace_syscall_phase = 0;
-    p->stop_sig = sig;
-    p->reported = 0;
+    p->stop_sig             = sig;
+    p->reported             = 0;
 
-    regs_to_user((ptrace_user_regs_t *)p->ptrace_regs, r,
-                 (uint64_t)p->syscall_nr);
+    regs_to_user((ptrace_user_regs_t *)p->ptrace_regs, r, (uint64_t)p->syscall_nr);
     p->ptrace_regs_valid = 1;
 
     proc_t *tracer = proc_by_pid(p->tracer_pid);
     if (tracer) {
         proc_signal(tracer, SIGCHLD);
-        if (tracer->state == PROC_BLOCKED &&
-            tracer->wait_reason == WAIT_CHILD)
+        if (tracer->state == PROC_BLOCKED && tracer->wait_reason == WAIT_CHILD)
             sched_wake(tracer);
     }
 
@@ -120,7 +142,7 @@ static void ptrace_inject_resume_sig(proc_t *p)
     if (p->ptrace_resume_sig > 0 && p->ptrace_resume_sig < NSIG)
         p->sig_pending |= SIGMASK(p->ptrace_resume_sig);
     p->ptrace_resume_sig = 0;
-    p->ptrace_stopped = 0;
+    p->ptrace_stopped    = 0;
 }
 
 /* Called from proc_check_signals() once a deliverable signal has been
@@ -156,8 +178,7 @@ void ptrace_syscall_enter(regs_t *r, uint64_t nr)
 void ptrace_syscall_exit(regs_t *r)
 {
     proc_t *p = proc_current();
-    if (!p || !p->traced || p->ptrace_mode != PTRACE_RUN_SYSCALL ||
-        p->ptrace_syscall_phase != 1)
+    if (!p || !p->traced || p->ptrace_mode != PTRACE_RUN_SYSCALL || p->ptrace_syscall_phase != 1)
         return;
 
     int sig = SIGTRAP;
@@ -192,14 +213,13 @@ static int ptrace_read_mem(proc_t *t, uint64_t addr, void *buf, uint64_t n)
             chunk = n;
         memcpy(b, pmm_virt(phys), chunk);
         addr += chunk;
-        b    += chunk;
-        n    -= chunk;
+        b += chunk;
+        n -= chunk;
     }
     return 0;
 }
 
-static int ptrace_write_mem(proc_t *t, uint64_t addr, const void *buf,
-                            uint64_t n)
+static int ptrace_write_mem(proc_t *t, uint64_t addr, const void *buf, uint64_t n)
 {
     if (!t->as)
         return -E_IO;
@@ -218,17 +238,17 @@ static int ptrace_write_mem(proc_t *t, uint64_t addr, const void *buf,
 static int ptrace_attach(proc_t *self, proc_t *t)
 {
     if (t->ppid != self->pid)
-        return -E_PERM;               /* GNOS: tracer must be the parent */
+        return -E_PERM; /* GNOS: tracer must be the parent */
     if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
         return -E_SRCH;
     if (t->traced)
         return -E_PERM;
 
-    t->traced           = 1;
-    t->tracer_pid       = self->pid;
-    t->ptrace_opts      = 0;
-    t->ptrace_mode      = PTRACE_RUN_CONT;
-    t->ptrace_stopped   = 0;
+    t->traced            = 1;
+    t->tracer_pid        = self->pid;
+    t->ptrace_opts       = 0;
+    t->ptrace_mode       = PTRACE_RUN_CONT;
+    t->ptrace_stopped    = 0;
     t->ptrace_regs_valid = 0;
 
     proc_signal(t, SIGSTOP);
@@ -242,10 +262,10 @@ static int ptrace_resume(proc_t *t, int mode, int sig)
     if (sig < 0 || sig >= NSIG)
         return -E_IO;
 
-    t->ptrace_mode = mode;
+    t->ptrace_mode       = mode;
     t->ptrace_resume_sig = sig;
-    t->ptrace_stopped = 0;
-    t->reported = 0;
+    t->ptrace_stopped    = 0;
+    t->reported          = 0;
     /* The tracee is parked in sched_block() inside ptrace_stop(); waking
      * it out of that wait is what unpins it from the stop. */
     if (t->state == PROC_BLOCKED && t->wait_reason == WAIT_CHILD)
@@ -264,11 +284,11 @@ int sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data)
     if (request == PTRACE_TRACEME) {
         if (self->traced)
             return -E_PERM;
-        self->traced           = 1;
-        self->tracer_pid       = self->ppid;
-        self->ptrace_opts      = 0;
-        self->ptrace_mode      = PTRACE_RUN_CONT;
-        self->ptrace_stopped   = 0;
+        self->traced            = 1;
+        self->tracer_pid        = self->ppid;
+        self->ptrace_opts       = 0;
+        self->ptrace_mode       = PTRACE_RUN_CONT;
+        self->ptrace_stopped    = 0;
         self->ptrace_regs_valid = 0;
         return 0;
     }
@@ -304,8 +324,8 @@ int sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data)
         int rc = ptrace_resume(t, PTRACE_RUN_CONT, (int)data);
         if (rc)
             return rc;
-        t->traced     = 0;
-        t->tracer_pid = 0;
+        t->traced      = 0;
+        t->tracer_pid  = 0;
         t->ptrace_opts = 0;
         return 0;
     }
@@ -320,7 +340,7 @@ int sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data)
     case PTRACE_GETREGS: {
         ptrace_user_regs_t u;
         if (!t->ptrace_regs_valid)
-            return -E_IO;             /* not stopped */
+            return -E_IO; /* not stopped */
         if (!user_ptr_ok(data, sizeof u))
             return -E_FAULT;
         /* The snapshot already is Linux layout; no conversion needed. */
@@ -344,14 +364,17 @@ int sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data)
         /* Linux: ptrace(PTRACE_GETREGSET, pid, NT_PRSTATUS, &iov) with an
          * iovec { base, len } the kernel updates to what it actually
          * wrote. */
-        struct { void *base; uint64_t len; } iov;
+        struct {
+            void    *base;
+            uint64_t len;
+        } iov;
         if (!user_ptr_ok(addr, sizeof iov))
             return -E_FAULT;
         memcpy(&iov, (void *)(uintptr_t)addr, sizeof iov);
         if (!t->ptrace_regs_valid)
             return -E_IO;
         ptrace_user_regs_t u;
-        uint64_t n = iov.len < sizeof u ? iov.len : sizeof u;
+        uint64_t           n = iov.len < sizeof u ? iov.len : sizeof u;
         if (n) {
             if (!user_ptr_ok((uint64_t)iov.base, n))
                 return -E_FAULT;
@@ -363,14 +386,17 @@ int sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data)
     }
 
     case PTRACE_SETREGSET: {
-        struct { const void *base; uint64_t len; } iov;
+        struct {
+            const void *base;
+            uint64_t    len;
+        } iov;
         if (!user_ptr_ok(addr, sizeof iov))
             return -E_FAULT;
         memcpy(&iov, (void *)(uintptr_t)addr, sizeof iov);
         if (!t->ptrace_regs_valid)
             return -E_IO;
         ptrace_user_regs_t u;
-        uint64_t n = iov.len < sizeof u ? iov.len : sizeof u;
+        uint64_t           n = iov.len < sizeof u ? iov.len : sizeof u;
         if (n) {
             if (!user_ptr_ok((uint64_t)iov.base, n))
                 return -E_FAULT;
@@ -385,7 +411,7 @@ int sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data)
     case PTRACE_PEEKDATA:
     case PTRACE_PEEKTEXT: {
         if (!t->ptrace_regs_valid)
-            return -E_IO;             /* not stopped */
+            return -E_IO; /* not stopped */
         uint64_t word;
         if (ptrace_read_mem(t, addr, &word, sizeof word) < 0)
             return -E_IO;
@@ -413,9 +439,9 @@ int sys_ptrace(int request, int64_t pid, uint64_t addr, uint64_t data)
         if (!user_ptr_ok(data, 16))
             return -E_FAULT;
         int32_t *si = (int32_t *)(uintptr_t)data;
-        si[0] = t->stop_sig & 0x7F;
-        si[1] = 0;
-        si[2] = 0;                    /* SI_USER */
+        si[0]       = t->stop_sig & 0x7F;
+        si[1]       = 0;
+        si[2]       = 0; /* SI_USER */
         return 0;
     }
 

@@ -66,56 +66,56 @@ struct drm_event_vblank {
  * single place to put them.
  */
 #ifndef _IOC_NRBITS
-#    define _IOC_NRBITS 8
+#define _IOC_NRBITS 8
 #endif
 #ifndef _IOC_TYPEBITS
-#    define _IOC_TYPEBITS 8
+#define _IOC_TYPEBITS 8
 #endif
 #ifndef _IOC_SIZEBITS
-#    define _IOC_SIZEBITS 14
+#define _IOC_SIZEBITS 14
 #endif
 #ifndef _IOC_DIRBITS
-#    define _IOC_DIRBITS 2
+#define _IOC_DIRBITS 2
 #endif
 
 #ifndef _IOC_NONE
-#    define _IOC_NONE 0U
+#define _IOC_NONE 0U
 #endif
 #ifndef _IOC_WRITE
-#    define _IOC_WRITE 1U
+#define _IOC_WRITE 1U
 #endif
 #ifndef _IOC_READ
-#    define _IOC_READ 2U
+#define _IOC_READ 2U
 #endif
 
 #ifndef _IOC
-#    define _IOC(dir, type, nr, size) (((dir) << 30) | ((type) << 8) | (nr) | ((size) << 16))
+#define _IOC(dir, type, nr, size) (((dir) << 30) | ((type) << 8) | (nr) | ((size) << 16))
 #endif
 
 #ifndef _IO
-#    define _IO(type, nr) _IOC(_IOC_NONE, (type), (nr), 0)
+#define _IO(type, nr) _IOC(_IOC_NONE, (type), (nr), 0)
 #endif
 #ifndef _IOR
-#    define _IOR(type, nr, size) _IOC(_IOC_READ, (type), (nr), (uint32_t)sizeof(size))
+#define _IOR(type, nr, size) _IOC(_IOC_READ, (type), (nr), (uint32_t)sizeof(size))
 #endif
 #ifndef _IOW
-#    define _IOW(type, nr, size) _IOC(_IOC_WRITE, (type), (nr), (uint32_t)sizeof(size))
+#define _IOW(type, nr, size) _IOC(_IOC_WRITE, (type), (nr), (uint32_t)sizeof(size))
 #endif
 #ifndef _IOWR
-#    define _IOWR(type, nr, size) _IOC(_IOC_READ | _IOC_WRITE, (type), (nr), (uint32_t)sizeof(size))
+#define _IOWR(type, nr, size) _IOC(_IOC_READ | _IOC_WRITE, (type), (nr), (uint32_t)sizeof(size))
 #endif
 
 #ifndef _IOC_DIR
-#    define _IOC_DIR(cmd) (((cmd) >> 30) & 0x3)
+#define _IOC_DIR(cmd) (((cmd) >> 30) & 0x3)
 #endif
 #ifndef _IOC_TYPE
-#    define _IOC_TYPE(cmd) (((cmd) >> 8) & 0xff)
+#define _IOC_TYPE(cmd) (((cmd) >> 8) & 0xff)
 #endif
 #ifndef _IOC_NR
-#    define _IOC_NR(cmd) ((cmd) & 0xff)
+#define _IOC_NR(cmd) ((cmd) & 0xff)
 #endif
 #ifndef _IOC_SIZE
-#    define _IOC_SIZE(cmd) (((cmd) >> 16) & 0x3fff)
+#define _IOC_SIZE(cmd) (((cmd) >> 16) & 0x3fff)
 #endif
 
 #define DRM_IOCTL_BASE 'd'
@@ -400,7 +400,8 @@ enum drm_vblank_seq_type {
 };
 #define _DRM_VBLANK_HIGH_CRTC_SHIFT 1
 #define _DRM_VBLANK_TYPES_MASK      (_DRM_VBLANK_ABSOLUTE | _DRM_VBLANK_RELATIVE)
-#define _DRM_VBLANK_FLAGS_MASK      (_DRM_VBLANK_EVENT | _DRM_VBLANK_SIGNAL | _DRM_VBLANK_SECONDARY | _DRM_VBLANK_NEXTONMISS)
+#define _DRM_VBLANK_FLAGS_MASK \
+    (_DRM_VBLANK_EVENT | _DRM_VBLANK_SIGNAL | _DRM_VBLANK_SECONDARY | _DRM_VBLANK_NEXTONMISS)
 
 struct drm_wait_vblank_request {
     enum drm_vblank_seq_type type;

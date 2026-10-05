@@ -12,15 +12,17 @@
 #ifndef GNUCOS_MODULE_INFO_H
 #define GNUCOS_MODULE_INFO_H
 
-#define __MODULE_INFO(field, value)                                     \
-    __asm__(".section .modinfo,\"a\",@progbits\n\t"                     \
-            ".asciz \"" field "=" value "\"\n\t"                        \
-            ".previous")
+#define __MODULE_INFO(field, value)             \
+    __asm__(                                    \
+        ".section .modinfo,\"a\",@progbits\n\t" \
+        ".asciz \"" field "=" value             \
+        "\"\n\t"                                \
+        ".previous")
 
 #define MODULE_INFO(field, value) __MODULE_INFO(field, value)
 
 /* Every module must provide these. */
-#define MODULE_NAME(name)    MODULE_INFO("name", name)
-#define MODULE_LICENSE(lic)  MODULE_INFO("license", lic)
+#define MODULE_NAME(name)   MODULE_INFO("name", name)
+#define MODULE_LICENSE(lic) MODULE_INFO("license", lic)
 
 #endif /* GNUCOS_MODULE_INFO_H */

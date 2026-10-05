@@ -111,11 +111,12 @@
 #define DRM_MODE_PANEL_TYPE_OLED    1
 
 /* Rotation and reflection applied when a plane is composed. */
-#define DRM_MODE_ROTATE_0     (1 << 0)
-#define DRM_MODE_ROTATE_90    (1 << 1)
-#define DRM_MODE_ROTATE_180   (1 << 2)
-#define DRM_MODE_ROTATE_270   (1 << 3)
-#define DRM_MODE_ROTATE_MASK  (DRM_MODE_ROTATE_0 | DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_180 | DRM_MODE_ROTATE_270)
+#define DRM_MODE_ROTATE_0   (1 << 0)
+#define DRM_MODE_ROTATE_90  (1 << 1)
+#define DRM_MODE_ROTATE_180 (1 << 2)
+#define DRM_MODE_ROTATE_270 (1 << 3)
+#define DRM_MODE_ROTATE_MASK \
+    (DRM_MODE_ROTATE_0 | DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_180 | DRM_MODE_ROTATE_270)
 #define DRM_MODE_REFLECT_X    (1 << 4)
 #define DRM_MODE_REFLECT_Y    (1 << 5)
 #define DRM_MODE_REFLECT_MASK (DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y)
@@ -133,7 +134,7 @@ struct drm_mode_modeinfo {
     __u16 hdisplay;    /* visible columns                          */
     __u16 hsync_start; /* column where hsync begins                */
     __u16 hsync_end;
-    __u16 htotal;      /* total columns, blanking included         */
+    __u16 htotal; /* total columns, blanking included         */
     __u16 hskew;
     __u16 vdisplay;
     __u16 vsync_start;
@@ -198,7 +199,7 @@ struct drm_mode_set_plane {
 
 struct drm_mode_get_plane {
     __u32 plane_id;
-    __u32 crtc_id;   /* currently driving this plane, 0 if none */
+    __u32 crtc_id; /* currently driving this plane, 0 if none */
     __u32 fb_id;
     __u32 possible_crtcs; /* bitmask of CRTCs this plane can feed */
     __u32 gamma_size;
@@ -271,19 +272,19 @@ enum drm_mode_subconnector {
 #define DRM_MODE_CONNECTOR_USB         20
 
 struct drm_mode_get_connector {
-    __u64 encoders_ptr;    /* ids of encoders that could drive this */
-    __u64 modes_ptr;       /* drm_mode_modeinfo array               */
+    __u64 encoders_ptr; /* ids of encoders that could drive this */
+    __u64 modes_ptr;    /* drm_mode_modeinfo array               */
     __u64 props_ptr;
     __u64 prop_values_ptr;
     __u32 count_modes;
     __u32 count_props;
     __u32 count_encoders;
-    __u32 encoder_id;      /* the one actually attached            */
+    __u32 encoder_id; /* the one actually attached            */
     __u32 connector_id;
     __u32 connector_type;
     __u32 connector_type_id;
-    __u32 connection;      /* connected / disconnected / unknown   */
-    __u32 mm_width;        /* physical size, 0 if the EDID lies    */
+    __u32 connection; /* connected / disconnected / unknown   */
+    __u32 mm_width;   /* physical size, 0 if the EDID lies    */
     __u32 mm_height;
     __u32 subpixel;
     __u32 pad;
@@ -307,9 +308,11 @@ struct drm_mode_get_connector {
 #define DRM_MODE_PROP_SIGNED_RANGE  DRM_MODE_PROP_TYPE(2)
 #define DRM_MODE_PROP_ATOMIC        0x80000000U
 
-#define DRM_MODE_PROP_FLAGS                                                                                                                  \
-    (DRM_MODE_PROP_PENDING | DRM_MODE_PROP_RANGE | DRM_MODE_PROP_IMMUTABLE | DRM_MODE_PROP_ENUM | DRM_MODE_PROP_BLOB | DRM_MODE_PROP_BITMASK \
-     | DRM_MODE_PROP_LEGACY_TYPE | DRM_MODE_PROP_EXTENDED_TYPE | DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_SIGNED_RANGE | DRM_MODE_PROP_ATOMIC)
+#define DRM_MODE_PROP_FLAGS                                                                       \
+    (DRM_MODE_PROP_PENDING | DRM_MODE_PROP_RANGE | DRM_MODE_PROP_IMMUTABLE | DRM_MODE_PROP_ENUM | \
+     DRM_MODE_PROP_BLOB | DRM_MODE_PROP_BITMASK | DRM_MODE_PROP_LEGACY_TYPE |                     \
+     DRM_MODE_PROP_EXTENDED_TYPE | DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_SIGNED_RANGE |            \
+     DRM_MODE_PROP_ATOMIC)
 
 /* One named value of an enumerated property. */
 struct drm_mode_property_enum {
@@ -447,7 +450,8 @@ struct drm_mode_crtc_lut {
 #define DRM_MODE_PAGE_FLIP_ASYNC           0x02
 #define DRM_MODE_PAGE_FLIP_TARGET_ABSOLUTE 0x04
 #define DRM_MODE_PAGE_FLIP_TARGET_RELATIVE 0x08
-#define DRM_MODE_PAGE_FLIP_TARGET          (DRM_MODE_PAGE_FLIP_TARGET_ABSOLUTE | DRM_MODE_PAGE_FLIP_TARGET_RELATIVE)
+#define DRM_MODE_PAGE_FLIP_TARGET \
+    (DRM_MODE_PAGE_FLIP_TARGET_ABSOLUTE | DRM_MODE_PAGE_FLIP_TARGET_RELATIVE)
 
 struct drm_mode_crtc_page_flip {
     __u32 crtc_id;
@@ -484,16 +488,17 @@ struct drm_mode_destroy_dumb {
 #define DRM_MODE_ATOMIC_TEST_ONLY     0x0100 /* validate without applying   */
 #define DRM_MODE_ATOMIC_NONBLOCK      0x0200 /* do not wait for completion  */
 #define DRM_MODE_ATOMIC_ALLOW_MODESET 0x0400 /* may reconfigure the display */
-#define DRM_MODE_ATOMIC_FLAGS \
-    (DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_PAGE_FLIP_ASYNC | DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_ATOMIC_ALLOW_MODESET)
+#define DRM_MODE_ATOMIC_FLAGS                                                          \
+    (DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_PAGE_FLIP_ASYNC | DRM_MODE_ATOMIC_TEST_ONLY | \
+     DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_ATOMIC_ALLOW_MODESET)
 
 /* A whole configuration change in one call: object ids, the properties to
  * set on each, and the values.  All-or-nothing is the point. */
 struct drm_mode_atomic {
     __u32 flags;
     __u32 count_objs;
-    __u64 objs_ptr;         /* object ids                             */
-    __u64 count_props_ptr;  /* how many properties per object         */
+    __u64 objs_ptr;        /* object ids                             */
+    __u64 count_props_ptr; /* how many properties per object         */
     __u64 props_ptr;
     __u64 prop_values_ptr;
     __u64 reserved;
@@ -575,7 +580,7 @@ struct drm_mode_create_lease {
 };
 
 struct drm_mode_list_lessees {
-    __u32 count_flags;  /* bit 0: only this master's lessees */
+    __u32 count_flags; /* bit 0: only this master's lessees */
     __u32 pad;
     __u32 lessee_count; /* out */
     __u32 pad2;

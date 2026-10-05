@@ -46,7 +46,9 @@ int drm_modeset_lock(struct drm_modeset_lock *lock, struct drm_modeset_acquire_c
         return 0;
     }
 
-    if (lock->ctx == ctx) { return 0; } /* taking it twice is free */
+    if (lock->ctx == ctx) {
+        return 0;
+    } /* taking it twice is free */
 
     if (lock->ctx != NULL) {
         /* Somebody else owns it.  Note which lock that was so backoff can
@@ -70,7 +72,8 @@ int drm_modeset_lock(struct drm_modeset_lock *lock, struct drm_modeset_acquire_c
     return 0;
 }
 
-int drm_modeset_lock_interruptible(struct drm_modeset_lock *lock, struct drm_modeset_acquire_ctx *ctx)
+int drm_modeset_lock_interruptible(struct drm_modeset_lock        *lock,
+                                   struct drm_modeset_acquire_ctx *ctx)
 {
     /* There is nothing here that could be interrupted yet. */
     return drm_modeset_lock(lock, ctx);
@@ -96,7 +99,9 @@ int drm_modeset_lock_single_interruptible(struct drm_modeset_lock *lock)
 {
     unsigned previous = __atomic_exchange_n(&lock->mutex.v, 1u, __ATOMIC_ACQUIRE);
 
-    if (previous != 0) { return -EBUSY; }
+    if (previous != 0) {
+        return -EBUSY;
+    }
 
     lock->ctx = NULL;
     return 0;
@@ -111,7 +116,7 @@ bool drm_modeset_is_locked(struct drm_modeset_lock *lock)
 
 void drm_modeset_acquire_init(struct drm_modeset_acquire_ctx *ctx, uint32_t flags)
 {
-    ctx->ctx_lock.v     = 0;
+    ctx->ctx_lock.v = 0;
     ilist_init(&ctx->locked);
     ctx->contended_lock = NULL;
     ctx->trylock_only   = false;
@@ -147,7 +152,9 @@ int drm_modeset_backoff(struct drm_modeset_acquire_ctx *ctx)
 {
     struct drm_modeset_lock *contended = ctx->contended_lock;
 
-    if (contended == NULL) { return 0; }
+    if (contended == NULL) {
+        return 0;
+    }
 
     /* Everything goes back.  contended_lock survives this call, which is
      * the whole point. */
@@ -177,9 +184,11 @@ int drm_modeset_lock_all_ctx(struct drm_device *dev, struct drm_modeset_acquire_
      * context's bookkeeping and has to be released by the caller. */
     spin_lock(&dev->mode_config.mutex);
 
-    for (node = dev->mode_config.crtc_list.next; node != &dev->mode_config.crtc_list; node = node->next) {
-        struct drm_crtc *crtc = (struct drm_crtc *)((uintptr_t)node - offsetof(struct drm_crtc, head));
-        int              ret  = drm_modeset_lock(&crtc->mutex, ctx);
+    for (node = dev->mode_config.crtc_list.next; node != &dev->mode_config.crtc_list;
+         node = node->next) {
+        struct drm_crtc *crtc =
+            (struct drm_crtc *)((uintptr_t)node - offsetof(struct drm_crtc, head));
+        int ret = drm_modeset_lock(&crtc->mutex, ctx);
 
         if (ret != 0) {
             /* Give back what we took so the retry cannot deadlock against

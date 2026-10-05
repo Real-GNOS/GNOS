@@ -35,10 +35,14 @@ int drm_vblank_init(struct drm_device *dev, unsigned int num_crtcs)
     struct drm_vblank_crtc *vblank;
     unsigned int            i;
 
-    if (dev == NULL || num_crtcs == 0) { return -EINVAL; }
+    if (dev == NULL || num_crtcs == 0) {
+        return -EINVAL;
+    }
 
     vblank = malloc(sizeof(*vblank) * num_crtcs);
-    if (vblank == NULL) { return -ENOMEM; }
+    if (vblank == NULL) {
+        return -ENOMEM;
+    }
     memset(vblank, 0, sizeof(*vblank) * num_crtcs);
 
     for (i = 0; i < num_crtcs; i++) {
@@ -70,12 +74,18 @@ static struct drm_vblank_crtc *drm_vblank_of(const struct drm_crtc *crtc)
 {
     struct drm_device *dev;
 
-    if (crtc == NULL || crtc->dev == NULL) { return NULL; }
+    if (crtc == NULL || crtc->dev == NULL) {
+        return NULL;
+    }
 
     dev = crtc->dev;
 
-    if (crtc->index < 0 || crtc->index >= dev->num_crtc) { return NULL; }
-    if (dev->vblank_unused_array == NULL) { return NULL; }
+    if (crtc->index < 0 || crtc->index >= dev->num_crtc) {
+        return NULL;
+    }
+    if (dev->vblank_unused_array == NULL) {
+        return NULL;
+    }
 
     return &dev->vblank_unused_array[crtc->index];
 }
@@ -84,7 +94,9 @@ uint32_t drm_crtc_vblank_count(struct drm_crtc *crtc)
 {
     struct drm_vblank_crtc *vblank = drm_vblank_of(crtc);
 
-    if (vblank == NULL) { return 0; }
+    if (vblank == NULL) {
+        return 0;
+    }
 
     return vblank->count;
 }
@@ -95,10 +107,12 @@ int drm_crtc_vblank_get(struct drm_crtc *crtc)
 {
     struct drm_vblank_crtc *vblank = drm_vblank_of(crtc);
 
-    if (vblank == NULL) { return -EINVAL; }
+    if (vblank == NULL) {
+        return -EINVAL;
+    }
 
     spin_lock(&vblank->lock);
-    vblank->crtc    = crtc;
+    vblank->crtc = crtc;
     vblank->refcount++;
     vblank->enabled = true;
     spin_unlock(&vblank->lock);
@@ -110,12 +124,18 @@ void drm_crtc_vblank_put(struct drm_crtc *crtc)
 {
     struct drm_vblank_crtc *vblank = drm_vblank_of(crtc);
 
-    if (vblank == NULL) { return; }
+    if (vblank == NULL) {
+        return;
+    }
 
     spin_lock(&vblank->lock);
-    if (vblank->refcount != 0) { vblank->refcount--; }
+    if (vblank->refcount != 0) {
+        vblank->refcount--;
+    }
     /* Stay on while either a reference or a queued event needs the count. */
-    if (vblank->refcount == 0 && vblank->event_queue == NULL) { vblank->enabled = false; }
+    if (vblank->refcount == 0 && vblank->event_queue == NULL) {
+        vblank->enabled = false;
+    }
     spin_unlock(&vblank->lock);
 }
 
@@ -128,7 +148,9 @@ void drm_crtc_arm_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank_
 {
     struct drm_vblank_crtc *vblank = drm_vblank_of(crtc);
 
-    if (vblank == NULL || e == NULL) { return; }
+    if (vblank == NULL || e == NULL) {
+        return;
+    }
 
     spin_lock(&vblank->lock);
 
@@ -163,7 +185,9 @@ void drm_crtc_arm_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank_
     } else {
         struct drm_pending_vblank_event *cur = vblank->event_queue;
 
-        while (cur->next != NULL && cur->next->sequence <= e->sequence) { cur = cur->next; }
+        while (cur->next != NULL && cur->next->sequence <= e->sequence) {
+            cur = cur->next;
+        }
         e->next   = cur->next;
         cur->next = e;
     }
@@ -177,8 +201,12 @@ void drm_crtc_send_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank
     struct drm_vblank_crtc *vblank;
     uint64_t                timestamp;
 
-    if (e == NULL || e->dev == NULL) { return; }
-    if (crtc == NULL) { crtc = e->crtc; }
+    if (e == NULL || e->dev == NULL) {
+        return;
+    }
+    if (crtc == NULL) {
+        crtc = e->crtc;
+    }
 
     vblank = (crtc != NULL) ? drm_vblank_of(crtc) : NULL;
     if (vblank == NULL) {
@@ -190,7 +218,9 @@ void drm_crtc_send_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank
         }
         if (e->file_ref && e->file_priv != NULL) {
             spin_lock(&e->file_priv->event_lock);
-            if (e->file_priv->event_refs != 0) { e->file_priv->event_refs--; }
+            if (e->file_priv->event_refs != 0) {
+                e->file_priv->event_refs--;
+            }
             e->file_ref = false;
             spin_unlock(&e->file_priv->event_lock);
             wait_queue_wake_all(&e->file_priv->event_wait);
@@ -206,14 +236,18 @@ void drm_crtc_send_vblank_event(struct drm_crtc *crtc, struct drm_pending_vblank
     e->event.tv_sec   = (uint32_t)(timestamp / 1000000000ULL);
     e->event.tv_usec  = (uint32_t)((timestamp / 1000ULL) % 1000000ULL);
 
-    if (drm_send_event(e->dev, e) != 0) { free(e); }
+    if (drm_send_event(e->dev, e) != 0) {
+        free(e);
+    }
 }
 
 void drm_crtc_vblank_off(struct drm_crtc *crtc)
 {
     struct drm_vblank_crtc *vblank = drm_vblank_of(crtc);
 
-    if (vblank == NULL) { return; }
+    if (vblank == NULL) {
+        return;
+    }
 
     spin_lock(&vblank->lock);
     vblank->enabled        = false;
@@ -225,11 +259,15 @@ void drm_crtc_vblank_on(struct drm_crtc *crtc)
 {
     struct drm_vblank_crtc *vblank = drm_vblank_of(crtc);
 
-    if (vblank == NULL) { return; }
+    if (vblank == NULL) {
+        return;
+    }
 
     spin_lock(&vblank->lock);
     vblank->enabled = true;
-    if (vblank->next_vblank_ns == 0) { vblank->next_vblank_ns = nano_time() + vblank->period_ns; }
+    if (vblank->next_vblank_ns == 0) {
+        vblank->next_vblank_ns = nano_time() + vblank->period_ns;
+    }
     spin_unlock(&vblank->lock);
 }
 
@@ -246,7 +284,9 @@ void drm_handle_vblank(struct drm_device *dev, unsigned int pipe)
     struct drm_pending_vblank_event **tail  = &ready;
     struct drm_crtc_helper_funcs     *helpers;
 
-    if (dev == NULL || (int)pipe >= dev->num_crtc || dev->vblank_unused_array == NULL) { return; }
+    if (dev == NULL || (int)pipe >= dev->num_crtc || dev->vblank_unused_array == NULL) {
+        return;
+    }
 
     vblank = &dev->vblank_unused_array[pipe];
 
@@ -268,8 +308,11 @@ void drm_handle_vblank(struct drm_device *dev, unsigned int pipe)
     spin_unlock(&vblank->lock);
     wait_queue_wake_all(&vblank->wait);
 
-    helpers = (vblank->crtc != NULL) ? (struct drm_crtc_helper_funcs *)vblank->crtc->helper_private : NULL;
-    if (helpers != NULL && helpers->vblank != NULL) { helpers->vblank(vblank->crtc); }
+    helpers = (vblank->crtc != NULL) ? (struct drm_crtc_helper_funcs *)vblank->crtc->helper_private
+                                     : NULL;
+    if (helpers != NULL && helpers->vblank != NULL) {
+        helpers->vblank(vblank->crtc);
+    }
 
     if (vblank->crtc != NULL) {
         bool completed_flip = false;
@@ -282,7 +325,9 @@ void drm_handle_vblank(struct drm_device *dev, unsigned int pipe)
         }
         spin_unlock(&vblank->crtc->commit_lock);
 
-        if (completed_flip) { drm_crtc_vblank_put(vblank->crtc); }
+        if (completed_flip) {
+            drm_crtc_vblank_put(vblank->crtc);
+        }
     }
 
     while (ready != NULL) {
@@ -311,7 +356,9 @@ void drm_vblank_tick(void)
     uint64_t                  now = nano_time();
     int                       i;
 
-    if (dev == NULL || dev->vblank_unused_array == NULL) { return; }
+    if (dev == NULL || dev->vblank_unused_array == NULL) {
+        return;
+    }
 
     for (i = 0; i < dev->num_crtc; i++) {
         struct drm_vblank_crtc *vblank = &dev->vblank_unused_array[i];
@@ -322,7 +369,9 @@ void drm_vblank_tick(void)
             spin_unlock(&vblank->lock);
             continue;
         }
-        if (vblank->next_vblank_ns == 0) { vblank->next_vblank_ns = now + vblank->period_ns; }
+        if (vblank->next_vblank_ns == 0) {
+            vblank->next_vblank_ns = now + vblank->period_ns;
+        }
         due = now >= vblank->next_vblank_ns;
         if (due) {
             do {
@@ -331,7 +380,9 @@ void drm_vblank_tick(void)
         }
         spin_unlock(&vblank->lock);
 
-        if (due) { drm_handle_vblank(dev, (unsigned int)i); }
+        if (due) {
+            drm_handle_vblank(dev, (unsigned int)i);
+        }
     }
 }
 
@@ -351,33 +402,50 @@ int drm_wait_vblank_ioctl(struct drm_device *dev, void *data, struct drm_file *f
     uint32_t                current;
     uint32_t                allowed;
 
-    if (dev == NULL || vblwait == NULL) { return -EINVAL; }
+    if (dev == NULL || vblwait == NULL) {
+        return -EINVAL;
+    }
 
     flags   = vblwait->request.type;
     allowed = _DRM_VBLANK_TYPES_MASK | _DRM_VBLANK_FLAGS_MASK | _DRM_VBLANK_HIGH_CRTC_MASK;
-    if ((flags & ~allowed) != 0) { return -EINVAL; }
-    if ((flags & (_DRM_VBLANK_SIGNAL | _DRM_VBLANK_FLIP)) != 0) { return -EINVAL; }
+    if ((flags & ~allowed) != 0) {
+        return -EINVAL;
+    }
+    if ((flags & (_DRM_VBLANK_SIGNAL | _DRM_VBLANK_FLIP)) != 0) {
+        return -EINVAL;
+    }
 
     pipe = (flags & _DRM_VBLANK_HIGH_CRTC_MASK) >> _DRM_VBLANK_HIGH_CRTC_SHIFT;
-    if ((flags & _DRM_VBLANK_SECONDARY) != 0 && pipe == 0) { pipe = 1; }
+    if ((flags & _DRM_VBLANK_SECONDARY) != 0 && pipe == 0) {
+        pipe = 1;
+    }
 
-    if (pipe >= (unsigned int)dev->num_crtc || dev->vblank_unused_array == NULL) { return -EINVAL; }
+    if (pipe >= (unsigned int)dev->num_crtc || dev->vblank_unused_array == NULL) {
+        return -EINVAL;
+    }
 
     vblank = &dev->vblank_unused_array[pipe];
-    if (vblank->crtc == NULL) { return -EINVAL; }
+    if (vblank->crtc == NULL) {
+        return -EINVAL;
+    }
 
     spin_lock(&vblank->lock);
     current = vblank->count;
-    target  = (flags & _DRM_VBLANK_RELATIVE) ? current + vblwait->request.sequence : vblwait->request.sequence;
+    target  = (flags & _DRM_VBLANK_RELATIVE) ? current + vblwait->request.sequence
+                                             : vblwait->request.sequence;
     /* Missed it already?  NEXTONMISS says take the next one instead of
      * returning an event that is instantly in the past. */
-    if ((flags & _DRM_VBLANK_NEXTONMISS) != 0 && (int32_t)(current - target) >= 0) { target = current + 1; }
+    if ((flags & _DRM_VBLANK_NEXTONMISS) != 0 && (int32_t)(current - target) >= 0) {
+        target = current + 1;
+    }
     spin_unlock(&vblank->lock);
 
     if ((flags & _DRM_VBLANK_EVENT) != 0) {
         struct drm_pending_vblank_event *e = malloc(sizeof(*e));
 
-        if (e == NULL) { return -ENOMEM; }
+        if (e == NULL) {
+            return -ENOMEM;
+        }
         memset(e, 0, sizeof(*e));
 
         e->dev               = dev;
@@ -399,7 +467,7 @@ int drm_wait_vblank_ioctl(struct drm_device *dev, void *data, struct drm_file *f
         if ((int32_t)(current - target) >= 0) {
             /* Already past it: deliver now instead of queueing for a frame
              * that will never be "next". */
-            e->sequence  = current;
+            e->sequence   = current;
             e->vblank_ref = false;
             drm_crtc_vblank_put(e->crtc);
             drm_crtc_send_vblank_event(e->crtc, e);
@@ -414,7 +482,9 @@ int drm_wait_vblank_ioctl(struct drm_device *dev, void *data, struct drm_file *f
         return 0;
     }
 
-    if (drm_crtc_vblank_get(vblank->crtc) != 0) { return -EINVAL; }
+    if (drm_crtc_vblank_get(vblank->crtc) != 0) {
+        return -EINVAL;
+    }
 
     for (;;) {
         spin_lock(&vblank->lock);
@@ -441,7 +511,9 @@ void drm_vblank_cancel_pending(struct drm_device *dev, struct drm_file *file_pri
 {
     int i;
 
-    if (dev == NULL || file_priv == NULL || dev->vblank_unused_array == NULL) { return; }
+    if (dev == NULL || file_priv == NULL || dev->vblank_unused_array == NULL) {
+        return;
+    }
 
     for (i = 0; i < dev->num_crtc; i++) {
         struct drm_vblank_crtc           *vblank = &dev->vblank_unused_array[i];
@@ -460,11 +532,15 @@ void drm_vblank_cancel_pending(struct drm_device *dev, struct drm_file *file_pri
 
             *link = event->next;
 
-            if (event->vblank_ref && vblank->refcount != 0) { vblank->refcount--; }
+            if (event->vblank_ref && vblank->refcount != 0) {
+                vblank->refcount--;
+            }
 
             if (event->file_ref) {
                 spin_lock(&file_priv->event_lock);
-                if (file_priv->event_refs != 0) { file_priv->event_refs--; }
+                if (file_priv->event_refs != 0) {
+                    file_priv->event_refs--;
+                }
                 event->file_ref = false;
                 spin_unlock(&file_priv->event_lock);
                 wait_queue_wake_all(&file_priv->event_wait);
@@ -472,7 +548,9 @@ void drm_vblank_cancel_pending(struct drm_device *dev, struct drm_file *file_pri
             free(event);
         }
 
-        if (vblank->refcount == 0 && vblank->event_queue == NULL) { vblank->enabled = false; }
+        if (vblank->refcount == 0 && vblank->event_queue == NULL) {
+            vblank->enabled = false;
+        }
 
         spin_unlock(&vblank->lock);
     }
@@ -482,7 +560,9 @@ void drm_vblank_cleanup(struct drm_device *dev)
 {
     int i;
 
-    if (dev == NULL || dev->vblank_unused_array == NULL) { return; }
+    if (dev == NULL || dev->vblank_unused_array == NULL) {
+        return;
+    }
 
     for (i = 0; i < dev->num_crtc; i++) {
         struct drm_vblank_crtc          *vblank = &dev->vblank_unused_array[i];

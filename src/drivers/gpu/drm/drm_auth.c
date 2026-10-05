@@ -51,12 +51,16 @@ int drm_getmagic(struct drm_device *dev, void *data, struct drm_file *file_priv)
 
     (void)dev;
 
-    if (data == NULL || file_priv == NULL) { return -EINVAL; }
+    if (data == NULL || file_priv == NULL) {
+        return -EINVAL;
+    }
 
     auth = (struct drm_auth *)data;
 
     item = malloc(sizeof(*item));
-    if (item == NULL) { return -ENOMEM; }
+    if (item == NULL) {
+        return -ENOMEM;
+    }
     memset(item, 0, sizeof(*item));
 
     spin_lock(&file_priv->magic_lock);
@@ -84,7 +88,9 @@ int drm_authmagic(struct drm_device *dev, void *data, struct drm_file *file_priv
 
     (void)dev;
 
-    if (data == NULL || file_priv == NULL) { return -EINVAL; }
+    if (data == NULL || file_priv == NULL) {
+        return -EINVAL;
+    }
 
     auth = (struct drm_auth *)data;
 
@@ -106,13 +112,19 @@ int drm_setmaster(struct drm_device *dev, void *data, struct drm_file *file_priv
 
     (void)data;
 
-    if (dev == NULL || file_priv == NULL) { return -EINVAL; }
-    if (file_priv->master != NULL) { return -EINVAL; }
+    if (dev == NULL || file_priv == NULL) {
+        return -EINVAL;
+    }
+    if (file_priv->master != NULL) {
+        return -EINVAL;
+    }
 
     plogk("drm: SET_MASTER called\n");
 
     master = malloc(sizeof(*master));
-    if (master == NULL) { return -ENOMEM; }
+    if (master == NULL) {
+        return -ENOMEM;
+    }
     memset(master, 0, sizeof(*master));
 
     master->dev      = dev;
@@ -137,10 +149,14 @@ int drm_dropmaster(struct drm_device *dev, void *data, struct drm_file *file_pri
     (void)dev;
     (void)data;
 
-    if (file_priv == NULL) { return -EINVAL; }
+    if (file_priv == NULL) {
+        return -EINVAL;
+    }
 
     master = file_priv->master;
-    if (master == NULL) { return -EINVAL; }
+    if (master == NULL) {
+        return -EINVAL;
+    }
 
     drm_ht_destroy(&master->magiclist);
     free(master);

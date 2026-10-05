@@ -25,7 +25,7 @@
 
 #include <stdint.h>
 
-#include "sysnum.h"        /* termios_t, winsize_t */
+#include "sysnum.h" /* termios_t, winsize_t */
 
 /* How many virtual terminals exist.  Six, matching the function keys the
  * switch is bound to and the getty lines init starts. */
@@ -55,7 +55,7 @@ int  tty_get_pgrp(void);
  * blocks the signal is let through instead.  Returns 1 when the signal was
  * raised and the caller must fail with EINTR, 0 when it may go ahead.
  */
-int  tty_check_ttou(void);
+int tty_check_ttou(void);
 
 /* Line-discipline settings, behind TCGETS / TCSETS*.  `flush` corresponds to
  * TCSAFLUSH: throw away input that has not been read yet. */
@@ -98,7 +98,7 @@ void tty_inject(const char *buf, uint32_t len);
 void tty_vt_switch(int n);
 
 /* The terminal currently on screen, 0-based. */
-int  tty_vt_active(void);
+int tty_vt_active(void);
 
 /* Release a terminal's claim on a session, called when a session leader
  * exits so the next getty can take it over. */

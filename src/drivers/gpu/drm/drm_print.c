@@ -53,7 +53,9 @@ struct drm_printer drm_printk_printer(const char *prefix)
         size_t len = strlen(prefix) + 1;
 
         copy = malloc(len);
-        if (copy != NULL) { memcpy(copy, prefix, len); }
+        if (copy != NULL) {
+            memcpy(copy, prefix, len);
+        }
     }
 
     p.arg   = copy;
@@ -64,7 +66,9 @@ struct drm_printer drm_printk_printer(const char *prefix)
 
 void drm_vprintf(struct drm_printer *p, const char *fmt, va_list args)
 {
-    if (p != NULL && p->printfn != NULL) { p->printfn(p->arg, fmt, args); }
+    if (p != NULL && p->printfn != NULL) {
+        p->printfn(p->arg, fmt, args);
+    }
 }
 
 void drm_printf(struct drm_printer *p, const char *fmt, ...)

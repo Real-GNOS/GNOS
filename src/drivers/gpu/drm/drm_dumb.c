@@ -31,37 +31,41 @@ int32_t drm_ioctl_create_dumb(uint64_t arg)
     if (!c.width || !c.height || c.bpp != 32 || c.flags)
         return -E_INVAL;
     if (c.width > 4096 || c.height > 4096)
-        return -E_INVAL;                /* the advertised GETRESOURCES max */
+        return -E_INVAL; /* the advertised GETRESOURCES max */
 
     uint32_t pitch = c.width * 4;
-    uint64_t size = (uint64_t)pitch * c.height;
+    uint64_t size  = (uint64_t)pitch * c.height;
     if (size == 0 || size > 16 * 1024 * 1024)
-        return -E_INVAL;                /* 16 MiB cap: sane, and contiguous */
+        return -E_INVAL; /* 16 MiB cap: sane, and contiguous */
 
     int slot = -1;
     for (int i = 0; i < MAX_DUMB; i++)
-        if (!g_dumb[i].used) { slot = i; break; }
+        if (!g_dumb[i].used) {
+            slot = i;
+            break;
+        }
     if (slot < 0)
         return -E_NOMEM;
 
     uint64_t nframes = (size + 0xFFF) >> 12;
-    uint64_t phys = pmm_alloc_contiguous(nframes);
+    uint64_t phys    = pmm_alloc_contiguous(nframes);
     if (!phys)
         return -E_NOMEM;
     memset(pmm_virt(phys), 0, (size_t)size);
 
     dumb_t *d = &g_dumb[slot];
     memset(d, 0, sizeof *d);
-    d->used = 1;
+    d->used   = 1;
     d->handle = (uint32_t)slot + 1;
-    d->phys = phys;
-    d->size = (uint32_t)size;
-    d->pitch = pitch;
-    d->w = c.width; d->h = c.height;
+    d->phys   = phys;
+    d->size   = (uint32_t)size;
+    d->pitch  = pitch;
+    d->w      = c.width;
+    d->h      = c.height;
 
     c.handle = d->handle;
-    c.pitch = pitch;
-    c.size = size;
+    c.pitch  = pitch;
+    c.size   = size;
     return copy_to_user(arg, &c, sizeof c);
 }
 
@@ -122,8 +126,7 @@ int32_t drm_ioctl_gem_close(uint64_t arg)
  * DESTROY_DUMB, and the compositor closes the fd before destroying the
  * buffer. */
 
-static int32_t drm_prime_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys,
-                              uint64_t *size)
+static int32_t drm_prime_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys, uint64_t *size)
 {
     dumb_t *d = (dumb_t *)n->priv;
     if (offset & 0xFFF)

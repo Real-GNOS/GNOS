@@ -20,8 +20,8 @@
 #include "anonfd.h"
 #include "signalfd.h"
 
-#define SFD_NONBLOCK  O_NONBLOCK        /* 04000 */
-#define SFD_CLOEXEC   O_CLOEXEC         /* 02000000 */
+#define SFD_NONBLOCK O_NONBLOCK /* 04000 */
+#define SFD_CLOEXEC  O_CLOEXEC  /* 02000000 */
 
 /* struct signalfd_siginfo as libc sees it (x86-64 Linux UAPI, 128 bytes). */
 typedef struct {
@@ -47,10 +47,10 @@ typedef struct {
     uint64_t ssi_call_addr;
     uint32_t ssi_arch;
     uint8_t  ssi_pad[28];
-} signalfd_siginfo_t;                    /* 128 bytes */
+} signalfd_siginfo_t; /* 128 bytes */
 
 typedef struct {
-    uint64_t mask;                      /* signals this fd reports */
+    uint64_t mask; /* signals this fd reports */
     int      nonblock;
 } signalfd_t;
 
@@ -58,8 +58,7 @@ typedef struct {
  * SIGKILL/SIGSTOP are never caught by a signalfd, exactly as on Linux. */
 static int signalfd_next(const signalfd_t *s, const proc_t *p)
 {
-    uint64_t want = p->sig_pending & s->mask &
-                    ~(SIGMASK(SIGKILL) | SIGMASK(SIGSTOP));
+    uint64_t want = p->sig_pending & s->mask & ~(SIGMASK(SIGKILL) | SIGMASK(SIGSTOP));
     if (!want)
         return 0;
     for (int sig = 1; sig < NSIG; sig++)
@@ -70,8 +69,7 @@ static int signalfd_next(const signalfd_t *s, const proc_t *p)
 
 /* ---- node ops ----------------------------------------------------------- */
 
-static int32_t signalfd_read(vfs_node_t *n, uint64_t off, void *buf,
-                             uint32_t len)
+static int32_t signalfd_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     (void)off;
     if (len < sizeof(signalfd_siginfo_t))
@@ -79,8 +77,8 @@ static int32_t signalfd_read(vfs_node_t *n, uint64_t off, void *buf,
     signalfd_t *s = (signalfd_t *)n->priv;
 
     for (;;) {
-        proc_t *me = proc_current();
-        int sig = me ? signalfd_next(s, me) : 0;
+        proc_t *me  = proc_current();
+        int     sig = me ? signalfd_next(s, me) : 0;
         if (sig) {
             /* Consume the signal: it was read as data, so the handler path
              * must not run it afterwards. */
@@ -97,17 +95,19 @@ static int32_t signalfd_read(vfs_node_t *n, uint64_t off, void *buf,
     }
 }
 
-static int32_t signalfd_write(vfs_node_t *n, uint64_t off, const void *buf,
-                              uint32_t len)
+static int32_t signalfd_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
-    return -E_INVAL;                    /* signalfds are read-only */
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
+    return -E_INVAL; /* signalfds are read-only */
 }
 
 static int signalfd_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
     signalfd_t *s = (signalfd_t *)n->priv;
-    int16_t r = 0;
+    int16_t     r = 0;
     if (events & POLLIN) {
         proc_t *me = proc_current();
         r |= (me && signalfd_next(s, me)) ? POLLIN : 0;
@@ -133,8 +133,7 @@ static const vfs_ops_t g_signalfd_ops = {
 
 /* ---- syscalls ------------------------------------------------------------ */
 
-int64_t sys_signalfd4(uint64_t fd, uint64_t umask, uint64_t sigsetsize,
-                      uint64_t flags)
+int64_t sys_signalfd4(uint64_t fd, uint64_t umask, uint64_t sigsetsize, uint64_t flags)
 {
     /* musl's sigset_t is 8 bytes on x86-64; libwayland passes 8. */
     if (sigsetsize != 8)
@@ -162,11 +161,11 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t umask, uint64_t sigsetsize,
     signalfd_t *s = kmalloc(sizeof(signalfd_t));
     if (!s)
         return -E_NOMEM;
-    s->mask = mask;
+    s->mask     = mask;
     s->nonblock = (flags & SFD_NONBLOCK) != 0;
 
-    int h = vfs_anon_open(VFS_ANON, &g_signalfd_ops, s,
-                          s->nonblock ? (O_RDWR | O_NONBLOCK) : O_RDWR);
+    int h =
+        vfs_anon_open(VFS_ANON, &g_signalfd_ops, s, s->nonblock ? (O_RDWR | O_NONBLOCK) : O_RDWR);
     if (h < 0) {
         kfree(s);
         return h;

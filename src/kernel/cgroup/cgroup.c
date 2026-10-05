@@ -51,13 +51,13 @@
 /* ------------------------------------------------------------------ */
 
 typedef struct cgroup {
-    int      parent;          /* cg slot; -1 for the root */
-    int      first_child;     /* child slots, singly linked */
-    int      next_sibling;
-    char     name[CG_NAME_MAX + 1];
+    int  parent;      /* cg slot; -1 for the root */
+    int  first_child; /* child slots, singly linked */
+    int  next_sibling;
+    char name[CG_NAME_MAX + 1];
 
-    uint32_t weight;          /* cpu.weight, 1..10000 */
-    uint32_t subtree_ctl;     /* controllers enabled for our children */
+    uint32_t weight;      /* cpu.weight, 1..10000 */
+    uint32_t subtree_ctl; /* controllers enabled for our children */
 
     /* ---- cpu accounting (real ticks; SCHED_HZ = 100) ----------------- */
     uint64_t usage_total;     /* lifetime CPU of the subtree, for cpu.stat */
@@ -71,25 +71,25 @@ typedef struct cgroup {
     uint32_t nr_throttled;    /* times the quota has been exhausted */
 
     /* ---- pids --------------------------------------------------------- */
-    int      nprocs;          /* direct member tasks */
-    int      pids_max;        /* subtree task cap; -1 = unlimited */
+    int nprocs;   /* direct member tasks */
+    int pids_max; /* subtree task cap; -1 = unlimited */
 
     /* ---- memory (real accounting with hierarchical charging) ---------- */
-    uint64_t mem_max;         /* bytes; ~0ULL = unlimited */
-    uint64_t mem_bytes;       /* directly charged bytes (this cgroup only;
-                               * subtree total = sum of all descendants) */
-    uint64_t mem_anon;        /* anonymous pages charged (for memory.stat) */
-    uint64_t mem_file;        /* file-backed pages charged (for memory.stat) */
+    uint64_t mem_max;   /* bytes; ~0ULL = unlimited */
+    uint64_t mem_bytes; /* directly charged bytes (this cgroup only;
+                         * subtree total = sum of all descendants) */
+    uint64_t mem_anon;  /* anonymous pages charged (for memory.stat) */
+    uint64_t mem_file;  /* file-backed pages charged (for memory.stat) */
 
     /* Tasks parked (WAIT_CGROUP) until this cgroup's period rolls over.
      * pid-based singly linked list through proc_t.cg_park_next. */
-    int      park_head;
+    int park_head;
 
-    int      live;
+    int live;
 } cgroup_t;
 
 static cgroup_t g_cgs[MAX_CGS];
-static int      g_nlive;      /* live cgroups, for /proc/cgroups */
+static int      g_nlive; /* live cgroups, for /proc/cgroups */
 
 /* ------------------------------------------------------------------ */
 /* Small text writers (numbers into a caller scratch buffer)          */
@@ -191,7 +191,7 @@ static int render_path(int cg, char *buf, int cap)
         }
         return 1;
     }
-    int parent = g_cgs[cg].parent;
+    int  parent = g_cgs[cg].parent;
     char pbuf[GNUOS_PATH_MAX];
     int  plen = render_path(parent, pbuf, (int)sizeof(pbuf));
     if (plen <= 0)
@@ -200,11 +200,11 @@ static int render_path(int cg, char *buf, int cap)
     if (need > cap)
         return -E_NOSPC;
     int o = 0;
-    if (plen > 1) {                 /* "/a" -> copy "a"; root adds nothing */
+    if (plen > 1) { /* "/a" -> copy "a"; root adds nothing */
         memcpy(buf, pbuf + 1, (size_t)(plen - 1));
         o = plen - 1;
     }
-    buf[o++] = '/';
+    buf[o++]      = '/';
     const char *n = g_cgs[cg].name;
     while (*n)
         buf[o++] = *n++;
@@ -215,8 +215,7 @@ static int render_path(int cg, char *buf, int cap)
 int cg_path(int cg, char *buf, int cap)
 {
     sched_lock();
-    int r = (cg_live(cg) || cg == CG_ROOT)
-                ? render_path(cg, buf, cap) : -E_NOENT;
+    int r = (cg_live(cg) || cg == CG_ROOT) ? render_path(cg, buf, cap) : -E_NOENT;
     sched_unlock();
     return r;
 }
@@ -265,8 +264,7 @@ uint32_t cg_subtree(int cg)
 uint32_t cg_weight(int cg)
 {
     sched_lock();
-    uint32_t w = (cg_live(cg) && cg != CG_ROOT) ? g_cgs[cg].weight
-                                                : CG_WEIGHT_DEFAULT;
+    uint32_t w = (cg_live(cg) && cg != CG_ROOT) ? g_cgs[cg].weight : CG_WEIGHT_DEFAULT;
     sched_unlock();
     return w;
 }
@@ -283,7 +281,7 @@ static uint32_t eff_weight(int cg)
         return CG_NICE0;
 
     uint64_t eff = CG_NICE0;
-    int cur = cg;
+    int      cur = cg;
     while (cur != CG_ROOT) {
         int pa = g_cgs[cur].parent;
         if (pa == -1 || (g_cgs[pa].subtree_ctl & CG_CTRL_BIT(CG_CTRL_CPU))) {
@@ -344,8 +342,7 @@ void cg_refresh_weights(void)
 static int pids_allow_one(int cg)
 {
     for (int c = cg; c != -1; c = g_cgs[c].parent) {
-        if (g_cgs[c].pids_max >= 0 &&
-            subtree_tasks(c) >= g_cgs[c].pids_max) {
+        if (g_cgs[c].pids_max >= 0 && subtree_tasks(c) >= g_cgs[c].pids_max) {
             extern void dbg_puts(const char *);
             extern void dbg_puts_dec(uint32_t);
             dbg_puts("PIDS: deny c=");
@@ -372,7 +369,7 @@ int cg_attach_new(proc_t *p, int cg)
     } else if ((r = pids_allow_one(cg)) != 0) {
         /* keep p unattached */
     } else {
-        p->cg = cg;
+        p->cg           = cg;
         p->sched_weight = eff_weight(cg);
         g_cgs[cg].nprocs++;
         /* Propagate the cgroup to the address space so the VMM memory
@@ -394,7 +391,7 @@ void cg_detach(proc_t *p)
         if (g_cgs[p->cg].nprocs > 0)
             g_cgs[p->cg].nprocs--;
     }
-    p->cg = -1;
+    p->cg           = -1;
     p->cg_park_next = -1;
     sched_unlock();
 }
@@ -430,12 +427,11 @@ static int move_tgid_locked(int pid, int cg)
             moving++;
     }
     if (moving == 0)
-        return 0;               /* already all here */
+        return 0; /* already all here */
 
     /* The destination chain must fit `moving` more tasks. */
     for (int c = cg; c != -1; c = g_cgs[c].parent) {
-        if (g_cgs[c].pids_max >= 0 &&
-            subtree_tasks(c) + moving > g_cgs[c].pids_max)
+        if (g_cgs[c].pids_max >= 0 && subtree_tasks(c) + moving > g_cgs[c].pids_max)
             return -E_AGAIN;
         if (c == CG_ROOT)
             break;
@@ -507,12 +503,11 @@ static void period_rollover(cgroup_t *g, uint64_t now)
     while (now >= g->period_start + g->period_ticks) {
         if (g->throttled) {
             uint64_t end = g->period_start + g->period_ticks;
-            g->throttled_total += (end > g->throttle_start)
-                                      ? end - g->throttle_start : 0;
+            g->throttled_total += (end > g->throttle_start) ? end - g->throttle_start : 0;
             g->throttled = 0;
         }
         g->period_start += g->period_ticks;
-        g->used_period   = 0;
+        g->used_period = 0;
     }
 }
 
@@ -520,26 +515,26 @@ static void period_rollover(cgroup_t *g, uint64_t now)
  * on cg's list.  Caller holds the sched lock. */
 static void release_parked(int cg)
 {
-    int pid = g_cgs[cg].park_head;
+    int pid             = g_cgs[cg].park_head;
     g_cgs[cg].park_head = -1;
     while (pid != -1) {
-        proc_t *p = proc_by_pid(pid);
-        int next = p ? p->cg_park_next : -1;
+        proc_t *p    = proc_by_pid(pid);
+        int     next = p ? p->cg_park_next : -1;
         if (p && p->state == PROC_BLOCKED && p->wait_reason == WAIT_CGROUP) {
             p->cg_park_next = -1;
             /* Any ancestor still throttled?  Park one level higher. */
             int anchor = -1;
             for (int c = p->cg; c != -1; c = g_cgs[c].parent) {
                 if (g_cgs[c].throttled)
-                    anchor = c;      /* keep the root-most one */
+                    anchor = c; /* keep the root-most one */
                 if (c == CG_ROOT)
                     break;
             }
             if (anchor != -1) {
-                p->cg_park_next = g_cgs[anchor].park_head;
+                p->cg_park_next         = g_cgs[anchor].park_head;
                 g_cgs[anchor].park_head = p->pid;
             } else {
-                sched_enqueue(p);    /* make runnable again */
+                sched_enqueue(p); /* make runnable again */
             }
         }
         pid = next;
@@ -580,8 +575,8 @@ void cg_park(proc_t *p)
 {
     if (!p || p->cg < 0)
         return;
-    p->state      = PROC_BLOCKED;
-    p->wait_reason = WAIT_CGROUP;
+    p->state        = PROC_BLOCKED;
+    p->wait_reason  = WAIT_CGROUP;
     p->cg_park_next = -1;
 
     /* Anchor on the root-most throttled ancestor: that is the last one to
@@ -599,7 +594,7 @@ void cg_park(proc_t *p)
         sched_enqueue(p);
         return;
     }
-    p->cg_park_next = g_cgs[anchor].park_head;
+    p->cg_park_next         = g_cgs[anchor].park_head;
     g_cgs[anchor].park_head = p->pid;
 }
 
@@ -614,8 +609,8 @@ int cg_charge_runtime(proc_t *p, uint64_t used)
 {
     if (!p || p->cg < 0 || used == 0)
         return 0;
-    uint64_t now = timer_ticks();
-    int throttled = 0;
+    uint64_t now       = timer_ticks();
+    int      throttled = 0;
 
     for (int c = p->cg; c != -1; c = g_cgs[c].parent) {
         cgroup_t *g = &g_cgs[c];
@@ -690,7 +685,7 @@ void cg_mem_discharge(int cg, uint64_t bytes)
         if (g_cgs[c].mem_bytes >= bytes)
             g_cgs[c].mem_bytes -= bytes;
         else
-            g_cgs[c].mem_bytes = 0;       /* shouldn't happen; clamp */
+            g_cgs[c].mem_bytes = 0; /* shouldn't happen; clamp */
         if (c == CG_ROOT)
             break;
     }
@@ -702,33 +697,42 @@ void cg_mem_discharge(int cg, uint64_t bytes)
  * ones are the v2 core files; the controller files exist only while that
  * controller is usable on the directory (enabled from the root). */
 enum {
-    F_PROCS, F_CONTROLLERS, F_SUBTREE, F_EVENTS, F_STAT,
-    F_CPU_WEIGHT, F_CPU_MAX, F_CPU_STAT,
-    F_PIDS_MAX, F_PIDS_CURRENT,
-    F_MEM_CURRENT, F_MEM_MAX, F_MEM_STAT,
+    F_PROCS,
+    F_CONTROLLERS,
+    F_SUBTREE,
+    F_EVENTS,
+    F_STAT,
+    F_CPU_WEIGHT,
+    F_CPU_MAX,
+    F_CPU_STAT,
+    F_PIDS_MAX,
+    F_PIDS_CURRENT,
+    F_MEM_CURRENT,
+    F_MEM_MAX,
+    F_MEM_STAT,
     F_MAX
 };
 
 typedef struct {
     const char *name;
-    uint8_t     file;           /* F_* */
-    uint8_t     ctrl;           /* CG_NCTRLS == always present */
+    uint8_t     file; /* F_* */
+    uint8_t     ctrl; /* CG_NCTRLS == always present */
 } cgfile_t;
 
 static const cgfile_t g_files[] = {
-    { "cgroup.procs",        F_PROCS,          CG_NCTRLS },
-    { "cgroup.controllers",  F_CONTROLLERS,    CG_NCTRLS },
-    { "cgroup.subtree_control", F_SUBTREE,     CG_NCTRLS },
-    { "cgroup.events",       F_EVENTS,         CG_NCTRLS },
-    { "cgroup.stat",         F_STAT,           CG_NCTRLS },
-    { "cpu.weight",          F_CPU_WEIGHT,     CG_CTRL_CPU },
-    { "cpu.max",             F_CPU_MAX,        CG_CTRL_CPU },
-    { "cpu.stat",            F_CPU_STAT,       CG_CTRL_CPU },
-    { "pids.max",            F_PIDS_MAX,       CG_CTRL_PIDS },
-    { "pids.current",        F_PIDS_CURRENT,   CG_CTRL_PIDS },
-    { "memory.current",      F_MEM_CURRENT,    CG_CTRL_MEM },
-    { "memory.max",          F_MEM_MAX,        CG_CTRL_MEM },
-    { "memory.stat",         F_MEM_STAT,       CG_CTRL_MEM },
+    {"cgroup.procs", F_PROCS, CG_NCTRLS},
+    {"cgroup.controllers", F_CONTROLLERS, CG_NCTRLS},
+    {"cgroup.subtree_control", F_SUBTREE, CG_NCTRLS},
+    {"cgroup.events", F_EVENTS, CG_NCTRLS},
+    {"cgroup.stat", F_STAT, CG_NCTRLS},
+    {"cpu.weight", F_CPU_WEIGHT, CG_CTRL_CPU},
+    {"cpu.max", F_CPU_MAX, CG_CTRL_CPU},
+    {"cpu.stat", F_CPU_STAT, CG_CTRL_CPU},
+    {"pids.max", F_PIDS_MAX, CG_CTRL_PIDS},
+    {"pids.current", F_PIDS_CURRENT, CG_CTRL_PIDS},
+    {"memory.current", F_MEM_CURRENT, CG_CTRL_MEM},
+    {"memory.max", F_MEM_MAX, CG_CTRL_MEM},
+    {"memory.stat", F_MEM_STAT, CG_CTRL_MEM},
 };
 #define NFILES ((int)(sizeof(g_files) / sizeof(g_files[0])))
 
@@ -742,11 +746,14 @@ static const cgfile_t g_files[] = {
  * which the VFS routes to cgfs_readdir() by mount path. */
 static int32_t cgdir_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
-static const vfs_ops_t g_cgdir_ops = { .read = cgdir_read, .write = NULL };
+static const vfs_ops_t g_cgdir_ops = {.read = cgdir_read, .write = NULL};
 /* Defined with cgfile_read/cgfile_write below; forward-declared so the
  * resolver above can reference it. */
 static const vfs_ops_t g_cgfile_ops;
@@ -772,8 +779,7 @@ static void render_file(int cg, int f, cgbuf_t *b)
                 continue;
             if (b->len > 0 && b->buf[b->len - 1] != '\n' && b->buf[b->len - 1] != ' ')
                 cg_char(b, ' ');
-            cg_str(b, (k == CG_CTRL_CPU) ? "cpu"
-                     : (k == CG_CTRL_PIDS) ? "pids" : "memory");
+            cg_str(b, (k == CG_CTRL_CPU) ? "cpu" : (k == CG_CTRL_PIDS) ? "pids" : "memory");
         }
         cg_char(b, '\n');
         break;
@@ -783,8 +789,7 @@ static void render_file(int cg, int f, cgbuf_t *b)
             if (!(g->subtree_ctl & CG_CTRL_BIT(k)))
                 continue;
             cg_char(b, '+');
-            cg_str(b, (k == CG_CTRL_CPU) ? "cpu" : (k == CG_CTRL_PIDS) ? "pids"
-                                                                      : "memory");
+            cg_str(b, (k == CG_CTRL_CPU) ? "cpu" : (k == CG_CTRL_PIDS) ? "pids" : "memory");
             cg_char(b, ' ');
         }
         if (b->len > 0 && b->buf[b->len - 1] == ' ')
@@ -809,7 +814,7 @@ static void render_file(int cg, int f, cgbuf_t *b)
         if (g->quota_ticks == 0)
             cg_str(b, "max ");
         else {
-            cg_u64(b, g->quota_ticks * 10000ULL);       /* ticks -> usec */
+            cg_u64(b, g->quota_ticks * 10000ULL); /* ticks -> usec */
             cg_char(b, ' ');
         }
         cg_u64(b, g->period_ticks * 10000ULL);
@@ -876,9 +881,9 @@ static int32_t cgfile_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
         sched_unlock();
         return -E_NOENT;
     }
-    cgbuf_t b = { scratch, (int)sizeof(scratch), 0 };
+    cgbuf_t b = {scratch, (int)sizeof(scratch), 0};
     render_file(cg, f, &b);
-    uint32_t size = (uint32_t)b.len;
+    uint32_t size   = (uint32_t)b.len;
     uint32_t copied = 0;
     if (off < size) {
         uint32_t avail = size - (uint32_t)off;
@@ -901,7 +906,7 @@ static int parse_u64(const char **pp, uint64_t *out)
     if (p[0] == 'm' && p[1] == 'a' && p[2] == 'x' &&
         (p[3] == 0 || p[3] == ' ' || p[3] == '\n' || p[3] == '\r')) {
         *out = ~0ULL;
-        *pp = p + 3;
+        *pp  = p + 3;
         return 0;
     }
     if (*p < '0' || *p > '9')
@@ -912,14 +917,14 @@ static int parse_u64(const char **pp, uint64_t *out)
         p++;
     }
     *out = v;
-    *pp = p;
+    *pp  = p;
     return 0;
 }
 
 static int parse_s32(const char **pp, int *out)
 {
     uint64_t v;
-    int r = parse_u64(pp, &v);
+    int      r = parse_u64(pp, &v);
     if (r < 0)
         return r;
     if (v == ~0ULL)
@@ -932,8 +937,8 @@ static int parse_s32(const char **pp, int *out)
  * regardless of the file offset, as on Linux. */
 static int apply_write(int cg, int f, const char *data, uint32_t len)
 {
-    cgroup_t *g = &g_cgs[cg];
-    const char *p = data;
+    cgroup_t   *g   = &g_cgs[cg];
+    const char *p   = data;
     const char *end = data + len;
     (void)end;
 
@@ -942,8 +947,7 @@ static int apply_write(int cg, int f, const char *data, uint32_t len)
         /* One or more pids (thread-group leaders or members); each moves
          * that task's whole thread group into cg. */
         for (;;) {
-            while (p < data + len && (*p == ' ' || *p == '\t' ||
-                                      *p == '\r' || *p == '\n'))
+            while (p < data + len && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
                 p++;
             if (p >= data + len)
                 break;
@@ -952,7 +956,7 @@ static int apply_write(int cg, int f, const char *data, uint32_t len)
                 return -E_INVAL;
             if (pid > 0x7FFFFFFFULL)
                 return -E_INVAL;
-            int r = move_tgid_locked((int)pid, cg);   /* lock already held */
+            int r = move_tgid_locked((int)pid, cg); /* lock already held */
             if (r < 0)
                 return r;
         }
@@ -961,8 +965,7 @@ static int apply_write(int cg, int f, const char *data, uint32_t len)
     case F_SUBTREE: {
         uint32_t want = g->subtree_ctl;
         for (;;) {
-            while (p < data + len && (*p == ' ' || *p == '\t' ||
-                                      *p == '\r' || *p == '\n'))
+            while (p < data + len && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
                 p++;
             if (p >= data + len)
                 break;
@@ -981,7 +984,7 @@ static int apply_write(int cg, int f, const char *data, uint32_t len)
                 return -E_INVAL;
             if (on) {
                 if (!ctrl_usable(cg, bit))
-                    return -E_INVAL;      /* enable top-down first */
+                    return -E_INVAL; /* enable top-down first */
                 /* "no internal processes": a cgroup with member tasks may
                  * not hand controllers down to its children (the root is
                  * exempt so the tree can be re-armed after a boot-time
@@ -1015,17 +1018,15 @@ static int apply_write(int cg, int f, const char *data, uint32_t len)
             return -E_INVAL;
         if (period == 0 || period == ~0ULL)
             return -E_INVAL;
-        if (period < 10000)                 /* one tick minimum */
+        if (period < 10000) /* one tick minimum */
             period = 10000;
         uint32_t ticks = (uint32_t)((period + 9999) / 10000);
-        if (ticks > 10000)                  /* cap at ~100 s */
+        if (ticks > 10000) /* cap at ~100 s */
             return -E_RANGE;
         g->period_ticks = ticks;
-        g->quota_ticks  = (quota == ~0ULL)
-                              ? 0
-                              : (uint64_t)((quota + 9999) / 10000);
+        g->quota_ticks  = (quota == ~0ULL) ? 0 : (uint64_t)((quota + 9999) / 10000);
         if (g->quota_ticks == 0)
-            g->quota_ticks = 1;             /* a real quota, never "off" */
+            g->quota_ticks = 1; /* a real quota, never "off" */
         /* A new, larger period may already be over: sync now. */
         period_rollover(g, timer_ticks());
         return (int)len;
@@ -1041,7 +1042,7 @@ static int apply_write(int cg, int f, const char *data, uint32_t len)
         uint64_t v;
         if (parse_u64(&p, &v) < 0)
             return -E_INVAL;
-        g->mem_max = v;                     /* stored; no enforcement */
+        g->mem_max = v; /* stored; no enforcement */
         return (int)len;
     }
     default:
@@ -1049,8 +1050,7 @@ static int apply_write(int cg, int f, const char *data, uint32_t len)
     }
 }
 
-static int32_t cgfile_write(vfs_node_t *n, uint64_t off, const void *buf,
-                            uint32_t len)
+static int32_t cgfile_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)off;
     int cg = PRIV_CG(n->priv);
@@ -1078,8 +1078,7 @@ static int32_t cgfile_write(vfs_node_t *n, uint64_t off, const void *buf,
 static int name_to_file(int cg, const char *name, int *file_out)
 {
     for (int i = 0; i < NFILES; i++) {
-        if (g_files[i].ctrl != CG_NCTRLS &&
-            !ctrl_usable(cg, CG_CTRL_BIT(g_files[i].ctrl)))
+        if (g_files[i].ctrl != CG_NCTRLS && !ctrl_usable(cg, CG_CTRL_BIT(g_files[i].ctrl)))
             continue;
         if (strcmp(g_files[i].name, name) == 0) {
             *file_out = i;
@@ -1101,11 +1100,11 @@ static int walk_rel(const char *rel, char *leaf, int leaf_cap, int *file_out)
     if (file_out)
         *file_out = -1;
 
-    int cg = CG_ROOT;
-    const char *p = rel + 1;
+    int         cg = CG_ROOT;
+    const char *p  = rel + 1;
     for (;;) {
         if (*p == 0)
-            return cg;              /* exactly a directory */
+            return cg; /* exactly a directory */
         while (*p == '/')
             p++;
         if (*p == 0)
@@ -1121,8 +1120,7 @@ static int walk_rel(const char *rel, char *leaf, int leaf_cap, int *file_out)
         if (*p == '/') {
             int child = -1;
             for (int c = g_cgs[cg].first_child; c != -1; c = g_cgs[c].next_sibling)
-                if (g_cgs[c].live &&
-                    (int)strlen(g_cgs[c].name) == n &&
+                if (g_cgs[c].live && (int)strlen(g_cgs[c].name) == n &&
                     memcmp(g_cgs[c].name, start, (size_t)n) == 0) {
                     child = c;
                     break;
@@ -1159,7 +1157,7 @@ int cgfs_resolve(const char *rel, vfs_node_t *out)
     sched_lock();
     char leaf[CG_NAME_MAX + 1];
     int  file = -1;
-    int  cg = walk_rel(rel, leaf, (int)sizeof(leaf), &file);
+    int  cg   = walk_rel(rel, leaf, (int)sizeof(leaf), &file);
     if (cg < 0 || !cg_live(cg)) {
         sched_unlock();
         return -E_NOENT;
@@ -1214,8 +1212,7 @@ int cgfs_readdir(const char *rel, uint32_t index, char *name, uint8_t *type)
         }
     }
     for (int i = 0; i < NFILES; i++) {
-        if (g_files[i].ctrl != CG_NCTRLS &&
-            !ctrl_usable(cg, CG_CTRL_BIT(g_files[i].ctrl)))
+        if (g_files[i].ctrl != CG_NCTRLS && !ctrl_usable(cg, CG_CTRL_BIT(g_files[i].ctrl)))
             continue;
         if (index == n++) {
             strncpy(name, g_files[i].name, VFS_NAME_MAX - 1);
@@ -1257,7 +1254,7 @@ int cgfs_mkdir(const char *rel)
         if (*p == '/')
             slash = p;
     if (slash == rel)
-        return -E_EXIST;            /* "mkdir /" */
+        return -E_EXIST; /* "mkdir /" */
 
     char parent_rel[GNUOS_PATH_MAX];
     int  plen = (int)(slash - rel);
@@ -1292,23 +1289,23 @@ int cgfs_mkdir(const char *rel)
         }
     if (slot == -1) {
         sched_unlock();
-        return -E_NOSPC;            /* static pool exhausted (never reused) */
+        return -E_NOSPC; /* static pool exhausted (never reused) */
     }
 
     cgroup_t *g = &g_cgs[slot];
     memset(g, 0, sizeof(*g));
     strncpy(g->name, name, CG_NAME_MAX);
-    g->live          = 1;
-    g->parent        = cg;
-    g->first_child   = -1;
-    g->next_sibling  = g_cgs[cg].first_child;
+    g->live               = 1;
+    g->parent             = cg;
+    g->first_child        = -1;
+    g->next_sibling       = g_cgs[cg].first_child;
     g_cgs[cg].first_child = slot;
-    g->weight        = CG_WEIGHT_DEFAULT;
-    g->period_ticks  = CG_PERIOD_DEFAULT_TICKS;
-    g->quota_ticks   = 0;
-    g->pids_max      = -1;
-    g->mem_max       = ~0ULL;
-    g->park_head     = -1;
+    g->weight             = CG_WEIGHT_DEFAULT;
+    g->period_ticks       = CG_PERIOD_DEFAULT_TICKS;
+    g->quota_ticks        = 0;
+    g->pids_max           = -1;
+    g->mem_max            = ~0ULL;
+    g->park_head          = -1;
     g_nlive++;
     refresh_all_weights();
     sched_unlock();
@@ -1330,17 +1327,17 @@ int cgfs_rmdir(const char *rel)
         sched_unlock();
         return -E_BUSY;
     }
-    if (member_count(cg) > 0 || g_cgs[cg].first_child != -1 ||
-        g_cgs[cg].subtree_ctl != 0 || g_cgs[cg].park_head != -1) {
+    if (member_count(cg) > 0 || g_cgs[cg].first_child != -1 || g_cgs[cg].subtree_ctl != 0 ||
+        g_cgs[cg].park_head != -1) {
         sched_unlock();
-        return -E_BUSY;             /* not empty (tasks/children/controllers) */
+        return -E_BUSY; /* not empty (tasks/children/controllers) */
     }
     g_cgs[cg].live = 0;
     g_nlive--;
 
     /* Unlink from the parent's child list. */
-    int parent = g_cgs[cg].parent;
-    int *link = &g_cgs[parent].first_child;
+    int  parent = g_cgs[cg].parent;
+    int *link   = &g_cgs[parent].first_child;
     while (*link != -1) {
         if (*link == cg) {
             *link = g_cgs[cg].next_sibling;
@@ -1357,7 +1354,7 @@ int cgfs_rmdir(const char *rel)
 /* init and procfs helpers                                            */
 /* ------------------------------------------------------------------ */
 
-static const vfs_ops_t g_cgfile_ops = { .read = cgfile_read, .write = cgfile_write };
+static const vfs_ops_t g_cgfile_ops = {.read = cgfile_read, .write = cgfile_write};
 
 /* cgroup v2 exposes one hierarchy; /proc/cgroups reports the single
  * hierarchy with all three controllers on it. */
@@ -1369,22 +1366,22 @@ int cg_proc_cgroup_line(proc_t *p, char *buf, int cap)
     int len;
     if (p->cg >= 0 && cg_live(p->cg)) {
         char path[GNUOS_PATH_MAX];
-        int plen = render_path(p->cg, path, (int)sizeof(path));
+        int  plen = render_path(p->cg, path, (int)sizeof(path));
         if (plen < 0) {
             sched_unlock();
             return plen;
         }
         const char *prefix = "0::";
-        int need = 3 + plen + 2;        /* "0::" + path + '\n' + NUL */
+        int         need   = 3 + plen + 2; /* "0::" + path + '\n' + NUL */
         if (need > cap) {
             sched_unlock();
             return -E_NOSPC;
         }
         memcpy(buf, prefix, 3);
         memcpy(buf + 3, path, (size_t)plen);
-        buf[3 + plen] = '\n';
+        buf[3 + plen]     = '\n';
         buf[3 + plen + 1] = 0;
-        len = 3 + plen + 1;
+        len               = 3 + plen + 1;
     } else {
         /* unattached (zombie): report the root */
         if (cap < 4) {
@@ -1402,7 +1399,7 @@ int cgroup_init(void)
 {
     memset(g_cgs, 0, sizeof(g_cgs));
 
-    cgroup_t *root = &g_cgs[CG_ROOT];
+    cgroup_t *root     = &g_cgs[CG_ROOT];
     root->parent       = -1;
     root->first_child  = -1;
     root->next_sibling = -1;
@@ -1420,4 +1417,3 @@ int cgroup_init(void)
     g_nlive            = 1;
     return 0;
 }
-

@@ -28,11 +28,13 @@
 
 #include "fat.h"
 
-static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint16_t rd16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
 static uint32_t rd32(const uint8_t *p)
 {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static void wr16(uint8_t *p, uint16_t v)
@@ -84,22 +86,25 @@ static uint8_t *clus_ptr(fat_fs_t *fs, uint32_t clus)
 static int fat_is_eoc(const fat_fs_t *fs, uint32_t v)
 {
     switch (fs->type) {
-    case 12: return v >= 0x0FF8;
-    case 16: return v >= 0xFFF8;
-    default: return v >= 0x0FFFFFF8;
+    case 12:
+        return v >= 0x0FF8;
+    case 16:
+        return v >= 0xFFF8;
+    default:
+        return v >= 0x0FFFFFF8;
     }
 }
 
 static uint32_t fat_next(fat_fs_t *fs, uint32_t clus)
 {
     if (!clus_ok(fs, clus))
-        return 0x0FFFFFFF;                 /* out of range: treat as EOC */
+        return 0x0FFFFFFF; /* out of range: treat as EOC */
 
     const uint8_t *fat = fs->img + (uint64_t)fs->fat_start * fs->bytes_per_sec;
 
     switch (fs->type) {
     case 12: {
-        uint32_t off = clus + (clus / 2);          /* 1.5 bytes per entry */
+        uint32_t off = clus + (clus / 2); /* 1.5 bytes per entry */
         uint16_t v   = rd16(fat + off);
         return (clus & 1) ? (uint32_t)(v >> 4) : (uint32_t)(v & 0x0FFF);
     }
@@ -118,8 +123,8 @@ static void fat_set_next(fat_fs_t *fs, uint32_t clus, uint32_t val)
         return;
 
     for (uint32_t f = 0; f < fs->num_fats; f++) {
-        uint64_t base = ((uint64_t)fs->fat_start +
-                         (uint64_t)f * fs->sec_per_fat) * fs->bytes_per_sec;
+        uint64_t base =
+            ((uint64_t)fs->fat_start + (uint64_t)f * fs->sec_per_fat) * fs->bytes_per_sec;
         if (base + fs->bytes_per_sec > fs->img_size)
             return;
         uint8_t *fat = fs->img + base;
@@ -171,7 +176,7 @@ static uint32_t fat_alloc_clus(fat_fs_t *fs)
 
     for (uint32_t n = 0; n < fs->clus_count; n++) {
         if (fat_next(fs, c) == 0) {
-            fat_set_next(fs, c, 0x0FFFFFFF);       /* claim it as a chain end */
+            fat_set_next(fs, c, 0x0FFFFFFF); /* claim it as a chain end */
             zero_clus(fs, c);
             fs->alloc_hint = (c + 1 < total) ? c + 1 : 2;
             return c;
@@ -228,16 +233,15 @@ int fat_mount(fat_fs_t *fs, uint8_t *img, uint32_t img_size)
         return 0;
 
     uint32_t fatsz16 = rd16(img + 22);
-    fs->sec_per_fat  = fatsz16 ? fatsz16 : rd32(img + 36);   /* BPB_FATSz32 */
+    fs->sec_per_fat  = fatsz16 ? fatsz16 : rd32(img + 36); /* BPB_FATSz32 */
 
-    uint32_t tot16   = rd16(img + 19);
-    fs->total_secs   = tot16 ? tot16 : rd32(img + 32);       /* BPB_TotSec32 */
+    uint32_t tot16 = rd16(img + 19);
+    fs->total_secs = tot16 ? tot16 : rd32(img + 32); /* BPB_TotSec32 */
 
     if (fs->sec_per_fat == 0 || fs->total_secs == 0)
         return 0;
 
-    fs->root_secs  = ((uint32_t)fs->root_entries * 32 + fs->bytes_per_sec - 1)
-                     / fs->bytes_per_sec;
+    fs->root_secs  = ((uint32_t)fs->root_entries * 32 + fs->bytes_per_sec - 1) / fs->bytes_per_sec;
     fs->fat_start  = fs->reserved_secs;
     fs->root_start = fs->fat_start + (uint32_t)fs->num_fats * fs->sec_per_fat;
     fs->data_start = fs->root_start + fs->root_secs;
@@ -254,7 +258,7 @@ int fat_mount(fat_fs_t *fs, uint8_t *img, uint32_t img_size)
     else
         fs->type = 32;
 
-    fs->root_clus = (fs->type == 32) ? rd32(img + 44) : 0;   /* BPB_RootClus */
+    fs->root_clus = (fs->type == 32) ? rd32(img + 44) : 0; /* BPB_RootClus */
     return 1;
 }
 
@@ -276,14 +280,14 @@ void fat_opendir(fat_fs_t *fs, uint32_t clus, fat_dir_t *dir)
  * the cluster chain as needed.  NULL once the directory is exhausted. */
 static uint8_t *dir_entry_at(fat_dir_t *dir)
 {
-    fat_fs_t *fs     = dir->fs;
-    uint32_t per_sec = fs->bytes_per_sec / 32;
+    fat_fs_t *fs      = dir->fs;
+    uint32_t  per_sec = fs->bytes_per_sec / 32;
 
     if (dir->fixed_root) {
         if (dir->index >= fs->root_entries)
             return NULL;
         uint32_t sec = fs->root_start + dir->index / per_sec;
-        uint8_t *s = sector(fs, sec);
+        uint8_t *s   = sector(fs, sec);
         return s ? s + (dir->index % per_sec) * 32 : NULL;
     }
 
@@ -302,7 +306,7 @@ static uint8_t *dir_entry_at(fat_dir_t *dir)
         return NULL;
 
     uint32_t sec = clus_to_sec(fs, clus) + idx / per_sec;
-    uint8_t *s = sector(fs, sec);
+    uint8_t *s   = sector(fs, sec);
     return s ? s + (idx % per_sec) * 32 : NULL;
 }
 
@@ -329,21 +333,21 @@ int fat_readdir(fat_dir_t *dir, fat_dirent_t *out)
         dir->index++;
 
         if (de[0] == 0x00)
-            return 0;                       /* no more entries at all      */
+            return 0; /* no more entries at all      */
         if (de[0] == 0xE5)
-            continue;                       /* deleted                     */
+            continue; /* deleted                     */
         if ((de[11] & FAT_ATTR_LFN) == FAT_ATTR_LFN)
-            continue;                       /* long-name fragment          */
+            continue; /* long-name fragment          */
         if (de[11] & FAT_ATTR_VOLUME_ID)
-            continue;                       /* volume label                */
+            continue; /* volume label                */
 
         name83_to_str(de, out->name);
         out->attr       = de[11];
         out->size       = rd32(de + 28);
         out->first_clus = ((uint32_t)rd16(de + 20) << 16) | rd16(de + 26);
         if (dir->fs->type != 32)
-            out->first_clus &= 0xFFFF;      /* the high word is garbage    */
-        out->ent_off    = (uint32_t)(de - dir->fs->img);
+            out->first_clus &= 0xFFFF; /* the high word is garbage    */
+        out->ent_off = (uint32_t)(de - dir->fs->img);
         return 1;
     }
 }
@@ -359,14 +363,15 @@ static int name_eq(const char *a, const char *b, const char *b_end)
     while (*a && b < b_end) {
         if (upper(*a) != upper(*b))
             return 0;
-        a++; b++;
+        a++;
+        b++;
     }
     return *a == 0 && b == b_end;
 }
 
 int fat_lookup(fat_fs_t *fs, const char *path, fat_dirent_t *out)
 {
-    uint32_t clus = 0;                       /* 0 == root */
+    uint32_t clus = 0; /* 0 == root */
 
     while (*path == '/')
         path++;
@@ -378,7 +383,7 @@ int fat_lookup(fat_fs_t *fs, const char *path, fat_dirent_t *out)
         out->attr       = FAT_ATTR_DIRECTORY;
         out->first_clus = (fs->type == 32) ? fs->root_clus : 0;
         out->size       = 0;
-        out->ent_off    = 0;                 /* synthesised: not on disk */
+        out->ent_off    = 0; /* synthesised: not on disk */
         return 1;
     }
 
@@ -403,17 +408,16 @@ int fat_lookup(fat_fs_t *fs, const char *path, fat_dirent_t *out)
         while (*end == '/')
             end++;
         if (*end == 0)
-            return 1;                        /* last component: done */
+            return 1; /* last component: done */
 
         if (!(out->attr & FAT_ATTR_DIRECTORY))
-            return 0;                        /* "a/b" where a is a file */
+            return 0; /* "a/b" where a is a file */
         clus = out->first_clus;
         path = end;
     }
 }
 
-uint32_t fat_read(fat_fs_t *fs, const fat_dirent_t *ent,
-                  uint32_t off, void *buf, uint32_t len)
+uint32_t fat_read(fat_fs_t *fs, const fat_dirent_t *ent, uint32_t off, void *buf, uint32_t len)
 {
     if (off >= ent->size)
         return 0;
@@ -445,7 +449,7 @@ uint32_t fat_read(fat_fs_t *fs, const fat_dirent_t *ent,
             dst[done + i] = src[off + i];
 
         done += n;
-        off   = 0;
+        off = 0;
         if (done >= len)
             break;
 
@@ -472,13 +476,12 @@ static void ent_sync(fat_fs_t *fs, const fat_dirent_t *e)
     wr32(de + 28, (e->attr & FAT_ATTR_DIRECTORY) ? 0 : e->size);
 }
 
-uint32_t fat_write(fat_fs_t *fs, fat_dirent_t *ent,
-                   uint32_t off, const void *buf, uint32_t len)
+uint32_t fat_write(fat_fs_t *fs, fat_dirent_t *ent, uint32_t off, const void *buf, uint32_t len)
 {
-    const uint8_t *src  = (const uint8_t *)buf;
-    uint32_t clus_bytes = (uint32_t)fs->bytes_per_sec * fs->sec_per_clus;
-    uint32_t start      = off;
-    uint32_t done       = 0;
+    const uint8_t *src        = (const uint8_t *)buf;
+    uint32_t       clus_bytes = (uint32_t)fs->bytes_per_sec * fs->sec_per_clus;
+    uint32_t       start      = off;
+    uint32_t       done       = 0;
 
     if (!len || (ent->attr & FAT_ATTR_DIRECTORY))
         return 0;
@@ -515,7 +518,7 @@ uint32_t fat_write(fat_fs_t *fs, fat_dirent_t *ent,
             dst[off + i] = src[done + i];
 
         done += n;
-        off   = 0;
+        off = 0;
         if (done >= len)
             break;
 
@@ -600,8 +603,8 @@ static int name_to_83(const char *name, uint8_t out[11])
     return 1;
 }
 
-static void put_entry(uint8_t *de, const uint8_t n83[11], uint8_t attr,
-                      uint32_t clus, uint32_t size)
+static void put_entry(uint8_t *de, const uint8_t n83[11], uint8_t attr, uint32_t clus,
+                      uint32_t size)
 {
     for (int i = 0; i < 32; i++)
         de[i] = 0;
@@ -631,7 +634,7 @@ static uint8_t *dir_alloc_slot(fat_fs_t *fs, uint32_t clus)
     }
 
     if (d.fixed_root)
-        return NULL;                     /* the FAT12/16 root cannot grow */
+        return NULL; /* the FAT12/16 root cannot grow */
 
     uint32_t last = d.clus;
     if (!clus_ok(fs, last))
@@ -647,7 +650,7 @@ static uint8_t *dir_alloc_slot(fat_fs_t *fs, uint32_t clus)
     if (!fresh)
         return NULL;
     fat_set_next(fs, last, fresh);
-    return clus_ptr(fs, fresh);          /* zeroed, so slot 0 is free */
+    return clus_ptr(fs, fresh); /* zeroed, so slot 0 is free */
 }
 
 int fat_create(fat_fs_t *fs, const char *path, uint8_t attr, fat_dirent_t *out)
@@ -698,11 +701,10 @@ int fat_create(fat_fs_t *fs, const char *path, uint8_t attr, fat_dirent_t *out)
          * a directory as far as anything else is concerned. */
         uint8_t *body = clus_ptr(fs, first);
         if (body) {
-            static const uint8_t dot[11]    = { '.', ' ', ' ', ' ', ' ', ' ',
-                                                ' ', ' ', ' ', ' ', ' ' };
-            static const uint8_t dotdot[11] = { '.', '.', ' ', ' ', ' ', ' ',
-                                                ' ', ' ', ' ', ' ', ' ' };
-            put_entry(body,      dot,    FAT_ATTR_DIRECTORY, first,  0);
+            static const uint8_t dot[11] = {'.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+            static const uint8_t dotdot[11] = {'.', '.', ' ', ' ', ' ', ' ',
+                                               ' ', ' ', ' ', ' ', ' '};
+            put_entry(body, dot, FAT_ATTR_DIRECTORY, first, 0);
             put_entry(body + 32, dotdot, FAT_ATTR_DIRECTORY, parent, 0);
         }
     }
@@ -723,7 +725,7 @@ int fat_unlink(fat_fs_t *fs, const char *path)
     if (!fat_lookup(fs, path, &e))
         return FAT_ENOENT;
     if (!e.ent_off)
-        return FAT_EINVAL;                   /* the root directory */
+        return FAT_EINVAL; /* the root directory */
 
     if (e.attr & FAT_ATTR_DIRECTORY) {
         fat_dir_t    d;
@@ -731,8 +733,7 @@ int fat_unlink(fat_fs_t *fs, const char *path)
         fat_opendir(fs, e.first_clus, &d);
         while (fat_readdir(&d, &child)) {
             if (child.name[0] == '.' &&
-                (child.name[1] == 0 ||
-                 (child.name[1] == '.' && child.name[2] == 0)))
+                (child.name[1] == 0 || (child.name[1] == '.' && child.name[2] == 0)))
                 continue;
             return FAT_ENOTEMPTY;
         }
@@ -741,6 +742,6 @@ int fat_unlink(fat_fs_t *fs, const char *path)
     if (clus_ok(fs, e.first_clus))
         fat_free_chain(fs, e.first_clus);
 
-    fs->img[e.ent_off] = 0xE5;               /* the classic tombstone */
+    fs->img[e.ent_off] = 0xE5; /* the classic tombstone */
     return FAT_OK;
 }

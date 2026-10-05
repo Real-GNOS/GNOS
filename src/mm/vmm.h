@@ -17,10 +17,10 @@
  * the addrspace_t.shared list below); only the pointer is stored here. */
 struct tmpfs_node;
 
-#define VM_READ   0x0
-#define VM_WRITE  0x1
-#define VM_USER   0x2
-#define VM_EXEC   0x4
+#define VM_READ  0x0
+#define VM_WRITE 0x1
+#define VM_USER  0x2
+#define VM_EXEC  0x4
 /* The page belongs to a SysV shared-memory segment: the physical frame is
  * owned by the segment, not by this address space, so unmap/teardown must
  * clear the PTE without freeing the frame.  Marks the PTE with the x86
@@ -37,7 +37,7 @@ struct tmpfs_node;
  * both brk-backed and mmap-backed chunks, and if their ranges interleave the
  * heap metadata gets corrupted and malloc aborts.  Keep a gap before the stack
  * too, or a growing heap collides with a growing stack. */
-#define USER_STACK_TOP   0x0000700000000000ULL
+#define USER_STACK_TOP 0x0000700000000000ULL
 /*
  * The stack is committed up front and then extended on demand: a fault
  * anywhere in the reserved window below the committed part maps one more
@@ -53,17 +53,17 @@ struct tmpfs_node;
  * long way down before it reaches anything a shell script author would
  * consider unreasonable.
  */
-#define USER_STACK_SIZE  (64 * 0x1000ULL)          /* 256 KiB committed */
-#define USER_STACK_MAX   (8 * 1024 * 1024ULL)      /* 8 MiB reserved */
-#define USER_BRK_BASE    0x0000600000000000ULL
-#define USER_BRK_CEIL    0x00006F0000000000ULL     /* leave room above for stack */
-#define USER_MMAP_BASE   0x0000500000000000ULL
-#define USER_MMAP_CEIL   0x0000600000000000ULL     /* stops where the brk heap starts */
+#define USER_STACK_SIZE (64 * 0x1000ULL)     /* 256 KiB committed */
+#define USER_STACK_MAX  (8 * 1024 * 1024ULL) /* 8 MiB reserved */
+#define USER_BRK_BASE   0x0000600000000000ULL
+#define USER_BRK_CEIL   0x00006F0000000000ULL /* leave room above for stack */
+#define USER_MMAP_BASE  0x0000500000000000ULL
+#define USER_MMAP_CEIL  0x0000600000000000ULL /* stops where the brk heap starts */
 
 /* Everything a user process is allowed to point at lives below the canonical
  * lower-half boundary; anything else is either kernel memory or a bad
  * pointer, and we refuse to touch it. */
-#define USER_LIMIT       0x0000800000000000ULL
+#define USER_LIMIT 0x0000800000000000ULL
 
 /* True if [p, p+len) lies entirely inside the user half.  A null pointer or
  * a range that wraps/overruns USER_LIMIT is rejected -- this is the gate every
@@ -79,7 +79,7 @@ typedef struct addrspace {
      * same page tables and each drops a reference when it dies.  The last
      * reference out destroys the space.
      */
-    int      refs;
+    int refs;
 
     /*
      * Resident user pages in this address space (counted at every map and
@@ -96,7 +96,7 @@ typedef struct addrspace {
      * The memory controller uses this to charge/uncharge page allocations
      * against the correct cgroup hierarchy.  -1 = unattached (no charging).
      */
-    int      cg;
+    int cg;
 
     /*
      * Anonymous/file mappings handed out in this address space, shared by
@@ -116,8 +116,13 @@ typedef struct addrspace {
      * dynamically linked program with dozens of shared libraries easily
      * makes more mappings than you would guess -- Xorg plus its libraries
      * overflowed 128 -- so keep real headroom here. */
-    struct { uint64_t base; uint64_t size; unsigned flags; uint64_t cksum; } mmaps[512];
-    int      nmmaps;
+    struct {
+        uint64_t base;
+        uint64_t size;
+        unsigned flags;
+        uint64_t cksum;
+    } mmaps[512];
+    int nmmaps;
 
     /*
      * MAP_SHARED tmpfs file mappings (POSIX shared memory / named
@@ -127,7 +132,11 @@ typedef struct addrspace {
      * an unlinked file).  Managed by the mmap syscall path; vmm_destroy
      * walks it after the page tables are gone.
      */
-    struct { struct tmpfs_node *node; uint64_t base; uint64_t size; } shared[16];
+    struct {
+        struct tmpfs_node *node;
+        uint64_t           base;
+        uint64_t           size;
+    } shared[16];
     uint32_t nshared;
 } addrspace_t;
 
@@ -159,8 +168,7 @@ void vmm_put(addrspace_t *as);
 int vmm_map(addrspace_t *as, uint64_t vaddr, uint64_t paddr, unsigned flags);
 
 /* Back [vaddr, vaddr+size) with freshly zeroed frames.  1 on success. */
-int vmm_alloc_range(addrspace_t *as, uint64_t vaddr, uint64_t size,
-                    unsigned flags);
+int vmm_alloc_range(addrspace_t *as, uint64_t vaddr, uint64_t size, unsigned flags);
 
 /* Physical address backing `vaddr`, or 0 if unmapped. */
 uint64_t vmm_resolve(addrspace_t *as, uint64_t vaddr);
@@ -204,11 +212,35 @@ int vmm_unmap(addrspace_t *as, uint64_t vaddr, uint64_t size);
  * the range are skipped.  1 on success. */
 int vmm_protect(addrspace_t *as, uint64_t vaddr, uint64_t size, unsigned prot);
 
-/* Deep-copy the lower half of `src` into a brand new address space (fork). */
+/* Deep-copy the lower half of `src` into a brand new address space (fork).
+ * Private writable pages are shared read-only instead of copied -- see
+ * vmm_cow_break(). */
 addrspace_t *vmm_clone(addrspace_t *src);
-int vmm_share_frame(uint64_t frame);      /* mark shared, one owner */
-int vmm_share_ref(uint64_t frame);        /* another mapper arrives */
-int vmm_share_unref(uint64_t frame);      /* a mapper leaves; last frees */
+int          vmm_share_frame(uint64_t frame);     /* mark shared, one owner */
+int          vmm_share_ref(uint64_t frame);       /* another mapper arrives */
+int          vmm_share_unref(uint64_t frame);     /* a mapper leaves; last frees */
+int          vmm_frame_ref_inc(uint64_t frame);   /* one more PTE points at it */
+int          vmm_frame_ref_count(uint64_t frame); /* refs, or -1 if untracked */
+uint32_t     vmm_frame_ref_slots(void);           /* live entries (self tests) */
+
+/* Give the address space a private, writable copy of the page at `va`.
+ *
+ * Three invariants hold for every leaf PTE in a user address space, and
+ * every line of this file that touches one has to keep them true:
+ *   1. PTE_COW implies PTE_RW is clear -- nobody may hold write permission
+ *      on a frame somebody else can still see;
+ *   2. PTE_COW and PTE_AVL are mutually exclusive (AVL means "owned by an
+ *      external object", COW means "shared between two page tables");
+ *   3. PTE_COW implies the frame is in the refcount table, so unmapping it
+ *      drops a reference instead of freeing it outright.
+ *
+ * Returns 1 if the caller may write to `va` now, 0 if there is no COW page
+ * there or a new frame could not be allocated. */
+int vmm_cow_break(addrspace_t *as, uint64_t va);
+
+/* True when the page holding `va` is a fork() page still being shared, i.e.
+ * one vmm_cow_break() away from being this address space's own. */
+int vmm_page_is_cow(addrspace_t *as, uint64_t vaddr);
 
 /* Load this address space into CR3. */
 void vmm_switch(addrspace_t *as);
@@ -221,9 +253,13 @@ void vmm_switch_kernel(void);
  * kernel threads: vmm_switch() needs a valid addrspace_t and a kthread has
  * no user memory of its own, so it runs on the kernel PML4 instead. */
 addrspace_t *vmm_kernel_as(void);
-void vmm_as_debug_dump(void);
-uint64_t vmm_region_checksum(addrspace_t *as, uint64_t base, uint64_t size);
-void vmm_alias_scan(uint64_t frame);
+void         vmm_as_debug_dump(void);
+uint64_t     vmm_region_checksum(addrspace_t *as, uint64_t base, uint64_t size);
+void         vmm_alias_scan(uint64_t frame);
+
+/* Boot-time proof that sharing, separation and teardown leave nothing
+ * behind; see the comment over its body. */
+void vmm_cow_self_test(void);
 
 /* Copy into a user address space that may not be the current one. */
 int vmm_copy_to_user(addrspace_t *as, uint64_t dst, const void *src, uint64_t n);

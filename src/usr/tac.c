@@ -8,9 +8,9 @@
  */
 #include "ulib.h"
 
-#define BUF_CAP   16384
-#define CHUNK     512
-#define PATH_MAX  128
+#define BUF_CAP  16384
+#define CHUNK    512
+#define PATH_MAX 128
 
 static char buf[BUF_CAP];
 static int  len;
@@ -44,7 +44,7 @@ static void emit(void)
 {
     int end = len;
     if (end > 0 && buf[end - 1] == '\n')
-        end--;                        /* the terminator of the last line */
+        end--; /* the terminator of the last line */
 
     while (end > 0) {
         int start = end;
@@ -53,7 +53,7 @@ static void emit(void)
 
         sys_write(1, buf + start, end - start);
         sys_write(1, "\n", 1);
-        end = start - 1;              /* step over the '\n' we stopped at */
+        end = start - 1; /* step over the '\n' we stopped at */
     }
 }
 

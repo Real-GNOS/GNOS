@@ -19,35 +19,35 @@
 #define GNUCOS_SMP_H
 
 #include <stdint.h>
-#include "gdt.h"        /* for struct tss64 */
+#include "gdt.h" /* for struct tss64 */
 
-#define MAX_CPUS       16
-#define PERCPU_KSTACK  0x4000
+#define MAX_CPUS      16
+#define PERCPU_KSTACK 0x4000
 
 /* The kernel's GS base.  Each core points IA32_GS_BASE at its own cpu_t;
  * `self` (the first member) is what lets C find the structure via %gs:0. */
-#define IA32_GS_BASE   0xC0000101ULL
+#define IA32_GS_BASE 0xC0000101ULL
 
 /* One per core.  The first slot (index 0) is always the BSP. */
 typedef struct cpu {
-    struct cpu    *self;      /* == &g_cpu[cpu]; reachable as %gs:0  */
-    int            id;        /* our index into g_cpu[]              */
-    uint32_t       lapic_id;  /* the APIC id Limine reported         */
-    uint8_t        online;    /* 1 once the AP has reached ap_main   */
+    struct cpu *self;     /* == &g_cpu[cpu]; reachable as %gs:0  */
+    int         id;       /* our index into g_cpu[]              */
+    uint32_t    lapic_id; /* the APIC id Limine reported         */
+    uint8_t     online;   /* 1 once the AP has reached ap_main   */
 
     /* ---- per-CPU runtime slots --------------------------------------
      * Offsets are fixed and mirrored in isr.asm (CPU_KERNEL_RSP0 and
      * CPU_USER_RSP): syscall_entry loads kernel_rsp0 and stashes the
      * user RSP in user_rsp through GS, and the scheduler parks each
      * core's idle context in sched_rsp. */
-    struct proc   *current;    /* +24: the process running on this core  */
-    uint64_t       kernel_rsp0;/* +32: stack a ring-3 entry switches to  */
-    uint64_t       user_rsp;   /* +40: syscall scratch (the user RSP)    */
-    uint64_t       sched_rsp;  /* +48: where switch_context parks idle   */
+    struct proc *current;     /* +24: the process running on this core  */
+    uint64_t     kernel_rsp0; /* +32: stack a ring-3 entry switches to  */
+    uint64_t     user_rsp;    /* +40: syscall scratch (the user RSP)    */
+    uint64_t     sched_rsp;   /* +48: where switch_context parks idle   */
 
-    void          *stack_top;  /* top of this CPU's kernel stack  */
-    uint64_t       gdt[7];     /* private GDT copy                */
-    struct tss64   tss;        /* private TSS                     */
+    void        *stack_top; /* top of this CPU's kernel stack  */
+    uint64_t     gdt[7];    /* private GDT copy                */
+    struct tss64 tss;       /* private TSS                     */
 } cpu_t;
 
 /* This core's own cpu_t.  Every CPU points IA32_GS_BASE at &g_cpu[cpu]
@@ -67,7 +67,7 @@ static inline cpu_t *cpu_self(void)
  * exactly as before. */
 typedef struct {
     volatile uint32_t v;
-    uint32_t          saved_flags;   /* IF state from spin_lock_irq */
+    uint32_t          saved_flags; /* IF state from spin_lock_irq */
 } spinlock_t;
 
 static inline void spin_lock(spinlock_t *l)
@@ -77,7 +77,9 @@ static inline void spin_lock(spinlock_t *l)
         "1: xchgl %0, %1\n\t"
         "testl %0, %0\n\t"
         "jnz 1b"
-        : "+r"(x), "+m"(l->v) : : "memory");
+        : "+r"(x), "+m"(l->v)
+        :
+        : "memory");
 }
 
 static inline void spin_unlock(spinlock_t *l)
@@ -111,12 +113,12 @@ static inline void spin_unlock_irq(spinlock_t *l)
  * released on the way back; a process that blocks drops it before parking
  * so it never rides a parked context switch (see sched_block in proc.c). */
 extern spinlock_t g_bkl;
-void bkl_acquire(void);
-void bkl_release(void);
+void              bkl_acquire(void);
+void              bkl_release(void);
 
 extern cpu_t g_cpu[MAX_CPUS];
-extern int    g_ncpus;         /* how many cores Limine reported  */
-extern int    g_bsp_id;        /* lapic id of the bootstrap CPU   */
+extern int   g_ncpus;  /* how many cores Limine reported  */
+extern int   g_bsp_id; /* lapic id of the bootstrap CPU   */
 
 /* Per-CPU kernel stacks (defined in smp.c); gdt.c points the BSP's TSS.RSP0
  * at g_cpu_stack[0]. */

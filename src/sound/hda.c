@@ -29,40 +29,40 @@
 #include "debugcon.h"
 
 /* ---- controller registers (from BAR0) -------------------------------- */
-#define HDA_GCAP      0x00      /* 16-bit: how many streams of each kind */
-#define HDA_VMAJ      0x03      /* 8-bit  spec version */
-#define HDA_VMIN      0x02
-#define HDA_GCTL      0x08      /* 32-bit global control */
-#define HDA_STATESTS  0x0E      /* 16-bit: bit N set = codec answered at N */
-#define HDA_ICW       0x60      /* 32-bit immediate command word */
-#define HDA_IRR       0x64      /* 32-bit immediate response */
-#define HDA_ICS       0x68      /* 16-bit immediate command status */
+#define HDA_GCAP     0x00 /* 16-bit: how many streams of each kind */
+#define HDA_VMAJ     0x03 /* 8-bit  spec version */
+#define HDA_VMIN     0x02
+#define HDA_GCTL     0x08 /* 32-bit global control */
+#define HDA_STATESTS 0x0E /* 16-bit: bit N set = codec answered at N */
+#define HDA_ICW      0x60 /* 32-bit immediate command word */
+#define HDA_IRR      0x64 /* 32-bit immediate response */
+#define HDA_ICS      0x68 /* 16-bit immediate command status */
 
-#define GCTL_CRST     (1u << 0) /* 0 = hold controller reset, 1 = release */
-#define ICS_BUSY      (1u << 0) /* we set it; the controller clears it */
-#define ICS_VALID     (1u << 1) /* a response is sitting in IRR (write 1 = ack) */
+#define GCTL_CRST (1u << 0) /* 0 = hold controller reset, 1 = release */
+#define ICS_BUSY  (1u << 0) /* we set it; the controller clears it */
+#define ICS_VALID (1u << 1) /* a response is sitting in IRR (write 1 = ack) */
 
 /* GCAP tells us how the stream descriptors are laid out.  Input streams come
  * first, then bidirectional ones, then output; each descriptor is a 0x20-byte
  * block starting at 0x80.  So the first *output* stream is at index ISS+BSS,
  * which is 4 on everything QEMU emulates but is not a constant in general. */
-#define GCAP_ISS(g)   (((g) >> 8) & 0x0F)
-#define GCAP_BSS(g)   (((g) >> 3) & 0x1F)
-#define GCAP_OSS(g)   (((g) >> 12) & 0x0F)
+#define GCAP_ISS(g) (((g) >> 8) & 0x0F)
+#define GCAP_BSS(g) (((g) >> 3) & 0x1F)
+#define GCAP_OSS(g) (((g) >> 12) & 0x0F)
 
 /* ---- stream descriptor registers (from SD_BASE(n)) ------------------- */
-#define SD_BASE(n)    (0x80u + (n) * 0x20u)
-#define SD_CTL        0x00      /* 24-bit control; byte 0 holds RESET/RUN */
-#define SD_STS        0x03      /* 8-bit status */
-#define SD_LPIB       0x04      /* 32-bit link position in buffer */
-#define SD_CBL        0x08      /* 32-bit cyclic buffer length, in bytes */
-#define SD_LVI        0x0C      /* 16-bit last valid BDL index */
-#define SD_FMT        0x12      /* 16-bit sample format */
-#define SD_BDLPL      0x18      /* 32-bit BDL base, low  (128-byte aligned) */
-#define SD_BDLPU      0x1C      /* 32-bit BDL base, high */
+#define SD_BASE(n) (0x80u + (n) * 0x20u)
+#define SD_CTL     0x00 /* 24-bit control; byte 0 holds RESET/RUN */
+#define SD_STS     0x03 /* 8-bit status */
+#define SD_LPIB    0x04 /* 32-bit link position in buffer */
+#define SD_CBL     0x08 /* 32-bit cyclic buffer length, in bytes */
+#define SD_LVI     0x0C /* 16-bit last valid BDL index */
+#define SD_FMT     0x12 /* 16-bit sample format */
+#define SD_BDLPL   0x18 /* 32-bit BDL base, low  (128-byte aligned) */
+#define SD_BDLPU   0x1C /* 32-bit BDL base, high */
 
-#define SDCTL_SRST    (1u << 0) /* stream reset: set, wait, clear, wait */
-#define SDCTL_RUN     (1u << 1) /* DMA go */
+#define SDCTL_SRST      (1u << 0) /* stream reset: set, wait, clear, wait */
+#define SDCTL_RUN       (1u << 1) /* DMA go */
 #define SDCTL_TAG_SHIFT 20
 
 /* ---- codec verbs ------------------------------------------------------ */
@@ -79,30 +79,30 @@
 #define VERB_SET_PIN_WIDGET_CTL   0x707
 
 /* GET_PARAMETER parameter ids */
-#define PAR_NODE_COUNT     0x04   /* [23:16] first sub-node, [7:0] how many */
-#define PAR_FUNCTION_TYPE  0x05
-#define PAR_WIDGET_CAP     0x09
-#define PAR_PIN_CAP        0x0C
-#define PAR_CONNLIST_LEN   0x0E
+#define PAR_NODE_COUNT    0x04 /* [23:16] first sub-node, [7:0] how many */
+#define PAR_FUNCTION_TYPE 0x05
+#define PAR_WIDGET_CAP    0x09
+#define PAR_PIN_CAP       0x0C
+#define PAR_CONNLIST_LEN  0x0E
 
-#define FUNC_TYPE_AUDIO    0x01
+#define FUNC_TYPE_AUDIO 0x01
 
-#define WCAP_CONN_LIST     (1u << 8)
-#define WCAP_OUT_AMP       (1u << 2)
-#define WCAP_TYPE(c)       (((c) >> 20) & 0x0F)
-#define WID_AUD_OUT        0x0    /* a DAC */
-#define WID_PIN            0x4    /* a physical jack */
+#define WCAP_CONN_LIST (1u << 8)
+#define WCAP_OUT_AMP   (1u << 2)
+#define WCAP_TYPE(c)   (((c) >> 20) & 0x0F)
+#define WID_AUD_OUT    0x0 /* a DAC */
+#define WID_PIN        0x4 /* a physical jack */
 
-#define PINCAP_OUT         (1u << 4)
-#define PINCTL_OUT_EN      (1u << 6)
+#define PINCAP_OUT    (1u << 4)
+#define PINCTL_OUT_EN (1u << 6)
 
 /* SET_AMP_GAIN_MUTE payload: which amp, which channel, mute bit, gain. */
-#define AMP_SET_OUTPUT     (1u << 15)
-#define AMP_SET_LEFT       (1u << 13)
-#define AMP_SET_RIGHT      (1u << 12)
-#define AMP_MUTE           (1u << 7)
+#define AMP_SET_OUTPUT (1u << 15)
+#define AMP_SET_LEFT   (1u << 13)
+#define AMP_SET_RIGHT  (1u << 12)
+#define AMP_MUTE       (1u << 7)
 
-#define PWRST_D0           0x00
+#define PWRST_D0 0x00
 
 /*
  * Sample format, shared by SDnFMT and SET_STREAM_FORMAT:
@@ -118,7 +118,7 @@
 #define SAMPLE_RATE 48000
 #define CHANNELS    2
 #define TONE_HZ     440
-#define STREAM_TAG  1          /* any non-zero 4-bit value will do */
+#define STREAM_TAG  1 /* any non-zero 4-bit value will do */
 
 /* Two pages of audio, played as a cycle: 8192 bytes / 4 bytes per frame =
  * 2048 frames, about 43 ms per lap.  The self-test lets it lap a few times
@@ -133,26 +133,49 @@
 typedef struct __attribute__((packed)) {
     uint64_t addr;
     uint32_t len;
-    uint32_t flags;     /* bit0 = interrupt on completion */
+    uint32_t flags; /* bit0 = interrupt on completion */
 } hda_bdl_t;
 
 static volatile uint8_t *g_regs;
-static int      g_ok;
-static uint32_t g_codec;        /* codec address that answered STATESTS */
-static uint32_t g_dac, g_pin;   /* the converter and the jack it feeds */
-static uint32_t g_ostream;      /* index of the output stream descriptor */
+static int               g_ok;
+static uint32_t          g_codec;      /* codec address that answered STATESTS */
+static uint32_t          g_dac, g_pin; /* the converter and the jack it feeds */
+static uint32_t          g_ostream;    /* index of the output stream descriptor */
 
-static hda_bdl_t *g_bdl;   static uint64_t g_bdl_phys;
-static int16_t   *g_buf[NBUF];  static uint64_t g_buf_phys[NBUF];
+static hda_bdl_t *g_bdl;
+static uint64_t   g_bdl_phys;
+static int16_t   *g_buf[NBUF];
+static uint64_t   g_buf_phys[NBUF];
 
-static inline uint8_t  r8 (uint32_t o) { return *(volatile uint8_t  *)(g_regs + o); }
-static inline uint16_t r16(uint32_t o) { return *(volatile uint16_t *)(g_regs + o); }
-static inline uint32_t r32(uint32_t o) { return *(volatile uint32_t *)(g_regs + o); }
-static inline void w8 (uint32_t o, uint8_t v)  { *(volatile uint8_t  *)(g_regs + o) = v; }
-static inline void w16(uint32_t o, uint16_t v) { *(volatile uint16_t *)(g_regs + o) = v; }
-static inline void w32(uint32_t o, uint32_t v) { *(volatile uint32_t *)(g_regs + o) = v; }
+static inline uint8_t r8(uint32_t o)
+{
+    return *(volatile uint8_t *)(g_regs + o);
+}
+static inline uint16_t r16(uint32_t o)
+{
+    return *(volatile uint16_t *)(g_regs + o);
+}
+static inline uint32_t r32(uint32_t o)
+{
+    return *(volatile uint32_t *)(g_regs + o);
+}
+static inline void w8(uint32_t o, uint8_t v)
+{
+    *(volatile uint8_t *)(g_regs + o) = v;
+}
+static inline void w16(uint32_t o, uint16_t v)
+{
+    *(volatile uint16_t *)(g_regs + o) = v;
+}
+static inline void w32(uint32_t o, uint32_t v)
+{
+    *(volatile uint32_t *)(g_regs + o) = v;
+}
 
-int hda_present(void) { return g_ok; }
+int hda_present(void)
+{
+    return g_ok;
+}
 
 /* ---- the immediate command interface --------------------------------- */
 /*
@@ -161,8 +184,7 @@ int hda_present(void) { return g_ok; }
  * result of the previous command has to be acknowledged first -- otherwise
  * the very first poll succeeds against an answer to a different question.
  */
-static int codec_cmd(uint32_t nid, uint32_t verb, uint32_t payload,
-                     uint32_t *resp)
+static int codec_cmd(uint32_t nid, uint32_t verb, uint32_t payload, uint32_t *resp)
 {
     int i;
 
@@ -174,7 +196,7 @@ static int codec_cmd(uint32_t nid, uint32_t verb, uint32_t payload,
     if (r16(HDA_ICS) & ICS_BUSY)
         return 0;
 
-    w16(HDA_ICS, ICS_VALID);            /* ack whatever was left over */
+    w16(HDA_ICS, ICS_VALID); /* ack whatever was left over */
     w32(HDA_ICW, (g_codec << 28) | (nid << 20) | (verb << 8) | payload);
     w16(HDA_ICS, ICS_BUSY);
 
@@ -211,7 +233,7 @@ static uint32_t codec_param(uint32_t nid, uint32_t par)
 static int pin_reaches(uint32_t pin, uint32_t wcap, uint32_t dac)
 {
     if (!(wcap & WCAP_CONN_LIST))
-        return 1;               /* no list published: nothing to contradict */
+        return 1; /* no list published: nothing to contradict */
 
     uint32_t len = codec_param(pin, PAR_CONNLIST_LEN) & 0x7F;
     for (uint32_t i = 0; i < len; i += 4) {
@@ -227,7 +249,7 @@ static int pin_reaches(uint32_t pin, uint32_t wcap, uint32_t dac)
 
 static int find_output_path(void)
 {
-    uint32_t nc = codec_param(0, PAR_NODE_COUNT);
+    uint32_t nc       = codec_param(0, PAR_NODE_COUNT);
     uint32_t fg_first = (nc >> 16) & 0xFF, fg_count = nc & 0xFF;
 
     for (uint32_t f = 0; f < fg_count; f++) {
@@ -235,7 +257,7 @@ static int find_output_path(void)
         if ((codec_param(fg, PAR_FUNCTION_TYPE) & 0x7F) != FUNC_TYPE_AUDIO)
             continue;
 
-        nc = codec_param(fg, PAR_NODE_COUNT);
+        nc               = codec_param(fg, PAR_NODE_COUNT);
         uint32_t w_first = (nc >> 16) & 0xFF, w_count = nc & 0xFF;
 
         uint32_t dac = 0;
@@ -248,7 +270,7 @@ static int find_output_path(void)
             continue;
 
         for (uint32_t i = 0; i < w_count; i++) {
-            uint32_t nid = w_first + i;
+            uint32_t nid  = w_first + i;
             uint32_t wcap = codec_param(nid, PAR_WIDGET_CAP);
             if (WCAP_TYPE(wcap) != WID_PIN)
                 continue;
@@ -274,8 +296,8 @@ static void configure_path(void)
     codec_cmd(g_dac, VERB_SET_STREAM_FORMAT, FMT_48K_S16_STEREO, NULL);
     codec_cmd(g_dac, VERB_SET_CHANNEL_STREAMID, (STREAM_TAG << 4) | 0, NULL);
 
-    codec_cmd(g_dac, VERB_SET_AMP_GAIN_MUTE,
-              AMP_SET_OUTPUT | AMP_SET_LEFT | AMP_SET_RIGHT | 0x2A, NULL);
+    codec_cmd(g_dac, VERB_SET_AMP_GAIN_MUTE, AMP_SET_OUTPUT | AMP_SET_LEFT | AMP_SET_RIGHT | 0x2A,
+              NULL);
     codec_cmd(g_pin, VERB_SET_PIN_WIDGET_CTL, PINCTL_OUT_EN, NULL);
 }
 
@@ -288,7 +310,7 @@ int hda_init(void)
         return 0;
     }
 
-    pci_enable(d);                       /* memory space + BUS MASTER */
+    pci_enable(d); /* memory space + BUS MASTER */
     uint64_t base = pci_map_bar(d, 0);
     if (!base) {
         dbg_puts("HDA: BAR0 is not a memory region, skipping\r\n");
@@ -379,7 +401,7 @@ static void fill_tone(int16_t *dst, uint32_t frames, uint32_t *phase)
 {
     const uint32_t period = SAMPLE_RATE / TONE_HZ;
     for (uint32_t i = 0; i < frames; i++) {
-        int16_t v = (*phase % period) < period / 2 ? 8000 : -8000;
+        int16_t v             = (*phase % period) < period / 2 ? 8000 : -8000;
         dst[i * CHANNELS + 0] = v;
         dst[i * CHANNELS + 1] = v;
         (*phase)++;
@@ -391,14 +413,14 @@ int hda_selftest(void)
     if (!g_ok)
         return 0;
 
-    const uint32_t sd = SD_BASE(g_ostream);
-    uint32_t phase = 0;
+    const uint32_t sd    = SD_BASE(g_ostream);
+    uint32_t       phase = 0;
 
     for (int i = 0; i < NBUF; i++) {
         fill_tone(g_buf[i], BUF_BYTES / (2 * CHANNELS), &phase);
         g_bdl[i].addr  = g_buf_phys[i];
         g_bdl[i].len   = BUF_BYTES;
-        g_bdl[i].flags = 0;              /* no interrupt: we are polling */
+        g_bdl[i].flags = 0; /* no interrupt: we are polling */
     }
 
     /* Stream reset is a handshake, not a poke: the bit reads back as 1 while
@@ -426,8 +448,8 @@ int hda_selftest(void)
     /* The falsifiable part.  LPIB is written by the controller as it drains
      * the ring, so if it moves, the tag matched, the BDL parsed, and bus
      * mastering is really on.  Nothing else makes it move. */
-    uint32_t lpib = lpib0;
-    int moved = 0;
+    uint32_t lpib  = lpib0;
+    int      moved = 0;
     for (int ms = 0; ms < 300; ms++) {
         timer_delay_ms(1);
         lpib = r32(sd + SD_LPIB);

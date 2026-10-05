@@ -1,0 +1,41 @@
+.footerNavBox .footerItem {
+  position: relative; }
+  .footerNavBox .footerItem .footerItemTitle {
+    position: relative;
+    left: 2.5%;
+    padding: 3px 10px;
+    transition: 0.5s; }
+    .footerNavBox .footerItem .footerItemTitle:before {
+      content: "";
+      position: absolute;
+      top: 26px;
+      left: 0;
+      z-index: 1;
+      border-bottom: 1px solid #767676;
+      transition: 0.5s;
+      width: 100%; }
+    .footerNavBox .footerItem .footerItemTitle:hover:before {
+      width: 300px; }
+  .footerNavBox .footerItem ul {
+    list-style: none;
+    margin: 15px 0;
+    padding: 10px 0; }
+    .footerNavBox .footerItem ul li {
+      width: 33.3%;
+      margin-bottom: 15px;
+      float: left;
+      display: inline-block; }
+      .footerNavBox .footerItem ul li b {
+        height: 50px;
+        font-size: 48px;
+        margin-bottom: 10px; }
+
+.attestBox .web_authentication img {
+  position: relative;
+  top: -2px;
+  width: auto;
+  max-width: 100%;
+  height: 17px;
+  max-font-size: 17px; }
+
+/*# sourceMappingURL=footer.css.map */

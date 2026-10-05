@@ -1,7 +1,8 @@
 #!/bin/sh
-# Boot: login prompts on tty1/tty2, then the smoke tests.
-# The Xorg/twm/xeyes block is kept (commented) for interactive runs;
-# the headless boot exercises apk over the slirp network.
+# Boot: login prompts on tty1/tty2, then the smoke tests, then the
+# Xorg/twm/xeyes session at the end of the script.  Xorg covers the console
+# with its own scanout while it runs, so the login prompt lives on the ttys
+# until the server is shut down again.
 mkdir -p /var/log /tmp/run
 
 /sbin/getty tty1 &
@@ -101,9 +102,21 @@ echo "cd_exit=$?" >> /tmp/cd.out
 /usr/bin/ls /mnt/cdrom >> /tmp/cd.out 2>&1
 /bin/dbgcat.elf /tmp/cd.out
 
-# apk over http: static apk + slirp (kernel TCP, DNS via 10.0.2.3).
-/sbin/apk.static --version >/tmp/apk.out 2>&1
-/sbin/apk.static update >>/tmp/apk.out 2>&1
+# copy-on-write: the kernel's fork() now shares pages instead of copying
+# them, and everything above has been running on that.  This checks it:
+# writes separate the page, reads do not, through fork, exec and mprotect.
+/bin/cowtest.elf >/tmp/cow.out 2>&1
+echo "COW_EXIT=$?" >>/tmp/cow.out
+/bin/dbgcat.elf /tmp/cow.out
+
+# apk over https: the image's root filesystem IS Alpine, so /sbin/apk is the
+# real thing -- with the CA bundle, the signing keys and an https repository
+# line already in place.  DNS rides the slirp resolver at 10.0.2.3.
+/sbin/apk --version >/tmp/apk.out 2>&1
+/sbin/apk update >>/tmp/apk.out 2>&1
+echo "UPDATE_EXIT=$?" >>/tmp/apk.out
+/sbin/apk fetch -o /tmp/apkdl lua-alt-getopt >>/tmp/apk.out 2>&1
+echo "FETCH_EXIT=$?" >>/tmp/apk.out
 /bin/dbgcat.elf /tmp/apk.out
 
 
@@ -114,8 +127,39 @@ echo "CC_EXIT=$?" >>/tmp/clang.out
 echo "RUN_EXIT=$?" >>/tmp/clang.out
 /bin/dbgcat.elf /tmp/clang.out
 
-# --- Xorg/xfce desktop: DISABLED ------------------------------------------------
-# The X stack (Xorg/twm/xterm/xfce4) cannot run on this kernel and was
-# removed from the image; uncomment only with those packages restored.
-
 /sbin/wiggle
+
+# --- Xorg/twm/xeyes desktop session -------------------------------------------
+# Last, because Xorg takes over the display: everything above has already
+# written its results to the debugcon log by the time the screen is covered.
+# xsetroot paints the root window first -- a client-free Xorg screen is just
+# the black root window (-br), indistinguishable from a dead pipeline -- and
+# sets the left_ptr sprite so pointer motion is visible before any client
+# window is under it.  twm comes up before the clients so they are managed
+# (title bars, move, resize).
+#/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset -logverbose 6 \
+#    -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
+#sleep 15
+#DISPLAY=:0 /usr/bin/xsetroot -solid gray40 -cursor_name left_ptr >/tmp/xsetroot.out 2>&1
+#DISPLAY=:0 /usr/bin/twm >/tmp/twm.out 2>&1 &
+#DISPLAY=:0 /usr/bin/xeyes -geometry +100+100 >/tmp/xeyes.out 2>&1 &
+#DISPLAY=:0 /usr/bin/xterm -geometry 80x25 -background white \
+#    -foreground black >/tmp/xterm.out 2>&1 &
+# Push the server log into the debugcon log (grep-able on the host).
+#/bin/dbgcat.elf /var/log/Xorg.0.log
+sleep 8
+{
+    echo "=== XORG STDOUT ==="
+    cat /tmp/xorg.out
+    echo "=== XSETROOT STDOUT ==="
+    cat /tmp/xsetroot.out
+    echo "=== TWM STDOUT ==="
+    cat /tmp/twm.out
+    echo "=== XEYES STDOUT ==="
+    cat /tmp/xeyes.out
+    echo "=== XTERM STDOUT ==="
+    cat /tmp/xterm.out
+    echo "=== XORG LOG (tail) ==="
+    tail -40 /var/log/Xorg.0.log
+    echo "=== END ==="
+} > /dev/tty2 2>&1

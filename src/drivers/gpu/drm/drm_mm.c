@@ -30,7 +30,9 @@ static inline uint64_t mm_node_end(const struct drm_mm_node *node)
 /* Round @x up to a multiple of @alignment (0 means "no requirement"). */
 static inline uint64_t mm_align_up(uint64_t x, uint64_t alignment)
 {
-    if (alignment == 0) { return x; }
+    if (alignment == 0) {
+        return x;
+    }
     return (x + alignment - 1) & ~(alignment - 1);
 }
 
@@ -55,8 +57,12 @@ static void mm_augment(rb_node_t *rb, void *data)
 
     (void)data;
 
-    if (rb->left != NULL && rb->left->min_vruntime > last) { last = rb->left->min_vruntime; }
-    if (rb->right != NULL && rb->right->min_vruntime > last) { last = rb->right->min_vruntime; }
+    if (rb->left != NULL && rb->left->min_vruntime > last) {
+        last = rb->left->min_vruntime;
+    }
+    if (rb->right != NULL && rb->right->min_vruntime > last) {
+        last = rb->right->min_vruntime;
+    }
 
     node->__subtree_last = last;
     rb->min_vruntime     = last;
@@ -65,7 +71,7 @@ static void mm_augment(rb_node_t *rb, void *data)
 void drm_mm_init(struct drm_mm *mm, uint64_t start, uint64_t size)
 {
     rb_init_root(&mm->interval_tree);
-    mm->lock        = (spinlock_t) {0};
+    mm->lock        = (spinlock_t){0};
     mm->start       = start;
     mm->size        = size;
     mm->alignment   = 0;
@@ -98,24 +104,30 @@ struct drm_mm_node *drm_mm_next(const struct drm_mm_node *node)
 
 int drm_mm_insert_node(struct drm_mm *mm, struct drm_mm_node *node, uint64_t size)
 {
-    return drm_mm_insert_node_in_range(mm, node, size, 0, mm->start, mm->start + mm->size, DRM_MM_INSERT_DEFAULT);
+    return drm_mm_insert_node_in_range(mm, node, size, 0, mm->start, mm->start + mm->size,
+                                       DRM_MM_INSERT_DEFAULT);
 }
 
-int drm_mm_insert_node_in_range(struct drm_mm *mm, struct drm_mm_node *node, uint64_t size, uint64_t alignment,
-                                uint64_t range_start, uint64_t range_end, enum drm_mm_insert_mode mode)
+int drm_mm_insert_node_in_range(struct drm_mm *mm, struct drm_mm_node *node, uint64_t size,
+                                uint64_t alignment, uint64_t range_start, uint64_t range_end,
+                                enum drm_mm_insert_mode mode)
 {
     struct drm_mm_node *prev, *entry;
-    uint64_t            chosen    = 0;
-    uint64_t            best_gap  = UINT64_MAX;
-    int                 found     = 0;
+    uint64_t            chosen   = 0;
+    uint64_t            best_gap = UINT64_MAX;
+    int                 found    = 0;
     int                 first_fit;
     int                 stop_at_first_gap;
 
-    if (size == 0) { return -EINVAL; }
-    if (range_start >= range_end) { return -EINVAL; }
+    if (size == 0) {
+        return -EINVAL;
+    }
+    if (range_start >= range_end) {
+        return -EINVAL;
+    }
 
     stop_at_first_gap = (mode & DRM_MM_INSERT_ONCE) != 0;
-    mode             &= ~DRM_MM_INSERT_MODE_FLAGS;
+    mode &= ~DRM_MM_INSERT_MODE_FLAGS;
 
     /* Only best-fit has to see every gap; everything else can stop at the
      * one it would have taken. */
@@ -123,15 +135,19 @@ int drm_mm_insert_node_in_range(struct drm_mm *mm, struct drm_mm_node *node, uin
 
     spin_lock(&mm->lock);
 
-    prev = NULL;
+    prev  = NULL;
     entry = drm_mm_first(mm);
     while (1) {
         uint64_t gap_start = (prev != NULL) ? mm_node_end(prev) : mm->start;
         uint64_t gap_end   = (entry != NULL) ? entry->start : mm->start + mm->size;
         uint64_t start;
 
-        if (gap_start < range_start) { gap_start = range_start; }
-        if (gap_end > range_end) { gap_end = range_end; }
+        if (gap_start < range_start) {
+            gap_start = range_start;
+        }
+        if (gap_end > range_end) {
+            gap_end = range_end;
+        }
 
         if (gap_start < gap_end) {
             start = mm_align_up(gap_start, alignment);
@@ -149,14 +165,20 @@ int drm_mm_insert_node_in_range(struct drm_mm *mm, struct drm_mm_node *node, uin
                     chosen = start; /* top-down keeps taking later gaps */
                 }
 
-                if (first_fit) { break; }
+                if (first_fit) {
+                    break;
+                }
             }
         }
 
-        if (entry == NULL) { break; }
+        if (entry == NULL) {
+            break;
+        }
         prev  = entry;
         entry = drm_mm_next(entry);
-        if (stop_at_first_gap && found) { break; }
+        if (stop_at_first_gap && found) {
+            break;
+        }
     }
 
     if (found) {
@@ -179,7 +201,9 @@ int drm_mm_insert_node_in_range(struct drm_mm *mm, struct drm_mm_node *node, uin
 
 void drm_mm_remove_node(struct drm_mm_node *node)
 {
-    if (!node->allocated) { return; }
+    if (!node->allocated) {
+        return;
+    }
 
     spin_lock(&node->mm->lock);
     rb_erase_augmented(&node->mm->interval_tree, &node->rb, mm_augment, NULL);
@@ -204,15 +228,16 @@ void drm_mm_replace_node(struct drm_mm_node *old, struct drm_mm_node *new_node)
     spin_unlock(&old->mm->lock);
 }
 
-void drm_mm_init_scan(struct drm_mm *mm, struct drm_mm_scan *scan, uint64_t size, uint64_t alignment,
-                      enum drm_mm_insert_mode mode)
+void drm_mm_init_scan(struct drm_mm *mm, struct drm_mm_scan *scan, uint64_t size,
+                      uint64_t alignment, enum drm_mm_insert_mode mode)
 {
     drm_mm_init_scan_with_range(mm, scan, size, alignment, mm->start, mm->start + mm->size, mode);
     scan->check_range = false;
 }
 
-void drm_mm_init_scan_with_range(struct drm_mm *mm, struct drm_mm_scan *scan, uint64_t size, uint64_t alignment,
-                                 uint64_t range_start, uint64_t range_end, enum drm_mm_insert_mode mode)
+void drm_mm_init_scan_with_range(struct drm_mm *mm, struct drm_mm_scan *scan, uint64_t size,
+                                 uint64_t alignment, uint64_t range_start, uint64_t range_end,
+                                 enum drm_mm_insert_mode mode)
 {
     scan->size        = size;
     scan->alignment   = alignment;

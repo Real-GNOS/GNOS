@@ -6,11 +6,11 @@
  * net_poll() runs in, which is the only genuinely subtle thing in the file.
  */
 #include "net.h"
-#include "tcp.h"             /* tcp_tick(); the transport layers fill the upcalls */
-#include "sock.h"            /* sock_init() */
+#include "tcp.h"  /* tcp_tick(); the transport layers fill the upcalls */
+#include "sock.h" /* sock_init() */
 #include "e1000.h"
-#include "vfs.h"            /* errno numbers */
-#include "vmm.h"            /* user_ptr_ok() */
+#include "vfs.h" /* errno numbers */
+#include "vmm.h" /* user_ptr_ok() */
 #include "kstring.h"
 #include "proc.h"
 #include "timer.h"
@@ -47,8 +47,11 @@ int net_if_ioctl(uint64_t ucmd, uint64_t uarg)
     uint32_t cmd = (uint32_t)ucmd;
     if (!uarg || !user_ptr_ok(uarg, 1))
         return -E_FAULT;
-    dbg_puts("net_ioctl: cmd="); dbg_puts_hex(cmd);
-    dbg_puts(" uarg="); dbg_puts_hex((uint64_t)uarg); dbg_puts("\r\n");
+    dbg_puts("net_ioctl: cmd=");
+    dbg_puts_hex(cmd);
+    dbg_puts(" uarg=");
+    dbg_puts_hex((uint64_t)uarg);
+    dbg_puts("\r\n");
 
     switch (cmd) {
     /* Enumerate every interface as a struct ifreq.  ifconfig uses this to
@@ -58,11 +61,14 @@ int net_if_ioctl(uint64_t ucmd, uint64_t uarg)
         if (!user_ptr_ok(uarg, sizeof(ic)))
             return -E_FAULT;
         memcpy(&ic, (const void *)(uintptr_t)uarg, sizeof(ic));
-        dbg_puts("  SIOCGIFCONF: maxlen="); dbg_puts_hex((uint64_t)ic.ifc_len);
-        dbg_puts(" buf="); dbg_puts_hex(ic.ifc_buf); dbg_puts("\r\n");
-        int max  = ic.ifc_len;
-        int used = 0;
-        uint8_t *buf = (uint8_t *)(uintptr_t)ic.ifc_buf;
+        dbg_puts("  SIOCGIFCONF: maxlen=");
+        dbg_puts_hex((uint64_t)ic.ifc_len);
+        dbg_puts(" buf=");
+        dbg_puts_hex(ic.ifc_buf);
+        dbg_puts("\r\n");
+        int      max  = ic.ifc_len;
+        int      used = 0;
+        uint8_t *buf  = (uint8_t *)(uintptr_t)ic.ifc_buf;
         for (int i = 0; i < NET_IF_MAX; i++) {
             if (used + (int)sizeof(ifreq_t) > max)
                 break;
@@ -79,8 +85,10 @@ int net_if_ioctl(uint64_t ucmd, uint64_t uarg)
         }
         ic.ifc_len = used;
         memcpy((void *)(uintptr_t)uarg, &ic, sizeof(ic));
-        dbg_puts("  SIOCGIFCONF: used="); dbg_puts_hex((uint64_t)used);
-        dbg_puts(" name0=["); dbg_puts(((ifreq_t*)buf)->ifr_name);
+        dbg_puts("  SIOCGIFCONF: used=");
+        dbg_puts_hex((uint64_t)used);
+        dbg_puts(" name0=[");
+        dbg_puts(((ifreq_t *)buf)->ifr_name);
         dbg_puts("]\r\n");
         return 0;
     }
@@ -100,8 +108,11 @@ int net_if_ioctl(uint64_t ucmd, uint64_t uarg)
             return -E_FAULT;
         memcpy(&r, (const void *)(uintptr_t)uarg, sizeof(r));
         int idx = net_if_idx(r.ifr_name);
-        dbg_puts("  name=["); dbg_puts(r.ifr_name); dbg_puts("] idx=");
-        dbg_puts_hex((uint64_t)idx); dbg_puts("\r\n");
+        dbg_puts("  name=[");
+        dbg_puts(r.ifr_name);
+        dbg_puts("] idx=");
+        dbg_puts_hex((uint64_t)idx);
+        dbg_puts("\r\n");
         if (idx < 0)
             return -E_NODEV;
         netif_t *n = &g_ifs[idx];
@@ -113,8 +124,7 @@ int net_if_ioctl(uint64_t ucmd, uint64_t uarg)
             r.u.netmask.sin_addr   = net_htonl(n->netmask);
         } else if (cmd == SIOCGIFBRDADDR) {
             r.u.broadaddr.sin_family = AF_INET;
-            r.u.broadaddr.sin_addr = net_htonl(n->netmask
-                                              ? (n->ip | ~n->netmask) : 0);
+            r.u.broadaddr.sin_addr   = net_htonl(n->netmask ? (n->ip | ~n->netmask) : 0);
         } else if (cmd == SIOCGIFHWADDR) {
             r.u.hw[0] = (uint8_t)ARPHRD_ETHER;
             r.u.hw[1] = 0;
@@ -122,14 +132,16 @@ int net_if_ioctl(uint64_t ucmd, uint64_t uarg)
         } else if (cmd == SIOCGIFFLAGS) {
             int f = n->up ? IFF_UP : 0;
             f |= IFF_BROADCAST;
-            if (n->loopback) f |= IFF_LOOPBACK;
-            else f |= IFF_RUNNING | IFF_MULTICAST;
+            if (n->loopback)
+                f |= IFF_LOOPBACK;
+            else
+                f |= IFF_RUNNING | IFF_MULTICAST;
             r.u.flags = (int16_t)f;
         } else if (cmd == SIOCGIFMTU) {
             r.u.mtu = 1500;
         } else if (cmd == SIOCGIFINDEX) {
             r.u.ifindex = idx;
-        } else {                        /* SIOCGIFMETRIC */
+        } else { /* SIOCGIFMETRIC */
             r.u.metric = 1;
         }
         memcpy((void *)(uintptr_t)uarg, &r, sizeof(r));
@@ -174,7 +186,7 @@ static uint32_t sum16(const uint8_t *p, uint32_t len, uint32_t acc)
         len -= 2;
     }
     if (len)
-        acc += (uint32_t)p[0] << 8;      /* odd tail is padded on the right */
+        acc += (uint32_t)p[0] << 8; /* odd tail is padded on the right */
     return acc;
 }
 
@@ -190,8 +202,8 @@ uint16_t net_checksum(const void *data, uint32_t len)
     return fold(sum16((const uint8_t *)data, len, 0));
 }
 
-uint16_t net_checksum_pseudo(uint32_t src, uint32_t dst, uint8_t proto,
-                             const void *seg, uint32_t len)
+uint16_t net_checksum_pseudo(uint32_t src, uint32_t dst, uint8_t proto, const void *seg,
+                             uint32_t len)
 {
     uint32_t acc = 0;
     acc += (src >> 16) & 0xFFFF;
@@ -204,9 +216,9 @@ uint16_t net_checksum_pseudo(uint32_t src, uint32_t dst, uint8_t proto,
 }
 
 /* ---- ARP --------------------------------------------------------------- */
-#define ARP_CACHE   16
-#define ARP_TIMEOUT_TICKS  (60 * 100)    /* an entry is good for a minute */
-#define ARP_RETRY_TICKS    100           /* re-request at most once a second */
+#define ARP_CACHE         16
+#define ARP_TIMEOUT_TICKS (60 * 100) /* an entry is good for a minute */
+#define ARP_RETRY_TICKS   100        /* re-request at most once a second */
 
 #define ARP_FREE    0
 #define ARP_PENDING 1
@@ -216,7 +228,7 @@ typedef struct {
     uint32_t ip;
     uint8_t  mac[ETH_ALEN];
     uint8_t  state;
-    uint64_t stamp;         /* tick the entry became valid, or was requested */
+    uint64_t stamp; /* tick the entry became valid, or was requested */
 } arp_entry_t;
 
 static arp_entry_t g_arp[ARP_CACHE];
@@ -234,12 +246,12 @@ typedef struct {
     int      used;
     uint32_t nexthop;
     uint16_t len;
-    uint8_t  packet[NET_MTU];       /* a complete IP datagram */
+    uint8_t  packet[NET_MTU]; /* a complete IP datagram */
 } arp_pending_t;
 
 static arp_pending_t g_arpq[ARP_QUEUE];
 
-static const uint8_t bcast_mac[ETH_ALEN] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+static const uint8_t bcast_mac[ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 static arp_entry_t *arp_find(uint32_t ip)
 {
@@ -267,22 +279,21 @@ static arp_entry_t *arp_slot(uint32_t ip)
     return oldest;
 }
 
-static int eth_output(const uint8_t *dmac, uint16_t ethertype,
-                      const void *payload, uint16_t len);
+static int eth_output(const uint8_t *dmac, uint16_t ethertype, const void *payload, uint16_t len);
 
 static void arp_request(uint32_t target)
 {
     netif_t *nif = &g_ifs[NET_IF_ETH];
-    uint8_t pkt[28];
+    uint8_t  pkt[28];
 
-    net_put16(pkt + 0, 1);              /* hardware type: ethernet */
-    net_put16(pkt + 2, ETH_P_IP);       /* protocol type */
+    net_put16(pkt + 0, 1);        /* hardware type: ethernet */
+    net_put16(pkt + 2, ETH_P_IP); /* protocol type */
     pkt[4] = ETH_ALEN;
     pkt[5] = 4;
-    net_put16(pkt + 6, 1);              /* opcode: request */
+    net_put16(pkt + 6, 1); /* opcode: request */
     memcpy(pkt + 8, nif->mac, ETH_ALEN);
     net_put32(pkt + 14, nif->ip);
-    memset(pkt + 18, 0, ETH_ALEN);      /* the answer we are asking for */
+    memset(pkt + 18, 0, ETH_ALEN); /* the answer we are asking for */
     net_put32(pkt + 24, target);
 
     eth_output(bcast_mac, ETH_P_ARP, pkt, sizeof(pkt));
@@ -291,16 +302,16 @@ static void arp_request(uint32_t target)
 static void arp_reply(const uint8_t *req)
 {
     netif_t *nif = &g_ifs[NET_IF_ETH];
-    uint8_t pkt[28];
+    uint8_t  pkt[28];
 
     net_put16(pkt + 0, 1);
     net_put16(pkt + 2, ETH_P_IP);
     pkt[4] = ETH_ALEN;
     pkt[5] = 4;
-    net_put16(pkt + 6, 2);              /* opcode: reply */
+    net_put16(pkt + 6, 2); /* opcode: reply */
     memcpy(pkt + 8, nif->mac, ETH_ALEN);
     net_put32(pkt + 14, nif->ip);
-    memcpy(pkt + 18, req + 8, ETH_ALEN);        /* back to whoever asked */
+    memcpy(pkt + 18, req + 8, ETH_ALEN); /* back to whoever asked */
     net_put32(pkt + 24, net_get32(req + 14));
 
     eth_output(req + 8, ETH_P_ARP, pkt, sizeof(pkt));
@@ -314,7 +325,7 @@ static void arp_flush_queue(uint32_t ip)
     for (int i = 0; i < ARP_QUEUE; i++) {
         if (!g_arpq[i].used || g_arpq[i].nexthop != ip)
             continue;
-        g_arpq[i].used = 0;             /* clear first: ip_transmit may re-queue */
+        g_arpq[i].used = 0; /* clear first: ip_transmit may re-queue */
         ip_transmit(ip, g_arpq[i].packet, g_arpq[i].len);
     }
 }
@@ -325,7 +336,7 @@ static void arp_learn(uint32_t ip, const uint8_t *mac)
         return;
 
     arp_entry_t *e = arp_slot(ip);
-    e->ip = ip;
+    e->ip          = ip;
     memcpy(e->mac, mac, ETH_ALEN);
     e->state = ARP_VALID;
     e->stamp = timer_ticks();
@@ -341,9 +352,9 @@ static void arp_input(const uint8_t *pkt, uint16_t len)
     if (pkt[4] != ETH_ALEN || pkt[5] != 4)
         return;
 
-    uint16_t op   = net_get16(pkt + 6);
-    uint32_t sip  = net_get32(pkt + 14);
-    uint32_t tip  = net_get32(pkt + 24);
+    uint16_t op  = net_get16(pkt + 6);
+    uint32_t sip = net_get32(pkt + 14);
+    uint32_t tip = net_get32(pkt + 24);
 
     /* Learn from every ARP packet that crosses us, request or reply: the
      * sender is by definition reachable and has just told us its MAC. */
@@ -354,10 +365,9 @@ static void arp_input(const uint8_t *pkt, uint16_t len)
 }
 
 /* ---- ethernet ---------------------------------------------------------- */
-static int eth_output(const uint8_t *dmac, uint16_t ethertype,
-                      const void *payload, uint16_t len)
+static int eth_output(const uint8_t *dmac, uint16_t ethertype, const void *payload, uint16_t len)
 {
-    netif_t *nif = &g_ifs[NET_IF_ETH];
+    netif_t       *nif = &g_ifs[NET_IF_ETH];
     static uint8_t frame[NET_FRAME_MAX];
 
     if (!nif->up || len > NET_MTU)
@@ -409,7 +419,7 @@ static int loop_enqueue(const uint8_t *packet, uint16_t len)
     }
     memcpy(g_loopq[g_loop_tail].packet, packet, len);
     g_loopq[g_loop_tail].len = len;
-    g_loop_tail = next;
+    g_loop_tail              = next;
     g_ifs[NET_IF_LO].tx_packets++;
     g_ifs[NET_IF_LO].tx_bytes += len;
     return 0;
@@ -429,21 +439,21 @@ uint16_t net_next_ip_id(void)
  * payload buffer and a bitmap of received 8-byte blocks.  The datagram is
  * complete when every block below `total - ihl` has arrived.  Unfinished
  * datagrams expire after 30 seconds (net_tick sweeps the table). */
-#define IPF_SLOTS   8
-#define IPF_MAX     65535               /* the largest IP datagram         */
-#define IPF_LIFE_TICKS (30 * 100)       /* 30 s at 100 Hz                  */
+#define IPF_SLOTS      8
+#define IPF_MAX        65535      /* the largest IP datagram         */
+#define IPF_LIFE_TICKS (30 * 100) /* 30 s at 100 Hz                  */
 
 typedef struct {
     int      used;
     uint32_t src, dst;
     uint16_t id;
     uint8_t  proto;
-    uint64_t stamp;                  /* last fragment arrival            */
-    uint8_t *data;                   /* payload buffer, kmalloc'd        */
-    uint32_t dlen;                   /* allocated bytes                  */
-    uint16_t total;                  /* total payload length, 0 unknown  */
-    uint32_t got;                    /* payload bytes received so far    */
-    uint8_t *holes;                  /* one byte per 8-byte block        */
+    uint64_t stamp; /* last fragment arrival            */
+    uint8_t *data;  /* payload buffer, kmalloc'd        */
+    uint32_t dlen;  /* allocated bytes                  */
+    uint16_t total; /* total payload length, 0 unknown  */
+    uint32_t got;   /* payload bytes received so far    */
+    uint8_t *holes; /* one byte per 8-byte block        */
     uint32_t nblocks;
 } ipf_t;
 
@@ -462,8 +472,7 @@ static ipf_t *ipf_find(uint32_t src, uint32_t dst, uint16_t id, uint8_t proto)
 {
     for (int i = 0; i < IPF_SLOTS; i++) {
         ipf_t *f = &g_ipf[i];
-        if (f->used && f->src == src && f->dst == dst &&
-            f->id == id && f->proto == proto)
+        if (f->used && f->src == src && f->dst == dst && f->id == id && f->proto == proto)
             return f;
     }
     return NULL;
@@ -478,13 +487,16 @@ static ipf_t *ipf_slot(uint32_t src, uint32_t dst, uint16_t id, uint8_t proto)
         if (!g_ipf[i].used) {
             f = &g_ipf[i];
             memset(f, 0, sizeof(*f));
-            f->used = 1;
-            f->src = src; f->dst = dst; f->id = id; f->proto = proto;
+            f->used  = 1;
+            f->src   = src;
+            f->dst   = dst;
+            f->id    = id;
+            f->proto = proto;
             f->stamp = timer_ticks();
             return f;
         }
     }
-    return NULL;                         /* table full: oldest will expire */
+    return NULL; /* table full: oldest will expire */
 }
 
 /* Expire unfinished datagrams; called from net_tick. */
@@ -529,7 +541,7 @@ static int ip_transmit(uint32_t nexthop, const uint8_t *packet, uint16_t len)
 
     uint64_t now = timer_ticks();
     if (!e || e->state == ARP_FREE) {
-        e = arp_slot(nexthop);
+        e        = arp_slot(nexthop);
         e->ip    = nexthop;
         e->state = ARP_PENDING;
         e->stamp = now;
@@ -556,21 +568,21 @@ static int ip_transmit(uint32_t nexthop, const uint8_t *packet, uint16_t len)
 /* Build one IP datagram and send it (loopback or the wire).  All the
  * header assembly lives here so the fragmentation path below can reuse
  * it with explicit id/flags. */
-static int ip_send_one(uint32_t dst, uint8_t proto, uint16_t id,
-                       uint16_t frag, const void *payload, uint16_t len)
+static int ip_send_one(uint32_t dst, uint8_t proto, uint16_t id, uint16_t frag, const void *payload,
+                       uint16_t len)
 {
     static uint8_t packet[NET_MTU];
-    uint32_t src = net_route_src(dst);
-    uint16_t total = (uint16_t)(IP_HDR_LEN + len);
+    uint32_t       src   = net_route_src(dst);
+    uint16_t       total = (uint16_t)(IP_HDR_LEN + len);
 
-    packet[0] = 0x45;                   /* IPv4, 5 words of header */
-    packet[1] = 0;                      /* no DSCP, no ECN */
+    packet[0] = 0x45; /* IPv4, 5 words of header */
+    packet[1] = 0;    /* no DSCP, no ECN */
     net_put16(packet + 2, total);
     net_put16(packet + 4, id);
     net_put16(packet + 6, frag);
-    packet[8]  = 64;                    /* TTL */
-    packet[9]  = proto;
-    net_put16(packet + 10, 0);          /* checksum, filled in below */
+    packet[8] = 64; /* TTL */
+    packet[9] = proto;
+    net_put16(packet + 10, 0); /* checksum, filled in below */
     net_put32(packet + 12, src);
     net_put32(packet + 16, dst);
     net_put16(packet + 10, net_checksum(packet, IP_HDR_LEN));
@@ -609,14 +621,12 @@ int net_ip_output(uint32_t dst, uint8_t proto, const void *payload, uint16_t len
      * carries MF; each shares the datagram id so the far end can
      * reassemble. */
     uint16_t chunk = (uint16_t)(((NET_MTU - IP_HDR_LEN) / 8) * 8);
-    uint16_t id = ++g_ip_id;
-    uint16_t off = 0;
+    uint16_t id    = ++g_ip_id;
+    uint16_t off   = 0;
     while (off < len) {
-        uint16_t n = (uint16_t)((len - off) < chunk ? (len - off) : chunk);
-        uint16_t frag = (uint16_t)(off / 8) |
-                        ((uint16_t)(off + n < len) ? 0x2000 : 0);
-        int r = ip_send_one(dst, proto, id, frag,
-                            (const uint8_t *)payload + off, n);
+        uint16_t n    = (uint16_t)((len - off) < chunk ? (len - off) : chunk);
+        uint16_t frag = (uint16_t)(off / 8) | ((uint16_t)(off + n < len) ? 0x2000 : 0);
+        int      r    = ip_send_one(dst, proto, id, frag, (const uint8_t *)payload + off, n);
         if (r < 0)
             return r;
         off = (uint16_t)(off + n);
@@ -633,20 +643,20 @@ int net_ip_output(uint32_t dst, uint8_t proto, const void *payload, uint16_t len
  * connected UDP), and let SO_ERROR/recv surface it once. */
 static void icmp_error_to_socket(const uint8_t *quoted)
 {
-    uint32_t qsrc = net_get32(quoted + 12);   /* we were the source       */
+    uint32_t qsrc   = net_get32(quoted + 12); /* we were the source       */
     uint8_t  qproto = quoted[9];
     (void)qsrc;
     if (qproto != IP_PROTO_UDP)
         return;
-    const uint8_t *u = quoted + IP_HDR_LEN;
-    uint16_t qsport = net_get16(u + 0);
-    uint16_t qdport = net_get16(u + 2);
-    uint32_t qdst = net_get32(quoted + 16);
+    const uint8_t *u      = quoted + IP_HDR_LEN;
+    uint16_t       qsport = net_get16(u + 0);
+    uint16_t       qdport = net_get16(u + 2);
+    uint32_t       qdst   = net_get32(quoted + 16);
     sock_udp_icmp_error(qsport, qdst, qdport);
 }
 
-static void icmp_input(uint32_t src, uint32_t dst, const uint8_t *packet,
-                       uint16_t ihl, const uint8_t *msg, uint16_t len)
+static void icmp_input(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
+                       const uint8_t *msg, uint16_t len)
 {
     static uint8_t reply[NET_MTU - IP_HDR_LEN];
     (void)dst;
@@ -655,7 +665,7 @@ static void icmp_input(uint32_t src, uint32_t dst, const uint8_t *packet,
         return;
     uint8_t type = msg[0];
 
-    if (type == 3) {                      /* destination unreachable */
+    if (type == 3) { /* destination unreachable */
         /* msg+8 quotes the original IP header and the first 8 payload
          * bytes; that is enough to find the socket it belongs to */
         if (len >= 8 + IP_HDR_LEN + 8)
@@ -666,9 +676,9 @@ static void icmp_input(uint32_t src, uint32_t dst, const uint8_t *packet,
     if (len < 8 || net_checksum(msg, len) != 0)
         return;
     if (msg[0] != ICMP_ECHO_REQUEST)
-        return;                          /* replies are for raw sockets only */
+        return; /* replies are for raw sockets only */
     if (dst == IP_BROADCAST)
-        return;                          /* do not answer broadcast pings */
+        return; /* do not answer broadcast pings */
     if (len > sizeof(reply))
         return;
 
@@ -684,11 +694,10 @@ static void icmp_input(uint32_t src, uint32_t dst, const uint8_t *packet,
 }
 
 /* ---- IPv4 input -------------------------------------------------------- */
-static uint8_t proto_of_ip(const uint8_t *packet);
+static uint8_t  proto_of_ip(const uint8_t *packet);
 static uint64_t align_up64(uint64_t v);
-static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
-                          uint16_t ihl, const uint8_t *seg, uint16_t seglen,
-                          uint16_t frag);
+static void     ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
+                              const uint8_t *seg, uint16_t seglen, uint16_t frag);
 
 static void ip_input(netif_t *nif, const uint8_t *packet, uint16_t len)
 {
@@ -705,9 +714,9 @@ static void ip_input(netif_t *nif, const uint8_t *packet, uint16_t len)
 
     uint16_t total = net_get16(packet + 2);
     if (total < ihl || total > len)
-        return;                          /* truncated, or a lying length */
+        return; /* truncated, or a lying length */
 
-    uint16_t frag = net_get16(packet + 6);
+    uint16_t frag  = net_get16(packet + 6);
     uint8_t  proto = packet[9];
     uint32_t src   = net_get32(packet + 12);
     uint32_t dst   = net_get32(packet + 16);
@@ -721,8 +730,8 @@ static void ip_input(netif_t *nif, const uint8_t *packet, uint16_t len)
     nif->rx_packets++;
     nif->rx_bytes += total;
 
-    const uint8_t *seg = packet + ihl;
-    uint16_t seglen = (uint16_t)(total - ihl);
+    const uint8_t *seg    = packet + ihl;
+    uint16_t       seglen = (uint16_t)(total - ihl);
 
     /* Raw sockets see everything, before and regardless of what the cooked
      * protocols make of it -- including the ICMP echo replies that are the
@@ -743,18 +752,24 @@ static void ip_input(netif_t *nif, const uint8_t *packet, uint16_t len)
     }
 
     switch (proto) {
-    case IP_PROTO_ICMP: icmp_input(src, dst, packet, ihl, seg, seglen); break;
-    case IP_PROTO_UDP:  udp_input(src, dst, packet, ihl, seg, seglen);  break;
-    case IP_PROTO_TCP:  tcp_input(src, dst, seg, seglen);  break;
-    default: break;
+    case IP_PROTO_ICMP:
+        icmp_input(src, dst, packet, ihl, seg, seglen);
+        break;
+    case IP_PROTO_UDP:
+        udp_input(src, dst, packet, ihl, seg, seglen);
+        break;
+    case IP_PROTO_TCP:
+        tcp_input(src, dst, seg, seglen);
+        break;
+    default:
+        break;
     }
 }
 
-static uint8_t proto_of_ip(const uint8_t *packet);
+static uint8_t  proto_of_ip(const uint8_t *packet);
 static uint64_t align_up64(uint64_t v);
-static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
-                          uint16_t ihl, const uint8_t *seg, uint16_t seglen,
-                          uint16_t frag);
+static void     ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
+                              const uint8_t *seg, uint16_t seglen, uint16_t frag);
 
 static uint8_t proto_of_ip(const uint8_t *packet)
 {
@@ -763,22 +778,21 @@ static uint8_t proto_of_ip(const uint8_t *packet)
 
 static uint64_t align_up64(uint64_t v)
 {
-    return (v + 63) & ~(uint64_t)63;     /* kmalloc-friendly rounding */
+    return (v + 63) & ~(uint64_t)63; /* kmalloc-friendly rounding */
 }
 
 /* Feed one fragment into the reassembly slot it belongs to; deliver the
  * reassembled datagram when the last hole closes. */
-static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
-                          uint16_t ihl, const uint8_t *seg, uint16_t seglen,
-                          uint16_t frag)
+static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
+                          const uint8_t *seg, uint16_t seglen, uint16_t frag)
 {
-    uint16_t id     = net_get16(packet + 4);
-    uint16_t offset = (frag & 0x1FFF) * 8;   /* payload offset in bytes  */
-    int      more   = frag & 0x2000;          /* more fragments follow    */
+    uint16_t id          = net_get16(packet + 4);
+    uint16_t offset      = (frag & 0x1FFF) * 8; /* payload offset in bytes  */
+    int      more        = frag & 0x2000;       /* more fragments follow    */
     uint16_t seglen_here = (uint16_t)(net_get16(packet + 2) - ihl);
 
     if ((uint32_t)offset + seglen > IPF_MAX)
-        return;                          /* beyond what IP allows */
+        return; /* beyond what IP allows */
 
     ipf_t *f = ipf_slot(src, dst, id, proto_of_ip(packet));
     if (!f)
@@ -808,8 +822,10 @@ static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
             kfree(f->holes);
         }
         memset(nh + f->nblocks, 0, (uint32_t)align_up64(need / 8 + 1) - f->nblocks);
-        f->data = nd;  f->dlen = (uint32_t)align_up64(need);
-        f->holes = nh; f->nblocks = (uint32_t)align_up64(need / 8 + 1);
+        f->data    = nd;
+        f->dlen    = (uint32_t)align_up64(need);
+        f->holes   = nh;
+        f->nblocks = (uint32_t)align_up64(need / 8 + 1);
     }
 
     /* copy the fragment in, marking its 8-byte blocks received; a
@@ -833,23 +849,26 @@ static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
         return;
     for (uint32_t b = 0; b < (f->total + 7) / 8; b++)
         if (!f->holes[b])
-            return;                      /* a hole remains */
+            return; /* a hole remains */
 
     uint8_t  proto = f->proto;
     uint16_t plen  = f->total;
     uint8_t *whole = f->data;
-    f->data = NULL; f->holes = NULL;     /* ownership moves below */
+    f->data        = NULL;
+    f->holes       = NULL; /* ownership moves below */
     ipf_free(f);
 
     /* Raw sockets get the reassembled datagram with a header rebuilt to
      * describe it as one packet, which is what ping expects to read. */
     {
         uint8_t hdr[IP_HDR_LEN];
-        hdr[0] = 0x45; hdr[1] = 0;
+        hdr[0] = 0x45;
+        hdr[1] = 0;
         net_put16(hdr + 2, (uint16_t)(IP_HDR_LEN + plen));
         net_put16(hdr + 4, id);
         net_put16(hdr + 6, 0);
-        hdr[8] = 64; hdr[9] = proto;
+        hdr[8] = 64;
+        hdr[9] = proto;
         net_put16(hdr + 10, 0);
         net_put32(hdr + 12, src);
         net_put32(hdr + 16, dst);
@@ -864,10 +883,17 @@ static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet,
     }
 
     switch (proto) {
-    case IP_PROTO_ICMP: icmp_input(src, dst, whole, 0, whole, plen); break;
-    case IP_PROTO_UDP:  udp_input(src, dst, whole, 0, whole, plen);  break;
-    case IP_PROTO_TCP:  tcp_input(src, dst, whole, plen);  break;
-    default: break;
+    case IP_PROTO_ICMP:
+        icmp_input(src, dst, whole, 0, whole, plen);
+        break;
+    case IP_PROTO_UDP:
+        udp_input(src, dst, whole, 0, whole, plen);
+        break;
+    case IP_PROTO_TCP:
+        tcp_input(src, dst, whole, plen);
+        break;
+    default:
+        break;
     }
     kfree(whole);
 }
@@ -877,9 +903,9 @@ static void eth_input(const uint8_t *frame, uint16_t len)
     if (len < ETH_HDR_LEN)
         return;
 
-    uint16_t ethertype = net_get16(frame + 12);
-    const uint8_t *payload = frame + ETH_HDR_LEN;
-    uint16_t plen = (uint16_t)(len - ETH_HDR_LEN);
+    uint16_t       ethertype = net_get16(frame + 12);
+    const uint8_t *payload   = frame + ETH_HDR_LEN;
+    uint16_t       plen      = (uint16_t)(len - ETH_HDR_LEN);
 
     switch (ethertype) {
     case ETH_P_ARP:
@@ -904,7 +930,7 @@ void net_poll(void)
      * stay in the card's ring until somebody takes them.
      */
     static volatile int busy;
-    static uint8_t frame[NET_FRAME_MAX];
+    static uint8_t      frame[NET_FRAME_MAX];
 
     if (busy)
         return;
@@ -920,7 +946,7 @@ void net_poll(void)
 
     for (int n = 0; n < LOOP_QUEUE && g_loop_head != g_loop_tail; n++) {
         loop_slot_t *s = &g_loopq[g_loop_head];
-        g_loop_head = (g_loop_head + 1) % LOOP_QUEUE;
+        g_loop_head    = (g_loop_head + 1) % LOOP_QUEUE;
         g_ifs[NET_IF_LO].rx_packets++;
         g_ifs[NET_IF_LO].rx_bytes += s->len;
         ip_input(&g_ifs[NET_IF_LO], s->packet, s->len);
@@ -996,7 +1022,7 @@ int net_arpinfo_next(int *iter, net_arpinfo_t *out)
     for (int i = *iter; i < ARP_CACHE; i++) {
         arp_entry_t *e = &g_arp[i];
         if (e->state != ARP_FREE) {
-            *iter = i + 1;
+            *iter   = i + 1;
             out->ip = e->ip;
             memcpy(out->mac, e->mac, 6);
             out->valid = (e->state == ARP_VALID);

@@ -24,7 +24,7 @@ static uint64_t seen;
 
 int init_module(void)
 {
-    seen = moddemo_ticks();            /* import + pin moddemo */
+    seen = moddemo_ticks(); /* import + pin moddemo */
     dbg_puts("MODPAIR: moddemo_ticks() = ");
     dbg_puts_dec((uint32_t)seen);
     dbg_puts("\r\n");

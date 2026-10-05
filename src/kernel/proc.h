@@ -24,19 +24,19 @@
  * BSS: KSTACK_SIZE * MAX_PROCS (1 MiB) plus sizeof(proc_t) * MAX_PROCS
  * (~340 KiB), which is why the QEMU line went from -m 256M to -m 512M.
  */
-#define MAX_PROCS     64
-#define KSTACK_SIZE   0x4000        /* 16 KiB */
+#define MAX_PROCS   64
+#define KSTACK_SIZE 0x4000 /* 16 KiB */
 
 /* A full libc program opens far more descriptors than the toy utilities did:
  * BusyBox's `cp -a` alone holds a source fd, a destination fd and a directory
  * fd per recursion level, and musl keeps stdio buffers on top.  64 is cheap
  * (an int each) and removes the ceiling as a thing to think about. */
-#define PROC_MAX_FD   64
+#define PROC_MAX_FD 64
 
 /* Supplementary groups per process.  Linux allows 65536; 32 is what a login
  * on a machine with a handful of accounts will ever install, and it keeps the
  * PCB (already ~340 KiB across MAX_PROCS) from growing another 256 KiB. */
-#define PROC_NGROUPS  32
+#define PROC_NGROUPS 32
 
 /* Process states.  STOPPED is distinct from BLOCKED: a stopped process is
  * not waiting for anything, it has been suspended by a job-control signal
@@ -57,13 +57,13 @@ typedef enum {
     WAIT_TTY,
     WAIT_PIPE,
     WAIT_NET,
-    WAIT_SLEEP,                     /* nanosleep: waiting only on the clock */
-    WAIT_FUTEX,                     /* futex wait: keyed by (as, futex_addr) */
-    WAIT_DRM,                       /* DRM wait_queue (vblank/commit/event) */
-    WAIT_CGROUP,                    /* cpu.max quota exhausted: parked until the period rolls over */
-    WAIT_IPC,                       /* System V IPC (semop/msg send/recv) */
-    WAIT_VFORK,                     /* CLONE_VFORK: parent parked until the
-                                     * child execs or exits */
+    WAIT_SLEEP,  /* nanosleep: waiting only on the clock */
+    WAIT_FUTEX,  /* futex wait: keyed by (as, futex_addr) */
+    WAIT_DRM,    /* DRM wait_queue (vblank/commit/event) */
+    WAIT_CGROUP, /* cpu.max quota exhausted: parked until the period rolls over */
+    WAIT_IPC,    /* System V IPC (semop/msg send/recv) */
+    WAIT_VFORK,  /* CLONE_VFORK: parent parked until the
+                  * child execs or exits */
 } wait_reason_t;
 
 /* Signal numbers, wait() flags and the rest of the user-visible constants
@@ -73,7 +73,7 @@ typedef enum {
 
 /* 64 rather than 32 because that is the width musl talks in: every
  * rt_sigprocmask/rt_sigaction it issues carries sigsetsize == 8. */
-#define NSIG    64
+#define NSIG 64
 
 /* Linux/musl put signal N at bit (N-1) of a sigset, so SIGUSR1 (10) is bit
  * 9 and SIGUSR2 (12) is bit 11.  Matching that convention end-to-end is what
@@ -85,15 +85,15 @@ typedef enum {
  * this is the *kernel's* 32-byte struct sigaction, not the 152-byte one in
  * <signal.h>; musl translates between the two. */
 typedef struct {
-    uint64_t handler;           /* SIG_DFL, SIG_IGN, or a user address */
-    uint64_t flags;             /* SA_* */
-    uint64_t restorer;          /* required when handler is a real address */
-    uint64_t mask;              /* extra signals blocked during the handler */
+    uint64_t handler;  /* SIG_DFL, SIG_IGN, or a user address */
+    uint64_t flags;    /* SA_* */
+    uint64_t restorer; /* required when handler is a real address */
+    uint64_t mask;     /* extra signals blocked during the handler */
 } sigact_t;
 
 typedef struct proc {
-    int           pid;
-    int           ppid;
+    int pid;
+    int ppid;
     /*
      * Thread group id: pid of the group leader.  A plain fork gives the
      * child tgid == its own pid; clone(CLONE_THREAD) copies the parent's
@@ -102,14 +102,14 @@ typedef struct proc {
      * process the parent waits on and the one that becomes the group's
      * zombie.
      */
-    int           tgid;
+    int tgid;
     /*
      * Set on every member while the thread group is being torn down (exit,
      * exit_group, exec from a multithreaded process, fatal signal).  A
      * thread that gets scheduled with this set never returns to user mode:
      * proc_check_signals() turns it into a zombie on the way out instead.
      */
-    int           group_dying;
+    int group_dying;
     /*
      * The futex word this process sleeps on while blocked in WAIT_FUTEX,
      * paired with `as`: two address spaces waiting on the same virtual
@@ -119,10 +119,10 @@ typedef struct proc {
      * keyed by the physical address of the word instead: futex_shared
      * selects the rule and futex_key carries the physical address.
      */
-    uint64_t      futex_addr;
-    uint64_t      futex_key;      /* phys address when futex_shared */
-    int           futex_shared;   /* word sits on a shared page */
-    int           pgid;             /* process group: the unit of job control */
+    uint64_t futex_addr;
+    uint64_t futex_key;    /* phys address when futex_shared */
+    int      futex_shared; /* word sits on a shared page */
+    int      pgid;         /* process group: the unit of job control */
     /*
      * Session id.  A session is a collection of process groups that share a
      * controlling terminal; setsid() starts a new one.  We track it mainly so
@@ -130,7 +130,7 @@ typedef struct proc {
      * this) can be told apart from the shell's own jobs, and so TIOCSPGRP
      * from outside the tty's session can be refused the way Linux does.
      */
-    int           sid;
+    int sid;
 
     /*
      * The controlling terminal: an index into the virtual-terminal array, or
@@ -140,7 +140,7 @@ typedef struct proc {
      * without it, a shell on tty3 opening /dev/tty would get whichever
      * console the user happens to be looking at.
      */
-    int           ctty;
+    int ctty;
 
     /*
      * Credentials.  Real / effective / saved-set, for both user and group,
@@ -149,34 +149,34 @@ typedef struct proc {
      * a set-user-ID program may switch back to after dropping privilege.
      * `groups` is the supplementary set login(1) installs from /etc/group.
      */
-    uint32_t      uid,  euid,  suid;
-    uint32_t      gid,  egid,  sgid;
-    uint32_t      ngroups;
-    uint32_t      groups[PROC_NGROUPS];
+    uint32_t uid, euid, suid;
+    uint32_t gid, egid, sgid;
+    uint32_t ngroups;
+    uint32_t groups[PROC_NGROUPS];
 
     proc_state_t  state;
     wait_reason_t wait_reason;
-    int           wait_pid;         /* which child waitpid() is after, -1 = any */
-    uint64_t      wake_tick;        /* timer tick to wake at, 0 = no deadline */
-    void         *wait_q;           /* DRM wait_queue this proc sleeps on */
+    int           wait_pid;  /* which child waitpid() is after, -1 = any */
+    uint64_t      wake_tick; /* timer tick to wake at, 0 = no deadline */
+    void         *wait_q;    /* DRM wait_queue this proc sleeps on */
 
     /* The tick this process was created on.  There is no per-process CPU
      * accounting here, so times() and getrusage() report elapsed lifetime
      * instead; a shell's `time` builtin subtracts two samples, and for that
      * a monotonic baseline is all it needs. */
-    uint64_t      start_tick;
+    uint64_t start_tick;
 
     /* ITIMER_REAL, in scheduler ticks.  It counts wall-clock time, so unlike
      * wake_tick it keeps running while the process is descheduled -- which is
      * the point of alarm(): interrupting a call that is stuck. */
-    uint64_t      itimer_expire;    /* tick to raise SIGALRM at, 0 = off */
-    uint64_t      itimer_interval;  /* re-arm period in ticks, 0 = one-shot */
+    uint64_t itimer_expire;   /* tick to raise SIGALRM at, 0 = off */
+    uint64_t itimer_interval; /* re-arm period in ticks, 0 = one-shot */
 
-    addrspace_t  *as;
-    uint64_t      kstack_top;
-    uint64_t      saved_rsp;        /* where switch_context parked this task */
+    addrspace_t *as;
+    uint64_t     kstack_top;
+    uint64_t     saved_rsp; /* where switch_context parked this task */
 
-    int           fds[PROC_MAX_FD]; /* -1, or a handle into the open-file table */
+    int fds[PROC_MAX_FD]; /* -1, or a handle into the open-file table */
 
     /*
      * Close-on-exec, one bit per descriptor.  This is a property of the
@@ -186,12 +186,12 @@ typedef struct proc {
      * even when the old one has it set.  A bitmap works because PROC_MAX_FD
      * is 64; the assertion below is what keeps that true.
      */
-    uint64_t      fd_cloexec;
+    uint64_t fd_cloexec;
 
-    uint64_t      sig_pending;
-    uint64_t      sig_ignored;
-    uint64_t      sig_mask;         /* signals blocked from delivery */
-    sigact_t      sigact[NSIG];     /* installed dispositions */
+    uint64_t sig_pending;
+    uint64_t sig_ignored;
+    uint64_t sig_mask;     /* signals blocked from delivery */
+    sigact_t sigact[NSIG]; /* installed dispositions */
 
     /*
      * sigsuspend(2) swaps in a temporary mask, waits for a signal, and must
@@ -202,28 +202,28 @@ typedef struct proc {
      * mask here, and signal_deliver() writes it into the frame's uc_sigmask
      * so rt_sigreturn restores it instead of the suspend mask.
      */
-    uint64_t      sig_saved_mask;
-    int           sig_restore_mask;
+    uint64_t sig_saved_mask;
+    int      sig_restore_mask;
 
     /* The syscall number the current trap came in with, or -1 when the trap
      * is not a restartable syscall.  syscall_handler() overwrites RAX with
      * the result before anyone gets to look at signals, so SA_RESTART needs
      * its own copy to rewind to. */
-    int64_t       syscall_nr;
+    int64_t syscall_nr;
 
-    uint64_t      brk;              /* current data break (sbrk/brk) */
-    uint64_t      fs_base;          /* TLS base (arch_prctl ARCH_SET_FS) */
-    uint64_t      clear_child_tid;  /* set_tid_address: futex word to clear */
+    uint64_t brk;             /* current data break (sbrk/brk) */
+    uint64_t fs_base;         /* TLS base (arch_prctl ARCH_SET_FS) */
+    uint64_t clear_child_tid; /* set_tid_address: futex word to clear */
 
     /* Ring of the last 8 syscalls (nr + return), dumped by the fault handler
      * so a NULL-deref crash shows what the process was doing. */
-    uint16_t      sys_hist_nr[8];
-    int32_t       sys_hist_ret[8];
-    uint8_t       sys_hist_idx;
+    uint16_t sys_hist_nr[8];
+    int32_t  sys_hist_ret[8];
+    uint8_t  sys_hist_idx;
 
     /* Per-process FPU/SSE state.  fxsave needs the buffer 16-byte aligned,
      * so the field carries that alignment and the whole struct inherits it. */
-    uint8_t       fpu[512] __attribute__((aligned(16)));
+    uint8_t fpu[512] __attribute__((aligned(16)));
 
     /* ---- EEVDF scheduling --------------------------------------------
      * Virtual run time in ticks, the global virtual clock, and the virtual
@@ -234,22 +234,22 @@ typedef struct proc {
      * execution owns the big kernel lock, so the answer survives a context
      * switch; `on_cpu` is the core running it (or -1).  The block is 48
      * bytes so the whole struct stays a multiple of 16 (fpu's alignment). */
-    uint64_t      vruntime;       /* normalized service, VIRT units      */
-    uint64_t      deadline;       /* vruntime + slice when last granted  */
-    uint64_t      slice;          /* slice granted per pick, in ticks    */
-    uint64_t      last_run_tick;  /* tick the CPU was last handed over   */
-    int64_t       vlag;           /* rq vtime - vruntime: <=0 = eligible */
-    int           rq_cpu;         /* home runqueue, -1 until first enq   */
-    uint32_t      tprio;          /* treap heap priority                 */
-    uint32_t      pi_boost;       /* inherited weight floor (futex PI)   */
-    struct proc  *pi_waiters;     /* tasks boosting us through a PI futex*/
-    struct proc  *pi_wnext;       /* next sibling waiter on the owner    */
-    struct proc  *pi_owner;       /* whose weight we are boosting        */
-    struct proc  *tl, *tr;        /* runqueue treap links                */
-    uint64_t      sched_pad;      /* keep the block 16-aligned (fpu)     */
-    int           bkl_held;       /* this kernel execution owns the BKL  */
-    int           on_cpu;         /* core this process runs on, or -1    */
-    int           rsvd;
+    uint64_t     vruntime;      /* normalized service, VIRT units      */
+    uint64_t     deadline;      /* vruntime + slice when last granted  */
+    uint64_t     slice;         /* slice granted per pick, in ticks    */
+    uint64_t     last_run_tick; /* tick the CPU was last handed over   */
+    int64_t      vlag;          /* rq vtime - vruntime: <=0 = eligible */
+    int          rq_cpu;        /* home runqueue, -1 until first enq   */
+    uint32_t     tprio;         /* treap heap priority                 */
+    uint32_t     pi_boost;      /* inherited weight floor (futex PI)   */
+    struct proc *pi_waiters;    /* tasks boosting us through a PI futex*/
+    struct proc *pi_wnext;      /* next sibling waiter on the owner    */
+    struct proc *pi_owner;      /* whose weight we are boosting        */
+    struct proc *tl, *tr;       /* runqueue treap links                */
+    uint64_t     sched_pad;     /* keep the block 16-aligned (fpu)     */
+    int          bkl_held;      /* this kernel execution owns the BKL  */
+    int          on_cpu;        /* core this process runs on, or -1    */
+    int          rsvd;
 
     /* ---- cgroup membership -------------------------------------------
      * Leaf cgroup slot in the v2 hierarchy (cgroup.h), or -1 while the
@@ -263,9 +263,9 @@ typedef struct proc {
      * `cg_park_next` chains processes that were runnable when their cgroup
      * hit its cpu.max quota: they are parked as WAIT_CGROUP until the
      * period rolls over.  pid-based link, -1 = end. */
-    int           cg;             /* leaf cgroup slot, -1 = unattached */
-    uint32_t      sched_weight;   /* hierarchical effective weight, CG_NICE0 base */
-    int           cg_park_next;   /* pid link on the throttled cgroup's park list */
+    int      cg;           /* leaf cgroup slot, -1 = unattached */
+    uint32_t sched_weight; /* hierarchical effective weight, CG_NICE0 base */
+    int      cg_park_next; /* pid link on the throttled cgroup's park list */
 
     /* ---- seccomp-BPF ----------------------------------------------------
      * When secc_mode == SECCOMP_MODE_FILTER the process runs every syscall
@@ -274,10 +274,10 @@ typedef struct proc {
      * or exit).  `seccomp_len` is the instruction count.  The mode is
      * sticky: once set it can only become stricter (disabled -> strict ->
      * filter).  no_new_privs is a prerequisite for filter installation. */
-    int           secc_mode;        /* SECCOMP_MODE_* or 0 = disabled */
+    int                 secc_mode;      /* SECCOMP_MODE_* or 0 = disabled */
     struct sock_filter *seccomp_filter; /* BPF instructions (kernel copy) */
-    unsigned short seccomp_len;     /* instruction count */
-    int           no_new_privs;     /* PR_SET_NO_NEW_PRIVS */
+    unsigned short      seccomp_len;    /* instruction count */
+    int                 no_new_privs;   /* PR_SET_NO_NEW_PRIVS */
 
     /*
      * The current directory, stored as a normalised absolute path rather than
@@ -287,17 +287,17 @@ typedef struct proc {
      * that trade is entirely in our favour.  Always begins with '/' and never
      * ends with one, except for the root itself.
      */
-    char          cwd[GNUOS_PATH_MAX];
+    char cwd[GNUOS_PATH_MAX];
 
     /* File-creation mask.  We do not enforce permissions, but programs read
      * it back (umask(0) then umask(old) is a standard idiom), so it has to be
      * remembered per process and inherited across fork and exec. */
-    uint32_t      umask;
+    uint32_t umask;
 
-    int           exit_status;
-    int           term_sig;         /* non-zero if a signal killed us */
-    int           stop_sig;         /* the signal that suspended us */
-    int           reported;         /* stop already reported to the parent */
+    int exit_status;
+    int term_sig; /* non-zero if a signal killed us */
+    int stop_sig; /* the signal that suspended us */
+    int reported; /* stop already reported to the parent */
 
     /* ---- ptrace ------------------------------------------------------
      * A traced process hands every signal it would otherwise dispose of
@@ -311,30 +311,30 @@ typedef struct proc {
      * SIGCONT must not.  While stopped, a regs_t snapshot lives in
      * ptrace_regs so GETREGS/SETREGS and the CONT-time replay never have
      * to touch the live kernel stack frame. */
-    int           traced;           /* a parent is tracing us */
-    int           tracer_pid;       /* who waitpid()s our stops and exit */
-    int           ptrace_opts;      /* PTRACE_O_* (only TRACESYSGOOD) */
-    int           ptrace_mode;      /* PTRACE_RUN_CONT / PTRACE_RUN_SYSCALL */
-    int           ptrace_stopped;   /* in a ptrace stop, awaiting the tracer */
-    int           ptrace_syscall_phase; /* 1 = entry stop done, exit pending */
-    int           ptrace_resume_sig;    /* signal the tracer handed back */
-    int           ptrace_regs_valid;    /* snapshot below is current */
+    int traced;               /* a parent is tracing us */
+    int tracer_pid;           /* who waitpid()s our stops and exit */
+    int ptrace_opts;          /* PTRACE_O_* (only TRACESYSGOOD) */
+    int ptrace_mode;          /* PTRACE_RUN_CONT / PTRACE_RUN_SYSCALL */
+    int ptrace_stopped;       /* in a ptrace stop, awaiting the tracer */
+    int ptrace_syscall_phase; /* 1 = entry stop done, exit pending */
+    int ptrace_resume_sig;    /* signal the tracer handed back */
+    int ptrace_regs_valid;    /* snapshot below is current */
     /* The stop image in Linux struct user_regs_struct layout -- exactly
      * what PTRACE_GETREGS/SETREGS exchange -- so the two never need a
      * translation of their own; the layout lives in ptrace.h, whose
      * conversion helpers cast this buffer.  27 qwords: r15..rdi (15),
      * orig_rax, then the seg/flag group. */
-    uint64_t      ptrace_regs[27];
+    uint64_t ptrace_regs[27];
 
-    char          name[16];
+    char name[16];
 
     /* The image this process last exec'd, after #! chasing: /proc/self/exe
      * resolves (readlink and execve) through this. */
-    char          exe_path[96];
+    char exe_path[96];
 
     /* CLONE_VFORK: pid of the parent parked in WAIT_VFORK until this task
      * execs or exits.  0 = nobody is waiting. */
-    int           vfork_parent;
+    int vfork_parent;
 
     /*
      * The full argument vector of the running image, NUL-separated and
@@ -343,8 +343,8 @@ typedef struct proc {
      * back and comparing it against the --exec it was asked to supervise, so
      * a plain basename in `name` is not enough.
      */
-    char          cmdline[192];
-    uint32_t      cmdline_len;
+    char     cmdline[192];
+    uint32_t cmdline_len;
 } proc_t;
 
 /* fd_cloexec is a uint64_t bitmap indexed by descriptor number. */
@@ -360,6 +360,10 @@ void    proc_init(void);
 proc_t *proc_current(void);
 proc_t *proc_by_pid(int pid);
 
+/* TEMPORARY Xorg debugging: alarm when a kernel entry runs on another
+ * task's kernel stack (see proc.c). */
+void proc_kstack_audit(const char *tag);
+
 /* Whole-table access for the cgroup module (membership scans, weight
  * refresh): the process table is a fixed array and its size is constant. */
 int     proc_capacity(void);
@@ -368,11 +372,11 @@ proc_t *proc_at(int i);
 /* Build PID 1 from an executable in the filesystem and make it runnable.
  * Words from the boot command line (an initrd-root /cmdline file) are
  * spliced into init's argv[1..] here, Linux style. */
-int  proc_spawn_init(const char *path);
+int proc_spawn_init(const char *path);
 
 /* fork(): duplicate the caller.  Returns the child's pid to the parent and
  * 0 to the child, or a negative errno. */
-int  proc_fork(regs_t *r);
+int proc_fork(regs_t *r);
 
 /* clone(2): the syscall musl funnels both fork() and pthread_create through.
  * CLONE_VM shares the parent's address space (threads, refcounted),
@@ -380,7 +384,7 @@ int  proc_fork(regs_t *r);
  * flags (TLS, parent/child tid, CLONE_CHILD_CLEARTID) are honoured too.
  * Returns the child pid to the parent and 0 to the child, or a negative
  * errno. */
-int  proc_clone(regs_t *r);
+int proc_clone(regs_t *r);
 
 /*
  * execve(): replace the caller's image.  Only returns on failure.
@@ -391,8 +395,7 @@ int  proc_clone(regs_t *r);
  * the interpreter becomes the real image and the script path is spliced into
  * argv, recursively, up to EXEC_INTERP_MAX levels deep.
  */
-int  proc_execve(const char *path, char *const argv[], char *const envp[],
-                 regs_t *r);
+int proc_execve(const char *path, char *const argv[], char *const envp[], regs_t *r);
 
 /* exit(): turn the caller into a zombie and schedule someone else. */
 void proc_exit(int status) __attribute__((noreturn));
@@ -408,10 +411,10 @@ void proc_exit_group(int status) __attribute__((noreturn));
 /* Wake every waiter on futex word `addr` inside address space `as`.
  * Returns how many were woken.  Used by futex(FUTEX_WAKE) and by the
  * pthread-exit path (clear_child_tid). */
-int  proc_wake_futex(addrspace_t *as, uint64_t addr);
+int proc_wake_futex(addrspace_t *as, uint64_t addr);
 
 /* waitpid(): reap a child.  Blocks unless WNOHANG. */
-int  proc_waitpid(int pid, int *status, int options);
+int proc_waitpid(int pid, int *status, int options);
 
 /* ---- scheduling ------------------------------------------------------- */
 void sched_start(void) __attribute__((noreturn));
@@ -464,15 +467,15 @@ void kthread_bootstrap(kthread_bootstrap_t *b) __attribute__((noreturn));
  * freed once the thread has been spawned. */
 typedef struct kthread_work {
     struct kthread_work *next;
-    proc_t *proc;               /* pre-allocated by kthread_create() */
-    const char *name;
+    proc_t              *proc; /* pre-allocated by kthread_create() */
+    const char          *name;
     void (*entry)(void *);
     void *arg;
 } kthread_work_t;
 
 proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg);
-int  proc_spawn_kthreadd(void);
-void kthread_wakeup(void);
+int     proc_spawn_kthreadd(void);
+void    kthread_wakeup(void);
 
 /* ---- signals ---------------------------------------------------------- */
 int  proc_signal(proc_t *p, int sig);
@@ -521,13 +524,12 @@ int proc_in_group(const proc_t *p, uint32_t gid);
  * set at all", which even root is refused -- that rule is what stops a stray
  * `./notes.txt` from being handed to the ELF loader.
  */
-int proc_permitted(uint32_t mode, uint32_t uid, uint32_t gid, int want,
-                   int is_dir);
+int proc_permitted(uint32_t mode, uint32_t uid, uint32_t gid, int want, int is_dir);
 
 /* Effective scheduling weight: the cgroup weight, or the PI-boosted floor
  * when futex waiters demand more. */
 uint32_t proc_eff_weight(proc_t *p);
-void futex_pi_unregister(proc_t *p);
+void     futex_pi_unregister(proc_t *p);
 uint32_t proc_cpu_mask_all(void);
 uint32_t proc_cpu_mask_of(proc_t *p);
 void     proc_set_cpu_mask(proc_t *p, uint32_t mask);

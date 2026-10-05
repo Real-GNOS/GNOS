@@ -23,12 +23,12 @@
 #include "vfs.h"
 #include "heap.h"
 
-#define KLOG_SIZE  (256 * 1024)      /* power of two */
+#define KLOG_SIZE (256 * 1024) /* power of two */
 
 static char    *klog_buf;
-static uint32_t klog_head;            /* next write offset */
-static uint32_t klog_tail;            /* oldest unread byte (drains on read) */
-static uint32_t klog_written;         /* total bytes ever written */
+static uint32_t klog_head;    /* next write offset */
+static uint32_t klog_tail;    /* oldest unread byte (drains on read) */
+static uint32_t klog_written; /* total bytes ever written */
 
 void klog_append(const char *s, uint32_t len)
 {
@@ -40,8 +40,8 @@ void klog_append(const char *s, uint32_t len)
     }
     for (uint32_t i = 0; i < len; i++) {
         klog_buf[klog_head] = s[i];
-        klog_head = (klog_head + 1) % KLOG_SIZE;
-        if (klog_head == klog_tail)          /* full ring: push the tail */
+        klog_head           = (klog_head + 1) % KLOG_SIZE;
+        if (klog_head == klog_tail) /* full ring: push the tail */
             klog_tail = (klog_tail + 1) % KLOG_SIZE;
         klog_written++;
     }
@@ -72,10 +72,10 @@ int64_t klog_syscall(uint64_t op, uint64_t buf, uint64_t len)
         return -E_NOMEM;
 
     switch (op) {
-    case 0:                                     /* read + drain */
-    case 2: {                                   /* read, do not drain */
+    case 0:   /* read + drain */
+    case 2: { /* read, do not drain */
         uint64_t avail = (klog_head - klog_tail + KLOG_SIZE) % KLOG_SIZE;
-        uint64_t n = (len < avail) ? len : avail;
+        uint64_t n     = (len < avail) ? len : avail;
         if (!n)
             return 0;
         if (!user_ptr_ok(buf, n))
@@ -90,16 +90,16 @@ int64_t klog_syscall(uint64_t op, uint64_t buf, uint64_t len)
             klog_tail = (klog_tail + (uint32_t)n) % KLOG_SIZE;
         return (int64_t)n;
     }
-    case 3:                                     /* clear the unread tail */
+    case 3: /* clear the unread tail */
         klog_tail = klog_head;
         return 0;
-    case 6: {                                   /* clear the whole ring */
+    case 6: { /* clear the whole ring */
         klog_head = klog_tail = 0;
-        klog_written = 0;
+        klog_written          = 0;
         return 0;
     }
     case 9:
-    case 10: {                                  /* write from user space */
+    case 10: { /* write from user space */
         if (!len)
             return 0;
         if (len > 4096)

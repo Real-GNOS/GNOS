@@ -21,7 +21,7 @@
 #include "landlock.h"
 #include "pidfd.h"
 #include "proc.h"
-#include "vfs.h"        /* errno values */
+#include "vfs.h" /* errno values */
 
 /* include/uapi/linux/landlock.h */
 #define LANDLOCK_CREATE_RULESET_VERSION (1U << 0)
@@ -32,7 +32,7 @@ enum landlock_rule_type {
     LANDLOCK_RULE_SCOPED,
 };
 
-#define RULESET_FD_MAGIC_UNUSED 0   /* no such descriptors exist here */
+#define RULESET_FD_MAGIC_UNUSED 0 /* no such descriptors exist here */
 
 int64_t sys_landlock_create_ruleset(uint64_t attr, uint64_t size, uint64_t flags)
 {
@@ -40,18 +40,17 @@ int64_t sys_landlock_create_ruleset(uint64_t attr, uint64_t size, uint64_t flags
     if (flags & ~LANDLOCK_CREATE_RULESET_VERSION)
         return -E_INVAL;
     if (!size)
-        return -E_INVAL;             /* Linux: EINVAL for a zero size */
+        return -E_INVAL; /* Linux: EINVAL for a zero size */
     return -E_NOSYS;
 }
 
-int64_t sys_landlock_add_rule(uint64_t ruleset_fd, uint64_t rule_type,
-                              uint64_t rule_attr, uint64_t flags)
+int64_t sys_landlock_add_rule(uint64_t ruleset_fd, uint64_t rule_type, uint64_t rule_attr,
+                              uint64_t flags)
 {
     (void)rule_attr;
     if (flags)
         return -E_INVAL;
-    if (rule_type < LANDLOCK_RULE_PATH_BENEATH ||
-        rule_type > LANDLOCK_RULE_SCOPED)
+    if (rule_type < LANDLOCK_RULE_PATH_BENEATH || rule_type > LANDLOCK_RULE_SCOPED)
         return -E_INVAL;
     /* There is no such thing as a ruleset descriptor here. */
     if (fd_handle((int)ruleset_fd) < 0)
@@ -77,5 +76,5 @@ int64_t sys_process_mrelease(uint64_t pidfd, uint64_t flags)
      * belonging to a process that may not even be the one it meant). */
     if (!pidfd_proc_of((int)pidfd))
         return -E_BADF;
-    return -E_NOSYS;                 /* no OOM reaper, no reclaim pass */
+    return -E_NOSYS; /* no OOM reaper, no reclaim pass */
 }

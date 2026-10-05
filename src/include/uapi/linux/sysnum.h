@@ -18,74 +18,74 @@
 /* Maximum length of a path the kernel will store or resolve.  Musl's own
  * PATH_MAX is 4096; 256 is plenty for a teaching OS and keeps per-open-file and
  * per-process cwd buffers small. */
-#define GNUOS_PATH_MAX   256
+#define GNUOS_PATH_MAX 256
 
-#define SYS_read           0
-#define SYS_write          1
-#define SYS_open           2
-#define SYS_close          3
-#define SYS_stat           4
-#define SYS_fstat          5
-#define SYS_lstat          6
-#define SYS_lseek          8
-#define SYS_ioctl         16
-#define SYS_readv         19
-#define SYS_writev        20
-#define SYS_pipe          22
-#define SYS_sched_yield   24
-#define SYS_dup           32
-#define SYS_dup2          33
-#define SYS_getpid        39
-#define SYS_sendfile      40
-#define SYS_fork          57
-#define SYS_vfork         58
-#define SYS_execve        59
-#define SYS_exit          60
-#define SYS_wait4         61
-#define SYS_kill          62
-#define SYS_ptrace       101
-#define SYS_poll           7
-#define SYS_ppoll        271
-#define SYS_getcwd        79
-#define SYS_chdir         80
-#define SYS_fchdir        81
-#define SYS_rename        82
-#define SYS_mkdir         83
-#define SYS_unlink        87
-#define SYS_setpgid      109
-#define SYS_getppid      110
-#define SYS_getpgid      121
-#define SYS_mprotect     10
-#define SYS_mmap         9
-#define SYS_munmap       11
-#define SYS_mremap       25
-#define SYS_brk          12
-#define SYS_rt_sigaction 13
-#define SYS_rt_sigprocmask 14
-#define SYS_rt_sigreturn 15
-#define SYS_rt_sigpending 127
-#define SYS_tkill        200
-#define SYS_tgkill       234
-#define SYS_gettimeofday 96
-#define SYS_getuid       102
-#define SYS_getgid       104
-#define SYS_geteuid      107
-#define SYS_getegid      108
-#define SYS_arch_prctl   158
-#define SYS_prctl        157
-#define SYS_seccomp      317
-#define SYS_gettid       186
-#define SYS_futex        202
+#define SYS_read            0
+#define SYS_write           1
+#define SYS_open            2
+#define SYS_close           3
+#define SYS_stat            4
+#define SYS_fstat           5
+#define SYS_lstat           6
+#define SYS_lseek           8
+#define SYS_ioctl           16
+#define SYS_readv           19
+#define SYS_writev          20
+#define SYS_pipe            22
+#define SYS_sched_yield     24
+#define SYS_dup             32
+#define SYS_dup2            33
+#define SYS_getpid          39
+#define SYS_sendfile        40
+#define SYS_fork            57
+#define SYS_vfork           58
+#define SYS_execve          59
+#define SYS_exit            60
+#define SYS_wait4           61
+#define SYS_kill            62
+#define SYS_ptrace          101
+#define SYS_poll            7
+#define SYS_ppoll           271
+#define SYS_getcwd          79
+#define SYS_chdir           80
+#define SYS_fchdir          81
+#define SYS_rename          82
+#define SYS_mkdir           83
+#define SYS_unlink          87
+#define SYS_setpgid         109
+#define SYS_getppid         110
+#define SYS_getpgid         121
+#define SYS_mprotect        10
+#define SYS_mmap            9
+#define SYS_munmap          11
+#define SYS_mremap          25
+#define SYS_brk             12
+#define SYS_rt_sigaction    13
+#define SYS_rt_sigprocmask  14
+#define SYS_rt_sigreturn    15
+#define SYS_rt_sigpending   127
+#define SYS_tkill           200
+#define SYS_tgkill          234
+#define SYS_gettimeofday    96
+#define SYS_getuid          102
+#define SYS_getgid          104
+#define SYS_geteuid         107
+#define SYS_getegid         108
+#define SYS_arch_prctl      158
+#define SYS_prctl           157
+#define SYS_seccomp         317
+#define SYS_gettid          186
+#define SYS_futex           202
 #define SYS_set_tid_address 218
-#define SYS_clock_gettime 228
-#define SYS_exit_group   231
-#define SYS_madvise      28
-#define SYS_getdents64   217
-#define SYS_newfstatat   262
-#define SYS_fcntl        72
-#define SYS_openat       257
-#define SYS_uname        63
-#define SYS_umask        95
+#define SYS_clock_gettime   228
+#define SYS_exit_group      231
+#define SYS_madvise         28
+#define SYS_getdents64      217
+#define SYS_newfstatat      262
+#define SYS_fcntl           72
+#define SYS_openat          257
+#define SYS_uname           63
+#define SYS_umask           95
 /*
  * System V IPC (sem/msg/shm).  x86-64 numbers, matching musl's
  * arch/x86_64/bits/syscall.h.in: semget/semop/semctl live at 64-66,
@@ -95,18 +95,18 @@
  * musl's POSIX adaptors ultimately rest on where they use the kernel
  * objects rather than /dev/shm files.
  */
-#define SYS_shmget        29
-#define SYS_shmat         30
-#define SYS_shmctl        31
-#define SYS_semget        64
-#define SYS_semop         65
-#define SYS_semctl        66
-#define SYS_shmdt         67
-#define SYS_msgget        68
-#define SYS_msgsnd        69
-#define SYS_msgrcv        70
-#define SYS_msgctl        71
-#define SYS_semtimedop   220
+#define SYS_shmget     29
+#define SYS_shmat      30
+#define SYS_shmctl     31
+#define SYS_semget     64
+#define SYS_semop      65
+#define SYS_semctl     66
+#define SYS_shmdt      67
+#define SYS_msgget     68
+#define SYS_msgsnd     69
+#define SYS_msgrcv     70
+#define SYS_msgctl     71
+#define SYS_semtimedop 220
 /*
  * gethostname is NOT a Linux system call -- glibc and musl both synthesise it
  * from uname(2).  It used to sit at 100, which on Linux/x86-64 is times(2):
@@ -115,24 +115,24 @@
  * got memcpy'd over the caller's timing buffer.  Moved into the private 400
  * block where nothing from Linux can ever collide with it again.
  */
-#define SYS_gethostname  401
-#define SYS_sethostname  170
-#define SYS_times        100
+#define SYS_gethostname 401
+#define SYS_sethostname 170
+#define SYS_times       100
 /* Interval timers.  musl has no alarm(2) of its own on x86-64: alarm() is
  * written in terms of setitimer(ITIMER_REAL), so a program as ordinary as
  * `ping` fails on a kernel that only implements 37. */
-#define SYS_getitimer    36
-#define SYS_alarm        37
-#define SYS_setitimer    38
-#define SYS_chmod        90
-#define SYS_readlink     89
-#define SYS_utimensat    280
-#define SYS_access       21
-#define SYS_faccessat    269
-#define SYS_chown        92
-#define SYS_fchown       93
-#define SYS_lchown       94
-#define SYS_fchmod       91
+#define SYS_getitimer 36
+#define SYS_alarm     37
+#define SYS_setitimer 38
+#define SYS_chmod     90
+#define SYS_readlink  89
+#define SYS_utimensat 280
+#define SYS_access    21
+#define SYS_faccessat 269
+#define SYS_chown     92
+#define SYS_fchown    93
+#define SYS_lchown    94
+#define SYS_fchmod    91
 
 /* ---- what bash needs on top of the above -------------------------------
  * Every one of these was reached by an interactive bash at some point during
@@ -140,97 +140,97 @@
  * cannot be faked: `sleep` is a bash builtin loop around the former and the
  * `time` keyword reports the latter.
  */
-#define SYS_nanosleep     35
-#define SYS_pread64       17
-#define SYS_pwrite64      18
-#define SYS_getrusage     98
-#define SYS_sysinfo       99
-#define SYS_getrlimit     97
-#define SYS_setrlimit    160
-#define SYS_prlimit64    302
-#define SYS_getgroups    115
-#define SYS_setgroups    116
-#define SYS_getresuid    118
-#define SYS_getresgid    120
-#define SYS_setresuid    117
-#define SYS_setresgid    119
-#define SYS_sigaltstack  131
-#define SYS_sigsuspend   130
-#define SYS_statfs       137
-#define SYS_fstatfs      138
-#define SYS_fadvise64    221
-#define SYS_flock         73
-#define SYS_fsync         74
-#define SYS_fdatasync     75
-#define SYS_ftruncate     77
-#define SYS_truncate      76
-#define SYS_time         201
-#define SYS_getrandom    318
-#define SYS_setuid       105
-#define SYS_setgid       106
-#define SYS_setreuid     113
-#define SYS_setregid     114
-#define SYS_setsid       112
-#define SYS_getsid       124
-#define SYS_getpgrp      111
-#define SYS_pipe2        293
-#define SYS_dup3         292
-#define SYS_rmdir         84
-#define SYS_symlink       88
-#define SYS_symlinkat    266
-#define SYS_link          86
-#define SYS_linkat       265
-#define SYS_readlinkat   267
-#define SYS_unlinkat     263
-#define SYS_mkdirat      258
-#define SYS_renameat     264
-#define SYS_renameat2    316
-#define SYS_statx        332
-#define SYS_fchmodat     268
-#define SYS_fchownat     260
-#define SYS_clone         56
-#define SYS_mount        165
-#define SYS_umount2      166
-#define SYS_chroot       161
-#define SYS_reboot       169
-#define SYS_personality  135
+#define SYS_nanosleep   35
+#define SYS_pread64     17
+#define SYS_pwrite64    18
+#define SYS_getrusage   98
+#define SYS_sysinfo     99
+#define SYS_getrlimit   97
+#define SYS_setrlimit   160
+#define SYS_prlimit64   302
+#define SYS_getgroups   115
+#define SYS_setgroups   116
+#define SYS_getresuid   118
+#define SYS_getresgid   120
+#define SYS_setresuid   117
+#define SYS_setresgid   119
+#define SYS_sigaltstack 131
+#define SYS_sigsuspend  130
+#define SYS_statfs      137
+#define SYS_fstatfs     138
+#define SYS_fadvise64   221
+#define SYS_flock       73
+#define SYS_fsync       74
+#define SYS_fdatasync   75
+#define SYS_ftruncate   77
+#define SYS_truncate    76
+#define SYS_time        201
+#define SYS_getrandom   318
+#define SYS_setuid      105
+#define SYS_setgid      106
+#define SYS_setreuid    113
+#define SYS_setregid    114
+#define SYS_setsid      112
+#define SYS_getsid      124
+#define SYS_getpgrp     111
+#define SYS_pipe2       293
+#define SYS_dup3        292
+#define SYS_rmdir       84
+#define SYS_symlink     88
+#define SYS_symlinkat   266
+#define SYS_link        86
+#define SYS_linkat      265
+#define SYS_readlinkat  267
+#define SYS_unlinkat    263
+#define SYS_mkdirat     258
+#define SYS_renameat    264
+#define SYS_renameat2   316
+#define SYS_statx       332
+#define SYS_fchmodat    268
+#define SYS_fchownat    260
+#define SYS_clone       56
+#define SYS_mount       165
+#define SYS_umount2     166
+#define SYS_chroot      161
+#define SYS_reboot      169
+#define SYS_personality 135
 
 /* Kernel module syscalls, same numbers as Linux x86-64.  init_module
  * loads an image from memory, finit_module from an fd, delete_module
  * unloads by name. */
-#define SYS_init_module  175
-#define SYS_delete_module 176
-#define SYS_finit_module 313
+#define SYS_init_module       175
+#define SYS_delete_module     176
+#define SYS_finit_module      313
 #define SYS_sched_setaffinity 203
 #define SYS_sched_getaffinity 204
 
 /* Anonymous-fd syscalls for the Wayland plumbing (wl_shm pools, the
  * compositor's event loop), same numbers as Linux x86-64: memfd_create
  * backs wl_shm, eventfd/eventfd2 carry wakeups, epoll drives the loop. */
-#define SYS_epoll_create  213
-#define SYS_epoll_wait    232
-#define SYS_epoll_ctl     233
-#define SYS_epoll_pwait   281
-#define SYS_eventfd       284
-#define SYS_eventfd2      290
-#define SYS_epoll_create1 291
-#define SYS_timerfd_create 283
+#define SYS_epoll_create    213
+#define SYS_epoll_wait      232
+#define SYS_epoll_ctl       233
+#define SYS_epoll_pwait     281
+#define SYS_eventfd         284
+#define SYS_eventfd2        290
+#define SYS_epoll_create1   291
+#define SYS_timerfd_create  283
 #define SYS_timerfd_settime 286
 #define SYS_timerfd_gettime 287
-#define SYS_signalfd4     289
-#define SYS_memfd_create  319
-#define SYS_clock_getres 229
+#define SYS_signalfd4       289
+#define SYS_memfd_create    319
+#define SYS_clock_getres    229
 #define SYS_clock_nanosleep 230
 
-#define SYS_signal       400          /* signal(sig, SIG_DFL|SIG_IGN) */
-#define SYS_gstat        403          /* private: the old 24-byte gstat_t */
+#define SYS_signal 400 /* signal(sig, SIG_DFL|SIG_IGN) */
+#define SYS_gstat  403 /* private: the old 24-byte gstat_t */
 /*
  * ttyinject(404) is a debugging back door, not POSIX.  It pushes bytes
  * straight into the line discipline as though the keyboard IRQ had produced
  * them, which is the only way to exercise readline's raw-mode cursor
  * handling on a headless `make test` run -- see src/user/readlinetest.c.
  */
-#define SYS_ttyinject    404
+#define SYS_ttyinject 404
 
 /*
  * inputinject(405) is the input twin of ttyinject(404): it pushes one
@@ -238,7 +238,7 @@
  * queue as though the PS/2 keyboard IRQ had produced it.  Headless tests
  * use it to drive read/poll/ioctl on the evdev node -- see src/user/evtest.c.
  */
-#define SYS_inputinject  405
+#define SYS_inputinject 405
 
 /* ---- sockets -----------------------------------------------------------
  * x86-64 has no socketcall(2) multiplexer -- that is a 32-bit i386 thing --
@@ -246,33 +246,33 @@
  * have to be dispatched individually; a missing one surfaces in user space
  * as a bare ENOSYS with nothing to say which call went unanswered.
  */
-#define SYS_socket        41
-#define SYS_connect       42
-#define SYS_accept        43
-#define SYS_sendto        44
-#define SYS_recvfrom      45
-#define SYS_sendmsg       46
-#define SYS_recvmsg       47
-#define SYS_shutdown      48
-#define SYS_bind          49
-#define SYS_listen        50
-#define SYS_getsockname   51
-#define SYS_getpeername   52
-#define SYS_socketpair    53
-#define SYS_setsockopt    54
-#define SYS_getsockopt    55
-#define SYS_accept4      288
+#define SYS_socket      41
+#define SYS_connect     42
+#define SYS_accept      43
+#define SYS_sendto      44
+#define SYS_recvfrom    45
+#define SYS_sendmsg     46
+#define SYS_recvmsg     47
+#define SYS_shutdown    48
+#define SYS_bind        49
+#define SYS_listen      50
+#define SYS_getsockname 51
+#define SYS_getpeername 52
+#define SYS_socketpair  53
+#define SYS_setsockopt  54
+#define SYS_getsockopt  55
+#define SYS_accept4     288
 
 /* select(2) comes along with them: BusyBox's nc and wget multiplex with
  * select, not poll, and musl's select() is this call verbatim (pselect6 is
  * a separate number and is *not* what select() compiles to on x86-64). */
-#define SYS_select        23
-#define SYS_pselect6     270
+#define SYS_select   23
+#define SYS_pselect6 270
 /* faccessat2(439) is what musl's faccessat() actually issues on a kernel that
  * advertises it (it is the modern, flags-carrying replacement for faccessat).
  * bash's trap handling reaches it during startup; it is just access() with an
  * explicit dirfd and flags, both of which this single-root kernel can ignore. */
-#define SYS_faccessat2    439
+#define SYS_faccessat2 439
 
 /* Report how many cores came online (BSP + any APs Limine started).  Lets a
  * boot assertion program confirm SMP bring-up without parsing the boot log. */
@@ -283,8 +283,8 @@
  * Linux binary that asks for one of those would get GNOS's instead.  The
  * house numbers live at SYS_GNOS_BASE and above, which the Linux ABI
  * leaves empty. */
-#define SYS_GNOS_BASE     1000
-#define SYS_smp_count     (SYS_GNOS_BASE + 0)
+#define SYS_GNOS_BASE 1000
+#define SYS_smp_count (SYS_GNOS_BASE + 0)
 
 /*
  * dbgputs(441) -- copy a NUL-terminated user string to the debug console
@@ -292,9 +292,9 @@
  * their verdicts through this so `make test` can grep build/dbg.log.  A
  * GNOS extension, not a Linux syscall.
  */
-#define SYS_dbgputs       (SYS_GNOS_BASE + 1)
-#define SYS_klog          (SYS_GNOS_BASE + 2)
-#define SYS_cpuid         (SYS_GNOS_BASE + 3)
+#define SYS_dbgputs (SYS_GNOS_BASE + 1)
+#define SYS_klog    (SYS_GNOS_BASE + 2)
+#define SYS_cpuid   (SYS_GNOS_BASE + 3)
 
 /*
  * struct sockaddr_in as it crosses the syscall boundary: 16 bytes, and the
@@ -304,37 +304,37 @@
  * happens exactly once, here at the edge.
  */
 typedef struct {
-    uint16_t sin_family;        /* AF_INET */
-    uint16_t sin_port;          /* network order */
-    uint32_t sin_addr;          /* network order */
+    uint16_t sin_family; /* AF_INET */
+    uint16_t sin_port;   /* network order */
+    uint32_t sin_addr;   /* network order */
     uint8_t  sin_zero[8];
 } sockaddr_in_t;
 
 /* arch_prctl() codes (x86-64). */
-#define ARCH_SET_FS  0x1002
-#define ARCH_GET_FS  0x1003
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
 
 /* mmap() flags and prot bits (subsets Linux uses). */
-#define PROT_READ    0x1
-#define PROT_WRITE   0x2
-#define PROT_EXEC    0x4
-#define MAP_PRIVATE  0x02
-#define MAP_SHARED   0x01
-#define MAP_FIXED    0x10
+#define PROT_READ     0x1
+#define PROT_WRITE    0x2
+#define PROT_EXEC     0x4
+#define MAP_PRIVATE   0x02
+#define MAP_SHARED    0x01
+#define MAP_FIXED     0x10
 #define MAP_ANONYMOUS 0x20
 
 /* futex() operations we recognise. */
-#define FUTEX_WAIT   0
-#define FUTEX_WAKE   1
-#define FUTEX_LOCK_PI        6
-#define FUTEX_UNLOCK_PI      7
+#define FUTEX_WAIT      0
+#define FUTEX_WAKE      1
+#define FUTEX_LOCK_PI   6
+#define FUTEX_UNLOCK_PI 7
 /* PI futex value conventions (uapi/futex.h). */
 #define FUTEX_TID_MASK    0x3FFFFFFFu
 #define FUTEX_WAITERS_BIT 0x40000000u
 
 /* signal() dispositions.  Anything else is the address of a handler. */
-#define SIG_DFL  0
-#define SIG_IGN  1
+#define SIG_DFL 0
+#define SIG_IGN 1
 
 /*
  * sigaction() flags, Linux values.
@@ -356,21 +356,21 @@ typedef struct {
 #define SA_RESTORER  0x04000000
 
 /* sigprocmask() operations. */
-#define SIG_BLOCK    0
-#define SIG_UNBLOCK  1
-#define SIG_SETMASK  2
+#define SIG_BLOCK   0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
 
 /* siginfo si_code: sent by kill() rather than by the kernel itself. */
-#define SI_USER      0
+#define SI_USER 0
 
 /* Signals (Linux numbering). */
-#define SIGHUP   1
-#define SIGINT   2
-#define SIGQUIT  3
+#define SIGHUP  1
+#define SIGINT  2
+#define SIGQUIT 3
 /* SIGTRAP is only produced by ptrace: the tracer's wait status after a
  * PTRACE_SYSCALL/PTRACE_CONT stop. */
-#define SIGTRAP  5
-#define SIGKILL  9
+#define SIGTRAP 5
+#define SIGKILL 9
 #define SIGSEGV 11
 #define SIGPIPE 13
 #define SIGALRM 14
@@ -387,27 +387,27 @@ typedef struct {
 #define WUNTRACED  2
 #define WCONTINUED 8
 
-#define WIFSTOPPED(s)   (((s) & 0xFF) == 0x7F)
-#define WIFSIGNALED(s)  (((s) & 0x7F) != 0 && ((s) & 0xFF) != 0x7F)
-#define WIFEXITED(s)    (((s) & 0x7F) == 0)
-#define WEXITSTATUS(s)  (((s) >> 8) & 0xFF)
-#define WTERMSIG(s)     ((s) & 0x7F)
-#define WSTOPSIG(s)     (((s) >> 8) & 0xFF)
+#define WIFSTOPPED(s)  (((s) & 0xFF) == 0x7F)
+#define WIFSIGNALED(s) (((s) & 0x7F) != 0 && ((s) & 0xFF) != 0x7F)
+#define WIFEXITED(s)   (((s) & 0x7F) == 0)
+#define WEXITSTATUS(s) (((s) >> 8) & 0xFF)
+#define WTERMSIG(s)    ((s) & 0x7F)
+#define WSTOPSIG(s)    (((s) >> 8) & 0xFF)
 
 /* open() flags.  The access mode is the low two bits, the rest are flags,
  * with the same values Linux uses so the numbers look familiar. */
-#define O_RDONLY   0
-#define O_WRONLY   1
-#define O_RDWR     2
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR   2
 #ifndef O_ACCMODE
-#define O_ACCMODE  3
+#define O_ACCMODE 3
 #endif
-#define O_CREAT    0100
-#define O_EXCL     0200
-#define O_NOCTTY   0400
-#define O_TRUNC    01000
-#define O_APPEND   02000
-#define O_NONBLOCK 04000
+#define O_CREAT     0100
+#define O_EXCL      0200
+#define O_NOCTTY    0400
+#define O_TRUNC     01000
+#define O_APPEND    02000
+#define O_NONBLOCK  04000
 #define O_DIRECTORY 0200000
 #define O_NOFOLLOW  0400000
 /*
@@ -416,16 +416,16 @@ typedef struct {
  * open-file one.  open() strips it before the VFS sees it and records the bit
  * in proc_t.fd_cloexec instead.
  */
-#define O_CLOEXEC   02000000
+#define O_CLOEXEC 02000000
 
 /* fcntl() commands musl actually issues for stdio/opendir. */
-#define F_DUPFD          0
-#define F_GETFD          1
-#define F_SETFD          2
-#define F_GETFL          3
-#define F_SETFL          4
-#define F_DUPFD_CLOEXEC  1030
-#define FD_CLOEXEC       1
+#define F_DUPFD         0
+#define F_GETFD         1
+#define F_SETFD         2
+#define F_GETFL         3
+#define F_SETFL         4
+#define F_DUPFD_CLOEXEC 1030
+#define FD_CLOEXEC      1
 
 /* ---- terminal control (ioctl(16)) --------------------------------------
  * Everything a terminal needs -- line discipline settings, window size, the
@@ -434,34 +434,34 @@ typedef struct {
  * tcgetattr() is ioctl(fd, TCGETS, tio), tcsetattr(fd, act, tio) is
  * ioctl(fd, TCSETS + act, tio), and isatty() is a TIOCGWINSZ that succeeds.
  */
-#define TCGETS      0x5401
-#define TCSETS      0x5402
-#define TCSETSW     0x5403      /* == TCSETS + TCSADRAIN */
-#define TCSETSF     0x5404      /* == TCSETS + TCSAFLUSH */
-#define TIOCSCTTY   0x540E
+#define TCGETS    0x5401
+#define TCSETS    0x5402
+#define TCSETSW   0x5403 /* == TCSETS + TCSADRAIN */
+#define TCSETSF   0x5404 /* == TCSETS + TCSAFLUSH */
+#define TIOCSCTTY 0x540E
 /* UNIX98 pty cloning (ptmx). */
-#define TIOCGPTN    0x80045430
-#define TIOCSPTLCK  0x40045431
-#define FIONREAD    0x541B
-#define SIGWINCH    28
-#define TIOCPKT     0x5420
-#define TIOCGPGRP   0x540F
-#define TIOCSPGRP   0x5410
-#define TIOCEXCL    0x540C
-#define TIOCNXCL    0x540D
-#define TCFLSH      0x540B
-#define TCXONC      0x540A
-#define TIOCOUTQ    0x5411
-#define TIOCSTI     0x5412
-#define TIOCSIG     0x40045436
+#define TIOCGPTN   0x80045430
+#define TIOCSPTLCK 0x40045431
+#define FIONREAD   0x541B
+#define SIGWINCH   28
+#define TIOCPKT    0x5420
+#define TIOCGPGRP  0x540F
+#define TIOCSPGRP  0x5410
+#define TIOCEXCL   0x540C
+#define TIOCNXCL   0x540D
+#define TCFLSH     0x540B
+#define TCXONC     0x540A
+#define TIOCOUTQ   0x5411
+#define TIOCSTI    0x5412
+#define TIOCSIG    0x40045436
 /* TCFLSH / TCXONC arguments. */
-#define TCIFLUSH    0
-#define TCOFLUSH    1
-#define TCIOFLUSH   2
-#define TCOOFF      0
-#define TCOON       1
-#define TCIOFF      2
-#define TCION       3
+#define TCIFLUSH  0
+#define TCOFLUSH  1
+#define TCIOFLUSH 2
+#define TCOOFF    0
+#define TCOON     1
+#define TCIOFF    2
+#define TCION     3
 /* TIOCPKT flags. */
 #define TIOCPKT_DATA       0x00
 #define TIOCPKT_FLUSHREAD  0x01
@@ -470,10 +470,10 @@ typedef struct {
 #define TIOCPKT_START      0x08
 #define TIOCPKT_NOSTOP     0x10
 #define TIOCPKT_DOSTOP     0x20
-#define TIOCSPGRP   0x5410
-#define TIOCGWINSZ  0x5413
-#define TIOCSWINSZ  0x5414
-#define TIOCNOTTY   0x5422
+#define TIOCSPGRP          0x5410
+#define TIOCGWINSZ         0x5413
+#define TIOCSWINSZ         0x5414
+#define TIOCNOTTY          0x5422
 
 /* ---- virtual terminals (ioctl on any /dev/tty*) -------------------------
  * The console is not one terminal but several, only one of which is on
@@ -486,26 +486,26 @@ typedef struct {
  * argument, numbered from 1 like the /dev/ttyN names.  VT_OPENQRY and
  * VT_GETSTATE take pointers.
  */
-#define VT_OPENQRY    0x5600    /* int *: lowest terminal with no session   */
-#define VT_GETMODE    0x5601    /* struct vt_mode *                         */
-#define VT_SETMODE    0x5602    /* struct vt_mode *                         */
-#define VT_GETSTATE   0x5603    /* struct vt_stat *                         */
-#define VT_ACTIVATE   0x5606    /* int: switch to this terminal             */
-#define VT_WAITACTIVE 0x5607    /* int: block until it is the one on screen */
-#define VT_DISALLOCATE 0x5608   /* int: release a terminal                  */
+#define VT_OPENQRY     0x5600 /* int *: lowest terminal with no session   */
+#define VT_GETMODE     0x5601 /* struct vt_mode *                         */
+#define VT_SETMODE     0x5602 /* struct vt_mode *                         */
+#define VT_GETSTATE    0x5603 /* struct vt_stat *                         */
+#define VT_ACTIVATE    0x5606 /* int: switch to this terminal             */
+#define VT_WAITACTIVE  0x5607 /* int: block until it is the one on screen */
+#define VT_DISALLOCATE 0x5608 /* int: release a terminal                  */
 
 /* VT_GETSTATE payload.  v_state is a bitmap of terminals in use, bit N for
  * terminal N, with bit 0 set for historical reasons. */
 typedef struct {
-    uint16_t v_active;          /* the terminal currently on screen */
-    uint16_t v_signal;          /* unused, reported as 0 */
-    uint16_t v_state;           /* bitmap of allocated terminals */
+    uint16_t v_active; /* the terminal currently on screen */
+    uint16_t v_signal; /* unused, reported as 0 */
+    uint16_t v_state;  /* bitmap of allocated terminals */
 } vt_stat_t;
 
 /* VT_GETMODE/VT_SETMODE payload.  Only VT_AUTO is supported: the kernel
  * switches terminals by itself and never asks a process for permission. */
-#define VT_AUTO      0x00
-#define VT_PROCESS   0x01
+#define VT_AUTO    0x00
+#define VT_PROCESS 0x01
 
 typedef struct {
     uint8_t mode;
@@ -529,12 +529,12 @@ typedef struct {
 #define GNUOS_NCCS 19
 
 typedef struct {
-    uint32_t c_iflag;           /* input modes    */
-    uint32_t c_oflag;           /* output modes   */
-    uint32_t c_cflag;           /* control modes  */
-    uint32_t c_lflag;           /* local modes    */
-    uint8_t  c_line;            /* line discipline (always 0 here) */
-    uint8_t  c_cc[GNUOS_NCCS];  /* control characters */
+    uint32_t c_iflag;          /* input modes    */
+    uint32_t c_oflag;          /* output modes   */
+    uint32_t c_cflag;          /* control modes  */
+    uint32_t c_lflag;          /* local modes    */
+    uint8_t  c_line;           /* line discipline (always 0 here) */
+    uint8_t  c_cc[GNUOS_NCCS]; /* control characters */
 } termios_t;
 
 /* TIOCGWINSZ/TIOCSWINSZ payload.  Pixel dimensions are reported as 0. */
@@ -546,16 +546,16 @@ typedef struct {
 } winsize_t;
 
 /* c_cc[] indices. */
-#define VINTR     0
-#define VQUIT     1
-#define VERASE    2
-#define VKILL     3
-#define VEOF      4
-#define VTIME     5
-#define VMIN      6
-#define VSWTC     7
-#define VSTART    8
-#define VSTOP     9
+#define VINTR    0
+#define VQUIT    1
+#define VERASE   2
+#define VKILL    3
+#define VEOF     4
+#define VTIME    5
+#define VMIN     6
+#define VSWTC    7
+#define VSTART   8
+#define VSTOP    9
 #define VSUSP    10
 #define VEOL     11
 #define VREPRINT 12
@@ -581,26 +581,26 @@ typedef struct {
 #define IUTF8   0040000
 
 /* c_oflag bits. */
-#define OPOST   0000001
-#define ONLCR   0000004
-#define OCRNL   0000010
-#define ONOCR   0000020
-#define ONLRET  0000040
+#define OPOST  0000001
+#define ONLCR  0000004
+#define OCRNL  0000010
+#define ONOCR  0000020
+#define ONLRET 0000040
 
 /* c_cflag bits.  Only the baud field and CS8 mean anything to a frame
  * buffer, but programs read them back and expect what they set. */
-#define CSIZE   0000060
-#define CS8     0000060
-#define CSTOPB  0000100
-#define CREAD   0000200
-#define PARENB  0000400
-#define PARODD  0001000
-#define HUPCL   0002000
-#define CLOCAL  0004000
-#define CBAUD   0010017
-#define B0      0000000
-#define B9600   0000015
-#define B38400  0000017
+#define CSIZE  0000060
+#define CS8    0000060
+#define CSTOPB 0000100
+#define CREAD  0000200
+#define PARENB 0000400
+#define PARODD 0001000
+#define HUPCL  0002000
+#define CLOCAL 0004000
+#define CBAUD  0010017
+#define B0     0000000
+#define B9600  0000015
+#define B38400 0000017
 
 /* c_lflag bits. */
 #define ISIG    0000001
@@ -621,49 +621,49 @@ typedef struct {
 #define TCSAFLUSH 2
 
 /* pollfd event bits (Linux values), shared by poll(7)/ppoll(271). */
-#define POLLIN    0x001
-#define POLLPRI   0x002
-#define POLLOUT   0x004
-#define POLLERR   0x008
-#define POLLHUP   0x010
-#define POLLNVAL  0x020
+#define POLLIN   0x001
+#define POLLPRI  0x002
+#define POLLOUT  0x004
+#define POLLERR  0x008
+#define POLLHUP  0x010
+#define POLLNVAL 0x020
 
 /* errno values, as returned negated in RAX. */
-#define EPERM      1
-#define ENOENT     2
-#define ESRCH      3
-#define EINTR      4
-#define EIO        5
-#define E2BIG      7
+#define EPERM  1
+#define ENOENT 2
+#define ESRCH  3
+#define EINTR  4
+#define EIO    5
+#define E2BIG  7
 /* ENOEXEC matters more than it looks: bash only retries a failed execve as a
  * shell script when it sees this, so returning EINVAL for "not an ELF" makes
  * `./script-without-shebang` fail outright instead of being run by sh. */
-#define ENOEXEC    8
-#define EBADF      9
-#define ECHILD    10
-#define EAGAIN    11
-#define ENOMEM    12
-#define EACCES    13
-#define EFAULT    14
-#define EBUSY     16
-#define EEXIST    17
-#define EXDEV     18
-#define ENODEV    19
-#define EISDIR    21
-#define ENOTDIR   20
-#define EINVAL    22
-#define ENFILE    23
-#define EMFILE    24
-#define ENOTTY    25
-#define ENOSPC    28
-#define EROFS     30
-#define EPIPE     32
-#define ERANGE    34
+#define ENOEXEC      8
+#define EBADF        9
+#define ECHILD       10
+#define EAGAIN       11
+#define ENOMEM       12
+#define EACCES       13
+#define EFAULT       14
+#define EBUSY        16
+#define EEXIST       17
+#define EXDEV        18
+#define ENODEV       19
+#define EISDIR       21
+#define ENOTDIR      20
+#define EINVAL       22
+#define ENFILE       23
+#define EMFILE       24
+#define ENOTTY       25
+#define ENOSPC       28
+#define EROFS        30
+#define EPIPE        32
+#define ERANGE       34
 #define ENAMETOOLONG 36
-#define ENOSYS    38
-#define ENOTEMPTY 39
-#define ELOOP     40
-#define EOVERFLOW 75
+#define ENOSYS       38
+#define ENOTEMPTY    39
+#define ELOOP        40
+#define EOVERFLOW    75
 
 /*
  * What a name refers to.  The numbers match the VFS's internal node kinds so
@@ -678,8 +678,8 @@ typedef struct {
 /* stat(): just enough to answer "does this exist, and what is it?" */
 typedef struct {
     uint64_t size;
-    uint32_t kind;              /* GK_* */
-    uint32_t attr;              /* raw FAT attribute byte, 0 for devices */
+    uint32_t kind; /* GK_* */
+    uint32_t attr; /* raw FAT attribute byte, 0 for devices */
 } gstat_t;
 
 /*
@@ -750,21 +750,21 @@ typedef struct {
     uint64_t stx_subvol;
 } kstatx_t;
 
-#define STATX_TYPE      0x0001
-#define STATX_MODE      0x0002
-#define STATX_NLINK     0x0004
-#define STATX_UID       0x0008
-#define STATX_GID       0x0010
-#define STATX_ATIME     0x0020
-#define STATX_MTIME     0x0040
-#define STATX_CTIME     0x0080
-#define STATX_INO       0x0100
-#define STATX_SIZE      0x0200
-#define STATX_BLOCKS    0x0400
+#define STATX_TYPE        0x0001
+#define STATX_MODE        0x0002
+#define STATX_NLINK       0x0004
+#define STATX_UID         0x0008
+#define STATX_GID         0x0010
+#define STATX_ATIME       0x0020
+#define STATX_MTIME       0x0040
+#define STATX_CTIME       0x0080
+#define STATX_INO         0x0100
+#define STATX_SIZE        0x0200
+#define STATX_BLOCKS      0x0400
 #define STATX_BASIC_STATS 0x07ff
 #define STATX_MNT_ID      0x1000
 #define STATX_DIOALIGN    0x2000
-#define STATX_BTIME     0x0800
+#define STATX_BTIME       0x0800
 
 /*
  * Reading a directory descriptor yields a whole number of these records
@@ -776,7 +776,7 @@ typedef struct {
 typedef struct {
     char     name[GDIRENT_NAME];
     uint32_t size;
-    uint32_t kind;              /* GK_FILE or GK_DIR */
+    uint32_t kind; /* GK_FILE or GK_DIR */
 } gdirent_t;
 
 /*
@@ -804,13 +804,13 @@ typedef struct {
 
 /* newfstatat(262) flag bits. */
 #define AT_SYMLINK_NOFOLLOW 0x100
-#define AT_EMPTY_PATH      0x1000
-#define AT_FDCWD          (-100)
+#define AT_EMPTY_PATH       0x1000
+#define AT_FDCWD            (-100)
 
 /* renameat2(316) flags.  Only NOREPLACE is implemented -- see the syscall. */
-#define RENAME_NOREPLACE  (1u << 0)
-#define RENAME_EXCHANGE   (1u << 1)
-#define RENAME_WHITEOUT   (1u << 2)
+#define RENAME_NOREPLACE (1u << 0)
+#define RENAME_EXCHANGE  (1u << 1)
+#define RENAME_WHITEOUT  (1u << 2)
 
 /*
  * uname(63).  Linux's new_utsname: six fixed 65-byte fields, no padding.
@@ -818,7 +818,7 @@ typedef struct {
  * _GNU_SOURCE and `__domainname` otherwise), so writing all 390 bytes is safe
  * whichever way the program was compiled.
  */
-#define UTS_LEN  65
+#define UTS_LEN 65
 typedef struct {
     char sysname[UTS_LEN];
     char nodename[UTS_LEN];
@@ -861,8 +861,14 @@ typedef struct {
 } rlimit_t;
 
 /* getrusage(98).  Only the two time fields are ever non-zero here. */
-typedef struct { int64_t tv_sec; int64_t tv_usec; } ktimeval_t;
-typedef struct { int64_t tv_sec; int64_t tv_nsec; } ktimespec_t;
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_usec;
+} ktimeval_t;
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+} ktimespec_t;
 
 typedef struct {
     ktimeval_t ru_utime;
@@ -874,7 +880,7 @@ typedef struct {
     int64_t    ru_nsignals, ru_nvcsw, ru_nivcsw;
 } rusage_t;
 
-#define RUSAGE_SELF      0
+#define RUSAGE_SELF     0
 #define RUSAGE_CHILDREN (-1)
 
 /* clock_gettime(228) ids.  The kernel keeps one monotonic tick counter and
@@ -909,9 +915,9 @@ typedef struct {
 } kstatfs_t;
 
 /* f_type magics, from Linux's magic.h -- coreutils recognises these by name. */
-#define EXT2_SUPER_MAGIC   0xEF53
-#define TMPFS_MAGIC        0x01021994
-#define PROC_SUPER_MAGIC   0x9FA0
+#define EXT2_SUPER_MAGIC 0xEF53
+#define TMPFS_MAGIC      0x01021994
+#define PROC_SUPER_MAGIC 0x9FA0
 
 /*
  * sysinfo(99).  Linux's struct sysinfo on 64-bit: no padding needed because
@@ -940,51 +946,51 @@ typedef struct {
  * before AT_NULL.  libc's _start walks this list, so the values must match
  * what a Linux x86-64 loader would supply.
  */
-#define AT_NULL     0
-#define AT_PHDR     3
-#define AT_PHENT    4
-#define AT_PHNUM    5
-#define AT_PAGESZ   6
-#define AT_BASE     7
-#define AT_ENTRY    9
-#define AT_UID      11
-#define AT_EUID     12
-#define AT_GID      13
-#define AT_EGID     14
-#define AT_CLKTCK   17
-#define AT_SECURE   23
-#define AT_RANDOM   25
+#define AT_NULL   0
+#define AT_PHDR   3
+#define AT_PHENT  4
+#define AT_PHNUM  5
+#define AT_PAGESZ 6
+#define AT_BASE   7
+#define AT_ENTRY  9
+#define AT_UID    11
+#define AT_EUID   12
+#define AT_GID    13
+#define AT_EGID   14
+#define AT_CLKTCK 17
+#define AT_SECURE 23
+#define AT_RANDOM 25
 
 /* ---- prctl() option numbers ------------------------------------------- */
-#define PR_SET_NO_NEW_PRIVS  38
-#define PR_GET_NO_NEW_PRIVS  39
-#define PR_SET_SECCOMP       22
-#define PR_GET_SECCOMP       21
+#define PR_SET_NO_NEW_PRIVS 38
+#define PR_GET_NO_NEW_PRIVS 39
+#define PR_SET_SECCOMP      22
+#define PR_GET_SECCOMP      21
 
 /* ---- seccomp modes ---------------------------------------------------- */
-#define SECCOMP_MODE_DISABLED   0
-#define SECCOMP_MODE_STRICT     1
-#define SECCOMP_MODE_FILTER     2
+#define SECCOMP_MODE_DISABLED 0
+#define SECCOMP_MODE_STRICT   1
+#define SECCOMP_MODE_FILTER   2
 
 /* ---- seccomp(2) operations -------------------------------------------- */
-#define SECCOMP_SET_MODE_FILTER    1
-#define SECCOMP_GET_ACTION_AVAIL   2
+#define SECCOMP_SET_MODE_FILTER  1
+#define SECCOMP_GET_ACTION_AVAIL 2
 
 /* seccomp filter return values (action | data). */
-#define SECCOMP_RET_KILL_PROCESS 0x00000000  /* kill the process */
-#define SECCOMP_RET_KILL_THREAD  0x00010000  /* kill the thread */
-#define SECCOMP_RET_TRAP         0x00020000  /* send SIGSYS */
-#define SECCOMP_RET_ERRNO        0x00050000  /* return -errno (data = errno) */
-#define SECCOMP_RET_USER_NOTIF   0x7fc00000  /* notif to userspace (stub) */
-#define SECCOMP_RET_TRACE        0x7ff00000  /* ptrace event */
-#define SECCOMP_RET_LOG          0x7ffc0000  /* allow + log */
-#define SECCOMP_RET_ALLOW        0x7fff0000  /* allow */
-#define SECCOMP_RET_ACTION       0xffff0000  /* mask for action bits */
+#define SECCOMP_RET_KILL_PROCESS 0x00000000 /* kill the process */
+#define SECCOMP_RET_KILL_THREAD  0x00010000 /* kill the thread */
+#define SECCOMP_RET_TRAP         0x00020000 /* send SIGSYS */
+#define SECCOMP_RET_ERRNO        0x00050000 /* return -errno (data = errno) */
+#define SECCOMP_RET_USER_NOTIF   0x7fc00000 /* notif to userspace (stub) */
+#define SECCOMP_RET_TRACE        0x7ff00000 /* ptrace event */
+#define SECCOMP_RET_LOG          0x7ffc0000 /* allow + log */
+#define SECCOMP_RET_ALLOW        0x7fff0000 /* allow */
+#define SECCOMP_RET_ACTION       0xffff0000 /* mask for action bits */
 
 /* ---- classic BPF constants for seccomp -------------------------------- */
-#define SECCOMP_BPF_MAXINSNS  256
+#define SECCOMP_BPF_MAXINSNS 256
 struct sock_fprog {
-    unsigned short len;     /* number of BPF instructions */
+    unsigned short      len; /* number of BPF instructions */
     struct sock_filter *filter;
 };
 struct sock_filter {
@@ -1005,28 +1011,28 @@ struct sock_filter {
 #define BPF_MISC 0x07
 
 /* BPF size bits (in code, upper 3 bits of load/store size). */
-#define BPF_W    0x00
-#define BPF_H    0x08
-#define BPF_B    0x10
+#define BPF_W 0x00
+#define BPF_H 0x08
+#define BPF_B 0x10
 
 /* BPF source bits (in code). */
-#define BPF_K    0x00
-#define BPF_X    0x08
+#define BPF_K 0x00
+#define BPF_X 0x08
 
 /* BPF modifier for LD/LDX. */
-#define BPF_ABS  0x20
-#define BPF_IND  0x40
-#define BPF_MEM  0x60
+#define BPF_ABS 0x20
+#define BPF_IND 0x40
+#define BPF_MEM 0x60
 
 /* BPF ALU operations. */
-#define BPF_ADD  0x00
-#define BPF_SUB  0x10
-#define BPF_MUL  0x20
-#define BPF_DIV  0x30
-#define BPF_AND  0x50
-#define BPF_OR   0x40
-#define BPF_LSH  0x60
-#define BPF_RSH  0x70
+#define BPF_ADD 0x00
+#define BPF_SUB 0x10
+#define BPF_MUL 0x20
+#define BPF_DIV 0x30
+#define BPF_AND 0x50
+#define BPF_OR  0x40
+#define BPF_LSH 0x60
+#define BPF_RSH 0x70
 
 /* BPF jump operations. */
 #define BPF_JA   0x00
@@ -1036,12 +1042,12 @@ struct sock_filter {
 #define BPF_JSET 0x40
 
 /* BPF misc operations. */
-#define BPF_TAX  0x00
-#define BPF_TXA  0x80
-#define BPF_A    0x10
+#define BPF_TAX 0x00
+#define BPF_TXA 0x80
+#define BPF_A   0x10
 
 /* Special BPF return values for seccomp. */
-#define SECCOMP_RET_ACTION_MASK  0xffff0000
+#define SECCOMP_RET_ACTION_MASK 0xffff0000
 
 #endif
 
@@ -1069,7 +1075,7 @@ struct sock_filter {
 
 #define SYS_rseq 386
 
-#define SYS_epoll_pwait2  441
+#define SYS_epoll_pwait2 441
 
 #define SYS_preadv2 327
 
@@ -1079,11 +1085,11 @@ struct sock_filter {
 
 #define SYS_process_madvise 440
 
-#define SYS_quotactl_fd  443
+#define SYS_quotactl_fd 443
 
-#define SYS_memfd_secret  447
+#define SYS_memfd_secret 447
 
-#define SYS_futex_waitv   449
+#define SYS_futex_waitv 449
 
 #define SYS_landlock_create_ruleset 444
 
@@ -1093,4 +1099,4 @@ struct sock_filter {
 
 #define SYS_process_mrelease 448
 
-#define SYS_sync          162
+#define SYS_sync 162

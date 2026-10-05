@@ -18,7 +18,7 @@
 #include "io.h"
 #include "pci.h"
 
-int g_vbe;                              /* VBE_DISPI answered the ID probe */
+int g_vbe; /* VBE_DISPI answered the ID probe */
 
 /* When the register bank is memory-mapped (bochs-display puts it in an
  * MMIO BAR; stdvga keeps it in I/O ports), accesses go here at 16-bit
@@ -26,7 +26,7 @@ int g_vbe;                              /* VBE_DISPI answered the ID probe */
  * bochs driver maps it. */
 static volatile uint16_t *g_vbe_mmio;
 
-#define VBE_ID_SIGNATURE 0xB0C0         /* ID registers read 0xB0C0..0xB0C5 */
+#define VBE_ID_SIGNATURE  0xB0C0 /* ID registers read 0xB0C0..0xB0C5 */
 #define PCI_CLASS_DISPLAY 0x03
 #define PCI_SUBCLASS_VGA  0x00
 
@@ -43,16 +43,16 @@ int vbe_pci_probe(void)
 
     for (int i = 0; i < 6; i++) {
         uint32_t raw = d->bar[i];
-        if (!raw || (raw & 1))          /* I/O BARs: tried below */
+        if (!raw || (raw & 1)) /* I/O BARs: tried below */
             continue;
         uint64_t va = pci_map_bar(d, i);
         if (!va)
             continue;
         volatile uint16_t *mm = (volatile uint16_t *)(uintptr_t)va;
-        uint16_t id = mm[VBE_ID];
+        uint16_t           id = mm[VBE_ID];
         if ((id & 0xFFF0) == VBE_ID_SIGNATURE) {
             g_vbe_mmio = mm;
-            g_vbe = 1;
+            g_vbe      = 1;
             dbg_puts("drm: vbe via PCI MMIO bar\r\n");
             return id;
         }
@@ -68,8 +68,8 @@ int vbe_pci_probe(void)
 }
 
 /* ---- current scanout state ------------------------------------------------ */
-uint32_t g_cur_w, g_cur_h;              /* current mode */
-uint32_t g_cur_fb;                      /* fb id on screen, 0 = console owns it */
+uint32_t g_cur_w, g_cur_h; /* current mode */
+uint32_t g_cur_fb;         /* fb id on screen, 0 = console owns it */
 
 void vbe_write(uint16_t idx, uint16_t val)
 {

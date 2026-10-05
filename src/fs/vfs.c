@@ -42,22 +42,22 @@
 
 typedef struct {
     int      used;
-    int      readers;           /* references held on the read end  */
-    int      writers;           /* references held on the write end */
+    int      readers; /* references held on the read end  */
+    int      writers; /* references held on the write end */
     uint32_t head, tail, count;
     uint8_t  buf[VFS_PIPE_CAP];
 } pipe_t;
 
 typedef struct {
-    int         refs;           /* 0 == this slot is free */
-    vfs_node_t  node;
-    uint64_t    pos;
-    int         flags;
-    char        path[VFS_PATH_MAX];   /* absolute path this descriptor names */
+    int        refs; /* 0 == this slot is free */
+    vfs_node_t node;
+    uint64_t   pos;
+    int        flags;
+    char       path[VFS_PATH_MAX]; /* absolute path this descriptor names */
 } vfs_file_t;
 
-static ext2_fs_t  g_fs;
-static int        g_fs_ok;
+static ext2_fs_t g_fs;
+static int       g_fs_ok;
 
 static vfs_node_t g_dev[VFS_MAX_DEV];
 static unsigned   g_dev_count;
@@ -69,15 +69,24 @@ static pipe_t     g_pipes[VFS_MAX_PIPES];
 static int fs_errno(int e)
 {
     switch (e) {
-    case EXT2_OK:        return 0;
-    case EXT2_ENOENT:    return -E_NOENT;
-    case EXT2_EEXIST:    return -E_EXIST;
-    case EXT2_ENOSPC:    return -E_NOSPC;
-    case EXT2_ENOTDIR:   return -E_NOTDIR;
-    case EXT2_ENOTEMPTY: return -E_NOTEMPTY;
-    case EXT2_EISDIR:    return -E_ISDIR;
-    case EXT2_EROFS:     return -E_ACCES;   /* closest errno: read-only fs */
-    default:             return -E_INVAL;
+    case EXT2_OK:
+        return 0;
+    case EXT2_ENOENT:
+        return -E_NOENT;
+    case EXT2_EEXIST:
+        return -E_EXIST;
+    case EXT2_ENOSPC:
+        return -E_NOSPC;
+    case EXT2_ENOTDIR:
+        return -E_NOTDIR;
+    case EXT2_ENOTEMPTY:
+        return -E_NOTEMPTY;
+    case EXT2_EISDIR:
+        return -E_ISDIR;
+    case EXT2_EROFS:
+        return -E_ACCES; /* closest errno: read-only fs */
+    default:
+        return -E_INVAL;
     }
 }
 
@@ -89,8 +98,7 @@ static int32_t fs_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
     return (int32_t)ext2_read(&g_fs, &n->e2, (uint32_t)off, buf, len);
 }
 
-static int32_t fs_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                             uint32_t len)
+static int32_t fs_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     if (off > 0xFFFFFFFFULL)
         return -E_INVAL;
@@ -103,7 +111,7 @@ static int32_t fs_node_write(vfs_node_t *n, uint64_t off, const void *buf,
     return (int32_t)w;
 }
 
-static const vfs_ops_t g_fs_ops = { .read = fs_node_read, .write = fs_node_write };
+static const vfs_ops_t g_fs_ops = {.read = fs_node_read, .write = fs_node_write};
 
 /*
  * Reading a directory yields whole gdirent_t records.  The offset is a byte
@@ -149,14 +157,16 @@ static int32_t dir_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t le
     return (int32_t)(got * rec);
 }
 
-static int32_t dir_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                              uint32_t len)
+static int32_t dir_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
-static const vfs_ops_t g_dir_ops = { .read = dir_node_read, .write = dir_node_write };
+static const vfs_ops_t g_dir_ops = {.read = dir_node_read, .write = dir_node_write};
 
 /* ---- pipes ------------------------------------------------------------ */
 static int32_t pipe_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
@@ -174,7 +184,7 @@ static int32_t pipe_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t l
      * CPU with no kernel pre-emption "cli" is exactly that. */
     asm volatile("cli");
     while (p->count == 0) {
-        if (p->writers == 0) {              /* nobody left to send anything */
+        if (p->writers == 0) { /* nobody left to send anything */
             asm volatile("sti");
             return 0;
         }
@@ -193,12 +203,11 @@ static int32_t pipe_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t l
     }
     asm volatile("sti");
 
-    sched_wake_reason(WAIT_PIPE);           /* a blocked writer has room now */
+    sched_wake_reason(WAIT_PIPE); /* a blocked writer has room now */
     return (int32_t)n2;
 }
 
-static int32_t pipe_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                               uint32_t len)
+static int32_t pipe_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)off;
 
@@ -232,7 +241,7 @@ static int32_t pipe_node_write(vfs_node_t *n, uint64_t off, const void *buf,
 
         while (done < len && p->count < VFS_PIPE_CAP) {
             p->buf[p->head] = s[done++];
-            p->head = (p->head + 1) % VFS_PIPE_CAP;
+            p->head         = (p->head + 1) % VFS_PIPE_CAP;
             p->count++;
         }
         asm volatile("sti");
@@ -248,18 +257,22 @@ static int32_t pipe_node_write(vfs_node_t *n, uint64_t off, const void *buf,
  * generic handler answers ENOTTY. */
 static int32_t null_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return 0;
 }
 
-static int32_t null_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                               uint32_t len)
+static int32_t null_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf;
+    (void)n;
+    (void)off;
+    (void)buf;
     return (int32_t)len;
 }
 
-static const vfs_ops_t g_null_ops = { .read = null_node_read, .write = null_node_write };
+static const vfs_ops_t g_null_ops = {.read = null_node_read, .write = null_node_write};
 
 /* ---- /dev/zero and /dev/full ------------------------------------------- */
 /* Both read as an endless run of zero bytes.  They differ only in what a
@@ -267,20 +280,23 @@ static const vfs_ops_t g_null_ops = { .read = null_node_read, .write = null_node
  * only portable way to make a program take its ENOSPC path on demand. */
 static int32_t zero_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off;
+    (void)n;
+    (void)off;
     memset(buf, 0, len);
     return (int32_t)len;
 }
 
-static int32_t full_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                               uint32_t len)
+static int32_t full_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_NOSPC;
 }
 
-static const vfs_ops_t g_zero_ops = { .read = zero_node_read, .write = null_node_write };
-static const vfs_ops_t g_full_ops = { .read = zero_node_read, .write = full_node_write };
+static const vfs_ops_t g_zero_ops = {.read = zero_node_read, .write = null_node_write};
+static const vfs_ops_t g_full_ops = {.read = zero_node_read, .write = full_node_write};
 
 /* ---- /dev/random and /dev/urandom -------------------------------------- */
 /* One generator behind both names.  Linux stopped distinguishing them years
@@ -289,14 +305,15 @@ static const vfs_ops_t g_full_ops = { .read = zero_node_read, .write = full_node
  * /dev/random here would simply hang the boot. */
 static int32_t random_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off;
+    (void)n;
+    (void)off;
     krandom_bytes(buf, len);
     return (int32_t)len;
 }
 
-static const vfs_ops_t g_random_ops = { .read = random_node_read, .write = null_node_write };
+static const vfs_ops_t g_random_ops = {.read = random_node_read, .write = null_node_write};
 
-static const vfs_ops_t g_pipe_ops = { .read = pipe_node_read, .write = pipe_node_write };
+static const vfs_ops_t g_pipe_ops = {.read = pipe_node_read, .write = pipe_node_write};
 
 int vfs_init(uint8_t *img, uint32_t img_size)
 {
@@ -332,25 +349,22 @@ int vfs_init(uint8_t *img, uint32_t img_size)
         const vfs_ops_t *ops;
         uint16_t         minor;
     } memdevs[] = {
-        { "null",    &g_null_ops,   3 },
-        { "zero",    &g_zero_ops,   5 },
-        { "full",    &g_full_ops,   7 },
-        { "random",  &g_random_ops, 8 },
-        { "urandom", &g_random_ops, 9 },
+        {"null", &g_null_ops, 3},     {"zero", &g_zero_ops, 5},      {"full", &g_full_ops, 7},
+        {"random", &g_random_ops, 8}, {"urandom", &g_random_ops, 9},
     };
     for (unsigned i = 0; i < sizeof(memdevs) / sizeof(memdevs[0]); i++) {
         if (vfs_register_dev(memdevs[i].name, memdevs[i].ops, NULL) < 0)
             continue;
-        int slot = subsys_register(memdevs[i].name, memdevs[i].name,
-                                   SUBSYS_CLASS_MEM, 1, memdevs[i].minor);
+        int slot = subsys_register(memdevs[i].name, memdevs[i].name, SUBSYS_CLASS_MEM, 1,
+                                   memdevs[i].minor);
         subsys_set_state(slot, SUBSYS_STATE_LIVE);
     }
     return 1;
 }
 
 /* ---- /dev ------------------------------------------------------------- */
-static int register_dev(const char *name, const vfs_ops_t *ops, void *priv,
-                        int kind, uint64_t size, uint32_t rdev)
+static int register_dev(const char *name, const vfs_ops_t *ops, void *priv, int kind, uint64_t size,
+                        uint32_t rdev)
 {
     if (g_dev_count >= VFS_MAX_DEV)
         return -E_NOMEM;
@@ -358,11 +372,11 @@ static int register_dev(const char *name, const vfs_ops_t *ops, void *priv,
     vfs_node_t *n = &g_dev[g_dev_count++];
     strncpy(n->name, name, VFS_NAME_MAX - 1);
     n->name[VFS_NAME_MAX - 1] = 0;
-    n->kind = kind;
-    n->size = size;
-    n->ops  = ops;
-    n->priv = priv;
-    n->rdev = rdev;
+    n->kind                   = kind;
+    n->size                   = size;
+    n->ops                    = ops;
+    n->priv                   = priv;
+    n->rdev                   = rdev;
 
     dbg_puts("VFS: registered /dev/");
     dbg_puts(n->name);
@@ -370,8 +384,8 @@ static int register_dev(const char *name, const vfs_ops_t *ops, void *priv,
     return 0;
 }
 
-int vfs_register_devnum(const char *name, const vfs_ops_t *ops, void *priv,
-                        uint32_t maj, uint32_t min)
+int vfs_register_devnum(const char *name, const vfs_ops_t *ops, void *priv, uint32_t maj,
+                        uint32_t min)
 {
     /* Linux's new_encode_dev() */
     uint32_t rdev = (min & 0xff) | (maj << 8) | ((min & ~0xffu) << 12);
@@ -383,8 +397,7 @@ int vfs_register_dev(const char *name, const vfs_ops_t *ops, void *priv)
     return register_dev(name, ops, priv, VFS_CHARDEV, 0, 0);
 }
 
-int vfs_register_blkdev(const char *name, const vfs_ops_t *ops, void *priv,
-                        uint64_t size)
+int vfs_register_blkdev(const char *name, const vfs_ops_t *ops, void *priv, uint64_t size)
 {
     return register_dev(name, ops, priv, VFS_BLOCKDEV, size, 0);
 }
@@ -424,14 +437,14 @@ static vfs_node_t *dev_lookup(const char *name)
 #define MAX_MOUNTS 8
 #define MT_TMPFS   1
 #define MT_CGROUP  2
-#define MT_EXT2    3    /* an ext2/ext4 volume from a block device */
-#define MT_FAT     4    /* a FAT12/16/32 volume from a block device */
-#define MT_ISO     5    /* a read-only ISO9660 volume (CD-ROM) */
-#define MT_DEV     6    /* devtmpfs: /dev backed by the live device registry */
+#define MT_EXT2    3 /* an ext2/ext4 volume from a block device */
+#define MT_FAT     4 /* a FAT12/16/32 volume from a block device */
+#define MT_ISO     5 /* a read-only ISO9660 volume (CD-ROM) */
+#define MT_DEV     6 /* devtmpfs: /dev backed by the live device registry */
 struct mount_entry {
     char     mnt[GNUOS_PATH_MAX];
     int      type;
-    tmpfs_t *fs;            /* MT_TMPFS payload; NULL for MT_CGROUP/MT_EXT2 */
+    tmpfs_t *fs; /* MT_TMPFS payload; NULL for MT_CGROUP/MT_EXT2 */
 } g_mounts[MAX_MOUNTS];
 int g_mount_count = 0;
 
@@ -444,7 +457,7 @@ int g_mount_count = 0;
  */
 static ext2_fs_t  g_bfs;
 static int        g_bfs_ok;
-static vfs_node_t g_bfs_dev;     /* the block device the volume rides on */
+static vfs_node_t g_bfs_dev; /* the block device the volume rides on */
 
 static int32_t bfs_blk_read(void *ctx, uint64_t off, void *buf, uint32_t len)
 {
@@ -452,8 +465,7 @@ static int32_t bfs_blk_read(void *ctx, uint64_t off, void *buf, uint32_t len)
     return g_bfs_dev.ops->read(&g_bfs_dev, off, buf, len);
 }
 
-static int32_t bfs_blk_write(void *ctx, uint64_t off, const void *buf,
-                             uint32_t len)
+static int32_t bfs_blk_write(void *ctx, uint64_t off, const void *buf, uint32_t len)
 {
     (void)ctx;
     return g_bfs_dev.ops->write(&g_bfs_dev, off, buf, len);
@@ -461,8 +473,7 @@ static int32_t bfs_blk_write(void *ctx, uint64_t off, const void *buf,
 
 /* Reads and writes through the disk-mounted volume (g_bfs), reached via
  * the blkio shims that route through g_bfs_dev's own ops. */
-static int32_t bfs_node_read(vfs_node_t *n, uint64_t off, void *buf,
-                             uint32_t len)
+static int32_t bfs_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     (void)n;
     if (off > 0xFFFFFFFFULL)
@@ -470,8 +481,7 @@ static int32_t bfs_node_read(vfs_node_t *n, uint64_t off, void *buf,
     return (int32_t)ext2_read(&g_bfs, &n->e2, (uint32_t)off, buf, len);
 }
 
-static int32_t bfs_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                              uint32_t len)
+static int32_t bfs_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)n;
     if (off > 0xFFFFFFFFULL)
@@ -483,12 +493,9 @@ static int32_t bfs_node_write(vfs_node_t *n, uint64_t off, const void *buf,
     return (int32_t)w;
 }
 
-static const vfs_ops_t g_bfs_file_ops = {
-    .read = bfs_node_read, .write = bfs_node_write
-};
+static const vfs_ops_t g_bfs_file_ops = {.read = bfs_node_read, .write = bfs_node_write};
 
-static int32_t bfs_dir_read(vfs_node_t *n, uint64_t off, void *buf,
-                            uint32_t len)
+static int32_t bfs_dir_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     const uint32_t rec = (uint32_t)sizeof(gdirent_t);
     if (off % rec)
@@ -523,16 +530,16 @@ static int32_t bfs_dir_read(vfs_node_t *n, uint64_t off, void *buf,
     return (int32_t)(got * rec);
 }
 
-static int32_t bfs_dir_write(vfs_node_t *n, uint64_t off, const void *buf,
-                             uint32_t len)
+static int32_t bfs_dir_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
-static const vfs_ops_t g_bfs_dir_ops = {
-    .read = bfs_dir_read, .write = bfs_dir_write
-};
+static const vfs_ops_t g_bfs_dir_ops = {.read = bfs_dir_read, .write = bfs_dir_write};
 
 /* Return the tmpfs instance (if any) that owns `abs`, choosing the longest
  * matching mount prefix, and write the path relative to that instance's root
@@ -554,9 +561,8 @@ static int vfs_route_dev(const char *abs, char *rel)
             rest = "/";
         if (rest[0] != '/')
             continue;
-        if (strncmp(rest, "/shm", 4) == 0 &&
-            (rest[4] == 0 || rest[4] == '/'))
-            return 0;                /* POSIX shm owns its subtree */
+        if (strncmp(rest, "/shm", 4) == 0 && (rest[4] == 0 || rest[4] == '/'))
+            return 0; /* POSIX shm owns its subtree */
         strcpy(rel, rest);
         return 1;
     }
@@ -573,9 +579,9 @@ int devtmpfs_readdir(const char *mntrel, uint32_t pos, char *name, uint8_t *dt)
             continue;
         strncpy(name, g_dev[i].name, VFS_NAME_MAX - 1);
         name[VFS_NAME_MAX - 1] = 0;
-        *dt = g_dev[i].kind == VFS_BLOCKDEV ? 6 /* DT_BLK */
-            : g_dev[i].kind == VFS_DIR         ? 4 /* DT_DIR */
-                                               : 2 /* DT_CHR */;
+        *dt                    = g_dev[i].kind == VFS_BLOCKDEV ? 6 /* DT_BLK */
+                                 : g_dev[i].kind == VFS_DIR    ? 4 /* DT_DIR */
+                                                               : 2 /* DT_CHR */;
         return 0;
     }
     return -1;
@@ -583,20 +589,27 @@ int devtmpfs_readdir(const char *mntrel, uint32_t pos, char *name, uint8_t *dt)
 
 static tmpfs_t *vfs_route_tmpfs(const char *abs, char *rel)
 {
-    tmpfs_t *best = NULL;
+    tmpfs_t *best    = NULL;
     int      bestlen = -1;
     for (int i = 0; i < g_mount_count; i++) {
         if (g_mounts[i].type != MT_TMPFS)
             continue;
-        const char *m = g_mounts[i].mnt;
-        int ml = (int)strlen(m);
+        const char *m  = g_mounts[i].mnt;
+        int         ml = (int)strlen(m);
         if (strcmp(abs, m) == 0) {
-            if (ml > bestlen) { best = g_mounts[i].fs; bestlen = ml;
-                                 rel[0] = '/'; rel[1] = 0; }
+            if (ml > bestlen) {
+                best    = g_mounts[i].fs;
+                bestlen = ml;
+                rel[0]  = '/';
+                rel[1]  = 0;
+            }
         } else if (strncmp(abs, m, ml) == 0 && abs[ml] == '/') {
-            if (ml > bestlen) { best = g_mounts[i].fs; bestlen = ml;
-                                 strncpy(rel, abs + ml, GNUOS_PATH_MAX - 1);
-                                 rel[GNUOS_PATH_MAX - 1] = 0; }
+            if (ml > bestlen) {
+                best    = g_mounts[i].fs;
+                bestlen = ml;
+                strncpy(rel, abs + ml, GNUOS_PATH_MAX - 1);
+                rel[GNUOS_PATH_MAX - 1] = 0;
+            }
         }
     }
     return best;
@@ -611,15 +624,20 @@ static int vfs_route_cgroup(const char *abs, char *rel)
     for (int i = 0; i < g_mount_count; i++) {
         if (g_mounts[i].type != MT_CGROUP)
             continue;
-        const char *m = g_mounts[i].mnt;
-        int ml = (int)strlen(m);
+        const char *m  = g_mounts[i].mnt;
+        int         ml = (int)strlen(m);
         if (strcmp(abs, m) == 0) {
-            if (ml > bestlen) { bestlen = ml;
-                                 rel[0] = '/'; rel[1] = 0; }
+            if (ml > bestlen) {
+                bestlen = ml;
+                rel[0]  = '/';
+                rel[1]  = 0;
+            }
         } else if (strncmp(abs, m, ml) == 0 && abs[ml] == '/') {
-            if (ml > bestlen) { bestlen = ml;
-                                 strncpy(rel, abs + ml, GNUOS_PATH_MAX - 1);
-                                 rel[GNUOS_PATH_MAX - 1] = 0; }
+            if (ml > bestlen) {
+                bestlen = ml;
+                strncpy(rel, abs + ml, GNUOS_PATH_MAX - 1);
+                rel[GNUOS_PATH_MAX - 1] = 0;
+            }
         }
     }
     return bestlen >= 0;
@@ -637,8 +655,8 @@ int vfs_mount_tmpfs(const char *path)
         return -E_NOSPC;
     strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
     g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
-    g_mounts[g_mount_count].type = MT_TMPFS;
-    g_mounts[g_mount_count].fs = fs;
+    g_mounts[g_mount_count].type                    = MT_TMPFS;
+    g_mounts[g_mount_count].fs                      = fs;
     g_mount_count++;
     return 0;
 }
@@ -653,8 +671,8 @@ int vfs_mount_devtmpfs(const char *path)
 
     strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
     g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
-    g_mounts[g_mount_count].type = MT_DEV;
-    g_mounts[g_mount_count].fs   = NULL;
+    g_mounts[g_mount_count].type                    = MT_DEV;
+    g_mounts[g_mount_count].fs                      = NULL;
     g_mount_count++;
     return 0;
 }
@@ -668,8 +686,8 @@ int vfs_mount_cgroupfs(const char *path)
             return -E_EXIST;
     strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
     g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
-    g_mounts[g_mount_count].type = MT_CGROUP;
-    g_mounts[g_mount_count].fs = NULL;
+    g_mounts[g_mount_count].type                    = MT_CGROUP;
+    g_mounts[g_mount_count].fs                      = NULL;
     g_mount_count++;
     return 0;
 }
@@ -709,8 +727,8 @@ int vfs_mount_bdev(const char *path, const char *devname)
         if (fr == 0) {
             strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
             g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
-            g_mounts[g_mount_count].type = MT_FAT;
-            g_mounts[g_mount_count].fs   = NULL;
+            g_mounts[g_mount_count].type                    = MT_FAT;
+            g_mounts[g_mount_count].fs                      = NULL;
             g_mount_count++;
             return 0;
         }
@@ -718,8 +736,8 @@ int vfs_mount_bdev(const char *path, const char *devname)
         if (iso9660_mount_bdev(path, d, d->size / 2048) == 0) {
             strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
             g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
-            g_mounts[g_mount_count].type = MT_ISO;
-            g_mounts[g_mount_count].fs   = NULL;
+            g_mounts[g_mount_count].type                    = MT_ISO;
+            g_mounts[g_mount_count].fs                      = NULL;
             g_mount_count++;
             return 0;
         }
@@ -731,13 +749,15 @@ int vfs_mount_bdev(const char *path, const char *devname)
 
     for (int i = 0; i < g_mount_count; i++)
         if (g_mounts[i].type == MT_EXT2)
-            g_mount_count--, memmove(&g_mounts[i], &g_mounts[i + 1],
-                    (unsigned)(g_mount_count - i) * sizeof(g_mounts[0])), i--;
+            g_mount_count--,
+                memmove(&g_mounts[i], &g_mounts[i + 1],
+                        (unsigned)(g_mount_count - i) * sizeof(g_mounts[0])),
+                i--;
 
     strncpy(g_mounts[g_mount_count].mnt, path, GNUOS_PATH_MAX - 1);
     g_mounts[g_mount_count].mnt[GNUOS_PATH_MAX - 1] = 0;
-    g_mounts[g_mount_count].type = MT_EXT2;
-    g_mounts[g_mount_count].fs = NULL;
+    g_mounts[g_mount_count].type                    = MT_EXT2;
+    g_mounts[g_mount_count].fs                      = NULL;
     g_mount_count++;
     g_bfs_ok = 1;
 
@@ -765,8 +785,8 @@ static int vfs_route_bfs(const char *abs, char *rel)
         if (g_mounts[i].type != MT_EXT2)
             continue;
         size_t ml = strlen(g_mounts[i].mnt);
-        if (strncmp(abs, g_mounts[i].mnt, ml) == 0 &&
-            (abs[ml] == '/' || abs[ml] == '\0') && (int)ml > bestlen) {
+        if (strncmp(abs, g_mounts[i].mnt, ml) == 0 && (abs[ml] == '/' || abs[ml] == '\0') &&
+            (int)ml > bestlen) {
             bestlen = (int)ml;
             if (abs[ml]) {
                 strncpy(rel, abs + ml, GNUOS_PATH_MAX - 1);
@@ -798,8 +818,7 @@ int vfs_umount(const char *path)
 {
     if (iso9660_umount(path) == 0) {
         for (int i = 0; i < g_mount_count; i++)
-            if (g_mounts[i].type == MT_ISO &&
-                strcmp(g_mounts[i].mnt, path) == 0) {
+            if (g_mounts[i].type == MT_ISO && strcmp(g_mounts[i].mnt, path) == 0) {
                 memmove(&g_mounts[i], &g_mounts[i + 1],
                         (unsigned)(g_mount_count - i - 1) * sizeof(g_mounts[0]));
                 g_mount_count--;
@@ -809,8 +828,7 @@ int vfs_umount(const char *path)
     }
     if (fatfs_umount(path) == 0) {
         for (int i = 0; i < g_mount_count; i++)
-            if (g_mounts[i].type == MT_FAT &&
-                strcmp(g_mounts[i].mnt, path) == 0) {
+            if (g_mounts[i].type == MT_FAT && strcmp(g_mounts[i].mnt, path) == 0) {
                 memmove(&g_mounts[i], &g_mounts[i + 1],
                         (unsigned)(g_mount_count - i - 1) * sizeof(g_mounts[0]));
                 g_mount_count--;
@@ -899,7 +917,7 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
 
     /* A mounted tmpfs shadows the ext2 image at its mount point, exactly as
      * /proc shadows the empty /proc directory the image carries. */
-    char mrel[GNUOS_PATH_MAX];
+    char     mrel[GNUOS_PATH_MAX];
     tmpfs_t *mfs = vfs_route_tmpfs(path, mrel);
     if (mfs)
         return tmpfs_resolve(mfs, mrel, out);
@@ -925,11 +943,10 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
         memset(out, 0, sizeof(*out));
         strncpy(out->name, ent.name, VFS_NAME_MAX - 1);
         uint16_t m = (uint16_t)(ent.mode & 0xF000);
-        out->kind = (m == EXT2_S_IFDIR) ? VFS_DIR
-                  : (m == EXT2_S_IFLNK) ? VFS_SYMLINK : VFS_FILE;
-        out->size = ent.size;
-        out->ops  = (out->kind == VFS_DIR) ? &g_bfs_dir_ops : &g_bfs_file_ops;
-        out->e2   = ent;
+        out->kind  = (m == EXT2_S_IFDIR) ? VFS_DIR : (m == EXT2_S_IFLNK) ? VFS_SYMLINK : VFS_FILE;
+        out->size  = ent.size;
+        out->ops   = (out->kind == VFS_DIR) ? &g_bfs_dir_ops : &g_bfs_file_ops;
+        out->e2    = ent;
         return 0;
     }
 
@@ -943,11 +960,10 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     memset(out, 0, sizeof(*out));
     strncpy(out->name, ent.name, VFS_NAME_MAX - 1);
     uint16_t m = (uint16_t)(ent.mode & 0xF000);
-    out->kind = (m == EXT2_S_IFDIR) ? VFS_DIR
-              : (m == EXT2_S_IFLNK) ? VFS_SYMLINK : VFS_FILE;
-    out->size = ent.size;
-    out->ops  = (out->kind == VFS_DIR) ? &g_dir_ops : &g_fs_ops;
-    out->e2   = ent;
+    out->kind  = (m == EXT2_S_IFDIR) ? VFS_DIR : (m == EXT2_S_IFLNK) ? VFS_SYMLINK : VFS_FILE;
+    out->size  = ent.size;
+    out->ops   = (out->kind == VFS_DIR) ? &g_dir_ops : &g_fs_ops;
+    out->e2    = ent;
     return 0;
 }
 
@@ -957,36 +973,55 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
  * honest "unknown" beats a fabricated value.  The permission bits come from the
  * inode when present, else from the node kind's default.
  */
-static vfs_file_t *get(int h);   /* defined further down; needed by fstat/path */
-static void fill_stat(const vfs_node_t *n, lstat_t *st)
+static vfs_file_t *get(int h); /* defined further down; needed by fstat/path */
+static void        fill_stat(const vfs_node_t *n, lstat_t *st)
 {
     memset(st, 0, sizeof(*st));
 
     uint32_t type, perms;
     switch (n->kind) {
-    case VFS_DIR:      type = 0x4000; perms = 0755; break; /* S_IFDIR */
-    case VFS_SYMLINK:  type = 0xA000; perms = 0777; break; /* S_IFLNK */
-    case VFS_CHARDEV:  type = 0x2000; perms = 0600; break; /* S_IFCHR */
-    case VFS_BLOCKDEV: type = 0x6000; perms = 0660; break; /* S_IFBLK */
-    case VFS_PIPE:     type = 0x1000; perms = 0600; break; /* S_IFIFO */
-    case VFS_SOCKET:   type = 0xC000; perms = 0777; break; /* S_IFSOCK */
-    default:           type = 0x8000; perms = 0644; break; /* S_IFREG */
+    case VFS_DIR:
+        type  = 0x4000;
+        perms = 0755;
+        break; /* S_IFDIR */
+    case VFS_SYMLINK:
+        type  = 0xA000;
+        perms = 0777;
+        break; /* S_IFLNK */
+    case VFS_CHARDEV:
+        type  = 0x2000;
+        perms = 0600;
+        break; /* S_IFCHR */
+    case VFS_BLOCKDEV:
+        type  = 0x6000;
+        perms = 0660;
+        break; /* S_IFBLK */
+    case VFS_PIPE:
+        type  = 0x1000;
+        perms = 0600;
+        break; /* S_IFIFO */
+    case VFS_SOCKET:
+        type  = 0xC000;
+        perms = 0777;
+        break; /* S_IFSOCK */
+    default:
+        type  = 0x8000;
+        perms = 0644;
+        break; /* S_IFREG */
     }
     if ((n->e2.mode & 0x0FFF) != 0)
         perms = n->e2.mode & 0x0FFF;
 
-    st->st_dev     = 1;                   /* one mounted volume */
-    st->st_ino     = n->e2.ino;
-    st->st_nlink   = (n->kind == VFS_DIR) ? 2 : 1;
-    st->st_mode    = type | perms;
-    st->st_uid     = n->e2.uid;
-    st->st_gid     = n->e2.gid;
-    st->st_rdev    = (n->kind == VFS_CHARDEV || n->kind == VFS_BLOCKDEV)
-                     ? n->rdev : 0;
+    st->st_dev   = 1; /* one mounted volume */
+    st->st_ino   = n->e2.ino;
+    st->st_nlink = (n->kind == VFS_DIR) ? 2 : 1;
+    st->st_mode  = type | perms;
+    st->st_uid   = n->e2.uid;
+    st->st_gid   = n->e2.gid;
+    st->st_rdev  = (n->kind == VFS_CHARDEV || n->kind == VFS_BLOCKDEV) ? n->rdev : 0;
     /* tmpfs files report their live size: the vfs_node copy is frozen at
      * open time but ftruncate moves the real one (see tmpfs_file_size). */
-    st->st_size    = (n->kind == VFS_FILE && tmpfs_is_file_node(n))
-                     ? tmpfs_file_size(n) : n->size;
+    st->st_size    = (n->kind == VFS_FILE && tmpfs_is_file_node(n)) ? tmpfs_file_size(n) : n->size;
     st->st_blksize = 4096;
     st->st_blocks  = (st->st_size + 511) / 512;
 }
@@ -994,7 +1029,7 @@ static void fill_stat(const vfs_node_t *n, lstat_t *st)
 int vfs_stat_linux(const char *path, lstat_t *st, int follow)
 {
     vfs_node_t n;
-    int r = resolve(path, &n, follow);
+    int        r = resolve(path, &n, follow);
     if (r < 0)
         return r;
     fill_stat(&n, st);
@@ -1016,14 +1051,14 @@ int vfs_fstat(int h, lstat_t *st)
  * pads every record out to eight bytes and d_off is a cookie pointing just
  * past the entry, which is what a rewinddir-free reader walks by.
  */
-static uint32_t emit_dirent(uint8_t *p, uint64_t off, uint32_t len,
-                            uint64_t ino, const char *name, uint8_t dt)
+static uint32_t emit_dirent(uint8_t *p, uint64_t off, uint32_t len, uint64_t ino, const char *name,
+                            uint8_t dt)
 {
     uint32_t nl = 0;
     while (nl < 255 && name[nl])
         nl++;
-    uint32_t reclen = 19 + nl + 1;      /* d_ino+d_off+d_reclen+d_type+name+NUL */
-    reclen = (reclen + 7) & ~7u;
+    uint32_t reclen = 19 + nl + 1; /* d_ino+d_off+d_reclen+d_type+name+NUL */
+    reclen          = (reclen + 7) & ~7u;
 
     if (off + reclen > len)
         return 0;
@@ -1031,8 +1066,8 @@ static uint32_t emit_dirent(uint8_t *p, uint64_t off, uint32_t len,
     uint64_t doff = off + reclen;
     uint16_t rl   = (uint16_t)reclen;
 
-    memcpy(p + off + 0,  &ino, 8);
-    memcpy(p + off + 8,  &doff, 8);
+    memcpy(p + off + 0, &ino, 8);
+    memcpy(p + off + 8, &doff, 8);
     memcpy(p + off + 16, &rl, 2);
     memcpy(p + off + 18, &dt, 1);
     for (uint32_t i = 0; i < nl; i++)
@@ -1057,7 +1092,7 @@ static int64_t proc_getdents64(vfs_file_t *f, void *buf, uint32_t len)
 
         uint32_t rec = emit_dirent(p, off, len, f->pos + 1, name, dt);
         if (!rec)
-            break;                      /* buffer full: pos stays, caller retries */
+            break; /* buffer full: pos stays, caller retries */
         off += rec;
         f->pos++;
     }
@@ -1114,7 +1149,7 @@ static int64_t sysfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
  * directory's path, same contract as the other two. */
 static int64_t cgroupfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
 {
-    char    crel[GNUOS_PATH_MAX];
+    char crel[GNUOS_PATH_MAX];
     if (!vfs_route_cgroup(f->path, crel))
         return -E_NOENT;
 
@@ -1141,7 +1176,7 @@ static int64_t cgroupfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
  * same contract proc_getdents64 uses. */
 static int64_t tmpfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
 {
-    char    rel[GNUOS_PATH_MAX];
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(f->path, rel);
     if (!fs)
         return -E_NOENT;
@@ -1157,7 +1192,7 @@ static int64_t tmpfs_getdents64(vfs_file_t *f, void *buf, uint32_t len)
 
         uint32_t rec = emit_dirent(p, off, len, f->pos + 1, name, dt);
         if (!rec)
-            break;                      /* buffer full: pos stays, caller retries */
+            break; /* buffer full: pos stays, caller retries */
         off += rec;
         f->pos++;
     }
@@ -1202,18 +1237,15 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
             return (int64_t)off;
         }
     }
-    if (strncmp(f->path, "/proc", 5) == 0 &&
-        (f->path[5] == '\0' || f->path[5] == '/'))
+    if (strncmp(f->path, "/proc", 5) == 0 && (f->path[5] == '\0' || f->path[5] == '/'))
         return proc_getdents64(f, buf, len);
 
     /* /debug is enumerated the same way: by index from the generated table. */
-    if (strncmp(f->path, "/debug", 6) == 0 &&
-        (f->path[6] == '\0' || f->path[6] == '/'))
+    if (strncmp(f->path, "/debug", 6) == 0 && (f->path[6] == '\0' || f->path[6] == '/'))
         return debugfs_getdents64(f, buf, len);
 
     /* /sys directories are enumerated from the registered attribute paths. */
-    if (strncmp(f->path, "/sys", 4) == 0 &&
-        (f->path[4] == '\0' || f->path[4] == '/'))
+    if (strncmp(f->path, "/sys", 4) == 0 && (f->path[4] == '\0' || f->path[4] == '/'))
         return sysfs_getdents64(f, buf, len);
 
     /* A cgroup mount is enumerated against the shared v2 hierarchy. */
@@ -1222,50 +1254,52 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
         return cgroupfs_getdents64(f, buf, len);
 
     /* A tmpfs mount is enumerated the same way: by index from its tree. */
-    char mrel[GNUOS_PATH_MAX];
+    char     mrel[GNUOS_PATH_MAX];
     tmpfs_t *mfs = vfs_route_tmpfs(f->path, mrel);
     if (mfs)
         return tmpfs_getdents64(f, buf, len);
 
     /* A disk-mounted ext2/ext4 volume is enumerated from g_bfs, not the
      * root image.  The node's ops tell us which volume it belongs to. */
-    int disk_vol = (f->node.ops == &g_bfs_file_ops ||
-                    f->node.ops == &g_bfs_dir_ops);
-    ext2_fs_t *walk_fs = disk_vol ? &g_bfs : &g_fs;
-    ext2_dir_t     d;
-    ext2_dirent_t  e;
+    int           disk_vol = (f->node.ops == &g_bfs_file_ops || f->node.ops == &g_bfs_dir_ops);
+    ext2_fs_t    *walk_fs  = disk_vol ? &g_bfs : &g_fs;
+    ext2_dir_t    d;
+    ext2_dirent_t e;
     ext2_opendir(walk_fs, f->node.e2.ino, &d);
 
-    uint8_t  *p   = (uint8_t *)buf;
-    uint64_t  off = 0;
-    uint32_t  total = 0;                /* logical entry index: ".", "..", then real */
-    uint32_t  emitted = 0;
+    uint8_t *p       = (uint8_t *)buf;
+    uint64_t off     = 0;
+    uint32_t total   = 0; /* logical entry index: ".", "..", then real */
+    uint32_t emitted = 0;
 
     /* getdents64 must report "." and ".." even though ext2_readdir skips
      * them; every reader expects them.  The skip below honours a non-zero
      * f->pos so a rewind-free walk still resumes correctly. */
     const char dot[] = ".", dotdot[] = "..";
-    uint32_t parent = ext2_parent_ino(walk_fs, f->node.e2.ino);
+    uint32_t   parent = ext2_parent_ino(walk_fs, f->node.e2.ino);
 
     if (total++ >= f->pos) {
         uint32_t rec = emit_dirent(p, off, len, f->node.e2.ino, dot, DT_DIR);
-        if (!rec) return (int64_t)off;
-        off += rec; emitted++;
+        if (!rec)
+            return (int64_t)off;
+        off += rec;
+        emitted++;
     }
     if (total++ >= f->pos) {
         uint32_t rec = emit_dirent(p, off, len, parent, dotdot, DT_DIR);
-        if (!rec) return (int64_t)off;
-        off += rec; emitted++;
+        if (!rec)
+            return (int64_t)off;
+        off += rec;
+        emitted++;
     }
 
     while (ext2_readdir(&d, &e)) {
         if (total++ < f->pos)
-            continue;                   /* reported in a previous call */
+            continue; /* reported in a previous call */
 
-        uint32_t rec = emit_dirent(p, off, len, e.ino, e.name,
-                                   ext2_is_dir(&e) ? DT_DIR : DT_REG);
+        uint32_t rec = emit_dirent(p, off, len, e.ino, e.name, ext2_is_dir(&e) ? DT_DIR : DT_REG);
         if (!rec)
-            break;                      /* buffer full: keep pos, return what we have */
+            break; /* buffer full: keep pos, return what we have */
 
         off += rec;
         emitted++;
@@ -1278,7 +1312,7 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
 int vfs_stat(const char *path, uint64_t *size, int *kind)
 {
     vfs_node_t n;
-    int r = resolve(path, &n, 1);
+    int        r = resolve(path, &n, 1);
     if (r < 0)
         return r;
 
@@ -1297,7 +1331,7 @@ int vfs_stat(const char *path, uint64_t *size, int *kind)
  * directory, or root -- may take it away, which is what stops one user from
  * deleting another's scratch files.
  */
-static void creator_from_caller(void)   /* defined below; needs proc_current */
+static void creator_from_caller(void) /* defined below; needs proc_current */
 {
     proc_t *p = proc_current();
     ext2_set_creator(&g_fs, p ? p->euid : 0, p ? p->egid : 0);
@@ -1325,24 +1359,23 @@ static int may_mutate_dir(const char *path, const char *victim)
 {
     proc_t *p = proc_current();
     if (!p)
-        return 0;                            /* kernel-internal: allowed */
+        return 0; /* kernel-internal: allowed */
 
     char dir[GNUOS_PATH_MAX];
     parent_path(path, dir);
 
     uint32_t duid, dgid, dmode;
-    int ddir;
+    int      ddir;
     if (vfs_owner(dir, &duid, &dgid, &dmode, &ddir, 1) < 0)
-        return 0;                            /* let the real call report it */
+        return 0; /* let the real call report it */
 
     if (!proc_permitted(dmode, duid, dgid, 2 | 1, ddir))
         return -E_ACCES;
 
     if (victim && (dmode & 01000) && p->euid != 0 && p->euid != duid) {
         uint32_t fuid, fgid, fmode;
-        int fdir;
-        if (vfs_owner(victim, &fuid, &fgid, &fmode, &fdir, 0) == 0 &&
-            p->euid != fuid)
+        int      fdir;
+        if (vfs_owner(victim, &fuid, &fgid, &fmode, &fdir, 0) == 0 && p->euid != fuid)
             return -E_PERM;
     }
     return 0;
@@ -1362,7 +1395,7 @@ int vfs_unlink(const char *path)
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
         return -E_PERM;
-    char rel[GNUOS_PATH_MAX];
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
         return tmpfs_unlink(fs, rel);
@@ -1387,13 +1420,13 @@ int vfs_rmdir(const char *path)
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
         return cgfs_rmdir(crel);
-    char rel[GNUOS_PATH_MAX];
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
         return tmpfs_rmdir(fs, rel);
 
     vfs_node_t n;
-    int r = resolve(path, &n, 0);
+    int        r = resolve(path, &n, 0);
     if (r < 0)
         return r;
     if (n.kind != GK_DIR)
@@ -1411,7 +1444,7 @@ int vfs_mkdir(const char *path)
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
         return cgfs_mkdir(crel);
-    char rel[GNUOS_PATH_MAX];
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
         return tmpfs_mkdir(fs, rel, 0755);
@@ -1430,8 +1463,8 @@ int vfs_symlink(const char *target, const char *path)
         return g;
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
-        return -E_PERM;             /* cgroupfs has no symlinks */
-    char rel[GNUOS_PATH_MAX];
+        return -E_PERM; /* cgroupfs has no symlinks */
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
         return tmpfs_symlink(fs, target, rel);
@@ -1448,11 +1481,11 @@ int vfs_link(const char *oldpath, const char *newpath)
         return g;
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(oldpath, crel) || vfs_route_cgroup(newpath, crel))
-        return -E_PERM;             /* cgroupfs has no hard links */
-    char rel[GNUOS_PATH_MAX];
+        return -E_PERM; /* cgroupfs has no hard links */
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(newpath, rel);
     if (fs)
-        return -E_OPNOTSUPP;            /* tmpfs has no inode sharing */
+        return -E_OPNOTSUPP; /* tmpfs has no inode sharing */
     return fs_errno(ext2_link(&g_fs, oldpath, newpath));
 }
 
@@ -1501,7 +1534,7 @@ int vfs_readlink(const char *path, char *buf, uint32_t cap)
     /* tmpfs first: vfs_symlink() has always been willing to create a link on
      * a tmpfs, so reading one back has to work too -- otherwise `ln -s`
      * succeeds and `readlink` comes back empty. */
-    char rel[GNUOS_PATH_MAX];
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *tfs = vfs_route_tmpfs(path, rel);
     if (tfs)
         return tmpfs_readlink(tfs, rel, buf, cap);
@@ -1539,7 +1572,7 @@ int vfs_rename(const char *src, const char *dst)
      * paths first and comparing the instances is what makes the distinction --
      * before this, every rename went to ext2, so `mv` on a tmpfs failed with a
      * bare ENOENT that mv had no fallback for. */
-    char srel[GNUOS_PATH_MAX], drel[GNUOS_PATH_MAX];
+    char     srel[GNUOS_PATH_MAX], drel[GNUOS_PATH_MAX];
     tmpfs_t *sfs = vfs_route_tmpfs(src, srel);
     tmpfs_t *dfs = vfs_route_tmpfs(dst, drel);
     if (sfs != dfs)
@@ -1567,7 +1600,7 @@ int vfs_truncate(const char *path, uint64_t len)
     if (vfs_route_cgroup(path, crel))
         return -E_PERM;
 
-    char rel[GNUOS_PATH_MAX];
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
         return tmpfs_setsize(fs, rel, len);
@@ -1576,7 +1609,7 @@ int vfs_truncate(const char *path, uint64_t len)
         return -E_NOENT;
 
     vfs_node_t node;
-    int r = resolve(path, &node, 1);
+    int        r = resolve(path, &node, 1);
     if (r < 0)
         return r;
     if (node.kind == VFS_DIR)
@@ -1606,7 +1639,7 @@ static int slot_alloc(void)
 int vfs_file_open(const char *path, int flags)
 {
     vfs_node_t node;
-    int r = resolve(path, &node, 1);
+    int        r = resolve(path, &node, 1);
 
     if (r == -E_NOENT && (flags & O_CREAT)) {
         /* Nothing may be created on a cgroup mount: the files are part of
@@ -1614,7 +1647,7 @@ int vfs_file_open(const char *path, int flags)
         char crel[GNUOS_PATH_MAX];
         if (vfs_route_cgroup(path, crel))
             return -E_PERM;
-        char rel[GNUOS_PATH_MAX];
+        char     rel[GNUOS_PATH_MAX];
         tmpfs_t *fs = vfs_route_tmpfs(path, rel);
         if (fs) {
             int c = tmpfs_create_file(fs, rel, 0644);
@@ -1633,7 +1666,7 @@ int vfs_file_open(const char *path, int flags)
         return r;
 
     if ((flags & O_TRUNC) && node.kind == VFS_FILE && node.size) {
-        char trel[GNUOS_PATH_MAX];
+        char     trel[GNUOS_PATH_MAX];
         tmpfs_t *tfs = vfs_route_tmpfs(path, trel);
         if (tfs)
             tmpfs_truncate(tfs, trel);
@@ -1726,15 +1759,15 @@ int vfs_chmod(const char *path, uint32_t mode)
 {
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
-        return -E_PERM;         /* cgroupfs modes are fixed */
+        return -E_PERM; /* cgroupfs modes are fixed */
 
-    char rel[GNUOS_PATH_MAX];
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
     if (fs)
         return tmpfs_chmod(fs, rel, mode);
 
     vfs_node_t n;
-    int r = resolve(path, &n, 1);
+    int        r = resolve(path, &n, 1);
     if (r < 0)
         return r;
 
@@ -1757,19 +1790,19 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid, int follow)
 {
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
-        return -E_PERM;         /* cgroupfs keeps no owners */
+        return -E_PERM; /* cgroupfs keeps no owners */
 
     char rel[GNUOS_PATH_MAX];
     if (vfs_route_tmpfs(path, rel))
-        return 0;          /* tmpfs keeps no owner; accept and forget */
+        return 0; /* tmpfs keeps no owner; accept and forget */
 
     vfs_node_t n;
-    int r = resolve(path, &n, follow);
+    int        r = resolve(path, &n, follow);
     if (r < 0)
         return r;
 
     if (!n.e2.ino)
-        return 0;          /* device node or pipe: nothing to write back to */
+        return 0; /* device node or pipe: nothing to write back to */
 
     return fs_errno(ext2_chown(&g_fs, &n.e2, uid, gid));
 }
@@ -1789,10 +1822,10 @@ int vfs_fchown(int h, uint32_t uid, uint32_t gid)
  * The permission checks in the syscall layer call this on the parent
  * directory as well as on the file itself, so it has to be cheap.
  */
-int vfs_owner(const char *path, uint32_t *uid, uint32_t *gid, uint32_t *mode,
-              int *is_dir, int follow)
+int vfs_owner(const char *path, uint32_t *uid, uint32_t *gid, uint32_t *mode, int *is_dir,
+              int follow)
 {
-    char rel[GNUOS_PATH_MAX];
+    char     rel[GNUOS_PATH_MAX];
     tmpfs_t *tfs = vfs_route_tmpfs(path, rel);
     if (tfs) {
         /* tmpfs keeps no owner and is world-writable scratch space by design
@@ -1801,21 +1834,28 @@ int vfs_owner(const char *path, uint32_t *uid, uint32_t *gid, uint32_t *mode,
         vfs_node_t tn;
         if (tmpfs_resolve(tfs, rel, &tn) < 0)
             return -E_NOENT;
-        if (uid)    *uid = 0;
-        if (gid)    *gid = 0;
-        if (mode)   *mode = 0777;
-        if (is_dir) *is_dir = (tn.kind == VFS_DIR);
+        if (uid)
+            *uid = 0;
+        if (gid)
+            *gid = 0;
+        if (mode)
+            *mode = 0777;
+        if (is_dir)
+            *is_dir = (tn.kind == VFS_DIR);
         return 0;
     }
 
     vfs_node_t n;
-    int r = resolve(path, &n, follow);
+    int        r = resolve(path, &n, follow);
     if (r < 0)
         return r;
 
-    if (uid)    *uid = n.e2.uid;
-    if (gid)    *gid = n.e2.gid;
-    if (is_dir) *is_dir = (n.kind == VFS_DIR);
+    if (uid)
+        *uid = n.e2.uid;
+    if (gid)
+        *gid = n.e2.gid;
+    if (is_dir)
+        *is_dir = (n.kind == VFS_DIR);
 
     if (mode) {
         uint32_t m = n.e2.mode & 0x0FFF;
@@ -1823,9 +1863,7 @@ int vfs_owner(const char *path, uint32_t *uid, uint32_t *gid, uint32_t *mode,
             /* A disk is not world-writable even on a system with no security
              * boundary to speak of: handing every process the raw block
              * device makes every file permission below it decorative. */
-            m = (n.kind == VFS_BLOCKDEV) ? 0660
-              : (n.kind == VFS_CHARDEV)  ? 0666
-                                         : 0777;        /* pipe */
+            m = (n.kind == VFS_BLOCKDEV) ? 0660 : (n.kind == VFS_CHARDEV) ? 0666 : 0777; /* pipe */
         else if (m == 0)
             m = (n.kind == VFS_DIR) ? 0755 : 0644;
         *mode = m;
@@ -1871,7 +1909,7 @@ int vfs_pipe(int *read_handle, int *write_handle)
     int rh = slot_alloc();
     if (rh < 0)
         return rh;
-    g_files[rh].refs = 1;                    /* claim it while we look again */
+    g_files[rh].refs = 1; /* claim it while we look again */
 
     int wh = slot_alloc();
     if (wh < 0) {
@@ -1903,7 +1941,7 @@ int vfs_pipe(int *read_handle, int *write_handle)
 /* read()/write() on a socket are recvfrom()/sendto() with no address; the
  * socket index rides in node.priv, which is why sock.c can implement these
  * two without ever seeing the open-file table. */
-static const vfs_ops_t g_sock_ops = { .read = sock_node_read, .write = sock_node_write };
+static const vfs_ops_t g_sock_ops = {.read = sock_node_read, .write = sock_node_write};
 
 int vfs_socket(int sock_index)
 {
@@ -1957,7 +1995,7 @@ void vfs_file_unref(int h)
     if (f->node.kind == VFS_SOCKET) {
         if (--f->refs <= 0) {
             f->refs = 0;
-            int s = (int)(uintptr_t)f->node.priv;
+            int s   = (int)(uintptr_t)f->node.priv;
             if (s < 0)
                 unix_close(-2 - s);
             else
@@ -2018,8 +2056,8 @@ int32_t vfs_file_read(int h, void *buf, uint32_t len)
      * pipe and a socket are streams, and advancing an offset on them would be
      * inventing a number nobody can use. */
     int32_t n = f->node.ops->read(&f->node, f->pos, buf, len);
-    if (n > 0 && (f->node.kind == VFS_FILE || f->node.kind == VFS_DIR ||
-                  f->node.kind == VFS_BLOCKDEV))
+    if (n > 0 &&
+        (f->node.kind == VFS_FILE || f->node.kind == VFS_DIR || f->node.kind == VFS_BLOCKDEV))
         f->pos += (uint32_t)n;
     return n;
 }
@@ -2100,18 +2138,24 @@ int64_t vfs_file_seek(int h, int64_t off, int whence)
     vfs_file_t *f = get(h);
     if (!f)
         return -E_BADF;
-    if (f->node.kind == VFS_PIPE || f->node.kind == VFS_CHARDEV ||
-        f->node.kind == VFS_SOCKET)
+    if (f->node.kind == VFS_PIPE || f->node.kind == VFS_CHARDEV || f->node.kind == VFS_SOCKET)
         return -E_INVAL;
     /* VFS_BLOCKDEV falls through on purpose: a disk is addressable, and
      * f->node.size holds its capacity, so SEEK_END is meaningful too. */
 
     int64_t base;
     switch (whence) {
-    case 0: base = 0;                     break;   /* SEEK_SET */
-    case 1: base = (int64_t)f->pos;       break;   /* SEEK_CUR */
-    case 2: base = (int64_t)f->node.size; break;   /* SEEK_END */
-    default: return -E_INVAL;
+    case 0:
+        base = 0;
+        break; /* SEEK_SET */
+    case 1:
+        base = (int64_t)f->pos;
+        break; /* SEEK_CUR */
+    case 2:
+        base = (int64_t)f->node.size;
+        break; /* SEEK_END */
+    default:
+        return -E_INVAL;
     }
     if (base + off < 0)
         return -E_INVAL;
@@ -2138,7 +2182,7 @@ int vfs_pipe_readable(int h)
     if (p->count > 0)
         return 1;
     if (p->writers == 0)
-        return 1;                       /* read end of a closed pipe => EOF */
+        return 1; /* read end of a closed pipe => EOF */
     return 0;
 }
 

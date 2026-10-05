@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 #include "ext2.h"
-#include "sysnum.h"          /* O_* flags and the user-visible record types */
+#include "sysnum.h" /* O_* flags and the user-visible record types */
 
 /* The open-file table is shared by every process, so it has to cover the
  * worst case across all of them at once, not per process. */
@@ -29,69 +29,69 @@
 
 /* Pipe capacity.  POSIX only promises 512 bytes of atomicity; a page is
  * plenty to keep a producer running while its consumer is descheduled. */
-#define VFS_PIPE_CAP  4096
+#define VFS_PIPE_CAP 4096
 
 /* node kinds -- the same numbers stat() reports as GK_* */
-#define VFS_FILE      1
-#define VFS_DIR       2
-#define VFS_CHARDEV   3
-#define VFS_PIPE      4
-#define VFS_SOCKET    5
-#define VFS_SYMLINK   6
+#define VFS_FILE    1
+#define VFS_DIR     2
+#define VFS_CHARDEV 3
+#define VFS_PIPE    4
+#define VFS_SOCKET  5
+#define VFS_SYMLINK 6
 /* An anonymous node that exists only as an open file -- memfd/eventfd/epoll
  * instances live in no directory, so this kind is what tells stat() to keep
  * them out of /dev and what lets the open-file table release their backing
  * store through ops->release when the last descriptor closes. */
-#define VFS_ANON      8
+#define VFS_ANON 8
 /* A disk, as opposed to a terminal or a framebuffer.  The distinction earns
  * its keep in exactly one place: a block device has a *position*.  Character
  * devices are streams, so lseek(2) on one is meaningless and the VFS refuses
  * it -- but a partitioner reading a partition table, or an installer writing
  * a filesystem, does nothing but seek. */
-#define VFS_BLOCKDEV  7
+#define VFS_BLOCKDEV 7
 
 /* errno values the syscall layer hands back to user space */
-#define E_PERM        1
-#define E_NOENT       2
-#define E_SRCH        3
-#define E_INTR        4
-#define E_IO          5
-#define E_2BIG        7
+#define E_PERM  1
+#define E_NOENT 2
+#define E_SRCH  3
+#define E_INTR  4
+#define E_IO    5
+#define E_2BIG  7
 /* ENOEXEC is what execve() must return for a file that is not an ELF, and
  * it is load-bearing rather than cosmetic: it is the signal a shell uses to
  * decide the file is a script and retry it through itself. */
 #define E_NOEXEC      8
 #define E_BADF        9
-#define E_CHILD      10
-#define E_AGAIN      11
-#define E_NOMEM      12
-#define E_ACCES      13
-#define E_FAULT      14
-#define E_BUSY       16
-#define E_EXIST      17
-#define E_XDEV       18
-#define E_NOTDIR     20
-#define E_ISDIR      21
-#define E_INVAL      22
-#define E_NFILE      23
-#define E_MFILE      24
-#define E_NOTTY      25
-#define E_NODEV      19
-#define E_NOSPC      28
-#define E_SPIPE      29
-#define E_ROFS       30
-#define E_PIPE       32
-#define E_RANGE      34
+#define E_CHILD       10
+#define E_AGAIN       11
+#define E_NOMEM       12
+#define E_ACCES       13
+#define E_FAULT       14
+#define E_BUSY        16
+#define E_EXIST       17
+#define E_XDEV        18
+#define E_NOTDIR      20
+#define E_ISDIR       21
+#define E_INVAL       22
+#define E_NFILE       23
+#define E_MFILE       24
+#define E_NOTTY       25
+#define E_NODEV       19
+#define E_NOSPC       28
+#define E_SPIPE       29
+#define E_ROFS        30
+#define E_PIPE        32
+#define E_RANGE       34
 #define E_NAMETOOLONG 36
-#define E_NOSYS      38
-#define E_NOTEMPTY   39
-#define E_LOOP       40
+#define E_NOSYS       38
+#define E_NOTEMPTY    39
+#define E_LOOP        40
 /* System V IPC errnos (Linux numbers): msgrcv returns ENOMSG when no
  * matching message is waiting, and every blocked IPC call wakes up with
  * EIDRM when its object is removed under it. */
-#define E_OVERFLOW   75
-#define E_MSG        42              /* ENOMSG */
-#define E_IDRM       43              /* EIDRM */
+#define E_OVERFLOW 75
+#define E_MSG      42 /* ENOMSG */
+#define E_IDRM     43 /* EIDRM */
 
 /* Sockets bring their own half of the errno table with them.  These are the
  * Linux numbers, not invented ones: musl maps a negative return straight into
@@ -108,22 +108,22 @@
 #define E_AFNOSUPPORT    97
 #define E_ADDRINUSE      98
 #define E_ADDRNOTAVAIL   99
-#define E_NETUNREACH    101
-#define E_CONNABORTED   103
-#define E_CONNRESET     104
-#define E_NOBUFS        105
-#define E_ISCONN        106
-#define E_NOTCONN       107
-#define E_TIMEDOUT      110
-#define E_CONNREFUSED   111
-#define E_HOSTUNREACH   113
-#define E_ALREADY       114
-#define E_INPROGRESS    115
+#define E_NETUNREACH     101
+#define E_CONNABORTED    103
+#define E_CONNRESET      104
+#define E_NOBUFS         105
+#define E_ISCONN         106
+#define E_NOTCONN        107
+#define E_TIMEDOUT       110
+#define E_CONNREFUSED    111
+#define E_HOSTUNREACH    113
+#define E_ALREADY        114
+#define E_INPROGRESS     115
 
 /* Internal-only (not a real Linux errno): returned by seccomp_check when
  * the filter decides the process should be killed.  Never seen by user
  * space; syscall_handler intercepts it and calls proc_exit(). */
-#define E_KILLED        256
+#define E_KILLED 256
 
 struct vfs_node;
 
@@ -138,8 +138,7 @@ typedef struct {
      * in the physical range a MAP_SHARED / device mmap should cover;
      * return 0 on success, negative on failure.  NULL means the device is
      * not mappable. */
-    int (*mmap)(struct vfs_node *n, uint64_t offset, uint64_t *phys,
-                uint64_t *size);
+    int (*mmap)(struct vfs_node *n, uint64_t offset, uint64_t *phys, uint64_t *size);
     /* Optional readiness probe for poll(2)/select(2)/epoll_wait(2).
      * `events` is the POLLIN/POLLOUT mask the caller asked for; set the
      * matching bits of *revents.  Return 0, or a negative errno.  NULL
@@ -161,81 +160,80 @@ typedef struct vfs_node {
     uint64_t         size;
     const vfs_ops_t *ops;
     void            *priv;
-    uint32_t         rdev;       /* Linux new_encode_dev() value; 0 = none */
-    ext2_dirent_t    e2;         /* valid when the node lives on the ext2 mount */
+    uint32_t         rdev; /* Linux new_encode_dev() value; 0 = none */
+    ext2_dirent_t    e2;   /* valid when the node lives on the ext2 mount */
 } vfs_node_t;
 
 /* The absolute path a descriptor was opened with.  Lets fchdir() and a
  * relative openat() rebuild a path from a directory fd without re-walking
  * from the root every time. */
-#define VFS_PATH_MAX  GNUOS_PATH_MAX
+#define VFS_PATH_MAX GNUOS_PATH_MAX
 
 /* Mount the ext2 image at `img` on "/".  Returns 1 on success. */
-int  vfs_init(uint8_t *img, uint32_t img_size);
+int vfs_init(uint8_t *img, uint32_t img_size);
 
 /* Publish a character device as "/dev/<name>". */
-int  vfs_register_dev(const char *name, const vfs_ops_t *ops, void *priv);
+int vfs_register_dev(const char *name, const vfs_ops_t *ops, void *priv);
 
 /* Publish a character device with a Linux device number.  `maj`/`min` are
  * what stat(2) reports as st_rdev -- libdrm (drmGetDeviceNameFromFd2) and
  * friends decide whether an fd is a DRM node from exactly this pair, so
  * card0 must read back as (226, 0), event0 as (13, 64) and so on. */
-int  vfs_register_devnum(const char *name, const vfs_ops_t *ops, void *priv,
-                         uint32_t maj, uint32_t min);
+int vfs_register_devnum(const char *name, const vfs_ops_t *ops, void *priv, uint32_t maj,
+                        uint32_t min);
 
 /* Create an anonymous open file -- no directory entry, no path.  This is
  * what memfd_create, eventfd and epoll_create1 hand back: a slot in the
  * open-file table carrying a synthetic node of `kind` whose ops/priv the
  * caller owns (release, if any, frees it on the last close).  Returns a
  * handle, or a negative errno. */
-int  vfs_anon_open(int kind, const vfs_ops_t *ops, void *priv, int flags);
+int vfs_anon_open(int kind, const vfs_ops_t *ops, void *priv, int flags);
 
 /* Publish a block device as "/dev/<name>".  `size` is the capacity in bytes;
  * it is what lseek(SEEK_END) and stat() report, so a partition registers its
  * own length here rather than the whole disk's. */
-int  vfs_register_blkdev(const char *name, const vfs_ops_t *ops, void *priv,
-                         uint64_t size);
+int vfs_register_blkdev(const char *name, const vfs_ops_t *ops, void *priv, uint64_t size);
 
 /* Forget every /dev entry a driver published, by exact name.  Re-reading a
  * partition table means the old /dev/sdaN have to go: a stale window onto a
  * partition that no longer exists is worse than no node at all. */
-int  vfs_unregister_dev(const char *name);
+int vfs_unregister_dev(const char *name);
 
 /* ---- names ------------------------------------------------------------ */
-int  vfs_stat(const char *path, uint64_t *size, int *kind);
-int  vfs_truncate(const char *path, uint64_t len);
-int  vfs_unlink(const char *path);
-int  vfs_rmdir(const char *path);
-int  vfs_mkdir(const char *path);
-int  vfs_link(const char *oldpath, const char *newpath);
-int  vfs_symlink(const char *target, const char *path);
-int  vfs_readlink(const char *path, char *buf, uint32_t cap);
-int  vfs_rename(const char *src, const char *dst);
+int vfs_stat(const char *path, uint64_t *size, int *kind);
+int vfs_truncate(const char *path, uint64_t len);
+int vfs_unlink(const char *path);
+int vfs_rmdir(const char *path);
+int vfs_mkdir(const char *path);
+int vfs_link(const char *oldpath, const char *newpath);
+int vfs_symlink(const char *target, const char *path);
+int vfs_readlink(const char *path, char *buf, uint32_t cap);
+int vfs_rename(const char *src, const char *dst);
 
 /* Linux-style stat (144-byte struct) used by musl/BusyBox. */
-int  vfs_stat_linux(const char *path, lstat_t *st, int follow);
-int  vfs_fstat(int h, lstat_t *st);
+int vfs_stat_linux(const char *path, lstat_t *st, int follow);
+int vfs_fstat(int h, lstat_t *st);
 
 /* statfs(137)/fstatfs(138): fill the kstatfs_t (sysnum.h) for the filesystem
  * backing `path` (or the root fs when path is NULL). */
-int  vfs_statfs(const char *path, void *out);
+int vfs_statfs(const char *path, void *out);
 
 /* Mount a fresh tmpfs instance at `path` (absolute, normalised).  Returns 0 or
  * a negative errno.  This is the VFS side of mount(2); only tmpfs is
  * supported, so any other fstype fails with -E_NODEV at the syscall layer. */
-int  vfs_mount_tmpfs(const char *path);
+int vfs_mount_tmpfs(const char *path);
 
 /* Mount the (single, shared) cgroup v2 hierarchy at `path`, as mount(2)
  * does for fstype "cgroup"/"cgroup2".  Returns 0 or a negative errno.
  * Several mounts of the same hierarchy are allowed at different paths. */
-int  vfs_mount_cgroupfs(const char *path);
+int vfs_mount_cgroupfs(const char *path);
 
 /* Mount an ext2/ext4 volume from a block device (/dev node name, e.g.
  * "nvme0n1p1") at `path`.  Returns 0 or a negative errno. */
-int  vfs_mount_bdev(const char *path, const char *devname);
+int vfs_mount_bdev(const char *path, const char *devname);
 
 /* Remove the mount at `path`.  Returns 0 or a negative errno. */
-int  vfs_umount(const char *path);
+int vfs_umount(const char *path);
 
 /* The tmpfs mounts currently attached, so /proc/mounts can report them.
  * Without this the file lists only the three static entries, and anything
@@ -267,18 +265,18 @@ const vfs_node_t *vfs_file_node(int h);
 
 /* Read `len` bytes from fd at `off` into kernel `buf`; returns the byte
  * count (<= len) or a negative errno.  Lets mmap populate a file mapping. */
-int  vfs_pread_fd(int h, uint64_t off, void *buf, uint32_t len);
+int vfs_pread_fd(int h, uint64_t off, void *buf, uint32_t len);
 
 /* Change the permission bits (low 12) of a path's inode; returns 0 or errno. */
-int  vfs_chmod(const char *path, uint32_t mode);
+int vfs_chmod(const char *path, uint32_t mode);
 
 /* chown(2) family.  (uint32_t)-1 leaves a component alone. */
-int  vfs_chown(const char *path, uint32_t uid, uint32_t gid, int follow);
-int  vfs_fchown(int h, uint32_t uid, uint32_t gid);
+int vfs_chown(const char *path, uint32_t uid, uint32_t gid, int follow);
+int vfs_fchown(int h, uint32_t uid, uint32_t gid);
 
 /* Owner/permission snapshot used by the syscall layer's access checks. */
-int  vfs_owner(const char *path, uint32_t *uid, uint32_t *gid, uint32_t *mode,
-               int *is_dir, int follow);
+int vfs_owner(const char *path, uint32_t *uid, uint32_t *gid, uint32_t *mode, int *is_dir,
+              int follow);
 
 /* Owner stamped onto files created from now on. */
 void vfs_set_creator(uint32_t uid, uint32_t gid);

@@ -1,0 +1,255 @@
+@import './tokens.css';
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--fluent-font-sans);
+  font-size: var(--fluent-font-size-body);
+  color: var(--fluent-text);
+  background: var(--fluent-bg);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--fluent-text-link);
+  text-decoration: none;
+  transition: color var(--fluent-animation-duration) var(--fluent-animation-easing);
+}
+a:hover { color: var(--fluent-accent-hover); text-decoration: underline; }
+
+::selection {
+  background: var(--fluent-accent);
+  color: var(--fluent-text-inverse);
+}
+
+::-webkit-scrollbar {
+  width: 6px; height: 6px;
+}
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--fluent-text-tertiary);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--fluent-text-secondary); }
+
+.fluent-card {
+  background: var(--fluent-bg-card);
+  border: 1px solid var(--fluent-border);
+  border-radius: var(--fluent-radius-lg);
+  box-shadow: var(--fluent-shadow-card);
+  transition: box-shadow var(--fluent-animation-duration) var(--fluent-animation-easing),
+              transform var(--fluent-animation-duration) var(--fluent-animation-easing);
+}
+.fluent-card:hover {
+  box-shadow: var(--fluent-shadow-card-hover);
+  transform: translateY(-1px);
+}
+
+.fluent-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--fluent-spacing-sm);
+  font-family: var(--fluent-font-sans);
+  font-size: var(--fluent-font-size-body);
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 16px;
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: var(--fluent-radius-md);
+  cursor: pointer;
+  transition: background var(--fluent-animation-duration) var(--fluent-animation-easing),
+              border-color var(--fluent-animation-duration) var(--fluent-animation-easing),
+              box-shadow var(--fluent-animation-duration) var(--fluent-animation-easing);
+  text-decoration: none;
+  user-select: none;
+}
+.fluent-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--fluent-bg-card), 0 0 0 3px var(--fluent-border-focus);
+}
+
+.fluent-btn-primary {
+  background: var(--fluent-accent);
+  color: var(--fluent-text-inverse);
+  border-color: var(--fluent-accent);
+}
+.fluent-btn-primary:hover {
+  background: var(--fluent-accent-hover);
+  border-color: var(--fluent-accent-hover);
+}
+.fluent-btn-primary:active {
+  background: var(--fluent-accent-active);
+  border-color: var(--fluent-accent-active);
+}
+
+.fluent-btn-secondary {
+  background: transparent;
+  color: var(--fluent-text);
+  border-color: var(--fluent-border-hover);
+}
+.fluent-btn-secondary:hover {
+  background: var(--fluent-bg-hover);
+  border-color: var(--fluent-text-secondary);
+}
+.fluent-btn-secondary:active {
+  background: var(--fluent-bg-active);
+}
+
+.fluent-btn-danger {
+  background: var(--fluent-status-error);
+  color: var(--fluent-text-inverse);
+  border-color: var(--fluent-status-error);
+}
+.fluent-btn-danger:hover {
+  background: #b92c2f;
+  border-color: #b92c2f;
+}
+
+.fluent-input {
+  font-family: var(--fluent-font-sans);
+  font-size: var(--fluent-font-size-body);
+  padding: 5px var(--fluent-spacing-md);
+  min-height: 32px;
+  background: var(--fluent-bg-card);
+  color: var(--fluent-text);
+  border: 1px solid var(--fluent-border-hover);
+  border-radius: var(--fluent-radius-md);
+  outline: none;
+  transition: border-color var(--fluent-animation-duration) var(--fluent-animation-easing),
+              box-shadow var(--fluent-animation-duration) var(--fluent-animation-easing);
+  width: 100%;
+}
+.fluent-input:hover { border-color: var(--fluent-text-secondary); }
+.fluent-input:focus {
+  border-color: var(--fluent-border-focus);
+  box-shadow: 0 0 0 1px var(--fluent-border-focus);
+}
+.fluent-input::placeholder { color: var(--fluent-text-tertiary); }
+
+.fluent-label {
+  font-size: var(--fluent-font-size-caption);
+  font-weight: 600;
+  color: var(--fluent-text-secondary);
+  margin-bottom: var(--fluent-spacing-xs);
+  display: block;
+}
+
+.fluent-select {
+  font-family: var(--fluent-font-sans);
+  font-size: var(--fluent-font-size-body);
+  padding: 5px 28px 5px var(--fluent-spacing-md);
+  min-height: 32px;
+  background: var(--fluent-bg-card);
+  color: var(--fluent-text);
+  border: 1px solid var(--fluent-border-hover);
+  border-radius: var(--fluent-radius-md);
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23605e5c' d='M2.15 4.65a.5.5 0 0 1 .7-.7L6 7.29l3.15-3.34a.5.5 0 1 1 .7.7l-3.5 3.7a.5.5 0 0 1-.7 0z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  transition: border-color var(--fluent-animation-duration) var(--fluent-animation-easing);
+  width: 100%;
+}
+.fluent-select:hover { border-color: var(--fluent-text-secondary); }
+.fluent-select:focus {
+  border-color: var(--fluent-border-focus);
+  box-shadow: 0 0 0 1px var(--fluent-border-focus);
+}
+
+.fluent-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fluent-font-size-caption);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--fluent-radius-md);
+  background: var(--fluent-accent-light);
+  color: var(--fluent-accent);
+}
+
+.fluent-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--fluent-accent);
+  color: var(--fluent-text-inverse);
+  line-height: 1;
+}
+
+.fluent-divider {
+  height: 1px;
+  background: var(--fluent-border);
+  margin: var(--fluent-spacing-lg) 0;
+  border: none;
+}
+
+.fluent-message {
+  padding: var(--fluent-spacing-md) var(--fluent-spacing-lg);
+  border-radius: var(--fluent-radius-md);
+  font-size: var(--fluent-font-size-body);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--fluent-spacing-sm);
+}
+.fluent-message-info { background: var(--fluent-status-info-bg); color: var(--fluent-status-info); }
+.fluent-message-success { background: var(--fluent-status-success-bg); color: var(--fluent-status-success); }
+.fluent-message-warning { background: var(--fluent-status-warning-bg); color: var(--fluent-status-warning); }
+.fluent-message-error { background: var(--fluent-status-error-bg); color: var(--fluent-status-error); }
+
+@keyframes fluent-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fluent-slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fluent-slide-right {
+  from { opacity: 0; transform: translateX(-20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes fluent-scale-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes fluent-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.fluent-skeleton {
+  background: linear-gradient(90deg, var(--fluent-bg-hover) 25%, var(--fluent-bg-active) 50%, var(--fluent-bg-hover) 75%);
+  background-size: 200% 100%;
+  animation: fluent-shimmer 1.5s var(--fluent-animation-easing) infinite;
+  border-radius: var(--fluent-radius-md);
+}
+@keyframes fluent-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (max-width: 768px) {
+  :root {
+    --fluent-spacing-lg: 12px;
+    --fluent-spacing-xl: 16px;
+  }
+}

@@ -33,35 +33,35 @@
 #include "vfs.h"
 #include "kstring.h"
 
-#define SOCK_MAX    16
-#define DGRAM_RING  4096                 /* one page per dgram/raw socket */
+#define SOCK_MAX   16
+#define DGRAM_RING 4096 /* one page per dgram/raw socket */
 
 /* A queued datagram.  src_port doubles as the protocol field on raw
  * sockets, where the payload is the whole IP packet. */
 typedef struct {
     uint32_t src_ip;
     uint16_t src_port;
-    uint16_t len;                        /* payload bytes; 0xFFFF = wrap marker */
+    uint16_t len; /* payload bytes; 0xFFFF = wrap marker */
 } dgram_hdr_t;
 #define DGRAM_WRAP 0xFFFF
 
 typedef struct {
-    int      used;
-    int      type;                       /* SOCK_STREAM / DGRAM / RAW */
-    int      protocol;
-    int      nonblock;                   /* SOCK_NONBLOCK at creation */
+    int used;
+    int type; /* SOCK_STREAM / DGRAM / RAW */
+    int protocol;
+    int nonblock; /* SOCK_NONBLOCK at creation */
 
-    uint64_t rx_phys;                    /* the datagram ring page */
+    uint64_t rx_phys; /* the datagram ring page */
     uint32_t rx_head, rx_tail, rx_used;
 
-    uint32_t lip, rip;                   /* local and peer, host order */
+    uint32_t lip, rip; /* local and peer, host order */
     uint16_t lport, rport;
-    int      connected;                  /* UDP: a default peer exists */
+    int      connected; /* UDP: a default peer exists */
 
-    int      broadcast;                  /* SO_BROADCAST */
-    int      error;                      /* datagram-side async errors */
+    int broadcast; /* SO_BROADCAST */
+    int error;     /* datagram-side async errors */
 
-    tcp_pcb_t *tcp;                      /* SOCK_STREAM only */
+    tcp_pcb_t *tcp; /* SOCK_STREAM only */
 } sock_t;
 
 static sock_t g_socks[SOCK_MAX];
@@ -88,8 +88,8 @@ static uint32_t ring_free(const sock_t *s)
 /* Append one record; returns 0 when the packet fit and was queued.  A
  * packet that does not fit is dropped -- for UDP and raw sockets that is
  * the specified behaviour, not an error path. */
-static int ring_put(sock_t *s, uint32_t src_ip, uint16_t src_port,
-                    const void *payload, uint16_t len)
+static int ring_put(sock_t *s, uint32_t src_ip, uint16_t src_port, const void *payload,
+                    uint16_t len)
 {
     uint8_t *ring = pmm_virt(s->rx_phys);
     uint32_t plen = (uint32_t)(len + 7) & ~7u;
@@ -101,13 +101,13 @@ static int ring_put(sock_t *s, uint32_t src_ip, uint16_t src_port,
     if (s->rx_head + need > DGRAM_RING) {
         /* Does not fit at the end: leave a wrap marker and start over.
          * Alignment (see the file comment) makes the marker always fit. */
-        dgram_hdr_t m = { 0, 0, DGRAM_WRAP };
+        dgram_hdr_t m = {0, 0, DGRAM_WRAP};
         memcpy(ring + s->rx_head, &m, 8);
         s->rx_used += 8;
-        s->rx_head  = 0;
+        s->rx_head = 0;
     }
 
-    dgram_hdr_t h = { src_ip, src_port, len };
+    dgram_hdr_t h = {src_ip, src_port, len};
     memcpy(ring + s->rx_head, &h, 8);
     if (len)
         memcpy(ring + s->rx_head + 8, payload, len);
@@ -120,8 +120,8 @@ static int ring_put(sock_t *s, uint32_t src_ip, uint16_t src_port,
 
 /* Copy out the oldest record.  Returns the payload length copied (possibly
  * truncated to `cap`), 0 when the ring is empty. */
-static uint32_t ring_pop(sock_t *s, uint32_t *src_ip, uint16_t *src_port,
-                         void *buf, uint32_t cap, int peek)
+static uint32_t ring_pop(sock_t *s, uint32_t *src_ip, uint16_t *src_port, void *buf, uint32_t cap,
+                         int peek)
 {
     if (!s->rx_used)
         return 0;
@@ -140,8 +140,10 @@ static uint32_t ring_pop(sock_t *s, uint32_t *src_ip, uint16_t *src_port,
     uint32_t n = h.len < cap ? h.len : cap;
     if (n)
         memcpy(buf, ring + s->rx_tail + 8, n);
-    if (src_ip)   *src_ip   = h.src_ip;
-    if (src_port) *src_port = h.src_port;
+    if (src_ip)
+        *src_ip = h.src_ip;
+    if (src_port)
+        *src_port = h.src_port;
 
     if (!peek) {
         s->rx_tail += 8 + ((uint32_t)(h.len + 7) & ~7u);
@@ -164,21 +166,30 @@ static uint32_t ring_pop(sock_t *s, uint32_t *src_ip, uint16_t *src_port,
  * test are expressions over the caller's locals.  COND becoming true exits
  * the loop normally; FAIL exits with its value (0 means "return 0").
  */
-#define SOCK_WAIT_LOOP(s, COND, FAIL)                                     \
-    for (;;) {                                                            \
-        net_poll();                                                       \
-        sched_wake_reason(WAIT_NET);   /* our poll may have fed a peer */ \
-        proc_t *me_ = proc_current();                                     \
-        asm volatile("cli");                                              \
-        if (COND) { asm volatile("sti"); break; }                         \
-        if (FAIL) { asm volatile("sti"); return (FAIL); }                 \
-        if ((s)->nonblock) { asm volatile("sti"); return -E_AGAIN; }      \
-        if (!me_ || proc_pending_signals(me_)) {                          \
-            asm volatile("sti");                                          \
-            return -E_INTR;                                               \
-        }                                                                 \
-        sched_block_irqoff(WAIT_NET);                                     \
-        asm volatile("sti");                                              \
+#define SOCK_WAIT_LOOP(s, COND, FAIL)                                   \
+    for (;;) {                                                          \
+        net_poll();                                                     \
+        sched_wake_reason(WAIT_NET); /* our poll may have fed a peer */ \
+        proc_t *me_ = proc_current();                                   \
+        asm volatile("cli");                                            \
+        if (COND) {                                                     \
+            asm volatile("sti");                                        \
+            break;                                                      \
+        }                                                               \
+        if (FAIL) {                                                     \
+            asm volatile("sti");                                        \
+            return (FAIL);                                              \
+        }                                                               \
+        if ((s)->nonblock) {                                            \
+            asm volatile("sti");                                        \
+            return -E_AGAIN;                                            \
+        }                                                               \
+        if (!me_ || proc_pending_signals(me_)) {                        \
+            asm volatile("sti");                                        \
+            return -E_INTR;                                             \
+        }                                                               \
+        sched_block_irqoff(WAIT_NET);                                   \
+        asm volatile("sti");                                            \
     }
 
 /* ---- creation and destruction -------------------------------------------- */
@@ -203,9 +214,10 @@ int sock_create(int domain, int type, int protocol)
         sock_t *s = &g_socks[i];
         memset(s, 0, sizeof(*s));
         s->type     = type;
-        s->protocol = protocol ? protocol
+        s->protocol = protocol              ? protocol
                       : type == SOCK_STREAM ? IPPROTO_TCP
-                      : type == SOCK_DGRAM  ? IPPROTO_UDP : 0;
+                      : type == SOCK_DGRAM  ? IPPROTO_UDP
+                                            : 0;
         s->nonblock = nonblock;
 
         if (type == SOCK_STREAM) {
@@ -229,7 +241,7 @@ void sock_close(int s)
     if (!sk)
         return;
     if (sk->tcp)
-        tcp_destroy(sk->tcp);         /* aborts a live connection (see tcp.h) */
+        tcp_destroy(sk->tcp); /* aborts a live connection (see tcp.h) */
     if (sk->rx_phys)
         pmm_free(sk->rx_phys);
     sk->used = 0;
@@ -299,11 +311,11 @@ int sock_bind(int s, uint32_t ip, uint16_t port)
 
     if (sk->type == SOCK_STREAM) {
         if (!port)
-            return -E_INVAL;              /* tcp_bind needs an explicit port */
+            return -E_INVAL; /* tcp_bind needs an explicit port */
         return tcp_bind(sk->tcp, ip, port);
     }
     if (sk->type == SOCK_RAW) {
-        sk->lip = ip;                     /* raw has no ports; bind only filters */
+        sk->lip = ip; /* raw has no ports; bind only filters */
         return 0;
     }
 
@@ -333,29 +345,32 @@ int sock_getname(int s, uint32_t *ip, uint16_t *port, int peer)
         uint16_t lport, rport;
         tcp_endpoints(sk->tcp, &lip, &lport, &rip, &rport);
         if (peer) {
-            if (tcp_state(sk->tcp) != TCPS_ESTABLISHED &&
-                tcp_state(sk->tcp) != TCPS_CLOSE_WAIT)
+            if (tcp_state(sk->tcp) != TCPS_ESTABLISHED && tcp_state(sk->tcp) != TCPS_CLOSE_WAIT)
                 return -E_NOTCONN;
-            *ip = rip; *port = rport;
+            *ip   = rip;
+            *port = rport;
         } else {
-            *ip = lip; *port = lport;
+            *ip   = lip;
+            *port = lport;
         }
         return 0;
     }
     if (peer) {
         if (!sk->connected)
             return -E_NOTCONN;
-        *ip = sk->rip; *port = sk->rport;
+        *ip   = sk->rip;
+        *port = sk->rport;
     } else {
-        *ip = sk->lip; *port = sk->lport;
+        *ip   = sk->lip;
+        *port = sk->lport;
     }
     return 0;
 }
 
 /* ---- UDP and raw: the wire side -------------------------------------------- */
 
-void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
-               const uint8_t *seg, uint16_t len)
+void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl, const uint8_t *seg,
+               uint16_t len)
 {
     if (len < 8)
         return;
@@ -365,8 +380,7 @@ void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
     if (ulen < 8 || ulen > len)
         return;
     /* A zero checksum means "not computed", which IPv4 permits. */
-    if (net_get16(seg + 6) &&
-        net_checksum_pseudo(src, dst, IP_PROTO_UDP, seg, ulen) != 0)
+    if (net_get16(seg + 6) && net_checksum_pseudo(src, dst, IP_PROTO_UDP, seg, ulen) != 0)
         return;
 
     for (int i = 0; i < SOCK_MAX; i++) {
@@ -378,7 +392,7 @@ void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
         if (s->connected && (s->rip != src || s->rport != sport))
             continue;
         ring_put(s, src, sport, seg + 8, (uint16_t)(ulen - 8));
-        sched_wake_reason(WAIT_NET);   /* wake poll()/select()/recvfrom waiters */
+        sched_wake_reason(WAIT_NET); /* wake poll()/select()/recvfrom waiters */
         return;
     }
     /* No listener: answer with ICMP port unreachable, quoting the original
@@ -386,38 +400,41 @@ void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl,
      * connected UDP socket fail its next call with ECONNREFUSED instead of
      * waiting out a timeout. */
     {
-        uint8_t r[IP_HDR_LEN + 8 + IP_HDR_LEN + 8];
+        uint8_t  r[IP_HDR_LEN + 8 + IP_HDR_LEN + 8];
         uint32_t me = net_route_src(src);
-        r[0] = 0x45; r[1] = 0;
+        r[0]        = 0x45;
+        r[1]        = 0;
         net_put16(r + 2, (uint16_t)(IP_HDR_LEN + 8 + IP_HDR_LEN + 8));
         net_put16(r + 4, net_next_ip_id());
         net_put16(r + 6, 0);
-        r[8] = 64; r[9] = IP_PROTO_ICMP;
+        r[8] = 64;
+        r[9] = IP_PROTO_ICMP;
         net_put16(r + 10, 0);
         net_put32(r + 12, me);
         net_put32(r + 16, src);
-        r[IP_HDR_LEN + 0] = 3;        /* destination unreachable */
-        r[IP_HDR_LEN + 1] = 3;        /* code 3: port unreachable */
-        net_put16(r + IP_HDR_LEN + 2, 0);   /* icmp checksum below */
-        net_put16(r + IP_HDR_LEN + 4, 0);   /* unused */
+        r[IP_HDR_LEN + 0] = 3;            /* destination unreachable */
+        r[IP_HDR_LEN + 1] = 3;            /* code 3: port unreachable */
+        net_put16(r + IP_HDR_LEN + 2, 0); /* icmp checksum below */
+        net_put16(r + IP_HDR_LEN + 4, 0); /* unused */
         memcpy(r + IP_HDR_LEN + 8, packet, ihl + 8);
-        net_put16(r + IP_HDR_LEN + 2, net_checksum(r + IP_HDR_LEN,
-                                                   (uint16_t)(8 + ihl + 8)));
+        net_put16(r + IP_HDR_LEN + 2, net_checksum(r + IP_HDR_LEN, (uint16_t)(8 + ihl + 8)));
         net_ip_output(src, IP_PROTO_ICMP, r, (uint16_t)(IP_HDR_LEN + 8 + ihl + 8));
     }
 }
 
 /* /proc/net/udp support: iterate datagram sockets with a local port. */
-int sock_udpinfo_next(int *iter, uint32_t *lip, uint16_t *lport,
-                      uint32_t *rip, uint16_t *rport, uint32_t *rxq)
+int sock_udpinfo_next(int *iter, uint32_t *lip, uint16_t *lport, uint32_t *rip, uint16_t *rport,
+                      uint32_t *rxq)
 {
     for (int i = *iter; i < SOCK_MAX; i++) {
         sock_t *s = &g_socks[i];
         if (s->used && s->type == SOCK_DGRAM && s->lport) {
-            *iter = i + 1;
-            *lip = s->lip; *lport = s->lport;
-            *rip = s->rip; *rport = s->rport;
-            *rxq = s->rx_used;
+            *iter  = i + 1;
+            *lip   = s->lip;
+            *lport = s->lport;
+            *rip   = s->rip;
+            *rport = s->rport;
+            *rxq   = s->rx_used;
             return 0;
         }
     }
@@ -440,8 +457,7 @@ void sock_udp_icmp_error(uint16_t lport, uint32_t rip, uint16_t rport)
     }
 }
 
-void raw_input(uint32_t src, uint32_t dst, uint8_t proto,
-               const uint8_t *packet, uint16_t total_len)
+void raw_input(uint32_t src, uint32_t dst, uint8_t proto, const uint8_t *packet, uint16_t total_len)
 {
     (void)dst;
     for (int i = 0; i < SOCK_MAX; i++) {
@@ -466,8 +482,7 @@ static int is_broadcast_addr(uint32_t ip)
     return 0;
 }
 
-static int udp_sendto(sock_t *s, const void *buf, uint32_t len,
-                      uint32_t ip, uint16_t port)
+static int udp_sendto(sock_t *s, const void *buf, uint32_t len, uint32_t ip, uint16_t port)
 {
     if (!ip || !port)
         return -E_DESTADDRREQ;
@@ -494,7 +509,7 @@ static int udp_sendto(sock_t *s, const void *buf, uint32_t len,
     if (len)
         memcpy(pkt + 8, buf, len);
     uint16_t sum = net_checksum_pseudo(src, ip, IP_PROTO_UDP, pkt, ulen);
-    net_put16(pkt + 6, sum ? sum : 0xFFFF);   /* 0 on the wire means "none" */
+    net_put16(pkt + 6, sum ? sum : 0xFFFF); /* 0 on the wire means "none" */
     e = net_ip_output(ip, IP_PROTO_UDP, pkt, ulen);
     return e ? e : (int)len;
 }
@@ -520,8 +535,8 @@ int sock_connect(int s, uint32_t ip, uint16_t port)
         int e = udp_ensure_bound(sk);
         if (e)
             return e;
-        sk->rip = ip;
-        sk->rport = port;
+        sk->rip       = ip;
+        sk->rport     = port;
         sk->connected = 1;
         return 0;
     }
@@ -593,7 +608,7 @@ int sock_accept(int s, uint32_t *rip, uint16_t *rport)
 
     tcp_pcb_t *child = tcp_accept(sk->tcp);
     if (!child)
-        return -E_AGAIN;              /* raced ourselves; cannot happen, be safe */
+        return -E_AGAIN; /* raced ourselves; cannot happen, be safe */
 
     int ns = sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (ns < 0) {
@@ -601,18 +616,19 @@ int sock_accept(int s, uint32_t *rip, uint16_t *rport)
         return ns;
     }
     sock_t *c = sock_at(ns);
-    tcp_destroy(c->tcp);              /* replace the fresh pcb with the child */
+    tcp_destroy(c->tcp); /* replace the fresh pcb with the child */
     c->tcp = child;
     tcp_endpoints(child, &c->lip, &c->lport, &c->rip, &c->rport);
-    if (rip)   *rip   = c->rip;
-    if (rport) *rport = c->rport;
+    if (rip)
+        *rip = c->rip;
+    if (rport)
+        *rport = c->rport;
     return ns;
 }
 
-int sock_sendto(int s, const void *buf, uint32_t len, int flags,
-                uint32_t ip, uint16_t port)
+int sock_sendto(int s, const void *buf, uint32_t len, int flags, uint32_t ip, uint16_t port)
 {
-    (void)flags;                      /* MSG_* we honour is MSG_PEEK, read-side */
+    (void)flags; /* MSG_* we honour is MSG_PEEK, read-side */
     sock_t *sk = sock_at(s);
     if (!sk)
         return -E_BADF;
@@ -654,16 +670,15 @@ int sock_sendto(int s, const void *buf, uint32_t len, int flags,
         /* No window space: wait for an ACK to open some.  If the connection
          * left us instead, that is a broken pipe, with the signal the
          * writer's shell is expecting. */
-        SOCK_WAIT_LOOP(sk, (tcp_tx_space(sk->tcp) > 0),
-                       (tcp_state(sk->tcp) != TCPS_ESTABLISHED &&
-                        tcp_state(sk->tcp) != TCPS_CLOSE_WAIT
-                            ? (proc_signal(proc_current(), SIGPIPE), -E_PIPE)
-                            : 0));
+        SOCK_WAIT_LOOP(
+            sk, (tcp_tx_space(sk->tcp) > 0),
+            (tcp_state(sk->tcp) != TCPS_ESTABLISHED && tcp_state(sk->tcp) != TCPS_CLOSE_WAIT
+                 ? (proc_signal(proc_current(), SIGPIPE), -E_PIPE)
+                 : 0));
     }
 }
 
-int sock_recvfrom(int s, void *buf, uint32_t len, int flags,
-                  uint32_t *ip, uint16_t *port)
+int sock_recvfrom(int s, void *buf, uint32_t len, int flags, uint32_t *ip, uint16_t *port)
 {
     sock_t *sk = sock_at(s);
     if (!sk)
@@ -673,7 +688,7 @@ int sock_recvfrom(int s, void *buf, uint32_t len, int flags,
         /* An ICMP error quoted our traffic: fail the next call with it,
          * Linux-style, then clear -- one error is reported once. */
         if (sk->error) {
-            int e = sk->error;
+            int e     = sk->error;
             sk->error = 0;
             return -e;
         }
@@ -685,7 +700,8 @@ int sock_recvfrom(int s, void *buf, uint32_t len, int flags,
     for (;;) {
         if (tcp_rx_avail(sk->tcp) > 0) {
             if (ip || port) {
-                uint32_t lip; uint16_t lport;
+                uint32_t lip;
+                uint16_t lport;
                 tcp_endpoints(sk->tcp, &lip, &lport, ip, port);
             }
             return tcp_read(sk->tcp, buf, len, flags & MSG_PEEK);
@@ -695,14 +711,14 @@ int sock_recvfrom(int s, void *buf, uint32_t len, int flags,
         int state = tcp_state(sk->tcp);
         if (state == TCPS_CLOSED) {
             int e = tcp_take_error(sk->tcp);
-            return e ? -e : 0;        /* clean close with nothing left: EOF */
+            return e ? -e : 0; /* clean close with nothing left: EOF */
         }
         if (state == TCPS_LISTEN)
             return -E_OPNOTSUPP;
-        SOCK_WAIT_LOOP(sk,
-                       (tcp_rx_avail(sk->tcp) > 0 || tcp_eof(sk->tcp) ||
-                        tcp_state(sk->tcp) == TCPS_CLOSED),
-                       0);
+        SOCK_WAIT_LOOP(
+            sk,
+            (tcp_rx_avail(sk->tcp) > 0 || tcp_eof(sk->tcp) || tcp_state(sk->tcp) == TCPS_CLOSED),
+            0);
     }
 }
 
@@ -714,7 +730,7 @@ int sock_shutdown(int s, int how)
     if (how < SHUT_RD || how > SHUT_RDWR)
         return -E_INVAL;
     if (sk->type != SOCK_STREAM)
-        return 0;                     /* meaningless on a datagram socket */
+        return 0; /* meaningless on a datagram socket */
     if (how == SHUT_WR || how == SHUT_RDWR) {
         int e = tcp_close_write(sk->tcp);
         if (e)
@@ -743,7 +759,7 @@ int sock_setsockopt(int s, int level, int name, const void *val, uint32_t len)
             sk->broadcast = v != 0;
             return 0;
         case SO_TYPE:
-            return -E_INVAL;          /* read-only */
+            return -E_INVAL; /* read-only */
         default:
             /* SO_RCVBUF, SO_SNDBUF, SO_REUSEADDR, ...: accepted, ignored.
              * Refusing them breaks BusyBox's setup paths for no benefit;
@@ -770,7 +786,7 @@ int sock_getsockopt(int s, int level, int name, void *val, uint32_t *len)
             v = (uint32_t)sk->type;
             break;
         case SO_ERROR:
-            v = (uint32_t)(sk->tcp ? tcp_take_error(sk->tcp) : sk->error);
+            v         = (uint32_t)(sk->tcp ? tcp_take_error(sk->tcp) : sk->error);
             sk->error = 0;
             break;
         case SO_BROADCAST:
@@ -792,14 +808,13 @@ int sock_readable(int s)
 {
     sock_t *sk = sock_at(s);
     if (!sk)
-        return 1;                     /* a dead fd is "ready": read it and see */
+        return 1; /* a dead fd is "ready": read it and see */
     if (sk->type != SOCK_STREAM)
         return sk->rx_used > 0;
     int state = tcp_state(sk->tcp);
     if (state == TCPS_LISTEN)
         return tcp_accept_ready(sk->tcp);
-    return tcp_rx_avail(sk->tcp) > 0 || tcp_eof(sk->tcp) ||
-           state == TCPS_CLOSED;
+    return tcp_rx_avail(sk->tcp) > 0 || tcp_eof(sk->tcp) || state == TCPS_CLOSED;
 }
 
 int sock_writable(int s)
@@ -810,8 +825,7 @@ int sock_writable(int s)
     if (sk->type != SOCK_STREAM)
         return 1;
     int state = tcp_state(sk->tcp);
-    return (state == TCPS_ESTABLISHED || state == TCPS_CLOSE_WAIT) &&
-           tcp_tx_space(sk->tcp) > 0;
+    return (state == TCPS_ESTABLISHED || state == TCPS_CLOSE_WAIT) && tcp_tx_space(sk->tcp) > 0;
 }
 
 /* ---- vfs node ops ----------------------------------------------------------- */
@@ -820,13 +834,12 @@ int32_t sock_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     (void)off;
     int s = (int)(uintptr_t)n->priv;
-    if (s < 0)                          /* -2 - u: an AF_UNIX socket */
+    if (s < 0) /* -2 - u: an AF_UNIX socket */
         return unix_node_read(n, off, buf, len);
     return sock_recvfrom(s, buf, len, 0, NULL, NULL);
 }
 
-int32_t sock_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                        uint32_t len)
+int32_t sock_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)off;
     int s = (int)(uintptr_t)n->priv;

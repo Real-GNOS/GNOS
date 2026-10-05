@@ -10,8 +10,8 @@
 /* Evaluate a seccomp filter against the current syscall.
  * Returns 0 to allow, negative to deny/kill.  Called from syscall_handler()
  * with the BKL held. */
-int seccomp_check(proc_t *p, int syscall_nr, uint64_t a1, uint64_t a2,
-                  uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6);
+int seccomp_check(proc_t *p, int syscall_nr, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                  uint64_t a5, uint64_t a6);
 
 /* Handle prctl() calls related to seccomp (PR_SET/GET_SECCOMP,
  * PR_SET/GET_NO_NEW_PRIVS). */

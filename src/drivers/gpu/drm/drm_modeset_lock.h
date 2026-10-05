@@ -60,7 +60,8 @@ void drm_modeset_lock_init(struct drm_modeset_lock *lock);
 int drm_modeset_lock(struct drm_modeset_lock *lock, struct drm_modeset_acquire_ctx *ctx);
 
 /* Same, spelled the way callers that could sleep will later spell it. */
-int drm_modeset_lock_interruptible(struct drm_modeset_lock *lock, struct drm_modeset_acquire_ctx *ctx);
+int drm_modeset_lock_interruptible(struct drm_modeset_lock        *lock,
+                                   struct drm_modeset_acquire_ctx *ctx);
 
 /* Release @lock and forget its owner. */
 void drm_modeset_unlock(struct drm_modeset_lock *lock);

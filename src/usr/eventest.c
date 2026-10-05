@@ -29,10 +29,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static int g_failed;
+static int  g_failed;
 static void report(const char *fmt, ...)
 {
-    char buf[512];
+    char    buf[512];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
@@ -44,8 +44,7 @@ static void report(const char *fmt, ...)
 
 static void check(int ok, int n, const char *what)
 {
-    report("EVENTEST: %s %d (%s) errno=%d", ok ? "PASS" : "FAIL", n, what,
-           errno);
+    report("EVENTEST: %s %d (%s) errno=%d", ok ? "PASS" : "FAIL", n, what, errno);
     if (!ok && !g_failed)
         g_failed = n;
 }
@@ -69,16 +68,15 @@ int main(void)
         /* Write through the fd must land in the same pages. */
         static const char tag[] = "GNOSmemfd";
         check(write(mfd, tag, sizeof tag - 1) == (ssize_t)sizeof tag - 1 &&
-              memcmp(p, tag, sizeof tag - 1) == 0, 4,
-              "write() lands in the mapping");
+                  memcmp(p, tag, sizeof tag - 1) == 0,
+              4, "write() lands in the mapping");
         /* Fresh ftruncate extension reads as zero (shmem semantics):
          * grow the file, then re-map to the new size -- the order real
          * wl_shm pools use. */
         check(ftruncate(mfd, 8192) == 0, 5, "ftruncate to 8192");
         munmap(p, 4096);
         p = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
-        check(p != MAP_FAILED && p[4096] == 0 && p[5000] == 0, 5,
-              "extended pages are zeroed");
+        check(p != MAP_FAILED && p[4096] == 0 && p[5000] == 0, 5, "extended pages are zeroed");
         if (p != MAP_FAILED)
             munmap(p, 8192);
     }
@@ -93,8 +91,7 @@ int main(void)
         }
         int st = 0;
         waitpid(kid, &st, 0);
-        check(strcmp(p, "hello from child") == 0, 6,
-              "fork shares memfd mapping");
+        check(strcmp(p, "hello from child") == 0, 6, "fork shares memfd mapping");
         munmap(p, 4096);
     }
     close(mfd);
@@ -104,15 +101,17 @@ int main(void)
     check(efd >= 0, 7, "eventfd2 nonblock");
     if (efd >= 0) {
         uint64_t u = 0;
-        errno = 0;
-        check(read(efd, &u, 8) == -1 && errno == EAGAIN, 8,
-              "empty nonblocking read EAGAIN");
+        errno      = 0;
+        check(read(efd, &u, 8) == -1 && errno == EAGAIN, 8, "empty nonblocking read EAGAIN");
         u = 5;
         check(write(efd, &u, 8) == 8, 9, "write 5");
         u = 0;
         check(read(efd, &u, 8) == 8 && u == 5, 10, "read drains to 0");
         u = 1;
-        write(efd, &u, 8); write(efd, &u, 8); u = 2; write(efd, &u, 8);
+        write(efd, &u, 8);
+        write(efd, &u, 8);
+        u = 2;
+        write(efd, &u, 8);
         u = 0;
         check(read(efd, &u, 8) == 8 && u == 4, 11, "counter accumulates");
         close(efd);
@@ -134,15 +133,14 @@ int main(void)
         if (ep >= 0) {
             struct epoll_event ev;
             memset(&ev, 0, sizeof ev);
-            ev.events = EPOLLIN;
+            ev.events   = EPOLLIN;
             ev.data.u64 = 0x1234;
-            check(epoll_ctl(ep, EPOLL_CTL_ADD, sfd, &ev) == 0, 16,
-                  "epoll_ctl ADD");
+            check(epoll_ctl(ep, EPOLL_CTL_ADD, sfd, &ev) == 0, 16, "epoll_ctl ADD");
             struct epoll_event out;
             memset(&out, 0, sizeof out);
             u = 0;
-            read(sfd, &u, 8);                /* drain the one left over */
-            read(sfd, &u, 8);                /* and the EAGAIN hit */
+            read(sfd, &u, 8); /* drain the one left over */
+            read(sfd, &u, 8); /* and the EAGAIN hit */
             errno = 0;
             check(epoll_wait(ep, &out, 1, 10) == 0, 17, "empty wait times out");
             errno = 0;
@@ -152,8 +150,7 @@ int main(void)
             check(epoll_wait(ep, &out, 1, 100) == 1, 19, "epoll reports readiness");
             check((out.events & EPOLLIN) && out.data.u64 == 0x1234, 20,
                   "epoll event data round-trips");
-            check(epoll_ctl(ep, EPOLL_CTL_DEL, sfd, NULL) == 0, 21,
-                  "epoll_ctl DEL");
+            check(epoll_ctl(ep, EPOLL_CTL_DEL, sfd, NULL) == 0, 21, "epoll_ctl DEL");
             close(ep);
         }
         close(sfd);

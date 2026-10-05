@@ -25,8 +25,8 @@
 /* The physical MMIO offset g_hhdm is added to (defined in kernel.c). */
 extern uint64_t g_hhdm;
 
-#define MSR_IA32_APIC_BASE   0x1B
-#define APIC_BASE_ENABLE     (1ULL << 11)
+#define MSR_IA32_APIC_BASE 0x1B
+#define APIC_BASE_ENABLE   (1ULL << 11)
 
 #define LAPIC_ID         0x020
 #define LAPIC_EOI        0x0B0
@@ -39,7 +39,7 @@ extern uint64_t g_hhdm;
 #define LVT_TIMER_PERIODIC 0x20000
 #define DIVIDE_BY_16       0x3
 
-static volatile uint32_t *g_lapic;   /* mapped base, set by lapic_init() */
+static volatile uint32_t *g_lapic; /* mapped base, set by lapic_init() */
 
 /* The calibrated LAPIC timer frequency (counts per second); 0 until the
  * first lapic_timer_start() runs. */
@@ -54,8 +54,7 @@ static inline uint64_t rdmsr(uint32_t msr)
 
 static inline void wrmsr(uint32_t msr, uint64_t v)
 {
-    asm volatile("wrmsr" :: "c"(msr), "a"((uint32_t)v),
-                 "d"((uint32_t)(v >> 32)) : "memory");
+    asm volatile("wrmsr" ::"c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)) : "memory");
 }
 
 static inline uint32_t lapic_read(unsigned off)
@@ -91,7 +90,7 @@ void lapic_eoi(void)
 void lapic_init(void)
 {
     if (g_lapic)
-        return;                         /* already done on this boot */
+        return; /* already done on this boot */
 
     uint64_t phys = acpi_lapic_base();
     if (!phys) {
@@ -108,7 +107,7 @@ void lapic_init(void)
         wrmsr(MSR_IA32_APIC_BASE, base | APIC_BASE_ENABLE);
         /* Re-read the base after enabling: the APIC's MMIO window moves
          * from 0xFEE00000 to the (same, here) value in the MSR. */
-        phys = rdmsr(MSR_IA32_APIC_BASE) & 0xFFFFF000ULL;
+        phys    = rdmsr(MSR_IA32_APIC_BASE) & 0xFFFFF000ULL;
         g_lapic = (volatile uint32_t *)(uintptr_t)(g_hhdm + phys);
     }
 

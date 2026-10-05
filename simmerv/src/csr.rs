@@ -1,0 +1,427 @@
+use num_derive::FromPrimitive;
+use std::fmt::Display;
+use std::fmt::Formatter;
+
+#[derive(FromPrimitive, Debug, Clone, Copy)]
+pub enum Csr {
+    Ustatus = 0x000,
+    Fflags = 0x001,
+    Frm = 0x002,
+    Fcsr = 0x003,
+    Uie = 0x004,
+    Utvec = 0x005,
+    Uscratch = 0x040,
+    Uepc = 0x041,
+    Ucause = 0x042,
+    Utval = 0x043,
+    Uip = 0x044,
+    // V — the vector CSRs.  vstart/vxsat/vxrm/vcsr are read-write in U-mode,
+    // vl/vtype/vlenb are read-only.
+    Vstart = 0x008,
+    Vxsat = 0x009,
+    Vxrm = 0x00a,
+    Vcsr = 0x00f,
+    Vl = 0xc20,
+    Vtype = 0xc21,
+    Vlenb = 0xc22,
+
+    Sstatus = 0x100,
+    Sedeleg = 0x102,
+    Sideleg = 0x103,
+    Scounteren = 0x106,
+    Sie = 0x104,
+    Stvec = 0x105,
+    Sscratch = 0x140,
+    Sepc = 0x141,
+    Scause = 0x142,
+    Stval = 0x143,
+    Sip = 0x144,
+    Stimecmp = 0x14d,
+    Satp = 0x180,
+    Senvcfg = 0x10a,
+    // Smstateen/Ssstateen.  Every bit gates access to some other extension's
+    // state; simmerv implements almost none of the gated features, so only
+    // mstateen0's SE0 (bit 63, guards sstateen0) and ENVCFG (bit 62, guards
+    // senvcfg) are writable and the rest are read-only zero.  sstateen0 gates
+    // only U-mode-visible state (Zcmt's jvt, Zfinx's fcsr, custom), none of
+    // which exists here, so it is read-only zero in full.
+    Sstateen0 = 0x10c,
+    Sstateen1 = 0x10d,
+    Sstateen2 = 0x10e,
+    Sstateen3 = 0x10f,
+    Mstateen0 = 0x30c,
+    Mstateen1 = 0x30d,
+    Mstateen2 = 0x30e,
+    Mstateen3 = 0x30f,
+
+    Mstatus = 0x300,
+    Misa = 0x301,
+    Medeleg = 0x302,
+    Mideleg = 0x303,
+    Mie = 0x304,
+    Mtvec = 0x305,
+    Mcounteren = 0x306,
+    Menvcfg = 0x30a,
+    Mcountinhibit = 0x320,
+    Mcyclecfg = 0x321,
+    Minstretcfg = 0x322,
+    Mscratch = 0x340,
+    Mepc = 0x341,
+    Mcause = 0x342,
+    Mtval = 0x343,
+    Mip = 0x344,
+    Pmpcfg0 = 0x3a0,
+    Pmpaddr0 = 0x3b0,
+    // Smrnmi resumable-NMI status: the DUT implements it as a benign WARL CSR
+    // (read-0 / write-ignored here); riscv-tests' reset vector writes it.
+    Mnstatus = 0x744,
+    Mcycle = 0xb00,
+    Minstret = 0xb02,
+    Cycle = 0xc00,
+    Time = 0xc01,
+    Instret = 0xc02,
+    Scountovf = 0xda0, // Sscofpmf supervisor count-overflow (read-only)
+    Mhartid = 0xf14,
+    Mimpid = 0xf13,
+    Marchid = 0xf12,
+    Mvendorid = 0xf11,
+    /// Pointer to a machine configuration data structure.  Mandatory since
+    /// privileged spec 1.12 -- reading zero (no structure) is allowed, not
+    /// existing is not.  Tenstorrent's arch tests read it during OS setup, and
+    /// trapping there failed 33 of 100 `rv_i` tests.
+    Mconfigptr = 0xf15,
+    Mtopi = 0xfb0, // Unsupported Highest Priority Pending And Enabled Interrupt
+    // Debug/Trace triggers: the DUT implements these as read-0 / write-ignored
+    // (no triggers present). Match it so OpenSBI's CSR probe doesn't diverge.
+    Tselect = 0x7a0,
+    Tdata1 = 0x7a1,
+    Tdata2 = 0x7a2,
+    Tdata3 = 0x7a3,
+    Tinfo = 0x7a4,
+}
+
+impl Display for Csr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // XXX First approximation, will improve later
+        write!(f, "{self:?}")
+    }
+}
+
+pub const MENVCFG_STCE: u64 = 1 << 63; // Sstc: enables stimecmp in S-mode
+
+// NOTE (cosim gating gap): menvcfg also defines the enable bits for the cache
+// extensions — CBZE (cbo.zero), CBIE[1:0]/CBCFE (Zicbom cbo.clean/flush/inval),
+// and PBMTE (Svpbmt).  We do NOT implement those bits or gate on them yet: the
+// cbo.* ops in cpu.rs execute unconditionally and the MMU accepts PBMT pages
+// regardless of PBMTE.  This matches the DUT only because OpenSBI sets menvcfg
+// before S-mode runs, so Linux never executes a cbo / touches a PBMT page while
+// the bits are clear.  A DUT that traps when these bits are clear would diverge
+// in that (firmware-only) window.  Add CBZE/CBIE/CBCFE/PBMTE here and gate the
+// ops if exact enable-bit parity is ever needed.
+
+/// Sscofpmf local counter-overflow interrupt pending/enable (interrupt 13).
+pub const MIP_LCOFIP: u64 = 1 << 13;
+
+/// `mstateen0.SE0` — gates lower-privilege access to `sstateen0`.
+pub const MSTATEEN0_SE0: u64 = 1 << 63;
+/// `mstateen0.ENVCFG` — gates lower-privilege access to `senvcfg`.
+pub const MSTATEEN0_ENVCFG: u64 = 1 << 62;
+/// The only bits simmerv implements; everything else reads zero because the
+/// state it would gate does not exist here.
+pub const MSTATEEN0_MASK: u64 = MSTATEEN0_SE0 | MSTATEEN0_ENVCFG;
+
+pub const MIP_MEIP: u64 = 0x800;
+pub const MIP_MTIP: u64 = 0x080;
+pub const MIP_MSIP: u64 = 0x008;
+pub const MIP_SEIP: u64 = 0x200;
+pub const MIP_STIP: u64 = 0x020;
+pub const MIP_SSIP: u64 = 0x002;
+
+// XXX Surely we can find a better way to handle the bitfields
+pub const MSTATUS_SPIE_SHIFT: u64 = 5;
+pub const MSTATUS_MPIE_SHIFT: u64 = 7;
+pub const MSTATUS_SPP_SHIFT: u64 = 8;
+pub const MSTATUS_VS_SHIFT: u64 = 9;
+pub const MSTATUS_MPP_SHIFT: u64 = 11;
+pub const MSTATUS_FS_SHIFT: u64 = 13;
+pub const MSTATUS_UXL_SHIFT: u64 = 32;
+pub const MSTATUS_SXL_SHIFT: u64 = 34;
+
+pub const MSTATUS_UIE: u64 = 1 << 0;
+pub const MSTATUS_SIE: u64 = 1 << 1;
+pub const MSTATUS_HIE: u64 = 1 << 2;
+pub const MSTATUS_MIE: u64 = 1 << 3;
+pub const MSTATUS_UPIE: u64 = 1 << 4;
+pub const MSTATUS_SPIE: u64 = 1 << MSTATUS_SPIE_SHIFT;
+pub const MSTATUS_HPIE: u64 = 1 << 6;
+pub const MSTATUS_MPIE: u64 = 1 << MSTATUS_MPIE_SHIFT;
+pub const MSTATUS_SPP: u64 = 1 << MSTATUS_SPP_SHIFT;
+pub const MSTATUS_VS: u64 = 3 << MSTATUS_VS_SHIFT;
+pub const MSTATUS_MPP: u64 = 3 << MSTATUS_MPP_SHIFT;
+pub const MSTATUS_FS: u64 = 3 << MSTATUS_FS_SHIFT;
+pub const MSTATUS_XS: u64 = 3 << 15;
+pub const MSTATUS_MPRV: u64 = 1 << 17;
+pub const MSTATUS_SUM: u64 = 1 << 18;
+pub const MSTATUS_MXR: u64 = 1 << 19;
+pub const MSTATUS_TVM: u64 = 1 << 20;
+pub const MSTATUS_TW: u64 = 1 << 21;
+pub const MSTATUS_TSR: u64 = 1 << 22;
+pub const MSTATUS_UXL_MASK: u64 = 3 << MSTATUS_UXL_SHIFT;
+pub const MSTATUS_SXL_MASK: u64 = 3 << MSTATUS_SXL_SHIFT;
+
+// MSTATUS_MASK are the only fields that are directly writable with an csr
+// instruction
+pub const MSTATUS_MASK: u64 = MSTATUS_SIE
+    | MSTATUS_MIE
+    | MSTATUS_SPIE
+    | MSTATUS_MPIE
+    | MSTATUS_SPP
+    | MSTATUS_MPP
+    | MSTATUS_VS  // XXX
+    | MSTATUS_FS
+    | MSTATUS_MPRV
+    | MSTATUS_SUM
+    | MSTATUS_MXR
+    | MSTATUS_TVM
+    | MSTATUS_TW
+    | MSTATUS_TSR
+    | MSTATUS_UXL_MASK  // XXX
+    | MSTATUS_SXL_MASK; // XXX
+
+pub const SATP_PPN_SHIFT: u64 = 0;
+pub const SATP_ASID_SHIFT: u64 = 44;
+pub const SATP_MODE_SHIFT: u64 = 60;
+pub const SATP_PPN_MASK: u64 = (1 << SATP_ASID_SHIFT) - 1;
+pub const SATP_ASID_MASK: u64 = (1 << (SATP_MODE_SHIFT - SATP_ASID_SHIFT)) - 1;
+pub const SATP_MODE_MASK: u64 = (1 << (64 - SATP_MODE_SHIFT)) - 1;
+
+#[derive(FromPrimitive, Debug, Clone, Copy)]
+pub enum SatpMode {
+    Bare = 0,
+    Sv39 = 8,
+    Sv48 = 9,
+    Sv57 = 10,
+    Sv64 = 11,
+}
+
+#[must_use]
+pub const fn legal(csr: Csr) -> bool {
+    matches!(
+        csr,
+        Csr::Cycle
+            | Csr::Fcsr
+            | Csr::Fflags
+            | Csr::Frm
+            | Csr::Instret
+            | Csr::Marchid
+            | Csr::Mcause
+            | Csr::Mcounteren
+            | Csr::Mcountinhibit
+            | Csr::Mcyclecfg
+            | Csr::Minstretcfg
+            | Csr::Scountovf
+            | Csr::Mcycle
+            | Csr::Minstret
+            | Csr::Medeleg
+            | Csr::Mepc
+            | Csr::Mhartid
+            | Csr::Mideleg
+            | Csr::Mie
+            | Csr::Mimpid
+            | Csr::Mconfigptr
+            | Csr::Mip
+            | Csr::Misa
+            | Csr::Mscratch
+            | Csr::Mstatus
+            | Csr::Mtval
+            | Csr::Mtvec
+            | Csr::Mnstatus
+            | Csr::Pmpcfg0
+            | Csr::Pmpaddr0
+            | Csr::Mvendorid
+            | Csr::Menvcfg
+            | Csr::Satp
+            | Csr::Scause
+            | Csr::Senvcfg
+            | Csr::Sstateen0
+            | Csr::Sstateen1
+            | Csr::Sstateen2
+            | Csr::Sstateen3
+            | Csr::Mstateen0
+            | Csr::Mstateen1
+            | Csr::Mstateen2
+            | Csr::Mstateen3
+            | Csr::Stimecmp
+            | Csr::Sedeleg
+            | Csr::Sepc
+            | Csr::Sideleg
+            | Csr::Scounteren
+            | Csr::Sie
+            | Csr::Sip
+            | Csr::Sscratch
+            | Csr::Sstatus
+            | Csr::Stval
+            | Csr::Stvec
+            | Csr::Time
+            | Csr::Tselect
+            | Csr::Tdata1
+            | Csr::Tdata2
+            | Csr::Tdata3
+            | Csr::Tinfo
+            | Csr::Ucause
+            | Csr::Uepc
+            | Csr::Uie
+            | Csr::Uip
+            | Csr::Uscratch
+            | Csr::Ustatus
+            | Csr::Utval
+            | Csr::Utvec
+            | Csr::Vstart
+            | Csr::Vxsat
+            | Csr::Vxrm
+            | Csr::Vcsr
+            | Csr::Vl
+            | Csr::Vtype
+            | Csr::Vlenb
+    )
+}
+
+/// Lowest and highest implemented hardware performance monitor counter.
+/// mhpmcounter3..15 / mhpmevent3..15 -- 13 counters, matching the DUT
+/// (smolrv64) and the `mcountinhibit` WARL mask below.
+pub const HPM_FIRST: usize = 3;
+pub const HPM_LAST: usize = 15;
+
+/// `mhpmevent` event selectors.
+///
+/// These are platform-specific: `OpenSBI` learns them from the
+/// `riscv,event-to-mhpmevent` / `riscv,raw-event-to-mhpmcounters` properties of
+/// the device tree's `riscv,pmu` node and programs them into `mhpmeventN` on
+/// the kernel's behalf.  Keep `linux/*.dts` in sync.
+pub const HPM_EV_NONE: u64 = 0;
+pub const HPM_EV_BB_MISS: u64 = 1;
+pub const HPM_EV_BB_COLD_MISS: u64 = 2;
+pub const HPM_EV_BB_CONFLICT_MISS: u64 = 3;
+pub const HPM_EV_BB_HIT: u64 = 4;
+pub const HPM_EV_BB_FLUSH: u64 = 5;
+pub const HPM_EV_ITLB_MISS: u64 = 6;
+pub const HPM_EV_DTLB_MISS: u64 = 7;
+// Cycles and retired instructions are also available as *programmable* events.
+// mcycle/minstret themselves cannot be filtered or sampled -- Sscofpmf gives
+// `scountovf` no bits below 3 and the OF/*INH flags live in mhpmevent -- so
+// OpenSBI deliberately steers CPU_CYCLES/INSTRUCTIONS to an mhpmcounter when
+// Sscofpmf is present, falling back to the fixed counters only when none is
+// free. Both are simmerv's one free-running counter (IPC is 1).
+pub const HPM_EV_CYCLES: u64 = 8;
+pub const HPM_EV_INSTRET: u64 = 9;
+
+/// Sscofpmf flags in the top 6 bits of `mhpmevent`.
+///
+/// `OF` is set by hardware when the counter wraps and is sticky: while it is
+/// set no further overflow interrupt is raised, which is how the kernel avoids
+/// having to throttle in its handler.  The `*INH` bits stop the counter in the
+/// named privilege mode.  H is not implemented, so VSINH/VUINH are stored and
+/// never consulted.
+pub const MHPMEVENT_OF: u64 = 1 << 63;
+pub const MHPMEVENT_MINH: u64 = 1 << 62;
+pub const MHPMEVENT_SINH: u64 = 1 << 61;
+pub const MHPMEVENT_UINH: u64 = 1 << 60;
+pub const MHPMEVENT_VSINH: u64 = 1 << 59;
+pub const MHPMEVENT_VUINH: u64 = 1 << 58;
+
+/// Selector field of `mhpmevent`: everything below the Sscofpmf flags.
+pub const MHPMEVENT_SEL_MASK: u64 = (1 << 58) - 1;
+
+pub struct CsrFile {
+    pub menvcfg: u64,
+    pub stimecmp: u64,
+    pub mcause: u64,
+    pub medeleg: u64,
+    pub mepc: u64,
+    pub mhartid: u64,
+    pub mideleg: u64,
+    pub mie: u64,
+    pub misa: u64,
+    pub mscratch: u64,
+    pub mtval: u64,
+    pub mtvec: u64,
+    pub scause: u64,
+    pub sedeleg: u64,
+    pub sepc: u64,
+    pub sideleg: u64,
+    pub sscratch: u64,
+    pub stval: u64,
+    pub stvec: u64,
+    pub ustatus: u64,
+    pub mcounteren: u32,
+    pub scounteren: u32,
+    pub mcountinhibit: u64,
+    pub mcyclecfg: u64,
+    pub minstretcfg: u64,
+    /// mhpmcounter3..15; entries 0..=2 are unused (those are
+    /// cycle/time/instret).
+    pub mhpmcounter: [u64; HPM_LAST + 1],
+    /// mhpmevent3..15; entries 0..=2 are unused.
+    pub mhpmevent: [u64; HPM_LAST + 1],
+    pub senvcfg: u64,
+    /// `mstateen0`.  Only `SE0` and `ENVCFG` are writable; see the enum.
+    pub mstateen0: u64,
+    // PMP: the DUTs (smolrv64 + probe) store cfg/addr0 verbatim (no enforcement),
+    // so simmerv stores them too -- OpenSBI writes then reads them back at boot.
+    pub pmpcfg0: u64,
+    pub pmpaddr0: u64,
+}
+
+impl Default for CsrFile {
+    fn default() -> Self { Self::new() }
+}
+
+impl CsrFile {
+    #[must_use]
+    pub fn new() -> Self {
+        let mut misa = 1 << 63; // RV64
+        for c in "SUIMAFDC".bytes() {
+            misa |= 1 << (c as usize - 65);
+        }
+
+        Self {
+            menvcfg: 0,
+            stimecmp: u64::MAX, // no deadline until set
+            mcause: 0,
+            medeleg: 0,
+            mepc: 0,
+            mhartid: 0,
+            mideleg: 0,
+            mie: 0,
+            misa,
+            mscratch: 0,
+            mtval: 0,
+            mtvec: 0,
+            scause: 0,
+            sedeleg: 0,
+            sepc: 0,
+            sideleg: 0,
+            sscratch: 0,
+            stval: 0,
+            stvec: 0,
+            ustatus: 0,
+            mcounteren: 0,
+            scounteren: 0,
+            mcountinhibit: 0,
+            mcyclecfg: 0,
+            minstretcfg: 0,
+            mhpmcounter: [0; HPM_LAST + 1],
+            mhpmevent: [0; HPM_LAST + 1],
+            senvcfg: 0,
+            // Reset permissive.  The architectural reset value denies access,
+            // on the reasoning that firmware should opt new state in -- but
+            // firmware that predates Smstateen never will, and would leave
+            // S-mode unable to reach senvcfg on a machine that previously had
+            // no gate at all.  Since the only state simmerv gates is senvcfg
+            // itself, denying by default protects nothing and breaks guests.
+            mstateen0: MSTATEEN0_SE0 | MSTATEEN0_ENVCFG,
+            pmpcfg0: 0,
+            pmpaddr0: 0,
+        }
+    }
+}

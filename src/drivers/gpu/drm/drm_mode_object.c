@@ -28,11 +28,12 @@
 #include "vfs.h"
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 /* Implemented in drm_property.c. */
-extern struct drm_property *drm_property_find(struct drm_device *dev, struct drm_file *file_priv, uint32_t id);
+extern struct drm_property *drm_property_find(struct drm_device *dev, struct drm_file *file_priv,
+                                              uint32_t id);
 
 /* Slots a property set starts with; most objects have fewer than a dozen. */
 #define DRM_OBJECT_PROP_INITIAL_CAPACITY 16u
@@ -45,13 +46,15 @@ extern struct drm_property *drm_property_find(struct drm_device *dev, struct drm
  */
 int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type)
 {
-    uint32_t id  = 0;
+    uint32_t id = 0;
     int      ret;
 
     spin_lock(&dev->mode_config.idr_mutex);
     ret = drm_idr_alloc(&dev->mode_config.object_idr, obj, 1, 0, &id);
     spin_unlock(&dev->mode_config.idr_mutex);
-    if (ret != 0) { return ret; }
+    if (ret != 0) {
+        return ret;
+    }
 
     obj->id         = id;
     obj->type       = type;
@@ -65,7 +68,9 @@ int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *ob
 
 void drm_mode_object_get(struct drm_mode_object *obj)
 {
-    if (obj == NULL) { return; }
+    if (obj == NULL) {
+        return;
+    }
 
     spin_lock(&obj->ref_lock);
     obj->refcount++;
@@ -82,7 +87,9 @@ bool drm_mode_object_put_dec_and_test(struct drm_mode_object *obj)
 {
     bool last;
 
-    if (obj == NULL) { return false; }
+    if (obj == NULL) {
+        return false;
+    }
 
     spin_lock(&obj->ref_lock);
     last = (--obj->refcount == 0);
@@ -101,7 +108,8 @@ void drm_mode_object_put(struct drm_mode_object *obj)
  * accepts anything.  On success the object carries an extra reference the
  * caller is responsible for dropping.
  */
-struct drm_mode_object *drm_mode_object_find(struct drm_device *dev, struct drm_file *file_priv, uint32_t id, uint32_t type)
+struct drm_mode_object *drm_mode_object_find(struct drm_device *dev, struct drm_file *file_priv,
+                                             uint32_t id, uint32_t type)
 {
     struct drm_mode_object *obj;
 
@@ -132,14 +140,19 @@ struct drm_mode_object *drm_mode_object_find(struct drm_device *dev, struct drm_
 /* --------------------------------------------------- per-object properties */
 
 /* Set (or overwrite) @property's value on @obj. */
-int drm_object_property_set_value(struct drm_mode_object *obj, struct drm_property *property, uint64_t val)
+int drm_object_property_set_value(struct drm_mode_object *obj, struct drm_property *property,
+                                  uint64_t val)
 {
     struct drm_property_set *set;
     uint32_t                 i;
 
-    if (obj == NULL || property == NULL) { return -EINVAL; }
+    if (obj == NULL || property == NULL) {
+        return -EINVAL;
+    }
     set = obj->properties;
-    if (set == NULL) { return -EINVAL; }
+    if (set == NULL) {
+        return -EINVAL;
+    }
 
     spin_lock(&set->lock);
 
@@ -152,8 +165,9 @@ int drm_object_property_set_value(struct drm_mode_object *obj, struct drm_proper
     }
 
     if (set->count >= set->capacity) {
-        uint32_t  wanted = (set->capacity != 0) ? set->capacity * 2u : DRM_OBJECT_PROP_INITIAL_CAPACITY;
-        uint32_t *ids    = realloc(set->ids, (size_t)wanted * sizeof(*ids));
+        uint32_t wanted =
+            (set->capacity != 0) ? set->capacity * 2u : DRM_OBJECT_PROP_INITIAL_CAPACITY;
+        uint32_t *ids = realloc(set->ids, (size_t)wanted * sizeof(*ids));
         uint64_t *values;
 
         if (ids == NULL) {
@@ -184,14 +198,19 @@ int drm_object_property_set_value(struct drm_mode_object *obj, struct drm_proper
 }
 
 /* Read @property's value back.  -EINVAL when it is not attached. */
-int drm_object_property_get_value(struct drm_mode_object *obj, struct drm_property *property, uint64_t *val_out)
+int drm_object_property_get_value(struct drm_mode_object *obj, struct drm_property *property,
+                                  uint64_t *val_out)
 {
     struct drm_property_set *set;
     uint32_t                 i;
 
-    if (obj == NULL || property == NULL || val_out == NULL) { return -EINVAL; }
+    if (obj == NULL || property == NULL || val_out == NULL) {
+        return -EINVAL;
+    }
     set = obj->properties;
-    if (set == NULL) { return -EINVAL; }
+    if (set == NULL) {
+        return -EINVAL;
+    }
 
     spin_lock(&set->lock);
     for (i = 0; i < set->count; i++) {
@@ -211,14 +230,17 @@ int drm_object_property_get_value(struct drm_mode_object *obj, struct drm_proper
  * use.  Meant for object construction: the set is not grown in a way that
  * is safe against a concurrent reader walking it.
  */
-int drm_object_attach_property(struct drm_mode_object *obj, struct drm_property *property, uint64_t init_val)
+int drm_object_attach_property(struct drm_mode_object *obj, struct drm_property *property,
+                               uint64_t init_val)
 {
-    if (obj == NULL || property == NULL) { return -EINVAL; }
+    if (obj == NULL || property == NULL) {
+        return -EINVAL;
+    }
 
     if (obj->properties == NULL) {
-        struct drm_property_set *set  = malloc(sizeof(*set));
-        uint32_t                *ids  = malloc((size_t)DRM_OBJECT_PROP_INITIAL_CAPACITY * sizeof(*ids));
-        uint64_t                *vals = malloc((size_t)DRM_OBJECT_PROP_INITIAL_CAPACITY * sizeof(*vals));
+        struct drm_property_set *set = malloc(sizeof(*set));
+        uint32_t *ids  = malloc((size_t)DRM_OBJECT_PROP_INITIAL_CAPACITY * sizeof(*ids));
+        uint64_t *vals = malloc((size_t)DRM_OBJECT_PROP_INITIAL_CAPACITY * sizeof(*vals));
 
         if (set == NULL || ids == NULL || vals == NULL) {
             free(set);
@@ -228,9 +250,9 @@ int drm_object_attach_property(struct drm_mode_object *obj, struct drm_property 
         }
 
         memset(set, 0, sizeof(*set));
-        set->capacity   = DRM_OBJECT_PROP_INITIAL_CAPACITY;
-        set->ids        = ids;
-        set->values     = vals;
+        set->capacity = DRM_OBJECT_PROP_INITIAL_CAPACITY;
+        set->ids      = ids;
+        set->values   = vals;
 
         obj->properties = set;
     }
@@ -240,14 +262,18 @@ int drm_object_attach_property(struct drm_mode_object *obj, struct drm_property 
 
 void drm_property_set_init(struct drm_property_set *set)
 {
-    if (set == NULL) { return; }
+    if (set == NULL) {
+        return;
+    }
 
     memset(set, 0, sizeof(*set));
 }
 
 void drm_property_set_destroy(struct drm_property_set *set)
 {
-    if (set == NULL) { return; }
+    if (set == NULL) {
+        return;
+    }
 
     free(set->ids);
     free(set->values);
@@ -267,10 +293,14 @@ int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct 
     struct drm_mode_obj_get_properties *req = (struct drm_mode_obj_get_properties *)data;
     struct drm_mode_object             *obj;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     obj = drm_mode_object_find(dev, file_priv, req->obj_id, req->obj_type);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
 
     if (obj->properties != NULL) {
         struct drm_property_set *set     = obj->properties;
@@ -299,10 +329,11 @@ int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct 
             return -ENOMEM;
         }
 
-        if (copying != 0
-            && (req->props_ptr == 0 || req->prop_values_ptr == 0
-                || copy_to_user((void *)(uintptr_t)req->props_ptr, ids, (size_t)copying * sizeof(*ids)) != 0
-                || copy_to_user((void *)(uintptr_t)req->prop_values_ptr, values, (size_t)copying * sizeof(*values)) != 0)) {
+        if (copying != 0 && (req->props_ptr == 0 || req->prop_values_ptr == 0 ||
+                             copy_to_user((void *)(uintptr_t)req->props_ptr, ids,
+                                          (size_t)copying * sizeof(*ids)) != 0 ||
+                             copy_to_user((void *)(uintptr_t)req->prop_values_ptr, values,
+                                          (size_t)copying * sizeof(*values)) != 0)) {
             free(ids);
             free(values);
             drm_mode_object_put(obj);
@@ -326,7 +357,7 @@ int drm_mode_obj_getproperties_ioctl(struct drm_device *dev, void *data, struct 
  */
 int drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_obj_set_property *req  = (struct drm_mode_obj_set_property *)data;
+    struct drm_mode_obj_set_property *req = (struct drm_mode_obj_set_property *)data;
     struct drm_mode_object           *obj;
     struct drm_property              *prop;
     uint64_t                          current_value;
@@ -334,10 +365,14 @@ int drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct dr
 
     (void)file_priv;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     obj = drm_mode_object_find(dev, NULL, req->obj_id, req->obj_type);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
 
     prop = drm_property_find(dev, NULL, req->prop_id);
     if (prop == NULL) {
@@ -363,7 +398,8 @@ int drm_mode_obj_setproperty_ioctl(struct drm_device *dev, void *data, struct dr
         return -EINVAL;
     }
 
-    if ((prop->flags & DRM_MODE_PROP_RANGE) != 0 && (req->value < prop->values[0] || req->value > prop->values[1])) {
+    if ((prop->flags & DRM_MODE_PROP_RANGE) != 0 &&
+        (req->value < prop->values[0] || req->value > prop->values[1])) {
         drm_mode_object_put(&prop->base);
         drm_mode_object_put(obj);
         return -EINVAL;
@@ -390,10 +426,12 @@ struct drm_mode_set_property {
 
 int drm_mode_setproperty_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
-    struct drm_mode_set_property     *legacy = (struct drm_mode_set_property *)data;
-    struct drm_mode_obj_set_property  modern;
+    struct drm_mode_set_property    *legacy = (struct drm_mode_set_property *)data;
+    struct drm_mode_obj_set_property modern;
 
-    if (dev == NULL || legacy == NULL) { return -EINVAL; }
+    if (dev == NULL || legacy == NULL) {
+        return -EINVAL;
+    }
 
     memset(&modern, 0, sizeof(modern));
     modern.obj_id   = legacy->connector_id;

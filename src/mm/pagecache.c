@@ -20,21 +20,21 @@
 #include "kstring.h"
 #include "debugcon.h"
 
-#define PC_PAGE      4096
-#define PC_PAGES     4096                  /* 16 MiB of cached device data */
-#define PC_BUCKETS   1024
+#define PC_PAGE    4096
+#define PC_PAGES   4096 /* 16 MiB of cached device data */
+#define PC_BUCKETS 1024
 
 typedef struct pc_page {
-    struct pc_page *next;                  /* hash chain                  */
-    struct pc_page *lru_prev, *lru_next;   /* recency list                */
-    void           *ctx;                   /* the device it belongs to    */
-    uint64_t        off;                   /* device offset, page-aligned */
-    int             active;                /* on the active list (2nd hit)*/
-    int             dirty;                 /* newer than the device copy  */
-    int             ra;                    /* filled by readahead, unread */
-    pc_dev_write_t  wr;                    /* how to write this device    */
-    uint64_t        frame;                 /* physical frame              */
-    uint8_t        *data;                  /* kernel-view pointer         */
+    struct pc_page *next;                /* hash chain                  */
+    struct pc_page *lru_prev, *lru_next; /* recency list                */
+    void           *ctx;                 /* the device it belongs to    */
+    uint64_t        off;                 /* device offset, page-aligned */
+    int             active;              /* on the active list (2nd hit)*/
+    int             dirty;               /* newer than the device copy  */
+    int             ra;                  /* filled by readahead, unread */
+    pc_dev_write_t  wr;                  /* how to write this device    */
+    uint64_t        frame;               /* physical frame              */
+    uint8_t        *data;                /* kernel-view pointer         */
 } pc_page_t;
 
 static pc_page_t  g_pool[PC_PAGES];
@@ -48,8 +48,8 @@ static pc_page_t *g_bucket[PC_BUCKETS];
 static pc_page_t *g_active_head, *g_active_tail;
 static pc_page_t *g_inactive_head, *g_inactive_tail;
 static uint32_t   g_hits, g_misses, g_evicts, g_promote, g_demote;
-static uint32_t   g_dirty_n, g_wb;       /* dirty pages now, writebacks ever */
-static uint32_t   g_active_n, g_inactive_n;      /* list lengths */
+static uint32_t   g_dirty_n, g_wb;          /* dirty pages now, writebacks ever */
+static uint32_t   g_active_n, g_inactive_n; /* list lengths */
 
 /* ---- readahead state -----------------------------------------------------
  * One window per device: where the sequential stream last stopped and how
@@ -57,15 +57,15 @@ static uint32_t   g_active_n, g_inactive_n;      /* list lengths */
  * (the stream is real); any other access resets it to the minimum, so one
  * random read never buys a burst of prefetches it does not want. */
 typedef struct {
-    void     *ctx;
-    uint64_t  last_page;      /* page index of the last access              */
-    uint32_t  window;         /* pages to fetch ahead of the stream         */
-    uint32_t  in_use;
+    void    *ctx;
+    uint64_t last_page; /* page index of the last access              */
+    uint32_t window;    /* pages to fetch ahead of the stream         */
+    uint32_t in_use;
 } ra_state_t;
 
-#define RA_MIN       2
-#define RA_MAX       16
-#define RA_TABLE     64
+#define RA_MIN   2
+#define RA_MAX   16
+#define RA_TABLE 64
 static ra_state_t g_ra[RA_TABLE];
 
 extern uint64_t g_hhdm;
@@ -133,14 +133,14 @@ static void lru_touch(pc_page_t *p)
 
 static void hash_insert(pc_page_t *p)
 {
-    unsigned b = bucket_of(p->ctx, p->off);
-    p->next = g_bucket[b];
+    unsigned b  = bucket_of(p->ctx, p->off);
+    p->next     = g_bucket[b];
     g_bucket[b] = p;
 }
 
 static void hash_remove(pc_page_t *p)
 {
-    unsigned b = bucket_of(p->ctx, p->off);
+    unsigned    b  = bucket_of(p->ctx, p->off);
     pc_page_t **pp = &g_bucket[b];
     while (*pp && *pp != p)
         pp = &(*pp)->next;
@@ -169,7 +169,7 @@ static int page_flush_one(pc_page_t *p)
     if (!p->dirty || !p->wr)
         return 0;
     if (p->wr(p->ctx, p->off, p->data, PC_PAGE) < 0)
-        return -1;                       /* keep it dirty: caller retries */
+        return -1; /* keep it dirty: caller retries */
     p->dirty = 0;
     if (g_dirty_n)
         g_dirty_n--;
@@ -207,7 +207,7 @@ static pc_page_t *page_alloc(void *ctx, uint64_t off)
 {
     pc_page_t *p;
     if (g_used < PC_PAGES) {
-        p = &g_pool[g_used++];
+        p        = &g_pool[g_used++];
         p->frame = pmm_alloc_zeroed();
         if (!p->frame)
             return NULL;
@@ -241,19 +241,19 @@ static pc_page_t *page_alloc(void *ctx, uint64_t off)
         while (v && v->dirty && page_flush_one(v) < 0)
             v = v->lru_next;
         if (!v)
-            return NULL;                 /* every victim owes the disk */
+            return NULL; /* every victim owes the disk */
         p = v;
         g_evicts++;
         hash_remove(p);
         lru_unlink(p);
     }
-    p->ctx = ctx;
-    p->off = off;
+    p->ctx    = ctx;
+    p->off    = off;
     p->active = 0;
-    p->dirty = 0;                        /* the old owner flushed above  */
-    p->ra = 0;
-    p->wr = NULL;
-    p->next = NULL;
+    p->dirty  = 0; /* the old owner flushed above  */
+    p->ra     = 0;
+    p->wr     = NULL;
+    p->next   = NULL;
     hash_insert(p);
     lru_push(&g_inactive_head, &g_inactive_tail, p);
     return p;
@@ -269,7 +269,7 @@ static ra_state_t *ra_find(void *ctx)
     return NULL;
 }
 
-static unsigned g_ra_victim;             /* rotates when the table is full */
+static unsigned g_ra_victim; /* rotates when the table is full */
 
 static ra_state_t *ra_get(void *ctx)
 {
@@ -286,10 +286,10 @@ static ra_state_t *ra_get(void *ctx)
     }
     if (!r)
         r = &g_ra[g_ra_victim++ % RA_TABLE];
-    r->ctx = ctx;
+    r->ctx       = ctx;
     r->last_page = (uint64_t)-1;
-    r->window = RA_MIN;
-    r->in_use = 1;
+    r->window    = RA_MIN;
+    r->in_use    = 1;
     return r;
 }
 
@@ -324,16 +324,15 @@ void pagecache_init(void)
     g_active_head = g_active_tail = g_inactive_head = g_inactive_tail = NULL;
 }
 
-int pagecache_read(void *ctx, pc_dev_read_t rd, uint64_t off, void *buf,
-                   uint32_t len)
+int pagecache_read(void *ctx, pc_dev_read_t rd, uint64_t off, void *buf, uint32_t len)
 {
     if (!ctx || !rd)
         return -1;
     uint32_t done = 0;
     while (done < len) {
-        uint64_t poff = (off + done) & ~(uint64_t)(PC_PAGE - 1);
+        uint64_t poff    = (off + done) & ~(uint64_t)(PC_PAGE - 1);
         uint32_t in_page = (uint32_t)((off + done) - poff);
-        uint32_t n = len - done;
+        uint32_t n       = len - done;
         if (n > PC_PAGE - in_page)
             n = PC_PAGE - in_page;
 
@@ -364,8 +363,7 @@ int pagecache_read(void *ctx, pc_dev_read_t rd, uint64_t off, void *buf,
             if (p->ra) {
                 p->ra = 0;
                 if (r->window < RA_MAX)
-                    r->window = (r->window + 1) * 2 > RA_MAX
-                              ? RA_MAX : (r->window + 1) * 2;
+                    r->window = (r->window + 1) * 2 > RA_MAX ? RA_MAX : (r->window + 1) * 2;
             }
             if (idx == r->last_page + 1)
                 ra_issue(ctx, rd, idx, r->window);
@@ -380,8 +378,8 @@ int pagecache_read(void *ctx, pc_dev_read_t rd, uint64_t off, void *buf,
     return (int)done;
 }
 
-int pagecache_write(void *ctx, pc_dev_read_t rd, pc_dev_write_t wr,
-                    uint64_t off, const void *buf, uint32_t len)
+int pagecache_write(void *ctx, pc_dev_read_t rd, pc_dev_write_t wr, uint64_t off, const void *buf,
+                    uint32_t len)
 {
     if (!ctx || !wr)
         return -1;
@@ -391,9 +389,9 @@ int pagecache_write(void *ctx, pc_dev_read_t rd, pc_dev_write_t wr,
      * nothing until pagecache_flush_* runs or reclaim claims the page. */
     uint32_t done = 0;
     while (done < len) {
-        uint64_t poff = (off + done) & ~(uint64_t)(PC_PAGE - 1);
+        uint64_t poff    = (off + done) & ~(uint64_t)(PC_PAGE - 1);
         uint32_t in_page = (uint32_t)((off + done) - poff);
-        uint32_t n = len - done;
+        uint32_t n       = len - done;
         if (n > PC_PAGE - in_page)
             n = PC_PAGE - in_page;
 
@@ -410,7 +408,7 @@ int pagecache_write(void *ctx, pc_dev_read_t rd, pc_dev_write_t wr,
             }
         }
         memcpy(p->data + in_page, (const uint8_t *)buf + done, n);
-        p->wr = wr;                      /* remember the flush path */
+        p->wr = wr; /* remember the flush path */
         if (!p->dirty) {
             p->dirty = 1;
             g_dirty_n++;
@@ -434,7 +432,7 @@ int pagecache_invalidate(void *ctx)
             pc_page_t *next = p->next;
             if (p->ctx == ctx) {
                 if (p->dirty && page_flush_one(p) < 0)
-                    r = -1;              /* page kept: it still owes data */
+                    r = -1; /* page kept: it still owes data */
                 else {
                     hash_remove(p);
                     lru_unlink(p);
@@ -447,19 +445,24 @@ int pagecache_invalidate(void *ctx)
     return r;
 }
 
-void pagecache_stats(uint32_t *hits, uint32_t *misses, uint32_t *evicts,
-                     uint32_t *pages)
+void pagecache_stats(uint32_t *hits, uint32_t *misses, uint32_t *evicts, uint32_t *pages)
 {
-    if (hits)  *hits = g_hits;
-    if (misses) *misses = g_misses;
-    if (evicts) *evicts = g_evicts;
-    if (pages) *pages = g_used;
+    if (hits)
+        *hits = g_hits;
+    if (misses)
+        *misses = g_misses;
+    if (evicts)
+        *evicts = g_evicts;
+    if (pages)
+        *pages = g_used;
 }
 
 void pagecache_wb_stats(uint32_t *dirty_now, uint32_t *writebacks)
 {
-    if (dirty_now)   *dirty_now = g_dirty_n;
-    if (writebacks)  *writebacks = g_wb;
+    if (dirty_now)
+        *dirty_now = g_dirty_n;
+    if (writebacks)
+        *writebacks = g_wb;
 }
 
 /* A driver with no backing store: reads memcpy out of a kernel buffer and
@@ -467,7 +470,7 @@ void pagecache_wb_stats(uint32_t *dirty_now, uint32_t *writebacks)
  * below reason about.  64 pages so readahead windows always fit. */
 static uint8_t  g_fake_dev[PC_PAGE * 64];
 static uint32_t g_fake_reads, g_fake_writes;
-static uint32_t g_fake_read_at[64];      /* reads per page index */
+static uint32_t g_fake_read_at[64]; /* reads per page index */
 
 static int fake_read(void *ctx, uint64_t off, void *buf, uint32_t len)
 {
@@ -492,7 +495,7 @@ void pagecache_selftest(void)
     pagecache_init();
     pagecache_stats(&h0, &m0, &e0, &p0);
 
-    void *ctx = (void *)0x1234;
+    void   *ctx = (void *)0x1234;
     uint8_t out[PC_PAGE];
 
     /* ---- write-back: a write is NOT on the device until sync ---------- */
@@ -507,8 +510,7 @@ void pagecache_selftest(void)
         return;
     }
     /* the cache answers the read from memory, not from the stale device */
-    if (pagecache_read(ctx, fake_read, 0, out, 11) != 11 ||
-        memcmp(out, "NEW-CONTENT", 11)) {
+    if (pagecache_read(ctx, fake_read, 0, out, 11) != 11 || memcmp(out, "NEW-CONTENT", 11)) {
         dbg_puts("PCACHE: FAIL (read did not see the cached write)\r\n");
         return;
     }
@@ -518,8 +520,7 @@ void pagecache_selftest(void)
     }
     /* after the flush the device copy is current: invalidate then read
      * must show the flushed data */
-    if (pagecache_invalidate(ctx) != 0 ||
-        pagecache_read(ctx, fake_read, 0, out, 11) != 11 ||
+    if (pagecache_invalidate(ctx) != 0 || pagecache_read(ctx, fake_read, 0, out, 11) != 11 ||
         memcmp(out, "NEW-CONTENT", 11)) {
         dbg_puts("PCACHE: FAIL (flushed data not on the device)\r\n");
         return;
@@ -529,8 +530,7 @@ void pagecache_selftest(void)
     before = g_fake_writes;
     uint8_t pat[PC_PAGE];
     memset(pat, 0xAB, PC_PAGE);
-    if (pagecache_write(ctx, fake_read, fake_write, PC_PAGE * 5, pat,
-                        PC_PAGE) != PC_PAGE) {
+    if (pagecache_write(ctx, fake_read, fake_write, PC_PAGE * 5, pat, PC_PAGE) != PC_PAGE) {
         dbg_puts("PCACHE: FAIL (full-page write)\r\n");
         return;
     }
@@ -567,7 +567,7 @@ void pagecache_selftest(void)
         dbg_puts("PCACHE: FAIL (stream first read)\r\n");
         return;
     }
-    if (g_fake_reads != before + 3) {    /* the page + RA_MIN prefetches */
+    if (g_fake_reads != before + 3) { /* the page + RA_MIN prefetches */
         dbg_puts("PCACHE: FAIL (no prefetch on sequential read)\r\n");
         return;
     }

@@ -52,17 +52,23 @@ static int drm_idr_rehash(struct drm_idr *idr)
     uint32_t              capacity = idr->capacity * 2u;
     uint32_t              i;
 
-    if (capacity == 0u || capacity < idr->capacity) { return -ENOMEM; }
+    if (capacity == 0u || capacity < idr->capacity) {
+        return -ENOMEM;
+    }
 
     fresh = malloc(capacity * sizeof(struct drm_idr_entry));
-    if (fresh == NULL) { return -ENOMEM; }
+    if (fresh == NULL) {
+        return -ENOMEM;
+    }
     memset(fresh, 0, capacity * sizeof(struct drm_idr_entry));
 
     for (i = 0; i < idr->capacity; i++) {
         struct drm_idr_entry *src = &idr->table[i];
         uint32_t              idx;
 
-        if (src->state != DRM_IDR_SLOT_LIVE) { continue; }
+        if (src->state != DRM_IDR_SLOT_LIVE) {
+            continue;
+        }
 
         idx = drm_idr_bucket(src->id, capacity);
         while (fresh[idx].state == DRM_IDR_SLOT_LIVE) {
@@ -98,15 +104,21 @@ static struct drm_idr_entry *drm_idr_locate(struct drm_idr *idr, uint32_t id)
     uint32_t idx  = drm_idr_bucket(id, idr->capacity);
     uint32_t i;
 
-    if (idr->capacity == 0u) { return NULL; }
+    if (idr->capacity == 0u) {
+        return NULL;
+    }
 
     for (i = 0; i < idr->capacity; i++) {
         struct drm_idr_entry *e = &idr->table[idx];
 
         /* An unused bucket that has never been used ends the probe chain
          * -- nothing can have been placed past it. */
-        if (e->state == DRM_IDR_SLOT_EMPTY) { return NULL; }
-        if (e->state == DRM_IDR_SLOT_LIVE && e->id == id) { return e; }
+        if (e->state == DRM_IDR_SLOT_EMPTY) {
+            return NULL;
+        }
+        if (e->state == DRM_IDR_SLOT_LIVE && e->id == id) {
+            return e;
+        }
         idx = (idx + 1u) & mask;
     }
     return NULL;
@@ -127,7 +139,9 @@ static int drm_idr_bind(struct drm_idr *idr, void *ptr, uint32_t id)
         uint32_t              i;
 
         if (idr->capacity == 0u) {
-            if (drm_idr_rehash(idr) != 0) { return -ENOMEM; }
+            if (drm_idr_rehash(idr) != 0) {
+                return -ENOMEM;
+            }
             continue;
         }
 
@@ -137,15 +151,17 @@ static int drm_idr_bind(struct drm_idr *idr, void *ptr, uint32_t id)
             if (e->state == DRM_IDR_SLOT_EMPTY) {
                 /* Free spot: reuse the tombstone we walked past, if any, so
                  * dead buckets do not silently accumulate. */
-                e         = (dead != NULL) ? dead : e;
-                e->id     = id;
-                e->ptr    = ptr;
-                e->state  = DRM_IDR_SLOT_LIVE;
+                e        = (dead != NULL) ? dead : e;
+                e->id    = id;
+                e->ptr   = ptr;
+                e->state = DRM_IDR_SLOT_LIVE;
                 idr->count++;
                 return 0;
             }
             if (e->state == DRM_IDR_SLOT_LIVE) {
-                if (e->id == id) { return -EEXIST; }
+                if (e->id == id) {
+                    return -EEXIST;
+                }
             } else if (dead == NULL) {
                 dead = e;
             }
@@ -153,7 +169,9 @@ static int drm_idr_bind(struct drm_idr *idr, void *ptr, uint32_t id)
         }
 
         /* Every bucket is live: grow and try once more in the new table. */
-        if (grown || drm_idr_rehash(idr) != 0) { return -ENOMEM; }
+        if (grown || drm_idr_rehash(idr) != 0) {
+            return -ENOMEM;
+        }
         grown = 1;
     }
 }
@@ -163,7 +181,9 @@ void drm_idr_init(struct drm_idr *idr)
     memset(idr, 0, sizeof(*idr));
 
     idr->table = malloc(DRM_IDR_MIN_CAPACITY * sizeof(struct drm_idr_entry));
-    if (idr->table == NULL) { return; }
+    if (idr->table == NULL) {
+        return;
+    }
     memset(idr->table, 0, DRM_IDR_MIN_CAPACITY * sizeof(struct drm_idr_entry));
 
     idr->capacity = DRM_IDR_MIN_CAPACITY;
@@ -203,7 +223,9 @@ int drm_idr_alloc(struct drm_idr *idr, void *ptr, uint32_t start, uint32_t end, 
             /* Keep the hint monotonic so repeated allocations do not hand
              * out an id that was used once, freed, and is being watched by
              * some user of the old handle. */
-            if (idr->next_id <= id) { idr->next_id = id + 1u; }
+            if (idr->next_id <= id) {
+                idr->next_id = id + 1u;
+            }
             *id_out = id;
             spin_unlock(&idr->lock);
             return 0;
@@ -222,7 +244,9 @@ int drm_idr_alloc_exact(struct drm_idr *idr, void *ptr, uint32_t id)
 {
     int ret;
 
-    if (id == DRM_IDR_INVALID) { return -EINVAL; }
+    if (id == DRM_IDR_INVALID) {
+        return -EINVAL;
+    }
 
     spin_lock(&idr->lock);
 
@@ -242,11 +266,15 @@ void *drm_idr_find(struct drm_idr *idr, uint32_t id)
     struct drm_idr_entry *e;
     void                 *ptr = NULL;
 
-    if (id == DRM_IDR_INVALID) { return NULL; }
+    if (id == DRM_IDR_INVALID) {
+        return NULL;
+    }
 
     spin_lock(&idr->lock);
     e = drm_idr_locate(idr, id);
-    if (e != NULL) { ptr = e->ptr; }
+    if (e != NULL) {
+        ptr = e->ptr;
+    }
     spin_unlock(&idr->lock);
 
     return ptr;
@@ -257,14 +285,16 @@ void *drm_idr_remove(struct drm_idr *idr, uint32_t id)
     struct drm_idr_entry *e;
     void                 *ptr = NULL;
 
-    if (id == DRM_IDR_INVALID) { return NULL; }
+    if (id == DRM_IDR_INVALID) {
+        return NULL;
+    }
 
     spin_lock(&idr->lock);
     e = drm_idr_locate(idr, id);
     if (e != NULL) {
-        ptr        = e->ptr;
-        e->ptr     = NULL;
-        e->state   = DRM_IDR_SLOT_DEAD;
+        ptr      = e->ptr;
+        e->ptr   = NULL;
+        e->state = DRM_IDR_SLOT_DEAD;
         idr->count--;
     }
     spin_unlock(&idr->lock);
@@ -277,7 +307,9 @@ void *drm_idr_replace(struct drm_idr *idr, void *ptr, uint32_t id)
     struct drm_idr_entry *e;
     void                 *old = NULL;
 
-    if (id == DRM_IDR_INVALID) { return NULL; }
+    if (id == DRM_IDR_INVALID) {
+        return NULL;
+    }
 
     spin_lock(&idr->lock);
     e = drm_idr_locate(idr, id);
@@ -299,9 +331,13 @@ int drm_idr_for_each(struct drm_idr *idr, int (*fn)(uint32_t id, void *ptr, void
     for (i = 0; i < idr->capacity; i++) {
         struct drm_idr_entry *e = &idr->table[i];
 
-        if (e->state != DRM_IDR_SLOT_LIVE) { continue; }
+        if (e->state != DRM_IDR_SLOT_LIVE) {
+            continue;
+        }
         ret = fn(e->id, e->ptr, data);
-        if (ret != 0) { break; }
+        if (ret != 0) {
+            break;
+        }
     }
     spin_unlock(&idr->lock);
 

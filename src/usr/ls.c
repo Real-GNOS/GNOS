@@ -8,7 +8,7 @@
  */
 #include "ulib.h"
 
-#define BATCH 16
+#define BATCH    16
 #define PATH_MAX 128
 
 static void column(const char *s, int width)

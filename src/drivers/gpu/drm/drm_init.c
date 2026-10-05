@@ -33,6 +33,7 @@
 #include "drm_init.h"
 #include "drm_mode.h"
 #include "drm_print.h"
+#include "drm_svga.h"
 #include "drm_vsnprintf.h"
 #include "heap.h"
 #include "kstring.h"
@@ -47,14 +48,14 @@ void sched_block_timeout(uint32_t why, uint64_t ticks);
 
 /* The DRM core is always built into this kernel. */
 #ifndef CONFIG_DRM
-#    define CONFIG_DRM 1
+#define CONFIG_DRM 1
 #endif
 
 extern int                      drm_vblank_init(struct drm_device *dev, unsigned int num_crtcs);
 extern void                     drm_vblank_tick(void);
 extern struct drm_display_mode *drm_mode_create(struct drm_device *dev);
-extern void                     drm_mode_probed_add(struct drm_connector *connector, struct drm_display_mode *mode);
-extern int                      drm_read(struct drm_file *file_priv, char *buf, size_t count, size_t *offset);
+extern void drm_mode_probed_add(struct drm_connector *connector, struct drm_display_mode *mode);
+extern int  drm_read(struct drm_file *file_priv, char *buf, size_t count, size_t *offset);
 
 /* ------------------------------------------------------- device registry */
 
@@ -119,7 +120,9 @@ struct drm_device *drm_get_device_by_minor(int type, int index)
     for (int i = 0; i < DRM_MAX_DEVICES; i++) {
         struct drm_device *dev = drm_device_list[i];
 
-        if (dev == NULL) { continue; }
+        if (dev == NULL) {
+            continue;
+        }
 
         if (type == DRM_MINOR_PRIMARY && dev->primary != NULL && dev->primary->index == index) {
             spin_unlock(&drm_device_list_lock);
@@ -159,7 +162,9 @@ static void drm_dummy_lastclose(struct drm_device *dev)
  * giving the pages back. */
 static void drm_dummy_gem_free_object(struct drm_gem_object *obj)
 {
-    if (obj == NULL) { return; }
+    if (obj == NULL) {
+        return;
+    }
 
     aligned_free(obj->backing);
     obj->backing = NULL;
@@ -178,7 +183,9 @@ static struct drm_gem_object *drm_dummy_gem_prime_import(struct drm_device *dev,
 
     (void)dev;
 
-    if (obj == NULL) { return NULL; }
+    if (obj == NULL) {
+        return NULL;
+    }
 
     drm_gem_object_get(obj);
     return obj;
@@ -186,44 +193,44 @@ static struct drm_gem_object *drm_dummy_gem_prime_import(struct drm_device *dev,
 
 /* The commands this device answers; anything else gets ENOTTY. */
 static const struct drm_ioctl_desc drm_dummy_ioctls[] = {
-    {DRM_IOCTL_VERSION,                drm_version,                      0                    },
-    {DRM_IOCTL_GET_MAGIC,              drm_getmagic,                     DRM_AUTH             },
-    {DRM_IOCTL_SET_VERSION,            drm_setversion,                   DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_SET_MASTER,             drm_setmaster,                    0                    },
-    {DRM_IOCTL_DROP_MASTER,            drm_dropmaster,                   0                    },
-    {DRM_IOCTL_AUTH_MAGIC,             drm_authmagic,                    DRM_AUTH             },
-    {DRM_IOCTL_GEM_CLOSE,              drm_gem_close_ioctl,              DRM_AUTH             },
-    {DRM_IOCTL_GEM_FLINK,              drm_gem_flink_ioctl,              DRM_AUTH             },
-    {DRM_IOCTL_GEM_OPEN,               drm_gem_open_ioctl,               DRM_AUTH             },
-    {DRM_IOCTL_GET_CAP,                drm_get_cap,                      0                    },
-    {DRM_IOCTL_SET_CLIENT_CAP,         drm_set_client_cap,               0                    },
-    {DRM_IOCTL_WAIT_VBLANK,            drm_wait_vblank_ioctl,            0                    },
-    {DRM_IOCTL_MODE_GETRESOURCES,      drm_mode_getresources,            DRM_AUTH             },
-    {DRM_IOCTL_MODE_GETCRTC,           drm_mode_getcrtc,                 DRM_AUTH             },
-    {DRM_IOCTL_MODE_SETCRTC,           drm_mode_setcrtc,                 DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_CURSOR,            drm_mode_cursor_ioctl,            DRM_AUTH             },
-    {DRM_IOCTL_MODE_GETENCODER,        drm_mode_getencoder,              DRM_AUTH             },
-    {DRM_IOCTL_MODE_GETCONNECTOR,      drm_mode_getconnector,            DRM_AUTH             },
-    {DRM_IOCTL_MODE_GETPROPERTY,       drm_mode_getproperty_ioctl,       DRM_AUTH             },
-    {DRM_IOCTL_MODE_GETPROPBLOB,       drm_mode_getpropblob_ioctl,       DRM_AUTH             },
-    {DRM_IOCTL_MODE_CREATEPROPBLOB,    drm_mode_createpropblob_ioctl,    DRM_AUTH             },
-    {DRM_IOCTL_MODE_DESTROYPROPBLOB,   drm_mode_destroypropblob_ioctl,   DRM_AUTH             },
-    {DRM_IOCTL_MODE_GETGAMMA,          drm_mode_getgamma_ioctl,          DRM_AUTH             },
-    {DRM_IOCTL_MODE_SETGAMMA,          drm_mode_setgamma_ioctl,          DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_GETFB,             drm_mode_getfb,                   DRM_AUTH             },
-    {DRM_IOCTL_MODE_ADDFB,             drm_mode_addfb,                   DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_RMFB,              drm_mode_rmfb,                    DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_PAGE_FLIP,         drm_mode_page_flip_ioctl,         DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_DIRTYFB,           drm_mode_dirtyfb,                 DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_GETPLANERESOURCES, drm_mode_getplane_res,            DRM_AUTH             },
-    {DRM_IOCTL_MODE_GETPLANE,          drm_mode_getplane,                DRM_AUTH             },
-    {DRM_IOCTL_MODE_SETPLANE,          drm_mode_setplane,                DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_ADDFB2,            drm_mode_addfb2,                  DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_OBJ_GETPROPERTIES, drm_mode_obj_getproperties_ioctl, DRM_AUTH             },
-    {DRM_IOCTL_MODE_OBJ_SETPROPERTY,   drm_mode_obj_setproperty_ioctl,   DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_CURSOR2,           drm_mode_cursor2_ioctl,           DRM_AUTH             },
-    {DRM_IOCTL_MODE_ATOMIC,            drm_mode_atomic_ioctl,            DRM_MASTER | DRM_AUTH},
-    {DRM_IOCTL_MODE_GETFB2,            drm_mode_getfb2_ioctl,            DRM_AUTH             },
+    {DRM_IOCTL_VERSION, drm_version, 0},
+    {DRM_IOCTL_GET_MAGIC, drm_getmagic, DRM_AUTH},
+    {DRM_IOCTL_SET_VERSION, drm_setversion, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_SET_MASTER, drm_setmaster, 0},
+    {DRM_IOCTL_DROP_MASTER, drm_dropmaster, 0},
+    {DRM_IOCTL_AUTH_MAGIC, drm_authmagic, DRM_AUTH},
+    {DRM_IOCTL_GEM_CLOSE, drm_gem_close_ioctl, DRM_AUTH},
+    {DRM_IOCTL_GEM_FLINK, drm_gem_flink_ioctl, DRM_AUTH},
+    {DRM_IOCTL_GEM_OPEN, drm_gem_open_ioctl, DRM_AUTH},
+    {DRM_IOCTL_GET_CAP, drm_get_cap, 0},
+    {DRM_IOCTL_SET_CLIENT_CAP, drm_set_client_cap, 0},
+    {DRM_IOCTL_WAIT_VBLANK, drm_wait_vblank_ioctl, 0},
+    {DRM_IOCTL_MODE_GETRESOURCES, drm_mode_getresources, DRM_AUTH},
+    {DRM_IOCTL_MODE_GETCRTC, drm_mode_getcrtc, DRM_AUTH},
+    {DRM_IOCTL_MODE_SETCRTC, drm_mode_setcrtc, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_CURSOR, drm_mode_cursor_ioctl, DRM_AUTH},
+    {DRM_IOCTL_MODE_GETENCODER, drm_mode_getencoder, DRM_AUTH},
+    {DRM_IOCTL_MODE_GETCONNECTOR, drm_mode_getconnector, DRM_AUTH},
+    {DRM_IOCTL_MODE_GETPROPERTY, drm_mode_getproperty_ioctl, DRM_AUTH},
+    {DRM_IOCTL_MODE_GETPROPBLOB, drm_mode_getpropblob_ioctl, DRM_AUTH},
+    {DRM_IOCTL_MODE_CREATEPROPBLOB, drm_mode_createpropblob_ioctl, DRM_AUTH},
+    {DRM_IOCTL_MODE_DESTROYPROPBLOB, drm_mode_destroypropblob_ioctl, DRM_AUTH},
+    {DRM_IOCTL_MODE_GETGAMMA, drm_mode_getgamma_ioctl, DRM_AUTH},
+    {DRM_IOCTL_MODE_SETGAMMA, drm_mode_setgamma_ioctl, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_GETFB, drm_mode_getfb, DRM_AUTH},
+    {DRM_IOCTL_MODE_ADDFB, drm_mode_addfb, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_RMFB, drm_mode_rmfb, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_PAGE_FLIP, drm_mode_page_flip_ioctl, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_DIRTYFB, drm_mode_dirtyfb, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_GETPLANERESOURCES, drm_mode_getplane_res, DRM_AUTH},
+    {DRM_IOCTL_MODE_GETPLANE, drm_mode_getplane, DRM_AUTH},
+    {DRM_IOCTL_MODE_SETPLANE, drm_mode_setplane, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_ADDFB2, drm_mode_addfb2, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_OBJ_GETPROPERTIES, drm_mode_obj_getproperties_ioctl, DRM_AUTH},
+    {DRM_IOCTL_MODE_OBJ_SETPROPERTY, drm_mode_obj_setproperty_ioctl, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_CURSOR2, drm_mode_cursor2_ioctl, DRM_AUTH},
+    {DRM_IOCTL_MODE_ATOMIC, drm_mode_atomic_ioctl, DRM_MASTER | DRM_AUTH},
+    {DRM_IOCTL_MODE_GETFB2, drm_mode_getfb2_ioctl, DRM_AUTH},
 };
 
 static struct drm_driver drm_dummy_driver = {
@@ -278,11 +285,46 @@ struct dummy_mode_cfg {
 /* Whatever is being scanned out right now. */
 static struct drm_framebuffer *g_scan_fb;
 
+/* Where it is scanned out to: the console framebuffer unless a hardware
+ * driver claimed the target first.  drm_svga.c sets this during probe,
+ * which happens before the pipeline below is built. */
+static struct drm_scanout g_scanout;
+
+int drm_scanout_set(volatile uint32_t *base, uint32_t w, uint32_t h, uint32_t pitch)
+{
+    if (base != NULL && (w == 0 || h == 0 || pitch == 0)) {
+        return -EINVAL;
+    }
+
+    g_scanout.base  = base;
+    g_scanout.w     = w;
+    g_scanout.h     = h;
+    g_scanout.pitch = pitch;
+    return 0;
+}
+
+/* The one place that decides which memory a committed framebuffer is copied
+ * into.  Unset means the console framebuffer, which is also what every path
+ * did before a hardware driver existed. */
+void drm_scanout_get(volatile uint32_t **base, uint32_t *w, uint32_t *h, uint32_t *pitch)
+{
+    if (g_scanout.base == NULL) {
+        *base = (volatile uint32_t *)fbcon_fb();
+        fbcon_geometry(w, h, pitch);
+        return;
+    }
+
+    *base  = g_scanout.base;
+    *w     = g_scanout.w;
+    *h     = g_scanout.h;
+    *pitch = g_scanout.pitch;
+}
+
 static void drm_refresh_thread(void *arg);
 void        drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep);
 
 static unsigned long g_refresh_count;
-static volatile int g_cursor_on;   /* TEMPORARY: mirrors sw_cursor.on */
+static volatile int  g_cursor_on; /* TEMPORARY: mirrors sw_cursor.on */
 
 /* /sys/class/drm/card0/{status,enabled}: the card reads enabled while a
  * client framebuffer is scanned out, disabled when the console is back.
@@ -296,14 +338,15 @@ static void sysfs_gen_card0_status(char *buf, uint32_t cap, uint32_t *len)
         buf[*len] = '\0';
 }
 
-/* Copy the live buffer to the console framebuffer and stamp the cursor on
- * top.  Called from the timer tick as well as from the refresh thread. */
+/* Copy the live buffer to the scanout target and stamp the cursor on top.
+ * Called from the timer tick as well as from the refresh thread. */
 void drm_dummy_refresh(void)
 {
-    uint32_t       dw = 0, dh = 0, dpitch = 0;
-    uint32_t      *dst;
-    const uint8_t *src;
-    uint32_t       w, h, dstep;
+    uint32_t           dw = 0, dh = 0, dpitch = 0;
+    uint32_t          *dst;
+    const uint8_t     *src;
+    uint32_t           w, h, dstep;
+    volatile uint32_t *vdst;
 
     /* Heartbeat: once a client hands us a framebuffer this counts up every
      * frame.  A compositor that is up but showing nothing shows up here as
@@ -319,22 +362,28 @@ void drm_dummy_refresh(void)
          * black screen can be traced to an unpainted dumb buffer vs a
          * broken copy path. */
         if (g_scan_fb && g_scan_fb->obj[0] && g_scan_fb->obj[0]->backing) {
-            const uint8_t *bp = (const uint8_t *)g_scan_fb->obj[0]->backing;
-            uint32_t sum = 0, n = g_scan_fb->pitches[0] * g_scan_fb->height;
-            if (n > 262144) n = 262144;
-            for (uint32_t i = 0; i < n; i++) sum += bp[i];
+            const uint8_t *bp  = (const uint8_t *)g_scan_fb->obj[0]->backing;
+            uint32_t       sum = 0, n = g_scan_fb->pitches[0] * g_scan_fb->height;
+            if (n > 262144)
+                n = 262144;
+            for (uint32_t i = 0; i < n; i++)
+                sum += bp[i];
             dbg_puts(" srcsum=");
             dbg_puts_hex(sum);
         }
         dbg_puts("\n");
     }
 
-    if (g_scan_fb == NULL || g_scan_fb->obj[0] == NULL || g_scan_fb->obj[0]->backing == NULL) { return; }
+    if (g_scan_fb == NULL || g_scan_fb->obj[0] == NULL || g_scan_fb->obj[0]->backing == NULL) {
+        return;
+    }
 
-    fbcon_geometry(&dw, &dh, &dpitch);
-    dst = (uint32_t *)fbcon_fb();
+    drm_scanout_get(&vdst, &dw, &dh, &dpitch);
+    dst = (uint32_t *)vdst;
     src = (const uint8_t *)g_scan_fb->obj[0]->backing;
-    if (dst == NULL || src == NULL || dw == 0 || dpitch == 0) { return; }
+    if (dst == NULL || src == NULL || dw == 0 || dpitch == 0) {
+        return;
+    }
 
     /* Clip: the client may have chosen a mode larger than the display was
      * booted with. */
@@ -342,11 +391,21 @@ void drm_dummy_refresh(void)
     h     = (g_scan_fb->height > dh) ? dh : g_scan_fb->height;
     dstep = dpitch / 4;
 
-    for (uint32_t row = 0; row < h; row++) {
-        uint32_t       *d = dst + (uint64_t)row * dstep;
-        const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * g_scan_fb->pitches[0]);
+    /* Let the device do the copy when it can.  svga_blit() only claims to
+     * work after svga_selftest() has compared a blit byte for byte, so the
+     * CPU loop below stays as the answer for everything else: no device, a
+     * source outside the direct map, a FIFO too small for the page table. */
+    if (svga_blit(src, g_scan_fb->pitches[0], w, h, NULL) != 0) {
+        for (uint32_t row = 0; row < h; row++) {
+            uint32_t       *d = dst + (uint64_t)row * dstep;
+            const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * g_scan_fb->pitches[0]);
 
-        for (uint32_t col = 0; col < w; col++) { d[col] = s[col]; }
+            for (uint32_t col = 0; col < w; col++) {
+                d[col] = s[col];
+            }
+        }
+
+        svga_update(0, 0, w, h);
     }
 
     drm_dummy_draw_cursor(dst, dw, dh, dstep);
@@ -360,23 +419,30 @@ void drm_dummy_refresh(void)
 static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb,
                                struct drm_pending_vblank_event *event, uint32_t flags)
 {
-    static int refresh_thread_up;
-    uint32_t       dw = 0, dh = 0, dpitch = 0;
-    uint32_t      *dst;
-    const uint8_t *src;
-    uint32_t       w, h, dstep;
+    static int         refresh_thread_up;
+    uint32_t           dw = 0, dh = 0, dpitch = 0;
+    uint32_t          *dst;
+    const uint8_t     *src;
+    uint32_t           w, h, dstep;
+    volatile uint32_t *vdst;
 
     if (!refresh_thread_up) {
         refresh_thread_up = 1;
-        if (kthread_create("drm-refresh", drm_refresh_thread, NULL) == NULL) { refresh_thread_up = 0; }
+        if (kthread_create("drm-refresh", drm_refresh_thread, NULL) == NULL) {
+            refresh_thread_up = 0;
+        }
     }
 
     (void)crtc;
     (void)event;
     (void)flags;
 
-    if (fb == NULL) { return 0; }
-    if (fb->obj[0] == NULL || fb->obj[0]->backing == NULL) { return -EINVAL; }
+    if (fb == NULL) {
+        return 0;
+    }
+    if (fb->obj[0] == NULL || fb->obj[0]->backing == NULL) {
+        return -EINVAL;
+    }
 
     g_scan_fb = fb;
 
@@ -387,20 +453,28 @@ static int drm_dummy_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb
      * scanned out again. */
     fbcon_suppress(fb->obj[0]->backing != (const uint8_t *)fbcon_fb());
 
-    fbcon_geometry(&dw, &dh, &dpitch);
-    dst = (uint32_t *)fbcon_fb();
+    drm_scanout_get(&vdst, &dw, &dh, &dpitch);
+    dst = (uint32_t *)vdst;
     src = (const uint8_t *)fb->obj[0]->backing;
-    if (dst == NULL || src == NULL || dw == 0 || dpitch == 0) { return -EINVAL; }
+    if (dst == NULL || src == NULL || dw == 0 || dpitch == 0) {
+        return -EINVAL;
+    }
 
     w     = (fb->width > dw) ? dw : fb->width;
     h     = (fb->height > dh) ? dh : fb->height;
     dstep = dpitch / 4;
 
-    for (uint32_t row = 0; row < h; row++) {
-        uint32_t       *d = dst + (uint64_t)row * dstep;
-        const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * fb->pitches[0]);
+    if (svga_blit(src, fb->pitches[0], w, h, NULL) != 0) {
+        for (uint32_t row = 0; row < h; row++) {
+            uint32_t       *d = dst + (uint64_t)row * dstep;
+            const uint32_t *s = (const uint32_t *)(src + (uint64_t)row * fb->pitches[0]);
 
-        for (uint32_t col = 0; col < w; col++) { d[col] = s[col]; }
+            for (uint32_t col = 0; col < w; col++) {
+                d[col] = s[col];
+            }
+        }
+
+        svga_update(0, 0, w, h);
     }
 
     return 0;
@@ -416,17 +490,26 @@ static void drm_dummy_vblank_blit(struct drm_crtc *crtc)
 {
     struct drm_framebuffer *fb = NULL;
 
-    if (crtc == NULL || crtc->primary == NULL) { return; }
-    if (crtc->primary->state != NULL) { fb = crtc->primary->state->fb; }
-    if (fb == NULL) { return; }
+    if (crtc == NULL || crtc->primary == NULL) {
+        return;
+    }
+    if (crtc->primary->state != NULL) {
+        fb = crtc->primary->state->fb;
+    }
+    if (fb == NULL) {
+        return;
+    }
 
     if (drm_dummy_page_flip(crtc, fb, NULL, 0) == 0) {
         /* Keep the cursor above whatever was just scanned out. */
-        uint32_t dw = 0, dh = 0, dpitch = 0;
+        uint32_t           dw = 0, dh = 0, dpitch = 0;
+        volatile uint32_t *vdst;
 
-        fbcon_geometry(&dw, &dh, &dpitch);
-        uint32_t *dst = (uint32_t *)fbcon_fb();
-        if (dst != NULL && dw != 0 && dpitch != 0) { drm_dummy_draw_cursor(dst, dw, dh, dpitch / 4); }
+        drm_scanout_get(&vdst, &dw, &dh, &dpitch);
+        uint32_t *dst = (uint32_t *)vdst;
+        if (dst != NULL && dw != 0 && dpitch != 0) {
+            drm_dummy_draw_cursor(dst, dw, dh, dpitch / 4);
+        }
     }
 }
 
@@ -445,8 +528,8 @@ static struct {
     bool                   on;
 } sw_cursor;
 
-static int drm_dummy_cursor_set(struct drm_crtc *crtc, struct drm_gem_object *bo, uint32_t width, uint32_t height,
-                                int32_t hot_x, int32_t hot_y)
+static int drm_dummy_cursor_set(struct drm_crtc *crtc, struct drm_gem_object *bo, uint32_t width,
+                                uint32_t height, int32_t hot_x, int32_t hot_y)
 {
     (void)crtc;
 
@@ -457,8 +540,26 @@ static int drm_dummy_cursor_set(struct drm_crtc *crtc, struct drm_gem_object *bo
     sw_cursor.hot_x = hot_x;
     sw_cursor.hot_y = hot_y;
     sw_cursor.on    = (bo != NULL);
-    g_cursor_on     = sw_cursor.on;   /* TEMPORARY: heartbeat visibility */
+    g_cursor_on     = sw_cursor.on; /* TEMPORARY: heartbeat visibility */
     spin_unlock(&sw_cursor_lock);
+
+    /* The device can draw this itself.  The software copy below stays
+     * armed as the answer for a machine with no SVGA II; with one, it
+     * stands down rather than painting a second cursor over the hardware's
+     * (svga_cursor_active()). */
+    if (svga_present()) {
+        if (bo != NULL && bo->backing != NULL) {
+            if (svga_cursor_define(1, width, height, hot_x, hot_y, (const uint32_t *)bo->backing) ==
+                0) {
+                svga_cursor_show(1);
+                svga_cursor_move(sw_cursor.x, sw_cursor.y);
+            } else {
+                svga_cursor_show(0); /* FIFO refused it: fall back to software */
+            }
+        } else {
+            svga_cursor_show(0);
+        }
+    }
 
     return 0;
 }
@@ -474,16 +575,25 @@ static int drm_dummy_cursor_move(struct drm_crtc *crtc, int32_t x, int32_t y)
     sw_cursor.y = y - sw_cursor.hot_y;
     spin_unlock(&sw_cursor_lock);
 
+    if (svga_present()) {
+        svga_cursor_move(x, y);
+    }
+
     return 0;
 }
 
 /* Draw the cursor over @dst.  Pixels whose high byte is mostly clear are
- * transparent; everything else is copied as it is. */
+ * transparent; everything else is copied as it is.  Does nothing while the
+ * SVGA II device is drawing the cursor itself. */
 void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dstep)
 {
     const uint32_t *src;
     uint32_t        cw, ch;
     int32_t         cx, cy;
+
+    if (svga_cursor_active()) {
+        return;
+    }
 
     spin_lock(&sw_cursor_lock);
     if (!sw_cursor.on || sw_cursor.bo == NULL || sw_cursor.bo->backing == NULL) {
@@ -497,12 +607,22 @@ void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dst
     cy  = sw_cursor.y;
     spin_unlock(&sw_cursor_lock);
 
-    if (cx < 0) { cx = 0; }
-    if (cy < 0) { cy = 0; }
-    if ((uint32_t)cx >= dw || (uint32_t)cy >= dh) { return; }
+    if (cx < 0) {
+        cx = 0;
+    }
+    if (cy < 0) {
+        cy = 0;
+    }
+    if ((uint32_t)cx >= dw || (uint32_t)cy >= dh) {
+        return;
+    }
 
-    if (cw > dw - (uint32_t)cx) { cw = dw - (uint32_t)cx; }
-    if (ch > dh - (uint32_t)cy) { ch = dh - (uint32_t)cy; }
+    if (cw > dw - (uint32_t)cx) {
+        cw = dw - (uint32_t)cx;
+    }
+    if (ch > dh - (uint32_t)cy) {
+        ch = dh - (uint32_t)cy;
+    }
 
     for (uint32_t row = 0; row < ch; row++) {
         uint32_t       *d    = dst + (uint64_t)(cy + row) * dstep + cx;
@@ -511,7 +631,9 @@ void drm_dummy_draw_cursor(uint32_t *dst, uint32_t dw, uint32_t dh, uint32_t dst
         for (uint32_t col = 0; col < cw; col++) {
             uint32_t px = srow[col];
 
-            if ((px >> 24) > 127) { d[col] = px; }
+            if ((px >> 24) > 127) {
+                d[col] = px;
+            }
         }
     }
 }
@@ -525,35 +647,35 @@ static const struct drm_crtc_helper_funcs pipeline_crtc_helper = {
 
 static const struct dummy_mode_cfg dummy_modes[] = {
     {
-     .name        = "1920x1080",
-     .clock       = 148500,
-     .hdisplay    = 1920,
-     .hsync_start = 2008,
-     .hsync_end   = 2052,
-     .htotal      = 2200,
-     .vdisplay    = 1080,
-     .vsync_start = 1084,
-     .vsync_end   = 1089,
-     .vtotal      = 1125,
-     .vrefresh    = 60,
-     .flags       = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
-     .type        = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER,
-     },
+        .name        = "1920x1080",
+        .clock       = 148500,
+        .hdisplay    = 1920,
+        .hsync_start = 2008,
+        .hsync_end   = 2052,
+        .htotal      = 2200,
+        .vdisplay    = 1080,
+        .vsync_start = 1084,
+        .vsync_end   = 1089,
+        .vtotal      = 1125,
+        .vrefresh    = 60,
+        .flags       = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
+        .type        = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER,
+    },
     {
-     .name        = "1280x720",
-     .clock       = 74250,
-     .hdisplay    = 1280,
-     .hsync_start = 1390,
-     .hsync_end   = 1430,
-     .htotal      = 1650,
-     .vdisplay    = 720,
-     .vsync_start = 725,
-     .vsync_end   = 730,
-     .vtotal      = 750,
-     .vrefresh    = 60,
-     .flags       = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC,
-     .type        = DRM_MODE_TYPE_DRIVER,
-     },
+        .name        = "1280x720",
+        .clock       = 74250,
+        .hdisplay    = 1280,
+        .hsync_start = 1390,
+        .hsync_end   = 1430,
+        .htotal      = 1650,
+        .vdisplay    = 720,
+        .vsync_start = 725,
+        .vsync_end   = 730,
+        .vtotal      = 750,
+        .vrefresh    = 60,
+        .flags       = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC,
+        .type        = DRM_MODE_TYPE_DRIVER,
+    },
 };
 
 static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector *connector)
@@ -561,10 +683,12 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
     (void)dev;
 
     for (unsigned int i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
-        const struct dummy_mode_cfg *cfg = &dummy_modes[i];
+        const struct dummy_mode_cfg *cfg  = &dummy_modes[i];
         struct drm_display_mode     *mode = drm_mode_create(dev);
 
-        if (mode == NULL) { return -ENOMEM; }
+        if (mode == NULL) {
+            return -ENOMEM;
+        }
 
         strncpy(mode->name, cfg->name, DRM_DISPLAY_MODE_LEN - 1);
         mode->name[DRM_DISPLAY_MODE_LEN - 1] = '\0';
@@ -597,7 +721,8 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
             int duplicate = 0;
 
             for (unsigned int i = 0; i < sizeof(dummy_modes) / sizeof(dummy_modes[0]); i++) {
-                if ((uint32_t)dummy_modes[i].hdisplay == fb_w && (uint32_t)dummy_modes[i].vdisplay == fb_h) {
+                if ((uint32_t)dummy_modes[i].hdisplay == fb_w &&
+                    (uint32_t)dummy_modes[i].vdisplay == fb_h) {
                     duplicate = 1;
                     break;
                 }
@@ -612,15 +737,15 @@ static int drm_dummy_kms_add_modes(struct drm_device *dev, struct drm_connector 
                     snprintf(namebuf, sizeof(namebuf), "%ux%u", fb_w, fb_h);
                     strncpy(mode->name, namebuf, DRM_DISPLAY_MODE_LEN - 1);
                     mode->name[DRM_DISPLAY_MODE_LEN - 1] = '\0';
-                    mode->hdisplay = fb_w;
-                    mode->vdisplay = fb_h;
-                    mode->htotal   = fb_w;
-                    mode->vtotal   = fb_h;
-                    mode->clock    = (int)((uint64_t)fb_w * fb_h * 60 / 1000);
-                    mode->vrefresh = 60;
-                    mode->flags    = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
-                    mode->type    = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
-                    mode->status  = MODE_OK;
+                    mode->hdisplay                       = fb_w;
+                    mode->vdisplay                       = fb_h;
+                    mode->htotal                         = fb_w;
+                    mode->vtotal                         = fb_h;
+                    mode->clock                          = (int)((uint64_t)fb_w * fb_h * 60 / 1000);
+                    mode->vrefresh                       = 60;
+                    mode->flags  = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
+                    mode->type   = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
+                    mode->status = MODE_OK;
 
                     drm_mode_probed_add(connector, mode);
                 }
@@ -653,7 +778,7 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
         DRM_FORMAT_RGB888,
         DRM_FORMAT_RGB565,
     };
-    int                   ret;
+    int ret;
 
     memset(&pipeline_crtc, 0, sizeof(pipeline_crtc));
     memset(&pipeline_primary_plane, 0, sizeof(pipeline_primary_plane));
@@ -662,8 +787,15 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
 
     /* Reach the hardware through PCI before building the pipeline: find
      * the display device, switch its spaces on and probe VBE.  Without an
-     * answer mode changes must stay refused rather than half-apply. */
-    {
+     * answer mode changes must stay refused rather than half-apply.
+     *
+     * SVGA wins when it is there.  It was probed earlier (see kernel.c) and
+     * already claimed the scanout target -- its own VRAM, not the console
+     * framebuffer -- so asking VBE to reshape the console framebuffer would
+     * move a surface nothing is scanning out any more. */
+    if (svga_present()) {
+        DRM_INFO("svga ii owns the scanout: skipping VBE probe\n");
+    } else {
         int vid = vbe_pci_probe();
         if (vid) {
             DRM_INFO("vbe interface version 0x%x: mode changes enabled\n", vid);
@@ -673,9 +805,10 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     }
 
     /* The primary plane, bound to CRTC 0. */
-    ret = drm_plane_init(dev, &pipeline_primary_plane, 1, /* possible_crtcs = bit 0 */
-                         NULL, primary_formats, sizeof(primary_formats) / sizeof(primary_formats[0]), NULL,
-                         DRM_PLANE_TYPE_PRIMARY, "primary");
+    ret =
+        drm_plane_init(dev, &pipeline_primary_plane, 1, /* possible_crtcs = bit 0 */
+                       NULL, primary_formats, sizeof(primary_formats) / sizeof(primary_formats[0]),
+                       NULL, DRM_PLANE_TYPE_PRIMARY, "primary");
     if (ret != 0) {
         DRM_ERROR("Failed to init primary plane: %d\n", ret);
         return ret;
@@ -694,7 +827,8 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
     pipeline_primary_plane.state->pixel_blend_mode = 0;
     pipeline_primary_plane.state->visible          = true;
 
-    ret = drm_crtc_init_with_planes(dev, &pipeline_crtc, &pipeline_primary_plane, NULL, &pipeline_crtc_helper, "CRTC-0");
+    ret = drm_crtc_init_with_planes(dev, &pipeline_crtc, &pipeline_primary_plane, NULL,
+                                    &pipeline_crtc_helper, "CRTC-0");
     if (ret != 0) {
         DRM_ERROR("Failed to init CRTC: %d\n", ret);
         return ret;
@@ -758,9 +892,9 @@ static int drm_dummy_kms_setup(struct drm_device *dev)
 
     drm_connector_register(&pipeline_connector);
 
-    DRM_INFO("KMS pipeline: CRTC-%u + primary plane-%u + encoder-%u + connector-%u (%u modes)\n", pipeline_crtc.base.id,
-             pipeline_primary_plane.base.id, pipeline_encoder.base.id, pipeline_connector.base.id,
-             sizeof(dummy_modes) / sizeof(dummy_modes[0]));
+    DRM_INFO("KMS pipeline: CRTC-%u + primary plane-%u + encoder-%u + connector-%u (%u modes)\n",
+             pipeline_crtc.base.id, pipeline_primary_plane.base.id, pipeline_encoder.base.id,
+             pipeline_connector.base.id, sizeof(dummy_modes) / sizeof(dummy_modes[0]));
 
     return 0;
 }
@@ -789,10 +923,14 @@ int drm_dev_ioctl(void *file, size_t req, void *arg)
     struct drm_file   *file_priv = (struct drm_file *)file;
     struct drm_device *dev;
 
-    if (file_priv == NULL) { return -ENODEV; }
+    if (file_priv == NULL) {
+        return -ENODEV;
+    }
 
     dev = drm_get_singleton();
-    if (dev == NULL) { return -ENODEV; }
+    if (dev == NULL) {
+        return -ENODEV;
+    }
 
     return drm_ioctl(dev, (unsigned int)req, arg, file_priv);
 }
@@ -810,14 +948,20 @@ int drm_dev_open(void *node_ptr, uint64_t flags, void **private_data)
 
     (void)flags;
 
-    if (private_data == NULL) { return -EINVAL; }
+    if (private_data == NULL) {
+        return -EINVAL;
+    }
     *private_data = NULL;
 
     dev = drm_get_singleton();
-    if (dev == NULL) { return -ENODEV; }
+    if (dev == NULL) {
+        return -ENODEV;
+    }
 
     file = malloc(sizeof(*file));
-    if (file == NULL) { return -ENOMEM; }
+    if (file == NULL) {
+        return -ENOMEM;
+    }
     memset(file, 0, sizeof(*file));
 
     ret = drm_open(dev, file);
@@ -835,8 +979,8 @@ int drm_dev_open(void *node_ptr, uint64_t flags, void **private_data)
         struct vfs_node *node = (struct vfs_node *)node_ptr;
         process_t       *proc = process_current();
 
-        if (node != NULL && node->name[0] != '\0' && !strncmp(node->name, "card", 4) && proc != NULL
-            && proc->uid == 0) {
+        if (node != NULL && node->name[0] != '\0' && !strncmp(node->name, "card", 4) &&
+            proc != NULL && proc->uid == 0) {
             file->authenticated = true;
         }
     }
@@ -863,7 +1007,8 @@ int drm_dev_file_ioctl(void *ctx, void *private_data, uint64_t flags, size_t req
     return drm_dev_ioctl(private_data, req, arg);
 }
 
-int64_t drm_dev_file_read(void *ctx, void *private_data, uint64_t flags, void *addr, size_t offset, size_t size)
+int64_t drm_dev_file_read(void *ctx, void *private_data, uint64_t flags, void *addr, size_t offset,
+                          size_t size)
 {
     (void)ctx;
     (void)flags;
@@ -871,7 +1016,8 @@ int64_t drm_dev_file_read(void *ctx, void *private_data, uint64_t flags, void *a
     return drm_dev_read(private_data, addr, offset, size);
 }
 
-int64_t drm_dev_file_write(void *ctx, void *private_data, uint64_t flags, const void *addr, size_t offset, size_t size)
+int64_t drm_dev_file_write(void *ctx, void *private_data, uint64_t flags, const void *addr,
+                           size_t offset, size_t size)
 {
     (void)ctx;
     (void)flags;
@@ -893,7 +1039,7 @@ int drm_dev_poll(void *file, size_t events)
      * is queued for this open file description.  The stub that always
      * returned 0 combined with the bridge's old revents logic made the
      * card0 fd report readable forever, and Xorg spun reading it. */
-    extern unsigned int drm_poll(struct drm_file *file_priv, unsigned int events);
+    extern unsigned int drm_poll(struct drm_file * file_priv, unsigned int events);
     return (int)drm_poll((struct drm_file *)file, (unsigned int)events);
 }
 
@@ -908,10 +1054,14 @@ void *drm_dev_mmap(void *file, size_t offset, size_t size, int flags)
     (void)size;
     (void)flags;
 
-    if (file_priv == NULL) { return NULL; }
+    if (file_priv == NULL) {
+        return NULL;
+    }
 
     obj = drm_gem_object_lookup_by_offset(file_priv, (uint64_t)offset);
-    if (obj == NULL) { return NULL; }
+    if (obj == NULL) {
+        return NULL;
+    }
 
     result = obj->backing;
     drm_gem_object_put(obj);
@@ -919,7 +1069,8 @@ void *drm_dev_mmap(void *file, size_t offset, size_t size, int flags)
     return result;
 }
 
-void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t size, int flags, struct vm_area *vma)
+void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t size, int flags,
+                        struct vm_area *vma)
 {
     struct drm_device     *dev       = (struct drm_device *)ctx;
     struct drm_file       *file_priv = (struct drm_file *)private_data;
@@ -928,7 +1079,9 @@ void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t
     (void)size;
     (void)flags;
 
-    if (dev == NULL) { dev = drm_get_singleton(); }
+    if (dev == NULL) {
+        dev = drm_get_singleton();
+    }
 
     dbg_puts("DRMMAP: dev=");
     dbg_puts_hex((uint64_t)(uintptr_t)dev);
@@ -944,7 +1097,9 @@ void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t
     dbg_puts_hex((uint64_t)(uintptr_t)vma);
     dbg_puts("\r\n");
 
-    if (dev == NULL || file_priv == NULL || vma == NULL) { return NULL; }
+    if (dev == NULL || file_priv == NULL || vma == NULL) {
+        return NULL;
+    }
 
     obj = drm_gem_object_lookup_by_offset(file_priv, (uint64_t)offset);
 
@@ -954,7 +1109,9 @@ void *drm_dev_file_mmap(void *ctx, void *private_data, uint64_t offset, uint64_t
     dbg_puts_hex((obj != NULL) ? (uint64_t)(uintptr_t)obj->backing : 0);
     dbg_puts("\r\n");
 
-    if (obj == NULL || obj->backing == NULL) { return NULL; }
+    if (obj == NULL || obj->backing == NULL) {
+        return NULL;
+    }
 
     /* The VMA keeps the object alive: unmap drops the reference. */
     vma->vm_private_data = obj;
@@ -1004,7 +1161,9 @@ int drm_init(void)
     if (!drm_class_registered) {
         int ret = class_register(&drm_class);
 
-        if (ret != EOK) { return ret; }
+        if (ret != EOK) {
+            return ret;
+        }
         drm_class_registered = 1;
     }
 

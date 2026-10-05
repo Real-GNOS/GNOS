@@ -60,7 +60,7 @@ int smp_online_count(void)
 void smp_init(void)
 {
     if (!smp_request.response) {
-        g_ncpus = 1;
+        g_ncpus            = 1;
         g_cpu[0].id        = 0;
         g_cpu[0].online    = 1;
         g_cpu[0].stack_top = (void *)((uintptr_t)g_cpu_stack[0] + PERCPU_KSTACK);
@@ -69,8 +69,8 @@ void smp_init(void)
     }
 
     struct limine_smp_response *resp = smp_request.response;
-    g_ncpus   = (int)resp->cpu_count;
-    g_bsp_id  = (int)resp->bsp_lapic_id;
+    g_ncpus                          = (int)resp->cpu_count;
+    g_bsp_id                         = (int)resp->bsp_lapic_id;
     if (g_ncpus > MAX_CPUS)
         g_ncpus = MAX_CPUS;
 
@@ -81,7 +81,7 @@ void smp_init(void)
         g_ap_stack_top[i]  = g_cpu[i].stack_top;
         /* The BSP (cpus[0]) is already running; everyone else is not online
          * until its trampoline reaches ap_main(). */
-        g_cpu[i].online    = (i == 0);
+        g_cpu[i].online = (i == 0);
     }
 
     /* Hand each AP its entry point and the cpu index it should use.  Writing
@@ -97,7 +97,10 @@ void smp_init(void)
     for (volatile unsigned t = 0; t < 200000000U; t++) {
         int all = 1;
         for (int i = 1; i < g_ncpus; i++)
-            if (!g_cpu[i].online) { all = 0; break; }
+            if (!g_cpu[i].online) {
+                all = 0;
+                break;
+            }
         if (all)
             break;
     }
@@ -116,18 +119,17 @@ void ap_main(int cpu)
     /* Publish the self pointer and point GS at this core's slot *before*
      * anything touches cpu_self() (gdt_build -> tss_set_rsp0 does). */
     g_cpu[cpu].self = &g_cpu[cpu];
-    uint64_t base = (uint64_t)(uintptr_t)&g_cpu[cpu];
-    asm volatile("wrmsr" :: "c"((uint32_t)IA32_GS_BASE),
-                            "a"((uint32_t)(base & 0xFFFFFFFFu)),
-                            "d"((uint32_t)(base >> 32))
+    uint64_t base   = (uint64_t)(uintptr_t)&g_cpu[cpu];
+    asm volatile("wrmsr" ::"c"((uint32_t)IA32_GS_BASE), "a"((uint32_t)(base & 0xFFFFFFFFu)),
+                 "d"((uint32_t)(base >> 32))
                  : "memory");
 
     /* Build and load this core's own GDT/TSS. */
     gdt_build(&g_cpu[cpu]);
 
-    struct gdtr gdtr = { .limit = sizeof(g_cpu[cpu].gdt) - 1,
-                         .base  = (uint64_t)(uintptr_t)g_cpu[cpu].gdt };
-    asm volatile("lgdt %0" :: "m"(gdtr) : "memory");
+    struct gdtr gdtr = {.limit = sizeof(g_cpu[cpu].gdt) - 1,
+                        .base  = (uint64_t)(uintptr_t)g_cpu[cpu].gdt};
+    asm volatile("lgdt %0" ::"m"(gdtr) : "memory");
 
     /* Reload every data selector onto the new GDT. */
     asm volatile(
@@ -139,14 +141,15 @@ void ap_main(int cpu)
         "mov %%ax, %%ss\n\t"
         "mov %1, %%ax\n\t"
         "ltr %%ax\n\t"
-        : : "i"(SEL_KDATA), "i"(SEL_TSS) : "rax", "memory");
+        :
+        : "i"(SEL_KDATA), "i"(SEL_TSS)
+        : "rax", "memory");
 
     /* `mov %ax,%gs` zeroed IA32_GS_BASE (long-mode selector reload); restore
      * the per-CPU pointer set above or cpu_self() faults at address 0. */
     g_cpu[cpu].self = &g_cpu[cpu];
-    asm volatile("wrmsr" :: "c"((uint32_t)IA32_GS_BASE),
-                            "a"((uint32_t)(base & 0xFFFFFFFFu)),
-                            "d"((uint32_t)(base >> 32))
+    asm volatile("wrmsr" ::"c"((uint32_t)IA32_GS_BASE), "a"((uint32_t)(base & 0xFFFFFFFFu)),
+                 "d"((uint32_t)(base >> 32))
                  : "memory");
 
     /* The shared IDT is a safety net until interrupts come on. */

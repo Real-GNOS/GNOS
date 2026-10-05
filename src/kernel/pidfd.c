@@ -18,7 +18,7 @@
 #include "heap.h"
 #include "kstring.h"
 
-#define PIDFD_NONBLOCK 0x8000          /* O_NONBLOCK, as passed by musl */
+#define PIDFD_NONBLOCK 0x8000 /* O_NONBLOCK, as passed by musl */
 
 typedef struct {
     int pid;
@@ -26,19 +26,27 @@ typedef struct {
 
 static int32_t pidfd_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
-    return 0;                            /* a pidfd is not readable */
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
+    return 0; /* a pidfd is not readable */
 }
 
 static int32_t pidfd_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_INVAL;
 }
 
 static int32_t pidfd_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
 {
-    (void)n; (void)cmd; (void)arg;
+    (void)n;
+    (void)cmd;
+    (void)arg;
     return -E_NOTTY;
 }
 
@@ -91,10 +99,9 @@ int64_t sys_pidfd_open(uint64_t pid, uint64_t flags)
     return anon_bind(h, 0);
 }
 
-int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t uinfo,
-                              uint64_t flags)
+int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t uinfo, uint64_t flags)
 {
-    (void)uinfo;                          /* siginfo delivery not supported */
+    (void)uinfo; /* siginfo delivery not supported */
     if (flags)
         return -E_INVAL;
     proc_t *target = pidfd_proc_of((int)pidfd);
@@ -107,6 +114,8 @@ int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t uinfo,
  * the file table to be shared across a pidfd, which GNOS does not model. */
 int64_t sys_pidfd_getfd(uint64_t pidfd, uint64_t targetfd, uint64_t flags)
 {
-    (void)pidfd; (void)targetfd; (void)flags;
+    (void)pidfd;
+    (void)targetfd;
+    (void)flags;
     return -E_NOSYS;
 }

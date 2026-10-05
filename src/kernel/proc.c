@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * proc.c — processes, round-robin scheduling, fork/exec/wait and signals.
+ * proc.c — processes, EEVDF scheduling, fork/exec/wait and signals.
  * (GPLv2)
  *
  * The whole thing is deliberately small: a fixed process table, a fixed
@@ -55,13 +55,13 @@ static int schedule(void);
  * kernel is never preempted: timer.c only calls sched_tick() when the trap
  * came from ring 3, so an execve runs to completion once it starts.
  */
-#define MAX_ARGS      128
-#define MAX_ENVS      128
-#define ARG_BYTES     16384
+#define MAX_ARGS  128
+#define MAX_ENVS  128
+#define ARG_BYTES 16384
 /* Whole-image exec buffer.  The statically-linked GTK3 desktop binaries
  * (xfce4-panel, thunar, ...) are 18-20 MB each; 16 MB made every one of
  * them fail to exec with a confusing "not found" from the shell. */
-#define IMAGE_MAX     (64 * 1024 * 1024)
+#define IMAGE_MAX (64 * 1024 * 1024)
 
 /* How many `#!` lines deep execve will chase an interpreter before giving up
  * with ELOOP.  Linux uses 4; a script whose interpreter is a script whose
@@ -73,16 +73,16 @@ static uint8_t g_kstacks[MAX_PROCS][KSTACK_SIZE] __attribute__((aligned(16)));
 
 /* execve's string arena and pointer vectors.  See the comment above for why
  * these are static rather than automatic. */
-static char  g_argbuf[ARG_BYTES];
+static char     g_argbuf[ARG_BYTES];
 static uint32_t g_argused;
-static char *g_args[MAX_ARGS + 1];
-static char *g_envs[MAX_ENVS + 1];
+static char    *g_args[MAX_ARGS + 1];
+static char    *g_envs[MAX_ENVS + 1];
 
 /* The current process, one per core: schedule() parks the outgoing task's
  * context in its own saved_rsp and stores the incoming one here. */
 #define g_current (cpu_self()->current)
 
-static int     g_next_pid = 1;
+static int g_next_pid = 1;
 
 /* ---- EEVDF run queue --------------------------------------------------
  * A binary min-heap of runnable processes keyed on virtual deadline,
@@ -97,10 +97,10 @@ static spinlock_t g_proc_lock;
  * Tasks are enqueued on the caller's CPU and stolen by an idle core when
  * its own queue runs dry.  All queue operations run under g_proc_lock. */
 typedef struct {
-    proc_t   *root;         /* treap of runnable tasks                     */
-    uint64_t  vtime;        /* this queue's virtual clock, VIRT units      */
-    uint64_t  min_vtime;    /* placement floor: monotonic                  */
-    unsigned  count;
+    proc_t  *root;      /* treap of runnable tasks                     */
+    uint64_t vtime;     /* this queue's virtual clock, VIRT units      */
+    uint64_t min_vtime; /* placement floor: monotonic                  */
+    unsigned count;
 } rq_t;
 
 #define NR_RQ 4
@@ -121,8 +121,8 @@ static kthread_work_t *g_kthread_work_tail;
  * would never yield.  The heap key, the deadlines and the slice are all in
  * these units; only `used` real ticks are converted at the charge sites.
  */
-#define VIRT_SHIFT     10
-#define VIRT_UNIT      (1ULL << VIRT_SHIFT)
+#define VIRT_SHIFT 10
+#define VIRT_UNIT  (1ULL << VIRT_SHIFT)
 
 /* The global virtual clock, in VIRT_UNITs.  Advances by the time a process
  * actually runs; an idle CPU advances nothing.  It anchors brand-new tasks
@@ -141,7 +141,7 @@ uint32_t proc_eff_weight(proc_t *p)
  * Kept beside the process table rather than inside proc_t: growing the
  * struct again would threaten the 16-byte alignment its embedded FPU save
  * area depends on.  A zero mask means "every core". */
-static uint32_t g_cpu_allowed[MAX_PROCS];   /* 0 = unrestricted */
+static uint32_t g_cpu_allowed[MAX_PROCS]; /* 0 = unrestricted */
 
 uint32_t proc_cpu_mask_all(void)
 {
@@ -171,19 +171,20 @@ void proc_set_cpu_mask(proc_t *p, uint32_t mask)
  * Kept beside the process table for the same alignment reason as the
  * affinity mask.  Registration writes the per-task cpu words once; the
  * preemption-abort delivery is not implemented (userspace falls back). */
-static struct { uint64_t ptr, len, sig; } g_rseq_tab[MAX_PROCS];
+static struct {
+    uint64_t ptr, len, sig;
+} g_rseq_tab[MAX_PROCS];
 
 int proc_rseq_register(uint64_t urseq, uint64_t sig)
 {
-    proc_t *p = proc_current();
-    int idx = (int)(p - g_procs);
+    proc_t *p   = proc_current();
+    int     idx = (int)(p - g_procs);
     if (idx < 0 || idx >= MAX_PROCS)
         return -E_INVAL;
     if (g_rseq_tab[idx].ptr)
         return -E_BUSY;
 
-    uint32_t cpu_words[2] = { (uint32_t)proc_pick_cpu(p),
-                              (uint32_t)proc_pick_cpu(p) };
+    uint32_t cpu_words[2] = {(uint32_t)proc_pick_cpu(p), (uint32_t)proc_pick_cpu(p)};
     if (!user_ptr_ok(urseq, 8))
         return -E_FAULT;
     memcpy((void *)(uintptr_t)urseq, cpu_words, 8);
@@ -196,8 +197,8 @@ int proc_rseq_register(uint64_t urseq, uint64_t sig)
 
 int proc_rseq_unregister(uint64_t urseq, uint64_t sig)
 {
-    proc_t *p = proc_current();
-    int idx = (int)(p - g_procs);
+    proc_t *p   = proc_current();
+    int     idx = (int)(p - g_procs);
     if (idx < 0 || idx >= MAX_PROCS)
         return -E_INVAL;
     if (g_rseq_tab[idx].ptr != urseq || g_rseq_tab[idx].sig != sig)
@@ -241,7 +242,46 @@ static void proc_make_runnable(proc_t *p);
 /* Scratch buffer for reading executables.  One at a time, in kernel BSS. */
 static uint8_t g_image[IMAGE_MAX];
 
-proc_t *proc_current(void) { return g_current; }
+proc_t *proc_current(void)
+{
+    return g_current;
+}
+
+/* TEMPORARY Xorg debugging: every kernel entry (syscall, interrupt) must run
+ * on the *current* task's own kernel-stack slot.  If the stack pointer sits
+ * inside some other task's slot, print an alarm -- that is the signature of
+ * one task's frames being overwritten by another context, which is what the
+ * epoll saved-register corruption looks like. */
+void proc_kstack_audit(const char *tag)
+{
+    proc_t  *cur = g_current;
+    uint64_t rsp, base;
+
+    if (!cur)
+        return;
+    asm volatile("mov %%rsp, %0" : "=r"(rsp));
+
+    base = (uint64_t)(uintptr_t)g_kstacks;
+    if (rsp < base || rsp >= base + (uint64_t)MAX_PROCS * KSTACK_SIZE)
+        return; /* scheduler / per-CPU stack: fine */
+
+    unsigned mine = (unsigned)(cur - g_procs);
+    unsigned slot = (unsigned)((rsp - base) / KSTACK_SIZE);
+    if (slot == mine)
+        return;
+
+    dbg_puts("STK ");
+    dbg_puts(tag);
+    dbg_puts(" pid=");
+    dbg_puts_dec((uint32_t)cur->pid);
+    dbg_puts(" rsp=");
+    dbg_puts_hex(rsp);
+    dbg_puts(" slot=");
+    dbg_puts_dec((uint32_t)slot);
+    dbg_puts(" mine=");
+    dbg_puts_dec((uint32_t)mine);
+    dbg_puts("\r\n");
+}
 
 proc_t *proc_by_pid(int pid)
 {
@@ -276,46 +316,55 @@ static proc_t *proc_alloc(void)
         proc_t *p = &g_procs[i];
         memset(p, 0, sizeof(*p));
         p->pid        = g_next_pid++;
-        p->tgid       = p->pid;      /* a fresh process is its own group leader */
+        p->tgid       = p->pid; /* a fresh process is its own group leader */
         p->start_tick = timer_ticks();
         p->kstack_top = (uint64_t)(uintptr_t)g_kstacks[i] + KSTACK_SIZE;
+        /* TEMPORARY Xorg debugging: record every stack-slot assignment so
+         * shared slots can be ruled out from the log. */
+        dbg_puts("NEW pid=");
+        dbg_puts_dec((uint32_t)p->pid);
+        dbg_puts(" slot=");
+        dbg_puts_dec((uint32_t)i);
+        dbg_puts(" ks=");
+        dbg_puts_hex(p->kstack_top);
+        dbg_puts("\r\n");
         /* EEVDF: the slice is fixed; vruntime/deadline are set when the
          * process joins the run queue.  Fresh processes own no BKL and
          * run nowhere yet. */
-        p->vlag         = 0;
-        p->rq_cpu       = -1;
-        p->tprio        = 0;
-        p->pi_boost     = 0;
-        p->pi_waiters   = NULL;
-        p->pi_wnext     = NULL;
-        p->pi_owner     = NULL;
-        p->tl = p->tr   = NULL;
-        p->bkl_held     = 0;
-        p->on_cpu       = -1;
-        p->slice        = EEVDF_SLICE_TICKS * VIRT_UNIT;
+        p->vlag       = 0;
+        p->rq_cpu     = -1;
+        p->tprio      = 0;
+        p->pi_boost   = 0;
+        p->pi_waiters = NULL;
+        p->pi_wnext   = NULL;
+        p->pi_owner   = NULL;
+        p->tl = p->tr = NULL;
+        p->bkl_held   = 0;
+        p->on_cpu     = -1;
+        p->slice      = EEVDF_SLICE_TICKS * VIRT_UNIT;
         for (int f = 0; f < PROC_MAX_FD; f++)
             p->fds[f] = -1;
         /* Per-process memory bookkeeping musl expects the kernel to keep.
          * brk starts at the base of the user heap region; TLS and the futex
          * clear-word are zero until a program sets them. */
-        p->sig_mask       = 0;
-        p->syscall_nr     = -1;
-        p->brk            = USER_BRK_BASE;
-        p->fs_base        = 0;
+        p->sig_mask        = 0;
+        p->syscall_nr      = -1;
+        p->brk             = USER_BRK_BASE;
+        p->fs_base         = 0;
         p->clear_child_tid = 0;
         /* Defaults for a process with no parent to inherit from; fork()
          * overwrites both from the parent a moment later. */
         strncpy(p->cwd, "/", GNUOS_PATH_MAX - 1);
-        p->umask          = 022;
+        p->umask = 022;
         /* No controlling terminal until something claims one with TIOCSCTTY;
          * PID 1 is given terminal 1 explicitly in proc_spawn_init(). */
-        p->ctty           = -1;
+        p->ctty = -1;
         /* Credentials default to root.  Everything on the system descends
          * from PID 1, which is root, and fork() overwrites these from the
          * parent immediately -- so the default only ever applies to init. */
         p->uid = p->euid = p->suid = 0;
         p->gid = p->egid = p->sgid = 0;
-        p->ngroups        = 0;
+        p->ngroups                 = 0;
         /* Hand the new process the one clean FPU/SSE state captured at boot,
          * so it starts with the default MXCSR and zeroed XMM registers. */
         memcpy(p->fpu, g_fpu_init, sizeof(p->fpu));
@@ -323,9 +372,9 @@ static proc_t *proc_alloc(void)
          * cgroup counters only count tasks that have been entered.  The
          * state is still PROC_UNUSED, so no membership scan can see it
          * before the enter happens. */
-        p->cg            = -1;
-        p->sched_weight  = CG_NICE0;
-        p->cg_park_next  = -1;
+        p->cg           = -1;
+        p->sched_weight = CG_NICE0;
+        p->cg_park_next = -1;
         return p;
     }
     return NULL;
@@ -336,17 +385,17 @@ static proc_t *proc_alloc(void)
 static void fpu_init_once(void)
 {
     asm volatile("fninit");
-    asm volatile("fxsave (%0)" :: "r"(g_fpu_init) : "memory");
+    asm volatile("fxsave (%0)" ::"r"(g_fpu_init) : "memory");
 }
 
 static void fpu_save(uint8_t *area)
 {
-    asm volatile("fxsave (%0)" :: "r"(area) : "memory");
+    asm volatile("fxsave (%0)" ::"r"(area) : "memory");
 }
 
 static void fpu_load(uint8_t *area)
 {
-    asm volatile("fxrstor (%0)" :: "r"(area) : "memory");
+    asm volatile("fxrstor (%0)" ::"r"(area) : "memory");
 }
 
 void proc_init(void)
@@ -401,7 +450,7 @@ static uint64_t build_startup_stack(proc_t *p, const regs_t *frame)
     /* 1. the trap frame ret_to_user will pop */
     sp -= sizeof(regs_t);
     regs_t *f = (regs_t *)(uintptr_t)sp;
-    *f = *frame;
+    *f        = *frame;
 
     /* 2. the return address switch_context will "return" to */
     sp -= 8;
@@ -419,7 +468,7 @@ static void make_user_frame(regs_t *f, uint64_t entry, uint64_t stack)
     memset(f, 0, sizeof(*f));
     f->rip    = entry;
     f->cs     = SEL_UCODE;
-    f->rflags = 0x202;                 /* IF set, nothing else */
+    f->rflags = 0x202; /* IF set, nothing else */
     f->rsp    = stack;
     f->ss     = SEL_UDATA;
 }
@@ -457,15 +506,13 @@ static int push_aux(addrspace_t *as, uint64_t *sp, uint64_t type, uint64_t val)
  * stack is only 16 KiB. */
 static uint64_t g_strptr[MAX_ARGS + MAX_ENVS];
 
-static uint64_t push_args(addrspace_t *as, uint64_t stack_top,
-                          char *const argv[], int argc,
-                          char *const envp[], int envc,
-                          uint64_t phdr, uint16_t phnum, uint64_t entry,
-                          uint64_t ldso_base)
+static uint64_t push_args(addrspace_t *as, uint64_t stack_top, char *const argv[], int argc,
+                          char *const envp[], int envc, uint64_t phdr, uint16_t phnum,
+                          uint64_t entry, uint64_t ldso_base)
 {
     uint64_t *arg_ptr = g_strptr;
     uint64_t *env_ptr = g_strptr + MAX_ARGS;
-    uint64_t sp = stack_top;
+    uint64_t  sp      = stack_top;
 
     /* Strings first, from the very top downwards: environment, then argv. */
     for (int i = envc - 1; i >= 0; i--) {
@@ -495,9 +542,9 @@ static uint64_t push_args(addrspace_t *as, uint64_t stack_top,
     {
         uint64_t seed[2];
         uint64_t t = timer_ticks() * 6364136223846793005ULL + 1442695040888963407ULL;
-        seed[0] = t ^ (uint64_t)(uintptr_t)as;
-        t = t * 6364136223846793005ULL + 1442695040888963407ULL;
-        seed[1] = t ^ entry;
+        seed[0]    = t ^ (uint64_t)(uintptr_t)as;
+        t          = t * 6364136223846793005ULL + 1442695040888963407ULL;
+        seed[1]    = t ^ entry;
         sp -= 16;
         sp &= ~15ULL;
         if (!vmm_copy_to_user(as, sp, seed, 16))
@@ -533,27 +580,38 @@ static uint64_t push_args(addrspace_t *as, uint64_t stack_top,
             top -= 8;
         sp = top;
     }
-    if (!push_aux(as, &sp, AT_NULL, 0))            return 0;
-    if (!push_aux(as, &sp, AT_ENTRY, entry))       return 0;
-    if (!push_aux(as, &sp, AT_PAGESZ, 4096))       return 0;
-    if (!push_aux(as, &sp, AT_CLKTCK, SCHED_HZ))   return 0;
-    if (!push_aux(as, &sp, AT_SECURE, 0))          return 0;
+    if (!push_aux(as, &sp, AT_NULL, 0))
+        return 0;
+    if (!push_aux(as, &sp, AT_ENTRY, entry))
+        return 0;
+    if (!push_aux(as, &sp, AT_PAGESZ, 4096))
+        return 0;
+    if (!push_aux(as, &sp, AT_CLKTCK, SCHED_HZ))
+        return 0;
+    if (!push_aux(as, &sp, AT_SECURE, 0))
+        return 0;
     /* musl computes libc.secure as "(aux[0]&0x7800)!=0x7800 || uid!=euid ||
      * gid!=egid || AT_SECURE": the 0x7800 mask covers exactly these four
      * entries, so leaving any of them out marks EVERY process as running
      * setuid and musl's secure_getenv() then returns NULL unconditionally --
      * which is how libxkbcommon ended up blind to XKB_CONFIG_ROOT. */
-    if (!push_aux(as, &sp, AT_UID, 0))             return 0;
-    if (!push_aux(as, &sp, AT_EUID, 0))            return 0;
-    if (!push_aux(as, &sp, AT_GID, 0))             return 0;
-    if (!push_aux(as, &sp, AT_EGID, 0))            return 0;
-    if (!push_aux(as, &sp, AT_RANDOM, at_random))  return 0;
+    if (!push_aux(as, &sp, AT_UID, 0))
+        return 0;
+    if (!push_aux(as, &sp, AT_EUID, 0))
+        return 0;
+    if (!push_aux(as, &sp, AT_GID, 0))
+        return 0;
+    if (!push_aux(as, &sp, AT_EGID, 0))
+        return 0;
+    if (!push_aux(as, &sp, AT_RANDOM, at_random))
+        return 0;
     /* AT_BASE: the load address of the dynamic linker, if there is one.
      * musl's dynlink derives its own base from this (falling back to
      * AT_PHDR & -4096 when absent); a statically linked process has no
      * linker and gets no entry, which is exactly the Linux behaviour. */
     if (ldso_base) {
-        if (!push_aux(as, &sp, AT_BASE, ldso_base))  return 0;
+        if (!push_aux(as, &sp, AT_BASE, ldso_base))
+            return 0;
         dbg_puts("EXEC: pushed AT_BASE=");
         dbg_puts_hex(ldso_base);
         dbg_puts(" at sp=");
@@ -566,9 +624,12 @@ static uint64_t push_args(addrspace_t *as, uint64_t stack_top,
         dbg_puts(" phdr=");
         dbg_puts_hex(phdr);
         dbg_puts("\r\n");
-        if (!push_aux(as, &sp, AT_PHNUM, phnum))                return 0;
-        if (!push_aux(as, &sp, AT_PHENT, ELF64_PHDR_SIZE))      return 0;
-        if (!push_aux(as, &sp, AT_PHDR, phdr))                  return 0;
+        if (!push_aux(as, &sp, AT_PHNUM, phnum))
+            return 0;
+        if (!push_aux(as, &sp, AT_PHENT, ELF64_PHDR_SIZE))
+            return 0;
+        if (!push_aux(as, &sp, AT_PHDR, phdr))
+            return 0;
     }
 
     /* The envp array, then the argv array, then argc.
@@ -586,7 +647,7 @@ static uint64_t push_args(addrspace_t *as, uint64_t stack_top,
     sp -= 8;
     uint64_t nul = 0;
     if (!vmm_copy_to_user(as, sp, &nul, 8))
-        return 0;                                  /* envp[envc] == NULL */
+        return 0; /* envp[envc] == NULL */
 
     for (int i = envc - 1; i >= 0; i--) {
         sp -= 8;
@@ -596,7 +657,7 @@ static uint64_t push_args(addrspace_t *as, uint64_t stack_top,
 
     sp -= 8;
     if (!vmm_copy_to_user(as, sp, &nul, 8))
-        return 0;                                  /* argv[argc] == NULL */
+        return 0; /* argv[argc] == NULL */
 
     for (int i = argc - 1; i >= 0; i--) {
         sp -= 8;
@@ -618,10 +679,8 @@ static uint64_t push_args(addrspace_t *as, uint64_t stack_top,
  * stack pointer and instruction pointer should start.  Nothing about the
  * caller is touched, so a failure here is always recoverable.
  */
-static int build_image(const char *path, char *const argv[], int argc,
-                       char *const envp[], int envc,
-                       addrspace_t **out_as, uint64_t *out_entry,
-                       uint64_t *out_sp)
+static int build_image(const char *path, char *const argv[], int argc, char *const envp[], int envc,
+                       addrspace_t **out_as, uint64_t *out_entry, uint64_t *out_sp)
 {
     uint32_t size = 0;
     if (!vfs_read_all(path, g_image, sizeof(g_image), &size))
@@ -632,14 +691,14 @@ static int build_image(const char *path, char *const argv[], int argc,
         return -E_NOMEM;
 
     uint64_t entry = 0;
-    uint64_t phdr = 0;
+    uint64_t phdr  = 0;
     uint16_t phnum = 0;
-    char interp[64];
+    char     interp[64];
     /* ENOEXEC, not EINVAL: "I read the file and it is not something I can
      * run" is a distinct answer from "your arguments were wrong", and bash
      * keys its fallback-to-shell-script behaviour off exactly this errno. */
-    if (load_executable(as, g_image, size, DYN_PROG_BASE, &entry, &phdr,
-                        &phnum, interp, sizeof interp) <= 0) {
+    if (load_executable(as, g_image, size, DYN_PROG_BASE, &entry, &phdr, &phnum, interp,
+                        sizeof interp) <= 0) {
         vmm_destroy(as);
         return -E_NOEXEC;
     }
@@ -666,15 +725,15 @@ static int build_image(const char *path, char *const argv[], int argc,
             return -E_NOENT;
         }
         uint64_t ientry = 0;
-        uint64_t iphdr = 0;
+        uint64_t iphdr  = 0;
         uint16_t iphnum = 0;
-        if (load_executable(as, g_image, isize, LDSO_BASE, &ientry, &iphdr,
-                            &iphnum, NULL, 0) <= 0) {
+        if (load_executable(as, g_image, isize, LDSO_BASE, &ientry, &iphdr, &iphnum, NULL, 0) <=
+            0) {
             vmm_destroy(as);
             return -E_NOEXEC;
         }
         ldso_base = LDSO_BASE;
-        entry = ientry;             /* the process starts in the linker */
+        entry     = ientry; /* the process starts in the linker */
         dbg_puts("EXEC: dyn interp=");
         dbg_puts(interp);
         dbg_puts(" ientry=");
@@ -694,8 +753,8 @@ static int build_image(const char *path, char *const argv[], int argc,
         return -E_NOMEM;
     }
 
-    uint64_t sp = push_args(as, USER_STACK_TOP - 16, argv, argc, envp, envc,
-                            phdr, phnum, app_entry, ldso_base);
+    uint64_t sp = push_args(as, USER_STACK_TOP - 16, argv, argc, envp, envc, phdr, phnum, app_entry,
+                            ldso_base);
     if (!sp) {
         vmm_destroy(as);
         return -E_NOMEM;
@@ -713,11 +772,11 @@ static int build_image(const char *path, char *const argv[], int argc,
     {
         uint64_t addr = sp;
         for (int w = 0; w < 24; w++) {
-            uint64_t pa = vmm_resolve(as, addr);
+            uint64_t pa  = vmm_resolve(as, addr);
             uint32_t val = 0;
             if (pa) {
                 const uint8_t *k = (const uint8_t *)pmm_virt(pa);
-                val = *(const uint32_t *)(k + (addr & 0xFFF));
+                val              = *(const uint32_t *)(k + (addr & 0xFFF));
             }
             dbg_puts_hex((uint64_t)addr);
             dbg_puts(": ");
@@ -781,19 +840,16 @@ int proc_spawn_init(const char *path)
      * the /init.elf read below uses, moments later -- is guaranteed to see
      * the mounted root.  `single` in that file selects single-user mode. */
     char *argv[16];
-    int argc = 0;
+    int   argc   = 0;
     argv[argc++] = (char *)path;
 
     extern char g_boot_cmdline[256];
     g_boot_cmdline[0] = 0;
-    uint32_t clen = 0;
-    if (vfs_read_all("/cmdline", g_boot_cmdline,
-                     (uint32_t)sizeof(g_boot_cmdline) - 1, &clen)) {
+    uint32_t clen     = 0;
+    if (vfs_read_all("/cmdline", g_boot_cmdline, (uint32_t)sizeof(g_boot_cmdline) - 1, &clen)) {
         g_boot_cmdline[clen] = 0;
-        while (clen > 0 &&
-               (g_boot_cmdline[clen - 1] == '\n' ||
-                g_boot_cmdline[clen - 1] == '\r' ||
-                g_boot_cmdline[clen - 1] == ' '))
+        while (clen > 0 && (g_boot_cmdline[clen - 1] == '\n' || g_boot_cmdline[clen - 1] == '\r' ||
+                            g_boot_cmdline[clen - 1] == ' '))
             g_boot_cmdline[--clen] = 0;
     }
     if (g_boot_cmdline[0]) {
@@ -813,9 +869,8 @@ int proc_spawn_init(const char *path)
     argv[argc] = NULL;
 
     addrspace_t *as;
-    uint64_t entry, sp;
-    int r = build_image(path, argv, argc, g_init_env, INIT_ENVC,
-                        &as, &entry, &sp);
+    uint64_t     entry, sp;
+    int          r = build_image(path, argv, argc, g_init_env, INIT_ENVC, &as, &entry, &sp);
     if (r < 0)
         return r;
 
@@ -829,8 +884,8 @@ int proc_spawn_init(const char *path)
     p->pgid = p->pid;
     /* PID 1 is the session leader of the one session that exists at boot, and
      * every process inherits that sid until something calls setsid(). */
-    p->sid  = p->pid;
-    p->as   = as;
+    p->sid = p->pid;
+    p->as  = as;
     strncpy(p->name, "init", sizeof(p->name) - 1);
     proc_set_cmdline(p, argv, argc);
 
@@ -845,8 +900,10 @@ int proc_spawn_init(const char *path)
     int h = vfs_file_open("/dev/tty", O_RDWR);
     if (h >= 0) {
         p->fds[0] = h;
-        p->fds[1] = h; vfs_file_ref(h);
-        p->fds[2] = h; vfs_file_ref(h);
+        p->fds[1] = h;
+        vfs_file_ref(h);
+        p->fds[2] = h;
+        vfs_file_ref(h);
     }
 
     regs_t f;
@@ -855,7 +912,7 @@ int proc_spawn_init(const char *path)
     /* PID 1 lives in the root cgroup. */
     if (cg_attach_new(p, CG_ROOT) < 0) {
         vmm_destroy(p->as);
-        p->as = NULL;
+        p->as    = NULL;
         p->state = PROC_UNUSED;
         return -E_AGAIN;
     }
@@ -879,9 +936,9 @@ int proc_spawn_init(const char *path)
 
 void kthread_bootstrap(kthread_bootstrap_t *b)
 {
-    void    (*entry)(void *) = b->entry;
-    void    *arg             = b->arg;
-    proc_t  *me              = proc_current();
+    void (*entry)(void *) = b->entry;
+    void   *arg           = b->arg;
+    proc_t *me            = proc_current();
 #ifdef SYSTRACE
     {
         extern void dbg_puts(const char *);
@@ -889,7 +946,7 @@ void kthread_bootstrap(kthread_bootstrap_t *b)
     }
 #endif
 
-    kfree(b);                   /* entry may need the heap */
+    kfree(b); /* entry may need the heap */
 
     entry(arg);
 
@@ -936,7 +993,7 @@ static void kthreadd_main(void *arg)
             continue;
         }
         /* Dequeue the oldest request. */
-        kthread_work_t *w = g_kthread_work_head;
+        kthread_work_t *w   = g_kthread_work_head;
         g_kthread_work_head = w->next;
         if (!g_kthread_work_head)
             g_kthread_work_tail = NULL;
@@ -961,9 +1018,9 @@ static void kthreadd_main(void *arg)
         p->as      = vmm_kernel_as();
         p->fs_base = 0;
         p->uid = p->euid = p->suid = 0;
-        p->ppid = g_kthreadd->pid;
-        p->pgid = p->pid;
-        p->sid  = g_kthreadd->sid;
+        p->ppid                    = g_kthreadd->pid;
+        p->pgid                    = p->pid;
+        p->sid                     = g_kthreadd->sid;
 
         /* Fabricate a switch_context frame: six callee-saved registers and
          * a return address of kthread_trampoline. */
@@ -972,13 +1029,13 @@ static void kthreadd_main(void *arg)
         *(uint64_t *)(uintptr_t)sp = (uint64_t)(uintptr_t)kthread_trampoline;
         sp -= 6 * 8;
         uint64_t *regs = (uint64_t *)(uintptr_t)sp;
-        regs[0] = 0;                        /* r15 */
-        regs[1] = 0;                        /* r14 */
-        regs[2] = 0;                        /* r13 */
-        regs[3] = (uint64_t)(uintptr_t)b;   /* r12 */
-        regs[4] = 0;                        /* rbx */
-        regs[5] = 0;                        /* rbp */
-        p->saved_rsp = sp;
+        regs[0]        = 0;                      /* r15 */
+        regs[1]        = 0;                      /* r14 */
+        regs[2]        = 0;                      /* r13 */
+        regs[3]        = (uint64_t)(uintptr_t)b; /* r12 */
+        regs[4]        = 0;                      /* rbx */
+        regs[5]        = 0;                      /* rbp */
+        p->saved_rsp   = sp;
 
         if (cg_attach_new(p, CG_ROOT) < 0) {
             kfree(b);
@@ -990,8 +1047,8 @@ static void kthreadd_main(void *arg)
     __builtin_unreachable();
 }
 
-/* Spawn kthreadd as PID 2.  Must be called *before* proc_spawn_init() so
- * that proc_alloc() hands it the second-lowest pid. */
+/* Spawn kthreadd as PID 2.  Must be called *after* proc_spawn_init() so
+ * that proc_alloc() hands it the second pid. */
 int proc_spawn_kthreadd(void)
 {
     proc_t *p = proc_alloc();
@@ -1004,9 +1061,9 @@ int proc_spawn_kthreadd(void)
     p->as      = vmm_kernel_as();
     p->fs_base = 0;
     p->uid = p->euid = p->suid = 0;
-    p->ppid = 0;
-    p->pgid = p->pid;
-    p->sid  = p->pid;
+    p->ppid                    = 0;
+    p->pgid                    = p->pid;
+    p->sid                     = p->pid;
     strncpy(p->name, "kthreadd", sizeof(p->name) - 1);
 
     /* Fabricate a switch_context frame pointing at kthreadd_main(NULL). */
@@ -1023,17 +1080,17 @@ int proc_spawn_kthreadd(void)
     *(uint64_t *)(uintptr_t)sp = (uint64_t)(uintptr_t)kthread_trampoline;
     sp -= 6 * 8;
     uint64_t *regs = (uint64_t *)(uintptr_t)sp;
-    regs[0] = 0;                        /* r15 */
-    regs[1] = 0;                        /* r14 */
-    regs[2] = 0;                        /* r13 */
-    regs[3] = (uint64_t)(uintptr_t)b;   /* r12 */
-    regs[4] = 0;                        /* rbx */
-    regs[5] = 0;                        /* rbp */
-    p->saved_rsp = sp;
+    regs[0]        = 0;                      /* r15 */
+    regs[1]        = 0;                      /* r14 */
+    regs[2]        = 0;                      /* r13 */
+    regs[3]        = (uint64_t)(uintptr_t)b; /* r12 */
+    regs[4]        = 0;                      /* rbx */
+    regs[5]        = 0;                      /* rbp */
+    p->saved_rsp   = sp;
 
     if (cg_attach_new(p, CG_ROOT) < 0) {
         extern void dbg_puts(const char *);
-        extern int cg_live(int);
+        extern int  cg_live(int);
         dbg_puts("KTHRD: cg_attach_new failed cg=");
         dbg_puts_dec((uint32_t)p->cg);
         dbg_puts(" live=");
@@ -1095,12 +1152,12 @@ proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg)
  */
 static void inherit_creds(proc_t *child, const proc_t *parent)
 {
-    child->uid  = parent->uid;
-    child->euid = parent->euid;
-    child->suid = parent->suid;
-    child->gid  = parent->gid;
-    child->egid = parent->egid;
-    child->sgid = parent->sgid;
+    child->uid     = parent->uid;
+    child->euid    = parent->euid;
+    child->suid    = parent->suid;
+    child->gid     = parent->gid;
+    child->egid    = parent->egid;
+    child->sgid    = parent->sgid;
     child->ngroups = parent->ngroups;
     for (uint32_t i = 0; i < parent->ngroups; i++)
         child->groups[i] = parent->groups[i];
@@ -1119,8 +1176,7 @@ int proc_in_group(const proc_t *p, uint32_t gid)
     return 0;
 }
 
-int proc_permitted(uint32_t mode, uint32_t uid, uint32_t gid, int want,
-                   int is_dir)
+int proc_permitted(uint32_t mode, uint32_t uid, uint32_t gid, int want, int is_dir)
 {
     proc_t *p = proc_current();
 
@@ -1144,9 +1200,7 @@ int proc_permitted(uint32_t mode, uint32_t uid, uint32_t gid, int want,
         return 1;
     }
 
-    int shift = (p->euid == uid)          ? 6
-              : proc_in_group(p, gid)     ? 3
-              :                             0;
+    int shift = (p->euid == uid) ? 6 : proc_in_group(p, gid) ? 3 : 0;
     return ((mode >> shift) & (uint32_t)want) == (uint32_t)want;
 }
 
@@ -1169,7 +1223,7 @@ int proc_fork(regs_t *r)
      * refuse (fork then fails with EAGAIN, exactly as on Linux). */
     if (cg_attach_new(child, parent->cg) < 0) {
         vmm_put(child->as);
-        child->as = NULL;
+        child->as    = NULL;
         child->state = PROC_UNUSED;
         return -E_AGAIN;
     }
@@ -1182,7 +1236,7 @@ int proc_fork(regs_t *r)
      * signals, the break, the TLS base and every anonymous mapping, so a
      * post-fork execve starts from a clean copy and a post-fork return to
      * libc sees the same heap it left. */
-    child->sig_mask        = parent->sig_mask;
+    child->sig_mask = parent->sig_mask;
     /* Handlers survive fork -- the address space is a copy, so the handler
      * addresses still point at the same code.  (exec is where they have to
      * go away; see proc_execve.) */
@@ -1194,7 +1248,7 @@ int proc_fork(regs_t *r)
      * that is what lets a shell `cd` once and have every command it forks
      * start there. */
     strncpy(child->cwd, parent->cwd, GNUOS_PATH_MAX - 1);
-    child->umask           = parent->umask;
+    child->umask = parent->umask;
     inherit_creds(child, parent);
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     memcpy(child->cmdline, parent->cmdline, parent->cmdline_len);
@@ -1211,8 +1265,8 @@ int proc_fork(regs_t *r)
 
     /* The child resumes exactly where the parent's syscall will return,
      * except that fork() reports 0 to it. */
-    regs_t f = *r;
-    f.rax = 0;
+    regs_t f         = *r;
+    f.rax            = 0;
     child->saved_rsp = build_startup_stack(child, &f);
     proc_make_runnable(child);
 
@@ -1231,13 +1285,13 @@ int proc_fork(regs_t *r)
  * of flags libc actually uses (TLS, the parent/child tid bookkeeping) are
  * honoured so futex-based synchronisation at least has a real tid to aim at.
  */
-#define CLONE_VM           0x00000100
-#define CLONE_VFORK        0x00004000
-#define CLONE_THREAD       0x00010000
-#define CLONE_SETTLS       0x00040000
-#define CLONE_PARENT_SETTID 0x00080000
+#define CLONE_VM             0x00000100
+#define CLONE_VFORK          0x00004000
+#define CLONE_THREAD         0x00010000
+#define CLONE_SETTLS         0x00040000
+#define CLONE_PARENT_SETTID  0x00080000
 #define CLONE_CHILD_CLEARTID 0x00100000
-#define CLONE_CHILD_SETTID 0x00200000
+#define CLONE_CHILD_SETTID   0x00200000
 
 /* Release the parent parked in WAIT_VFORK for this child (CLONE_VFORK's
  * "parent resumes once the child execs or exits" contract).  musl's
@@ -1249,7 +1303,7 @@ static void vfork_wake_parent(proc_t *child)
 {
     if (!child->vfork_parent)
         return;
-    proc_t *pp = proc_by_pid(child->vfork_parent);
+    proc_t *pp          = proc_by_pid(child->vfork_parent);
     child->vfork_parent = 0;
     if (pp && pp->state == PROC_BLOCKED && pp->wait_reason == WAIT_VFORK)
         proc_make_runnable(pp);
@@ -1257,7 +1311,7 @@ static void vfork_wake_parent(proc_t *child)
 
 int proc_clone(regs_t *r)
 {
-    uint64_t  flags      = r->rdi;
+    uint64_t  flags       = r->rdi;
     void     *child_stack = (void *)r->rsi;
     int      *parent_tid  = (int *)r->rdx;
     int      *child_tid   = (int *)r->r10;
@@ -1293,12 +1347,12 @@ int proc_clone(regs_t *r)
      * refuse (clone then fails with EAGAIN, exactly as on Linux). */
     if (cg_attach_new(child, parent->cg) < 0) {
         vmm_put(child->as);
-        child->as = NULL;
+        child->as    = NULL;
         child->state = PROC_UNUSED;
         return -E_AGAIN;
     }
 
-    child->ppid        = parent->pid;
+    child->ppid = parent->pid;
     /*
      * A thread joins the parent's thread group, so both report the same
      * getpid(); the leader (pid == tgid) is what the grandparent waits on.
@@ -1312,17 +1366,16 @@ int proc_clone(regs_t *r)
     child->sig_ignored = parent->sig_ignored;
     child->sig_mask    = parent->sig_mask;
     memcpy(child->sigact, parent->sigact, sizeof(child->sigact));
-    child->brk         = parent->brk;
-    child->fs_base     = parent->fs_base;
+    child->brk     = parent->brk;
+    child->fs_base = parent->fs_base;
     if (flags & CLONE_SETTLS)
         child->fs_base = tls;
     /* A plain copy inherits the parent's clear_child_tid; clone lets the
      * caller set its own so a thread can be joined via FUTEX_WAIT on it. */
-    child->clear_child_tid = (flags & CLONE_CHILD_CLEARTID)
-                                 ? (uintptr_t)child_tid
-                                 : parent->clear_child_tid;
+    child->clear_child_tid =
+        (flags & CLONE_CHILD_CLEARTID) ? (uintptr_t)child_tid : parent->clear_child_tid;
     strncpy(child->cwd, parent->cwd, GNUOS_PATH_MAX - 1);
-    child->umask       = parent->umask;
+    child->umask = parent->umask;
     inherit_creds(child, parent);
     strncpy(child->name, parent->name, sizeof(child->name) - 1);
     memcpy(child->cmdline, parent->cmdline, parent->cmdline_len);
@@ -1348,7 +1401,7 @@ int proc_clone(regs_t *r)
     }
 
     regs_t f = *r;
-    f.rax = 0;
+    f.rax    = 0;
     /* A thread (child_stack != NULL) must run on the stack libc prepared
      * rather than the parent's copied one. */
     if (child_stack)
@@ -1410,9 +1463,9 @@ static int resolve_interp(char *pathbuf, char **args, int *argc)
 {
     int h = vfs_file_open(pathbuf, O_RDONLY);
     if (h < 0)
-        return 0;                       /* let build_image report the real error */
+        return 0; /* let build_image report the real error */
 
-    char hdr[257];
+    char    hdr[257];
     int32_t got = vfs_file_read(h, hdr, sizeof(hdr) - 1);
     vfs_file_unref(h);
     if (got < 2 || hdr[0] != '#' || hdr[1] != '!')
@@ -1432,7 +1485,7 @@ static int resolve_interp(char *pathbuf, char **args, int *argc)
     while (*s == ' ' || *s == '\t')
         s++;
     if (!*s)
-        return -E_NOEXEC;               /* "#!" with nothing after it */
+        return -E_NOEXEC; /* "#!" with nothing after it */
 
     char *interp = s;
     while (*s && *s != ' ' && *s != '\t')
@@ -1480,8 +1533,7 @@ static int resolve_interp(char *pathbuf, char **args, int *argc)
     return 1;
 }
 
-int proc_execve(const char *path, char *const argv[], char *const envp[],
-                regs_t *r)
+int proc_execve(const char *path, char *const argv[], char *const envp[], regs_t *r)
 {
     proc_t *p = g_current;
 
@@ -1544,7 +1596,7 @@ int proc_execve(const char *path, char *const argv[], char *const envp[],
 
     /* Chase `#!` lines until we reach something the ELF loader can take. */
     int interp_used = 0;
-    for (int depth = 0; ; depth++) {
+    for (int depth = 0;; depth++) {
         if (depth >= EXEC_INTERP_MAX)
             return -E_LOOP;
         int got = resolve_interp(pathbuf, g_args, &argc);
@@ -1552,13 +1604,13 @@ int proc_execve(const char *path, char *const argv[], char *const envp[],
             return got;
         if (got == 0)
             break;
-        interp_used = 1;
+        interp_used  = 1;
         g_args[argc] = NULL;
     }
 
     addrspace_t *as;
-    uint64_t entry, sp;
-    int rc = build_image(pathbuf, g_args, argc, g_envs, envc, &as, &entry, &sp);
+    uint64_t     entry, sp;
+    int          rc = build_image(pathbuf, g_args, argc, g_envs, envc, &as, &entry, &sp);
     if (rc < 0)
         return rc;
 
@@ -1587,7 +1639,7 @@ int proc_execve(const char *path, char *const argv[], char *const envp[],
 
     /* Past this point the old image is gone and there is no way back. */
     addrspace_t *old = p->as;
-    p->as = as;
+    p->as            = as;
     vmm_switch(as);
     /* The dying threads still hold references to `old`; the last of them
      * to exit tears it down. */
@@ -1792,7 +1844,7 @@ void proc_exit_group(int status)
             continue;
         q->group_dying = 1;
         if (q != p && q->state == PROC_BLOCKED)
-            sched_wake(q);          /* READY ones die when next scheduled */
+            sched_wake(q); /* READY ones die when next scheduled */
     }
 
     /*
@@ -1843,13 +1895,19 @@ void proc_exit_group(int status)
  * wake on ANY of them.  The set lives beside the process table (not in
  * proc_t, whose layout the FPU save area constrains) and is disarmed the
  * moment one of the words matches. */
-typedef struct { uint64_t uaddr, key; int shared; } wv_ent_t;
-static struct { wv_ent_t *v; uint32_t n; } g_futex_waitv[MAX_PROCS];
+typedef struct {
+    uint64_t uaddr, key;
+    int      shared;
+} wv_ent_t;
+static struct {
+    wv_ent_t *v;
+    uint32_t  n;
+} g_futex_waitv[MAX_PROCS];
 
 int proc_futex_waitv_arm(const uint64_t *uaddr, uint32_t n)
 {
-    proc_t *p = proc_current();
-    int idx = (int)(p - g_procs);
+    proc_t *p   = proc_current();
+    int     idx = (int)(p - g_procs);
     if (idx < 0 || idx >= MAX_PROCS || !n || n > 128)
         return -E_INVAL;
 
@@ -1868,8 +1926,8 @@ int proc_futex_waitv_arm(const uint64_t *uaddr, uint32_t n)
 
 void proc_futex_waitv_disarm(void)
 {
-    proc_t *p = proc_current();
-    int idx = (int)(p - g_procs);
+    proc_t *p   = proc_current();
+    int     idx = (int)(p - g_procs);
     if (idx < 0 || idx >= MAX_PROCS)
         return;
     if (g_futex_waitv[idx].v)
@@ -1880,10 +1938,13 @@ void proc_futex_waitv_disarm(void)
 
 /* Called from proc_wake_futex: does this sleeper's waitv set contain the
  * word being woken? */
-static int proc_futex_waitv_matches(int slot, addrspace_t *as, uint64_t addr,
-                                   int shared, uint64_t key)
+static int proc_futex_waitv_matches(int slot, addrspace_t *as, uint64_t addr, int shared,
+                                    uint64_t key)
 {
-    struct { wv_ent_t *v; uint32_t n; } *s = &g_futex_waitv[slot];
+    struct {
+        wv_ent_t *v;
+        uint32_t  n;
+    } *s = &g_futex_waitv[slot];
     if (!s->v || !s->n)
         return 0;
     proc_t *q = &g_procs[slot];
@@ -1901,22 +1962,21 @@ int proc_wake_futex(addrspace_t *as, uint64_t addr)
      * page (POSIX named semaphore) matches on physical address, so a wake
      * in one address space finds waiters parked in others that map the
      * same frame. */
-    int shared = as ? vmm_page_shared(as, addr) : 0;
-    uint64_t key = shared ? vmm_resolve(as, addr) : 0;
-    int n = 0;
+    int      shared = as ? vmm_page_shared(as, addr) : 0;
+    uint64_t key    = shared ? vmm_resolve(as, addr) : 0;
+    int      n      = 0;
     for (int i = 0; i < MAX_PROCS; i++) {
         proc_t *q = &g_procs[i];
         if (q->state != PROC_BLOCKED || q->wait_reason != WAIT_FUTEX)
             continue;
         int match = shared ? (q->futex_shared && q->futex_key == key)
-                           : (!q->futex_shared && q->as == as &&
-                              q->futex_addr == addr);
+                           : (!q->futex_shared && q->as == as && q->futex_addr == addr);
         if (!match && proc_futex_waitv_matches(i, as, addr, shared, key)) {
             if (g_futex_waitv[i].v)
                 kfree(g_futex_waitv[i].v);
             g_futex_waitv[i].v = NULL;
             g_futex_waitv[i].n = 0;
-            match = 1;
+            match              = 1;
         }
         if (match) {
             sched_wake(q);
@@ -1949,15 +2009,14 @@ int proc_waitpid(int pid, int *status, int options)
             if (c->state == PROC_ZOMBIE) {
                 int cpid = c->pid;
                 if (status)
-                    *status = c->term_sig ? (c->term_sig & 0x7F)
-                                          : ((c->exit_status & 0xFF) << 8);
+                    *status = c->term_sig ? (c->term_sig & 0x7F) : ((c->exit_status & 0xFF) << 8);
                 c->state = PROC_UNUSED;
                 /* Reaping the leader reaps the whole group: every thread
                  * zombie of it is unreachable now and its slot is freed
                  * here, the one place that knows it is safe. */
                 for (int j = 0; j < MAX_PROCS; j++) {
-                    if (g_procs[j].state == PROC_ZOMBIE &&
-                        g_procs[j].tgid == cpid && &g_procs[j] != c)
+                    if (g_procs[j].state == PROC_ZOMBIE && g_procs[j].tgid == cpid &&
+                        &g_procs[j] != c)
                         g_procs[j].state = PROC_UNUSED;
                 }
                 return cpid;
@@ -1977,8 +2036,7 @@ int proc_waitpid(int pid, int *status, int options)
 
             /* WUNTRACED is how a shell learns that a job it started has been
              * suspended rather than having finished. */
-            if ((options & WUNTRACED) && c->state == PROC_STOPPED &&
-                !c->reported) {
+            if ((options & WUNTRACED) && c->state == PROC_STOPPED && !c->reported) {
                 c->reported = 1;
                 if (status)
                     *status = 0x7F | ((c->stop_sig & 0xFF) << 8);
@@ -1991,8 +2049,8 @@ int proc_waitpid(int pid, int *status, int options)
         if (options & WNOHANG)
             return 0;
 
-        p->wait_pid     = pid;
-        p->wait_reason  = WAIT_CHILD;
+        p->wait_pid    = pid;
+        p->wait_reason = WAIT_CHILD;
         sched_block(WAIT_CHILD);
 
         /*
@@ -2027,7 +2085,7 @@ static int sig_is_ignored_by_default(int s)
  * already been resumed -- the wakeup was the whole point of the signal, and
  * there is nothing further to report.
  */
-#define SIG_NOINTR  (SIGMASK(SIGCONT))
+#define SIG_NOINTR (SIGMASK(SIGCONT))
 
 /*
  * Does delivering this signal actually do anything?  A signal whose default
@@ -2072,15 +2130,14 @@ int proc_signal_blocked(const proc_t *p, int sig)
 
 int proc_signal(proc_t *p, int sig)
 {
-    if (!p || sig <= 0 || sig >= NSIG || p->state == PROC_UNUSED ||
-        p->state == PROC_ZOMBIE)
+    if (!p || sig <= 0 || sig >= NSIG || p->state == PROC_UNUSED || p->state == PROC_ZOMBIE)
         return -E_INVAL;
 
     /* SIGCONT resumes immediately, before anyone looks at the pending set:
      * a stopped process is not running and would never get around to it. */
     if (sig == SIGCONT) {
-        p->sig_pending &= ~(SIGMASK(SIGSTOP) | SIGMASK(SIGTSTP) |
-                            SIGMASK(SIGTTIN) | SIGMASK(SIGTTOU));
+        p->sig_pending &=
+            ~(SIGMASK(SIGSTOP) | SIGMASK(SIGTSTP) | SIGMASK(SIGTTIN) | SIGMASK(SIGTTOU));
         if (p->state == PROC_STOPPED) {
             /* A ptrace stop is not a job-control stop: SIGCONT must not
              * unpark it -- only PTRACE_CONT/SYSCALL/DETACH can. */
@@ -2200,7 +2257,7 @@ void proc_check_signals(regs_t *r)
         if (!sig)
             return;
 
-p->sig_pending &= ~SIGMASK(sig);
+        p->sig_pending &= ~SIGMASK(sig);
 
         /*
          * A traced process stops for its tracer before the signal is
@@ -2240,7 +2297,7 @@ p->sig_pending &= ~SIGMASK(sig);
 
         if (sig_is_stop(sig)) {
             stop_current(sig);
-            continue;                    /* resumed by SIGCONT; look again */
+            continue; /* resumed by SIGCONT; look again */
         }
 
         dbg_puts("PROC: pid ");
@@ -2269,14 +2326,19 @@ static int key_before(proc_t *a, proc_t *b)
 {
     if (a->deadline != b->deadline)
         return a->deadline < b->deadline;
-    return a->pid < b->pid;                 /* deterministic tie-break */
+    return a->pid < b->pid; /* deterministic tie-break */
 }
 
 static proc_t *tr_merge(proc_t *l, proc_t *r)
 {
-    if (!l) return r;
-    if (!r) return l;
-    if (l->tprio > r->tprio) { l->tr = tr_merge(l->tr, r); return l; }
+    if (!l)
+        return r;
+    if (!r)
+        return l;
+    if (l->tprio > r->tprio) {
+        l->tr = tr_merge(l->tr, r);
+        return l;
+    }
     r->tl = tr_merge(l, r->tl);
     return r;
 }
@@ -2291,17 +2353,17 @@ static proc_t *tr_insert(proc_t *root, proc_t *p)
         root->tl = tr_insert(root->tl, p);
         if (root->tl->tprio > root->tprio) {
             proc_t *l = root->tl;
-            root->tl = l->tr;
-            l->tr    = root;
-            root     = l;
+            root->tl  = l->tr;
+            l->tr     = root;
+            root      = l;
         }
     } else {
         root->tr = tr_insert(root->tr, p);
         if (root->tr->tprio > root->tprio) {
             proc_t *r = root->tr;
-            root->tr = r->tl;
-            r->tl    = root;
-            root     = r;
+            root->tr  = r->tl;
+            r->tl     = root;
+            root      = r;
         }
     }
     return root;
@@ -2329,8 +2391,7 @@ static proc_t *tr_leftmost(proc_t *root)
 
 /* In-order walk = ascending deadline.  The first eligible node seen is the
  * pick; ineligible nodes compete on vlag as the fallback. */
-static void tr_pick(proc_t *root, rq_t *q, proc_t **elig, proc_t **fb,
-                    int64_t *fb_vlag)
+static void tr_pick(proc_t *root, rq_t *q, proc_t **elig, proc_t **fb, int64_t *fb_vlag)
 {
     if (!root || (*elig && *fb))
         return;
@@ -2342,7 +2403,7 @@ static void tr_pick(proc_t *root, rq_t *q, proc_t **elig, proc_t **fb,
         if (!*elig)
             *elig = root;
     } else if (!*fb || vlag < *fb_vlag) {
-        *fb = root;
+        *fb      = root;
         *fb_vlag = vlag;
     }
     tr_pick(root->tr, q, elig, fb, fb_vlag);
@@ -2356,10 +2417,10 @@ static void rq_enqueue(rq_t *q, proc_t *p)
     p->vruntime = (uint64_t)((int64_t)q->vtime - p->vlag);
     if ((int64_t)(p->vruntime - q->min_vtime) < 0) {
         p->vruntime = q->min_vtime;
-        p->vlag = (int64_t)q->vtime - (int64_t)p->vruntime;
+        p->vlag     = (int64_t)q->vtime - (int64_t)p->vruntime;
     }
     p->deadline = p->vruntime + p->slice;
-    q->root = tr_insert(q->root, p);
+    q->root     = tr_insert(q->root, p);
     q->count++;
     proc_t *lm = tr_leftmost(q->root);
     if (lm && (int64_t)(lm->vruntime - q->min_vtime) > 0)
@@ -2388,7 +2449,7 @@ static proc_t *rq_pick_best(rq_t *q)
     if (!pick)
         return NULL;
     pick->vlag = (int64_t)q->vtime - (int64_t)pick->vruntime;
-    q->root = tr_delete(q->root, pick);
+    q->root    = tr_delete(q->root, pick);
     if (q->count)
         q->count--;
     proc_t *lm = tr_leftmost(q->root);
@@ -2404,7 +2465,7 @@ static proc_t *rq_pick_best(rq_t *q)
 static void enqueue_fresh(proc_t *p)
 {
 #ifdef SYSTRACE
-    if (p->name[0]=='d' && p->name[1]=='r' && p->name[2]=='m') {
+    if (p->name[0] == 'd' && p->name[1] == 'r' && p->name[2] == 'm') {
         extern void dbg_puts(const char *);
         dbg_puts("ENQ ");
         dbg_puts(p->name);
@@ -2416,8 +2477,7 @@ static void enqueue_fresh(proc_t *p)
         return;
     }
     int want = proc_pick_cpu(p);
-    if (p->rq_cpu < 0 || p->rq_cpu >= NR_RQ ||
-        !(proc_cpu_mask_of(p) & (1u << p->rq_cpu)))
+    if (p->rq_cpu < 0 || p->rq_cpu >= NR_RQ || !(proc_cpu_mask_of(p) & (1u << p->rq_cpu)))
         p->rq_cpu = want;
     if (!p->tprio)
         p->tprio = (uint32_t)(p->pid * 0x9E3779B9u) ^ 0x85EBCA6Bu;
@@ -2500,12 +2560,12 @@ static int schedule(void)
     if (prev) {
         uint64_t now  = timer_ticks();
         uint64_t used = now - prev->last_run_tick;
-        int pc = (prev->on_cpu >= 0 && prev->on_cpu < NR_RQ) ? prev->on_cpu : 0;
-        rq_t *pq = &g_rqs[pc];
-        uint64_t dv = virt_delta(used, proc_eff_weight(prev));
+        int      pc   = (prev->on_cpu >= 0 && prev->on_cpu < NR_RQ) ? prev->on_cpu : 0;
+        rq_t    *pq   = &g_rqs[pc];
+        uint64_t dv   = virt_delta(used, proc_eff_weight(prev));
         prev->vruntime += dv;
-        pq->vtime      += used * VIRT_UNIT;
-        prev->vlag      = (int64_t)pq->vtime - (int64_t)prev->vruntime;
+        pq->vtime += used * VIRT_UNIT;
+        prev->vlag          = (int64_t)pq->vtime - (int64_t)prev->vruntime;
         prev->last_run_tick = now;
         if (prev->state == PROC_RUNNING) {
             prev->state = PROC_READY;
@@ -2525,8 +2585,8 @@ static int schedule(void)
 
     /* Pick from this core's queue; an idle queue steals from the fullest
      * other one (per-CPU queues, work-stealing fallback). */
-    int mycpu = (int)cpu_self()->id % NR_RQ;
-    proc_t *next = rq_pick_best(&g_rqs[mycpu]);
+    int     mycpu = (int)cpu_self()->id % NR_RQ;
+    proc_t *next  = rq_pick_best(&g_rqs[mycpu]);
     if (next) {
         next->rq_cpu = mycpu;
     } else {
@@ -2542,14 +2602,13 @@ static int schedule(void)
             if (next) {
                 /* Re-base the stolen task onto this queue's clock: its
                  * vlag was finalised against the source queue's clock. */
-                next->vruntime = (uint64_t)((int64_t)g_rqs[mycpu].vtime -
-                                            next->vlag);
-                next->rq_cpu = mycpu;
+                next->vruntime = (uint64_t)((int64_t)g_rqs[mycpu].vtime - next->vlag);
+                next->rq_cpu   = mycpu;
             }
         }
     }
 #ifdef SYSTRACE
-    if (next && next->name[0]=='d' && next->name[1]=='r' && next->name[2]=='m') {
+    if (next && next->name[0] == 'd' && next->name[1] == 'r' && next->name[2] == 'm') {
         extern void dbg_puts(const char *);
         dbg_puts("PICK drm-refresh\n");
     }
@@ -2569,7 +2628,7 @@ static int schedule(void)
         cpu_self()->current = NULL;
         vmm_switch_kernel();
         switch_context(&prev->saved_rsp, cpu_self()->sched_rsp);
-        spin_unlock_irq(&g_proc_lock);       /* resumed: we are the idle context */
+        spin_unlock_irq(&g_proc_lock); /* resumed: we are the idle context */
         return 1;
     }
 
@@ -2588,9 +2647,9 @@ static int schedule(void)
         return 1;
     }
 
-    next->deadline      = next->vruntime + next->slice;  /* fresh slice */
+    next->deadline      = next->vruntime + next->slice; /* fresh slice */
     next->last_run_tick = timer_ticks();
-    int fresh = (next->on_cpu == -1);   /* never ran: fabricated stack */
+    int fresh           = (next->on_cpu == -1); /* never ran: fabricated stack */
     next->on_cpu        = cpu_self()->id;
     cpu_self()->current = next;
 
@@ -2622,7 +2681,7 @@ static int schedule(void)
 
     uint64_t *save = prev ? &prev->saved_rsp : &cpu_self()->sched_rsp;
     switch_context(save, next->saved_rsp);
-    spin_unlock_irq(&g_proc_lock);           /* resumed: inherit this core's lock */
+    spin_unlock_irq(&g_proc_lock); /* resumed: inherit this core's lock */
     return 1;
 }
 
@@ -2643,7 +2702,7 @@ void futex_pi_unregister(proc_t *p)
             w->pi_wnext = p->pi_wnext;
     }
     p->pi_owner = p->pi_wnext = NULL;
-    uint32_t best = 0;
+    uint32_t best             = 0;
     for (proc_t *w = owner->pi_waiters; w; w = w->pi_wnext)
         if (proc_eff_weight(w) > best)
             best = proc_eff_weight(w);
@@ -2694,11 +2753,11 @@ void sched_tick(void)
     spin_lock_irq(&g_proc_lock);
     uint64_t now  = timer_ticks();
     uint64_t used = now - cur->last_run_tick;
-    int tc = (cur->on_cpu >= 0 && cur->on_cpu < NR_RQ) ? cur->on_cpu : 0;
-    rq_t *tq = &g_rqs[tc];
+    int      tc   = (cur->on_cpu >= 0 && cur->on_cpu < NR_RQ) ? cur->on_cpu : 0;
+    rq_t    *tq   = &g_rqs[tc];
     cur->vruntime += virt_delta(used, proc_eff_weight(cur));
-    tq->vtime     += used * VIRT_UNIT;
-    cur->vlag      = (int64_t)tq->vtime - (int64_t)cur->vruntime;
+    tq->vtime += used * VIRT_UNIT;
+    cur->vlag          = (int64_t)tq->vtime - (int64_t)cur->vruntime;
     cur->last_run_tick = now;
     /* Real CPU time is charged to the cgroup's cpu.max budget; the moment
      * the quota runs out the running task must give the CPU back so it can
@@ -2711,10 +2770,10 @@ void sched_tick(void)
     if (owed) {
         rq_enqueue(tq, owed);
     }
-    int preempt   = throttled ||                                  /* quota gone */
-                    (cur->vruntime >= cur->deadline) ||           /* slice gone */
-                    (owed && owed->vlag <= 0 &&
-                     owed->deadline < cur->deadline);             /* eligible owed task */
+    int preempt =
+        throttled ||                                                 /* quota gone */
+        (cur->vruntime >= cur->deadline) ||                          /* slice gone */
+        (owed && owed->vlag <= 0 && owed->deadline < cur->deadline); /* eligible owed task */
     spin_unlock_irq(&g_proc_lock);
 
     if (preempt) {
@@ -2764,7 +2823,7 @@ void sched_block_timeout(wait_reason_t why, uint64_t ticks)
     bkl_leave_for_switch(p);
     schedule();
     bkl_return_from_switch();
-    p->wake_tick   = 0;
+    p->wake_tick = 0;
 }
 
 void sched_wake(proc_t *p)
@@ -2783,13 +2842,13 @@ void sched_wake(proc_t *p)
 void sched_expire_timeouts(void)
 {
 #ifdef SYSTRACE
-    {   /* Track the drm-refresh kernel thread through its lifecycle: the
-         * name scan is O(MAX_PROCS) once a second, cheap enough here. */
+    { /* Track the drm-refresh kernel thread through its lifecycle: the
+       * name scan is O(MAX_PROCS) once a second, cheap enough here. */
         static unsigned dq;
         if (++dq <= 5 || (dq & 2047) == 0) {
             for (int i = 0; i < MAX_PROCS; i++) {
-                if (g_procs[i].name[0]=='d' && g_procs[i].name[1]=='r' &&
-                    g_procs[i].name[2]=='m') {
+                if (g_procs[i].name[0] == 'd' && g_procs[i].name[1] == 'r' &&
+                    g_procs[i].name[2] == 'm') {
                     extern void dbg_puts(const char *);
                     extern void dbg_puts_dec(uint32_t);
                     dbg_puts("RTHRD state=");
@@ -2818,8 +2877,7 @@ void sched_expire_timeouts(void)
          * from `now` and not from the old deadline: a periodic timer whose
          * process was starved should not then fire in a burst catching up. */
         if (p->itimer_expire && now >= p->itimer_expire) {
-            p->itimer_expire = p->itimer_interval ? now + p->itimer_interval
-                                                  : 0;
+            p->itimer_expire = p->itimer_interval ? now + p->itimer_interval : 0;
             proc_signal(p, SIGALRM);
         }
 

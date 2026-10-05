@@ -30,9 +30,9 @@ enum drm_idr_slot_state {
 };
 
 struct drm_idr_entry {
-    uint32_t                 id;
-    void                    *ptr;
-    enum drm_idr_slot_state  state;
+    uint32_t                id;
+    void                   *ptr;
+    enum drm_idr_slot_state state;
 };
 
 struct drm_idr {
@@ -77,6 +77,7 @@ void *drm_idr_replace(struct drm_idr *idr, void *ptr, uint32_t id);
  * Walk every live entry, in table order (not id order).
  * @fn returning non-zero stops the walk, and that value comes back here.
  */
-int drm_idr_for_each(struct drm_idr *idr, int (*fn)(uint32_t id, void *ptr, void *data), void *data);
+int drm_idr_for_each(struct drm_idr *idr, int (*fn)(uint32_t id, void *ptr, void *data),
+                     void           *data);
 
 #endif /* INCLUDE_DRM_DRM_IDR_H_ */

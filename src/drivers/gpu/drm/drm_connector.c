@@ -26,23 +26,30 @@
 #include "vfs.h"
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 /* From drm_mode_object.c, drm_property.c and drm_modes.c. */
-extern int                       drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type);
-extern struct drm_property_blob *drm_property_create_blob(struct drm_device *dev, const void *data, size_t length);
+extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj,
+                                     uint32_t type);
+extern struct drm_property_blob *drm_property_create_blob(struct drm_device *dev, const void *data,
+                                                          size_t length);
 extern void                      drm_property_blob_put(struct drm_property_blob *blob);
-extern void                      drm_convert_to_umode(struct drm_mode_modeinfo *out, const struct drm_display_mode *in);
+extern void drm_convert_to_umode(struct drm_mode_modeinfo *out, const struct drm_display_mode *in);
 
-int drm_connector_init(struct drm_device *dev, struct drm_connector *connector, void *funcs, int connector_type)
+int drm_connector_init(struct drm_device *dev, struct drm_connector *connector, void *funcs,
+                       int connector_type)
 {
     int ret;
 
-    if (dev == NULL || connector == NULL) { return -EINVAL; }
+    if (dev == NULL || connector == NULL) {
+        return -EINVAL;
+    }
 
     ret = drm_mode_object_idr_alloc(dev, &connector->base, DRM_MODE_OBJECT_CONNECTOR);
-    if (ret != 0) { return ret; }
+    if (ret != 0) {
+        return ret;
+    }
 
     drm_modeset_lock_init(&connector->mutex);
 
@@ -95,11 +102,15 @@ int drm_connector_attach_encoder(struct drm_connector *connector, struct drm_enc
     uint32_t *ids;
     uint32_t  count;
 
-    if (connector == NULL || encoder == NULL) { return -EINVAL; }
+    if (connector == NULL || encoder == NULL) {
+        return -EINVAL;
+    }
 
     count = connector->possible_encoders_count + 1;
     ids   = realloc(connector->possible_encoders_ids, (size_t)count * sizeof(uint32_t));
-    if (ids == NULL) { return -ENOMEM; }
+    if (ids == NULL) {
+        return -ENOMEM;
+    }
 
     ids[connector->possible_encoders_count] = encoder->base.id;
 
@@ -111,7 +122,9 @@ int drm_connector_attach_encoder(struct drm_connector *connector, struct drm_enc
 
 int drm_connector_register(struct drm_connector *connector)
 {
-    if (connector == NULL) { return -EINVAL; }
+    if (connector == NULL) {
+        return -EINVAL;
+    }
 
     /* Connectors are reachable through GETRESOURCES from the moment they
      * are initialised; there is no second registration step yet. */
@@ -133,21 +146,29 @@ int drm_mode_getconnector(struct drm_device *dev, void *data, struct drm_file *f
     uint32_t                       wanted_modes, wanted_encoders, wanted_props;
     int                            mode_count = 0;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     wanted_modes    = req->count_modes;
     wanted_encoders = req->count_encoders;
     wanted_props    = req->count_props;
 
     obj = drm_mode_object_find(dev, file_priv, req->connector_id, DRM_MODE_OBJECT_CONNECTOR);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
     connector = container_of(obj, struct drm_connector, base);
 
-    for (node = connector->modes.next; node != NULL && node != &connector->modes; node = node->next) { mode_count++; }
+    for (node = connector->modes.next; node != NULL && node != &connector->modes;
+         node = node->next) {
+        mode_count++;
+    }
 
     if (wanted_modes != 0 && mode_count != 0) {
-        uint32_t                  copying = (wanted_modes < (uint32_t)mode_count) ? wanted_modes : (uint32_t)mode_count;
-        struct drm_mode_modeinfo *modes   = malloc((size_t)copying * sizeof(*modes));
+        uint32_t copying =
+            (wanted_modes < (uint32_t)mode_count) ? wanted_modes : (uint32_t)mode_count;
+        struct drm_mode_modeinfo *modes = malloc((size_t)copying * sizeof(*modes));
 
         if (modes == NULL) {
             drm_mode_object_put(obj);
@@ -159,8 +180,8 @@ int drm_mode_getconnector(struct drm_device *dev, void *data, struct drm_file *f
             drm_convert_to_umode(&modes[i], container_of(node, struct drm_display_mode, head));
         }
 
-        if (req->modes_ptr == 0
-            || copy_to_user((void *)(uintptr_t)req->modes_ptr, modes, (size_t)copying * sizeof(*modes)) != 0) {
+        if (req->modes_ptr == 0 || copy_to_user((void *)(uintptr_t)req->modes_ptr, modes,
+                                                (size_t)copying * sizeof(*modes)) != 0) {
             free(modes);
             drm_mode_object_put(obj);
             return -EFAULT;
@@ -169,12 +190,13 @@ int drm_mode_getconnector(struct drm_device *dev, void *data, struct drm_file *f
     }
 
     if (wanted_encoders != 0 && connector->possible_encoders_count != 0) {
-        uint32_t copying = (wanted_encoders < connector->possible_encoders_count) ? wanted_encoders
-                                                                                 : connector->possible_encoders_count;
+        uint32_t copying = (wanted_encoders < connector->possible_encoders_count)
+                               ? wanted_encoders
+                               : connector->possible_encoders_count;
 
-        if (req->encoders_ptr == 0
-            || copy_to_user((void *)(uintptr_t)req->encoders_ptr, connector->possible_encoders_ids,
-                            (size_t)copying * sizeof(*connector->possible_encoders_ids)) != 0) {
+        if (req->encoders_ptr == 0 ||
+            copy_to_user((void *)(uintptr_t)req->encoders_ptr, connector->possible_encoders_ids,
+                         (size_t)copying * sizeof(*connector->possible_encoders_ids)) != 0) {
             drm_mode_object_put(obj);
             return -EFAULT;
         }
@@ -205,10 +227,11 @@ int drm_mode_getconnector(struct drm_device *dev, void *data, struct drm_file *f
             return -ENOMEM;
         }
 
-        if (copying != 0
-            && (req->props_ptr == 0 || req->prop_values_ptr == 0
-                || copy_to_user((void *)(uintptr_t)req->props_ptr, ids, (size_t)copying * sizeof(*ids)) != 0
-                || copy_to_user((void *)(uintptr_t)req->prop_values_ptr, values, (size_t)copying * sizeof(*values)) != 0)) {
+        if (copying != 0 && (req->props_ptr == 0 || req->prop_values_ptr == 0 ||
+                             copy_to_user((void *)(uintptr_t)req->props_ptr, ids,
+                                          (size_t)copying * sizeof(*ids)) != 0 ||
+                             copy_to_user((void *)(uintptr_t)req->prop_values_ptr, values,
+                                          (size_t)copying * sizeof(*values)) != 0)) {
             free(ids);
             free(values);
             drm_mode_object_put(obj);
@@ -229,8 +252,8 @@ int drm_mode_getconnector(struct drm_device *dev, void *data, struct drm_file *f
     req->mm_height         = connector->display_info_height_mm;
     req->subpixel          = 0;
     req->count_modes       = (__u32)mode_count;
-    req->count_props       = (connector->base.properties != NULL) ? connector->base.properties->count : 0;
-    req->count_encoders    = (__u32)connector->possible_encoders_count;
+    req->count_props = (connector->base.properties != NULL) ? connector->base.properties->count : 0;
+    req->count_encoders = (__u32)connector->possible_encoders_count;
 
     drm_mode_object_put(obj);
     return 0;
@@ -240,13 +263,16 @@ void drm_connector_cleanup(struct drm_connector *connector)
 {
     struct drm_device *dev;
 
-    if (connector == NULL) { return; }
+    if (connector == NULL) {
+        return;
+    }
 
     dev = connector->dev;
 
     /* The modes belong to this connector and nobody else holds them. */
     while (connector->modes.next != NULL && connector->modes.next != &connector->modes) {
-        struct drm_display_mode *mode = container_of(connector->modes.next, struct drm_display_mode, head);
+        struct drm_display_mode *mode =
+            container_of(connector->modes.next, struct drm_display_mode, head);
 
         ilist_remove(&mode->head);
         free(mode);
@@ -259,7 +285,9 @@ void drm_connector_cleanup(struct drm_connector *connector)
         drm_idr_remove(&dev->mode_config.object_idr, connector->base.id);
         spin_unlock(&dev->mode_config.idr_mutex);
 
-        if (dev->mode_config.num_connector > 0) { dev->mode_config.num_connector--; }
+        if (dev->mode_config.num_connector > 0) {
+            dev->mode_config.num_connector--;
+        }
     }
 
     free(connector->possible_encoders_ids);
@@ -296,12 +324,15 @@ void drm_connector_cleanup(struct drm_connector *connector)
  * NULL).  The blob is what user space reads to learn the monitor's name,
  * size and preferred mode.
  */
-int drm_connector_update_edid_property(struct drm_connector *connector, const unsigned char *edid, size_t size)
+int drm_connector_update_edid_property(struct drm_connector *connector, const unsigned char *edid,
+                                       size_t size)
 {
     struct drm_device        *dev;
     struct drm_property_blob *fresh = NULL;
 
-    if (connector == NULL || connector->dev == NULL) { return -EINVAL; }
+    if (connector == NULL || connector->dev == NULL) {
+        return -EINVAL;
+    }
 
     dev = connector->dev;
 
@@ -312,7 +343,9 @@ int drm_connector_update_edid_property(struct drm_connector *connector, const un
 
     if (edid != NULL && size > 0) {
         fresh = drm_property_create_blob(dev, edid, size);
-        if (fresh == NULL) { return -ENOMEM; }
+        if (fresh == NULL) {
+            return -ENOMEM;
+        }
     }
 
     connector->edid_blob = fresh;

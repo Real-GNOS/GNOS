@@ -24,9 +24,9 @@
 #include "kstring.h"
 #include "heap.h"
 #include "pmm.h"
-#include "vmm.h"        /* user_ptr_ok */
-#include "timer.h"      /* timer_ticks */
-#include "drm_port.h"   /* errno maps */
+#include "vmm.h"      /* user_ptr_ok */
+#include "timer.h"    /* timer_ticks */
+#include "drm_port.h" /* errno maps */
 
 /* Higher-half direct-map base (defined in the kernel's memory setup). */
 extern uint64_t g_hhdm;
@@ -92,7 +92,7 @@ void *aligned_alloc(size_t align, size_t size)
 {
     uint64_t nframes;
 
-    (void)align;                     /* always page-aligned here */
+    (void)align; /* always page-aligned here */
     if (!size)
         return NULL;
     nframes = ((uint64_t)size + 0xFFF) >> 12;

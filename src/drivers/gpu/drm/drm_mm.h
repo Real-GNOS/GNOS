@@ -69,8 +69,8 @@ struct drm_mm_scan {
 struct drm_mm {
     rb_root_t     interval_tree;
     spinlock_t    lock;
-    uint64_t      start;       /* first byte of the managed span */
-    uint64_t      size;        /* its length in bytes            */
+    uint64_t      start; /* first byte of the managed span */
+    uint64_t      size;  /* its length in bytes            */
     uint64_t      alignment;
     unsigned long scan_active; /* non-zero while a scan is running */
 };
@@ -101,8 +101,9 @@ bool drm_mm_clean_check(const struct drm_mm *mm);
  * two) and taken from within [range_start, range_end).
  * Returns 0, -EINVAL for nonsense arguments, or -ENOSPC when no gap fits.
  */
-int drm_mm_insert_node_in_range(struct drm_mm *mm, struct drm_mm_node *node, uint64_t size, uint64_t alignment,
-                                uint64_t range_start, uint64_t range_end, enum drm_mm_insert_mode mode);
+int drm_mm_insert_node_in_range(struct drm_mm *mm, struct drm_mm_node *node, uint64_t size,
+                                uint64_t alignment, uint64_t range_start, uint64_t range_end,
+                                enum drm_mm_insert_mode mode);
 
 /* Reserve @size bytes anywhere in the span. */
 int drm_mm_insert_node(struct drm_mm *mm, struct drm_mm_node *node, uint64_t size);
@@ -114,12 +115,13 @@ void drm_mm_remove_node(struct drm_mm_node *node);
 void drm_mm_replace_node(struct drm_mm_node *old, struct drm_mm_node *new_node);
 
 /* Begin a scan over the whole span. */
-void drm_mm_init_scan(struct drm_mm *mm, struct drm_mm_scan *scan, uint64_t size, uint64_t alignment,
-                      enum drm_mm_insert_mode mode);
+void drm_mm_init_scan(struct drm_mm *mm, struct drm_mm_scan *scan, uint64_t size,
+                      uint64_t alignment, enum drm_mm_insert_mode mode);
 
 /* Begin a scan restricted to [range_start, range_end). */
-void drm_mm_init_scan_with_range(struct drm_mm *mm, struct drm_mm_scan *scan, uint64_t size, uint64_t alignment,
-                                 uint64_t range_start, uint64_t range_end, enum drm_mm_insert_mode mode);
+void drm_mm_init_scan_with_range(struct drm_mm *mm, struct drm_mm_scan *scan, uint64_t size,
+                                 uint64_t alignment, uint64_t range_start, uint64_t range_end,
+                                 enum drm_mm_insert_mode mode);
 
 /* Record @node as reserved-for-now during a scan. */
 bool drm_mm_scan_add_block(struct drm_mm_scan *scan, struct drm_mm_node *node);

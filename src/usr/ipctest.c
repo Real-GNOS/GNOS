@@ -48,14 +48,14 @@ union semun {
 
 static void report(const char *fmt, ...)
 {
-    char buf[512];
+    char    buf[512];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     printf("%s\n", buf);
     fflush(stdout);
-    syscall(1001, buf);          /* SYS_dbgputs: mirror into build/dbg.log */
+    syscall(1001, buf); /* SYS_dbgputs: mirror into build/dbg.log */
 }
 
 static void check(const char *what, int ok)
@@ -72,7 +72,10 @@ static void check(const char *what, int ok)
 /* ---- System V messages ------------------------------------------------ */
 static void test_msg(void)
 {
-    struct msgbuf { long mtype; char mtext[64]; } m;
+    struct msgbuf {
+        long mtype;
+        char mtext[64];
+    } m;
     int q = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
     check("msgget", q >= 0);
 
@@ -84,8 +87,7 @@ static void test_msg(void)
     if (pid == 0) {
         struct msgbuf r;
         memset(&r, 0, sizeof(r));
-        if (msgrcv(q, &r, sizeof(r.mtext), 1, 0) >= 0 &&
-            strcmp(r.mtext, "sysv-message") == 0)
+        if (msgrcv(q, &r, sizeof(r.mtext), 1, 0) >= 0 && strcmp(r.mtext, "sysv-message") == 0)
             _exit(0);
         _exit(1);
     }
@@ -104,29 +106,27 @@ static void test_sem(void)
     int s = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
     check("semget", s >= 0);
 
-    check("semctl SETVAL", semctl(s, 0, SETVAL, (union semun){ .val = 1 }) == 0);
-    struct sembuf down = { 0, -1, 0 };
+    check("semctl SETVAL", semctl(s, 0, SETVAL, (union semun){.val = 1}) == 0);
+    struct sembuf down = {0, -1, 0};
     check("semop down", semop(s, &down, 1) == 0);
     check("semctl GETVAL(0)", semctl(s, 0, GETVAL, 0) == 0);
 
     pid_t pid = fork();
     if (pid == 0) {
-        struct sembuf up = { 0, 1, 0 };
-        if (semop(s, &up, 1) == 0)      /* child raises: parent wakes below */
+        struct sembuf up = {0, 1, 0};
+        if (semop(s, &up, 1) == 0) /* child raises: parent wakes below */
             _exit(0);
         _exit(1);
     }
     /* Blocking wait for the child's raise: exercises the WAIT_IPC wake. */
-    struct sembuf down2 = { 0, -1, 0 };
-    int r = semop(s, &down2, 1);
-    int st = 1;
+    struct sembuf down2 = {0, -1, 0};
+    int           r     = semop(s, &down2, 1);
+    int           st    = 1;
     waitpid(pid, &st, 0);
-    check("semop block across fork", r == 0 &&
-          WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    check("semop block across fork", r == 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0);
 
     struct semid_ds sds;
-    check("semctl STAT", semctl(s, 0, IPC_STAT, &sds) == 0 &&
-          sds.sem_nsems == 1);
+    check("semctl STAT", semctl(s, 0, IPC_STAT, &sds) == 0 && sds.sem_nsems == 1);
     check("semctl RMID", semctl(s, 0, IPC_RMID, 0) == 0);
 }
 
@@ -141,7 +141,7 @@ static void test_shm(void)
         strcpy(addr, "sysv-shared");
         pid_t pid = fork();
         if (pid == 0) {
-            if (strcmp(addr, "sysv-shared") == 0)   /* same frames */
+            if (strcmp(addr, "sysv-shared") == 0) /* same frames */
                 _exit(0);
             _exit(1);
         }
@@ -159,7 +159,7 @@ static void test_shm(void)
 static void test_posix(void)
 {
     char name[] = "/ipctest.XXXXXX";
-    int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+    int  fd     = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
     check("shm_open", fd >= 0);
     if (fd < 0)
         return;
@@ -175,16 +175,15 @@ static void test_posix(void)
         if (s != SEM_FAILED) {
             pid_t pid = fork();
             if (pid == 0) {
-                if (sem_wait(s) == 0)   /* blocks until parent posts */
+                if (sem_wait(s) == 0) /* blocks until parent posts */
                     _exit(0);
                 _exit(1);
             }
-            usleep(100000);             /* let the child block first */
+            usleep(100000); /* let the child block first */
             int posted = sem_post(s) == 0;
-            int st = 1;
+            int st     = 1;
             waitpid(pid, &st, 0);
-            check("sem_post wakes child", posted &&
-                  WIFEXITED(st) && WEXITSTATUS(st) == 0);
+            check("sem_post wakes child", posted && WIFEXITED(st) && WEXITSTATUS(st) == 0);
             check("sem_close", sem_close(s) == 0);
             check("sem_unlink", sem_unlink("/ipctest-sem") == 0);
         }

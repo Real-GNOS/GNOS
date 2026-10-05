@@ -15,7 +15,7 @@
 #include "panic.h"
 #include "proc.h"
 #include "vmm.h"
-#include "sysnum.h"              /* PROT_READ/WRITE/EXEC */
+#include "sysnum.h" /* PROT_READ/WRITE/EXEC */
 #include "pmm.h"
 #include "debugcon.h"
 #include "smp.h"
@@ -24,7 +24,7 @@
 
 /* Forward declarations for functions defined in vmm.c and lapic.c but not
  * exported through headers yet. */
-extern void vmm_pte_dump(uint64_t va);
+extern void          vmm_pte_dump(uint64_t va);
 extern irq_handler_t lapic_timer_handler(void);
 
 struct idt_entry {
@@ -42,15 +42,15 @@ struct idtr {
     uint64_t base;
 } __attribute__((packed));
 
-extern uint8_t isr_stub_base[];   /* isr.asm, 16 bytes per vector */
+extern uint8_t isr_stub_base[]; /* isr.asm, 16 bytes per vector */
 
 static struct idt_entry g_idt[256];
 static irq_handler_t    g_irq[16];
 static const char      *g_irq_name[16];
 /* MSI/MSI-X messages land on vectors from the dedicated pool below; the
  * LAPIC raises them like any other interrupt and each needs its own EOI. */
-static irq_handler_t    g_msi[16];
-static const char      *g_msi_name[16];
+static irq_handler_t g_msi[16];
+static const char   *g_msi_name[16];
 
 /* /proc/interrupts bookkeeping: which core took which interrupt how many
  * times.  Counted outside any lock -- a torn count is fine for a stat that
@@ -83,14 +83,14 @@ void msi_install(unsigned vec, irq_handler_t fn, const char *name)
 {
     if (vec < MSI_VECTOR_BASE || vec >= MSI_VECTOR_BASE + 16)
         return;
-    g_msi[vec - MSI_VECTOR_BASE] = fn;
+    g_msi[vec - MSI_VECTOR_BASE]      = fn;
     g_msi_name[vec - MSI_VECTOR_BASE] = name;
 }
-static irq_handler_t    g_syscall;
+static irq_handler_t g_syscall;
 
 static inline void outb(uint16_t port, uint8_t v)
 {
-    asm volatile("outb %0, %1" :: "a"(v), "Nd"(port));
+    asm volatile("outb %0, %1" ::"a"(v), "Nd"(port));
 }
 
 static inline uint8_t inb(uint16_t port)
@@ -109,16 +109,19 @@ static inline uint8_t inb(uint16_t port)
 static void pic_remap(void)
 {
     uint8_t m1 = inb(PIC1_DATA), m2 = inb(PIC2_DATA);
-    (void)m1; (void)m2;
+    (void)m1;
+    (void)m2;
 
-    outb(PIC1_CMD, 0x11);  outb(PIC2_CMD, 0x11);   /* ICW1: init + ICW4  */
-    outb(PIC1_DATA, IRQ_BASE);                     /* ICW2: vector bases */
+    outb(PIC1_CMD, 0x11);
+    outb(PIC2_CMD, 0x11);      /* ICW1: init + ICW4  */
+    outb(PIC1_DATA, IRQ_BASE); /* ICW2: vector bases */
     outb(PIC2_DATA, IRQ_BASE + 8);
-    outb(PIC1_DATA, 0x04);                         /* ICW3: slave on IR2 */
+    outb(PIC1_DATA, 0x04); /* ICW3: slave on IR2 */
     outb(PIC2_DATA, 0x02);
-    outb(PIC1_DATA, 0x01);  outb(PIC2_DATA, 0x01); /* ICW4: 8086 mode    */
+    outb(PIC1_DATA, 0x01);
+    outb(PIC2_DATA, 0x01); /* ICW4: 8086 mode    */
 
-    outb(PIC1_DATA, 0xFF);                         /* mask everything    */
+    outb(PIC1_DATA, 0xFF); /* mask everything    */
     outb(PIC2_DATA, 0xFF);
 }
 
@@ -127,7 +130,7 @@ static void pic_unmask(unsigned irq)
     uint16_t port = (irq < 8) ? PIC1_DATA : PIC2_DATA;
     uint8_t  bit  = (uint8_t)(1u << (irq & 7));
     outb(port, (uint8_t)(inb(port) & ~bit));
-    if (irq >= 8)                                  /* also open the cascade */
+    if (irq >= 8) /* also open the cascade */
         outb(PIC1_DATA, (uint8_t)(inb(PIC1_DATA) & ~(1u << 2)));
 }
 
@@ -141,9 +144,9 @@ static void pic_eoi(unsigned irq)
 /* ---- gates ----------------------------------------------------------- */
 static void idt_set(unsigned vec, uint64_t handler, uint8_t dpl)
 {
-    g_idt[vec].off_lo    = (uint16_t)(handler & 0xFFFF);
-    g_idt[vec].selector  = SEL_KCODE;
-    g_idt[vec].ist       = 0;
+    g_idt[vec].off_lo   = (uint16_t)(handler & 0xFFFF);
+    g_idt[vec].selector = SEL_KCODE;
+    g_idt[vec].ist      = 0;
     /* 0x8E = present, 64-bit interrupt gate (IF cleared on entry). */
     g_idt[vec].type_attr = (uint8_t)(0x8E | ((dpl & 3) << 5));
     g_idt[vec].off_mid   = (uint16_t)((handler >> 16) & 0xFFFF);
@@ -155,7 +158,7 @@ void irq_install(unsigned irq, irq_handler_t fn, const char *name)
 {
     if (irq >= 16)
         return;
-    g_irq[irq] = fn;
+    g_irq[irq]      = fn;
     g_irq_name[irq] = name;
     pic_unmask(irq);
 }
@@ -198,6 +201,39 @@ static void __attribute__((noreturn)) fault_halt(regs_t *r, const char *tag)
     dbg_puts_hex(cr3);
     dbg_puts("\r\n");
 
+    /* TEMPORARY Xorg debugging: the vector/rip/cr2 triple says where we
+     * died but not which register held the wild pointer, so dump the
+     * frame the ISR stub captured. */
+    if (r) {
+        dbg_puts(" rax=");
+        dbg_puts_hex(r->rax);
+        dbg_puts(" rbx=");
+        dbg_puts_hex(r->rbx);
+        dbg_puts(" rcx=");
+        dbg_puts_hex(r->rcx);
+        dbg_puts(" rdx=");
+        dbg_puts_hex(r->rdx);
+        dbg_puts("\r\n");
+        dbg_puts(" rsi=");
+        dbg_puts_hex(r->rsi);
+        dbg_puts(" rdi=");
+        dbg_puts_hex(r->rdi);
+        dbg_puts(" rbp=");
+        dbg_puts_hex(r->rbp);
+        dbg_puts(" rsp=");
+        dbg_puts_hex(r->rsp);
+        dbg_puts("\r\n");
+        dbg_puts(" r8=");
+        dbg_puts_hex(r->r8);
+        dbg_puts(" r9=");
+        dbg_puts_hex(r->r9);
+        dbg_puts(" r15=");
+        dbg_puts_hex(r->r15);
+        dbg_puts(" r14=");
+        dbg_puts_hex(r->r14);
+        dbg_puts("\r\n");
+    }
+
     for (;;)
         asm volatile("cli; hlt");
 }
@@ -221,6 +257,14 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
         return 0;
     int is_write = (int)(errcode & 2);
     int is_fetch = (int)(errcode & 16);
+    /* A fork() shared page: fork shares parent and child frames read-only
+     * (PTE_COW), and the faulting write is the cashing-in.  This has to be
+     * settled before the record lookup below, or the mmaps list (which
+     * covers lazily demand-paged regions, not eagerly linked text/stack)
+     * sends a fork() page fault to the SIGSEGV path instead of taking the
+     * copy. */
+    if (is_write && vmm_page_is_cow(as, cr2))
+        return vmm_cow_break(as, cr2);
     /* Records can overlap (a MAP_FIXED mapping replaces an earlier one), so
      * the LAST matching record -- the one a fixed mapping most recently
      * claimed -- wins, exactly as a page-table walk would resolve it. */
@@ -261,6 +305,17 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
             return 0;
         if (is_fetch && !(vf & VM_EXEC))
             return 0;
+        /* A write to a page another address space can still see -- fork()
+         * shares them read-only and this is where that promise is cashed
+         * in.  It has to be settled before the "already present" branch
+         * below: that one only rewrites permissions, and it would happily
+         * put the write bit back on a frame that is still shared, leaving
+         * both sides writing the same memory with no further traps.
+         *
+         * This is also why the branch cannot be left to ring 3 alone: with
+         * CR0.WP set (see vmm_init) a supervisor store to a user page faults
+         * the same way, which is what makes a plain copy-to-user safe on a
+         * fork() page without touching the hundreds of syscall sites. */
         /* A fault on a page that is ALREADY present is a protection
          * fault, not demand paging: the PTE's permissions went stale
          * (a MAP_FIXED remap once skipped present pages, leaving the
@@ -271,8 +326,7 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
          * executable text came back as all-zero pages that the CPU
          * happily executed. */
         if (vmm_resolve(as, cr2 & ~0xFFFULL)) {
-            unsigned prot = ((vf & VM_READ) ? PROT_READ : 0) |
-                            ((vf & VM_WRITE) ? PROT_WRITE : 0) |
+            unsigned prot = ((vf & VM_READ) ? PROT_READ : 0) | ((vf & VM_WRITE) ? PROT_WRITE : 0) |
                             ((vf & VM_EXEC) ? PROT_EXEC : 0);
             return vmm_protect(as, cr2 & ~0xFFFULL, PAGE_SIZE, prot);
         }
@@ -281,7 +335,7 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
             return 0;
         int ok = vmm_map(as, cr2 & ~0xFFFULL, frame, vf);
         if (ok) {
-            as->pages++;    /* lazy fault backed a resident page */
+            as->pages++; /* lazy fault backed a resident page */
             /* TEMPORARY Xorg debugging: lazy mappings are silent -- expose
              * them, they are exactly how a text page becomes zeros. */
             dbg_puts("LAZY: backed va=");
@@ -307,6 +361,10 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
 
 void isr_dispatch(regs_t *r)
 {
+    /* TEMPORARY Xorg debugging: an interrupt/fault must run on the current
+     * task's slot (or outside the kstack array entirely). */
+    proc_kstack_audit("IRQ");
+
     /* A trap taken from ring 3 runs in the interrupted process's kernel
      * execution, so it takes the big kernel lock: the kernel is otherwise
      * lock-free, and this is the one point every entry into it passes.
@@ -351,7 +409,7 @@ void isr_dispatch(regs_t *r)
                 uint64_t cr2;
                 asm volatile("mov %%cr2, %0" : "=r"(cr2));
                 if (vmm_grow_stack(proc_current()->as, cr2))
-                    goto out;   /* retry the faulting instruction */
+                    goto out; /* retry the faulting instruction */
                 /* Demand-paging for recorded anonymous mmap regions: musl and
                  * labwc expect a freshly-mmap'd region to be lazily backed, so
                  * the first touch of a mapping that has no PTE yet just gets a
@@ -360,9 +418,8 @@ void isr_dispatch(regs_t *r)
                  * the process mapped is served -- but a region that was
                  * munmap'd (record dropped) is NOT resurrected, which keeps
                  * freed stacks/heaps from being silently zeroed. */
-                if (fault_back_lazy(proc_current()->as, cr2,
-                                    (int)(r->errcode & 2)))
-                    goto out;   /* retry the faulting instruction */
+                if (fault_back_lazy(proc_current()->as, cr2, (int)r->errcode))
+                    goto out; /* retry the faulting instruction */
             }
 
             dbg_puts("GNOS: fault in user pid ");
@@ -383,7 +440,7 @@ void isr_dispatch(regs_t *r)
                 dbg_puts_hex(r->errcode);
                 vmm_pte_dump(cr2);
                 {
-                    extern void dbg_puts(const char *);
+                    extern void  dbg_puts(const char *);
                     addrspace_t *as = proc_current()->as;
                     dbg_puts("\nMMAP-RECORDS n=");
                     dbg_puts_dec((uint32_t)as->nmmaps);
@@ -453,7 +510,7 @@ void isr_dispatch(regs_t *r)
                     if (!phys)
                         continue;
                     uint64_t *wp = (uint64_t *)pmm_virt(phys);
-                    uint64_t w = wp[(ua & 0xFFF) / 8];
+                    uint64_t  w  = wp[(ua & 0xFFF) / 8];
                     if (w >= 0x400000 && w < 0x1000000) {
                         dbg_puts_hex(w);
                         dbg_puts(" ");
@@ -462,11 +519,14 @@ void isr_dispatch(regs_t *r)
                 dbg_puts("\r\n");
                 dbg_puts("  ustack: ");
                 for (int64_t s = -8; s < 40; s++) {
-                    uint64_t ua = r->rsp + (uint64_t)s * 8;
+                    uint64_t ua   = r->rsp + (uint64_t)s * 8;
                     uint64_t phys = vmm_resolve(proc_current()->as, ua);
-                    if (!phys) { dbg_puts("?? "); continue; }
+                    if (!phys) {
+                        dbg_puts("?? ");
+                        continue;
+                    }
                     uint64_t *wp = (uint64_t *)pmm_virt(phys);
-                    uint64_t w = wp[(ua & 0xFFF) / 8];
+                    uint64_t  w  = wp[(ua & 0xFFF) / 8];
                     dbg_puts_hex(w);
                     dbg_puts(" ");
                 }
@@ -493,8 +553,7 @@ void isr_dispatch(regs_t *r)
                     for (int i = 0; i < uas->nmmaps; i++) {
                         uint64_t mb = uas->mmaps[i].base;
                         uint64_t ms = uas->mmaps[i].size;
-                        if ((r->rip < mb || r->rip >= mb + ms) &&
-                            (ucr2 < mb || ucr2 >= mb + ms))
+                        if ((r->rip < mb || r->rip >= mb + ms) && (ucr2 < mb || ucr2 >= mb + ms))
                             continue;
                         uint64_t now = vmm_region_checksum(uas, mb, ms);
                         dbg_puts("  REC cksum base=");
@@ -509,11 +568,17 @@ void isr_dispatch(regs_t *r)
                         dbg_puts("  pagemap: ");
                         for (uint64_t va = mb; va < mb + ms; va += PAGE_SIZE) {
                             uint64_t ph = vmm_resolve(uas, va);
-                            if (!ph) { dbg_puts("?"); continue; }
+                            if (!ph) {
+                                dbg_puts("?");
+                                continue;
+                            }
                             uint8_t *p = (uint8_t *)pmm_virt(ph);
-                            int z = 1;
+                            int      z = 1;
                             for (uint64_t o = 0; o < PAGE_SIZE; o++)
-                                if (p[o]) { z = 0; break; }
+                                if (p[o]) {
+                                    z = 0;
+                                    break;
+                                }
                             dbg_puts(z ? "0" : "X");
                         }
                         dbg_puts("\r\n");
@@ -542,9 +607,12 @@ void isr_dispatch(regs_t *r)
                 {
                     dbg_puts("  code: ");
                     for (int b = -8; b < 16; b++) {
-                        uint64_t ua = r->rip + (uint64_t)b;
+                        uint64_t ua   = r->rip + (uint64_t)b;
                         uint64_t phys = vmm_resolve(proc_current()->as, ua & ~0xFFFULL);
-                        if (!phys) { dbg_puts("?? "); continue; }
+                        if (!phys) {
+                            dbg_puts("?? ");
+                            continue;
+                        }
                         uint8_t *kp = (uint8_t *)pmm_virt(phys);
                         dbg_puts_hex(kp[ua & 0xFFF]);
                         dbg_puts(" ");
@@ -566,8 +634,7 @@ void isr_dispatch(regs_t *r)
         if (r->vector == 14 && proc_current()) {
             uint64_t kcr2;
             asm volatile("mov %%cr2, %0" : "=r"(kcr2));
-            if (fault_back_lazy(proc_current()->as, kcr2,
-                                (int)(r->errcode & 2)))
+            if (fault_back_lazy(proc_current()->as, kcr2, (int)r->errcode))
                 goto out;
         }
 
@@ -578,7 +645,7 @@ void isr_dispatch(regs_t *r)
         if (g_syscall)
             g_syscall(r);
         else
-            r->rax = (uint64_t)-38;      /* -ENOSYS */
+            r->rax = (uint64_t)-38; /* -ENOSYS */
         proc_check_signals(r);
         goto out;
     }
@@ -609,7 +676,7 @@ void isr_dispatch(regs_t *r)
         g_msi_stat[i][irqstat_cpu()]++;
         if (g_msi[i])
             g_msi[i](r);
-        lapic_eoi();                     /* an MSI is an LAPIC interrupt */
+        lapic_eoi(); /* an MSI is an LAPIC interrupt */
         proc_check_signals(r);
         goto out;
     }
@@ -650,9 +717,8 @@ void idt_init(void)
         idt_set(v, stub, (v == SYSCALL_VECTOR) ? 3 : 0);
     }
 
-    struct idtr idtr = { .limit = sizeof(g_idt) - 1,
-                         .base  = (uint64_t)(uintptr_t)g_idt };
-    asm volatile("lidt %0" :: "m"(idtr) : "memory");
+    struct idtr idtr = {.limit = sizeof(g_idt) - 1, .base = (uint64_t)(uintptr_t)g_idt};
+    asm volatile("lidt %0" ::"m"(idtr) : "memory");
 
     dbg_puts("GNOS: IDT installed, stubs@");
     dbg_puts_hex((uint64_t)(uintptr_t)isr_stub_base);
@@ -663,7 +729,6 @@ void idt_init(void)
  * their own GDT).  The table itself is built once in idt_init(). */
 void idt_load(void)
 {
-    struct idtr idtr = { .limit = sizeof(g_idt) - 1,
-                         .base  = (uint64_t)(uintptr_t)g_idt };
-    asm volatile("lidt %0" :: "m"(idtr) : "memory");
+    struct idtr idtr = {.limit = sizeof(g_idt) - 1, .base = (uint64_t)(uintptr_t)g_idt};
+    asm volatile("lidt %0" ::"m"(idtr) : "memory");
 }

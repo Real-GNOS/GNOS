@@ -39,11 +39,11 @@
  * loader walks it with sizeof.  Padding to a multiple of 16 keeps the
  * stride equal to sizeof in every build. */
 struct kernel_symbol {
-    const char *name;       /* NUL-terminated, lives in rodata (kernel) or
-                             * in the exporting module's mapping */
-    uintptr_t   value;      /* runtime address of the symbol */
-    uint8_t     gpl;        /* 1: only GPL-licensed modules may use it */
-    uint8_t     reserved[15];
+    const char *name; /* NUL-terminated, lives in rodata (kernel) or
+                       * in the exporting module's mapping */
+    uintptr_t value;  /* runtime address of the symbol */
+    uint8_t   gpl;    /* 1: only GPL-licensed modules may use it */
+    uint8_t   reserved[15];
 };
 
 /* The public face of a loaded module.  Modules get a pointer to this
@@ -52,10 +52,10 @@ struct kernel_symbol {
 struct module {
     char     name[MODULE_NAME_LEN];
     int      state;
-    uint32_t refcount;      /* try_module_get()/module_put() (plus
-                             * imports of this module's exports) */
-    size_t   core_size;     /* mapped bytes outside .init* */
-    size_t   init_size;     /* mapped bytes in .init* sections */
+    uint32_t refcount; /* try_module_get()/module_put() (plus
+                        * imports of this module's exports) */
+    size_t core_size;  /* mapped bytes outside .init* */
+    size_t init_size;  /* mapped bytes in .init* sections */
 };
 
 /* Module-load flags for module_load() (init_module(2)). */
@@ -69,11 +69,10 @@ struct module {
 
 /* Export `sym` to loadable modules.  Only symbols with external linkage
  * can be exported (the macro needs `extern typeof(sym)` to compile). */
-#define __EXPORT_SYMBOL(sym, gpl)                                       \
-    extern typeof(sym) sym;                                             \
-    static const struct kernel_symbol __ksym_##sym                      \
-        __attribute__((used, section("__ksymtab"))) = {                 \
-            #sym, (uintptr_t)&sym, (gpl) }
+#define __EXPORT_SYMBOL(sym, gpl)                  \
+    extern typeof(sym)                sym;         \
+    static const struct kernel_symbol __ksym_##sym \
+        __attribute__((used, section("__ksymtab"))) = {#sym, (uintptr_t) & sym, (gpl)}
 
 #define EXPORT_SYMBOL(sym)     __EXPORT_SYMBOL(sym, 0)
 #define EXPORT_SYMBOL_GPL(sym) __EXPORT_SYMBOL(sym, 1)
@@ -85,8 +84,8 @@ struct module {
  * the module name when the image carries no .modinfo "name=" field.
  * Returns 0 or a negative errno; on success the module is LIVE.
  */
-int module_load(const void *image, size_t size, const char *params,
-                unsigned int flags, const char *hint);
+int module_load(const void *image, size_t size, const char *params, unsigned int flags,
+                const char *hint);
 
 /* Unload a LIVE module by name.  Refused with -E_BUSY while its refcount
  * is nonzero unless MODULE_DELETE_FORCE is set. */

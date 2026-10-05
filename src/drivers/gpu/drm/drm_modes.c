@@ -27,21 +27,26 @@
 #include "vfs.h"
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 /* Implemented in drm_mode_object.c: hand an object its device-wide id. */
-extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type);
+extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj,
+                                     uint32_t type);
 
 /* A fresh mode, registered with the device so it can be looked up by id. */
 struct drm_display_mode *drm_mode_create(struct drm_device *dev)
 {
     struct drm_display_mode *mode;
 
-    if (dev == NULL) { return NULL; }
+    if (dev == NULL) {
+        return NULL;
+    }
 
     mode = malloc(sizeof(*mode));
-    if (mode == NULL) { return NULL; }
+    if (mode == NULL) {
+        return NULL;
+    }
     memset(mode, 0, sizeof(*mode));
 
     if (drm_mode_object_idr_alloc(dev, &mode->base, DRM_MODE_OBJECT_MODE) != 0) {
@@ -55,7 +60,9 @@ struct drm_display_mode *drm_mode_create(struct drm_device *dev)
 /* The reverse: take it off whatever list it is on, forget its id, free it. */
 void drm_mode_destroy(struct drm_device *dev, struct drm_display_mode *mode)
 {
-    if (dev == NULL || mode == NULL) { return; }
+    if (dev == NULL || mode == NULL) {
+        return;
+    }
 
     ilist_remove(&mode->head);
 
@@ -71,7 +78,9 @@ void drm_mode_destroy(struct drm_device *dev, struct drm_display_mode *mode)
  * them is not freed while the other still lists it. */
 void drm_mode_probed_add(struct drm_connector *connector, struct drm_display_mode *mode)
 {
-    if (connector == NULL || mode == NULL) { return; }
+    if (connector == NULL || mode == NULL) {
+        return;
+    }
 
     ilist_insert_after(&connector->modes, &mode->head);
     mode->connector_count++;
@@ -79,7 +88,9 @@ void drm_mode_probed_add(struct drm_connector *connector, struct drm_display_mod
 
 void drm_mode_copy(struct drm_display_mode *dst, const struct drm_display_mode *src)
 {
-    if (dst == NULL || src == NULL) { return; }
+    if (dst == NULL || src == NULL) {
+        return;
+    }
 
     memcpy(dst, src, sizeof(*dst));
 }
@@ -92,11 +103,19 @@ void drm_mode_copy(struct drm_display_mode *dst, const struct drm_display_mode *
  */
 bool drm_mode_equal(const struct drm_display_mode *mode1, const struct drm_display_mode *mode2)
 {
-    if (mode1 == NULL || mode2 == NULL) { return false; }
+    if (mode1 == NULL || mode2 == NULL) {
+        return false;
+    }
 
-    if (mode1->clock != mode2->clock) { return false; }
-    if (mode1->hdisplay != mode2->hdisplay || mode1->vdisplay != mode2->vdisplay) { return false; }
-    if (mode1->flags != mode2->flags || mode1->type != mode2->type) { return false; }
+    if (mode1->clock != mode2->clock) {
+        return false;
+    }
+    if (mode1->hdisplay != mode2->hdisplay || mode1->vdisplay != mode2->vdisplay) {
+        return false;
+    }
+    if (mode1->flags != mode2->flags || mode1->type != mode2->type) {
+        return false;
+    }
 
     return true;
 }
@@ -110,27 +129,31 @@ struct drm_display_mode *drm_convert_umode(const struct drm_mode_modeinfo *umode
 {
     struct drm_display_mode *mode;
 
-    if (umode == NULL) { return NULL; }
+    if (umode == NULL) {
+        return NULL;
+    }
 
     mode = malloc(sizeof(*mode));
-    if (mode == NULL) { return NULL; }
+    if (mode == NULL) {
+        return NULL;
+    }
     memset(mode, 0, sizeof(*mode));
 
-    mode->clock       = (int)umode->clock;
-    mode->hdisplay    = (int)umode->hdisplay;
-    mode->hsync_start = (int)umode->hsync_start;
-    mode->hsync_end   = (int)umode->hsync_end;
-    mode->htotal      = (int)umode->htotal;
-    mode->hskew       = (int)umode->hskew;
-    mode->vdisplay    = (int)umode->vdisplay;
-    mode->vsync_start = (int)umode->vsync_start;
-    mode->vsync_end   = (int)umode->vsync_end;
-    mode->vtotal      = (int)umode->vtotal;
-    mode->vscan       = (int)umode->vscan;
-    mode->vrefresh    = (int)umode->vrefresh;
-    mode->flags       = umode->flags;
-    mode->type        = umode->type;
-    mode->status      = MODE_OK;
+    mode->clock           = (int)umode->clock;
+    mode->hdisplay        = (int)umode->hdisplay;
+    mode->hsync_start     = (int)umode->hsync_start;
+    mode->hsync_end       = (int)umode->hsync_end;
+    mode->htotal          = (int)umode->htotal;
+    mode->hskew           = (int)umode->hskew;
+    mode->vdisplay        = (int)umode->vdisplay;
+    mode->vsync_start     = (int)umode->vsync_start;
+    mode->vsync_end       = (int)umode->vsync_end;
+    mode->vtotal          = (int)umode->vtotal;
+    mode->vscan           = (int)umode->vscan;
+    mode->vrefresh        = (int)umode->vrefresh;
+    mode->flags           = umode->flags;
+    mode->type            = umode->type;
+    mode->status          = MODE_OK;
     mode->connector_count = 0;
 
     strncpy(mode->name, umode->name, DRM_DISPLAY_MODE_LEN - 1);
@@ -142,7 +165,9 @@ struct drm_display_mode *drm_convert_umode(const struct drm_mode_modeinfo *umode
 /* UAPI view of a kernel mode: drop the bookkeeping, keep the timings. */
 void drm_convert_to_umode(struct drm_mode_modeinfo *out, const struct drm_display_mode *in)
 {
-    if (out == NULL || in == NULL) { return; }
+    if (out == NULL || in == NULL) {
+        return;
+    }
 
     memset(out, 0, sizeof(*out));
 
@@ -173,7 +198,8 @@ void drm_mode_debug_printmodeline(const struct drm_display_mode *mode)
         return;
     }
 
-    DRM_DEBUG_KMS("modeline \"%s\": %d %d %d %d %d %d %d %d %d 0x%x 0x%x\n", mode->name, mode->clock, mode->hdisplay,
-                  mode->hsync_start, mode->hsync_end, mode->htotal, mode->vdisplay, mode->vsync_start, mode->vsync_end,
-                  mode->vtotal, mode->flags, mode->type);
+    DRM_DEBUG_KMS("modeline \"%s\": %d %d %d %d %d %d %d %d %d 0x%x 0x%x\n", mode->name,
+                  mode->clock, mode->hdisplay, mode->hsync_start, mode->hsync_end, mode->htotal,
+                  mode->vdisplay, mode->vsync_start, mode->vsync_end, mode->vtotal, mode->flags,
+                  mode->type);
 }

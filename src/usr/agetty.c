@@ -21,13 +21,13 @@
 #include <termios.h>
 #include <unistd.h>
 
-#define MAX_INPUT  512
-#define MAX_ARGS   64
-#define HIST_SIZE  64
-#define CFG_FILE   "/etc/agetty.conf"
-#define PASSWD_DB  "/etc/shadow"
-#define VERSION    "0.9.5"
-#define OS_NAME    "GNOS v5.11"
+#define MAX_INPUT 512
+#define MAX_ARGS  64
+#define HIST_SIZE 64
+#define CFG_FILE  "/etc/agetty.conf"
+#define PASSWD_DB "/etc/shadow"
+#define VERSION   "0.9.5"
+#define OS_NAME   "GNOS v5.11"
 
 /* ---- Prompt styles ---------------------------------------------------- */
 #define STYLE_DEFAULT 1
@@ -38,7 +38,7 @@
 
 static int  prompt_style = STYLE_DEFAULT;
 static char username[64] = {0};
-static char cwd[256] = {0};
+static char cwd[256]     = {0};
 
 static void load_config(void)
 {
@@ -75,8 +75,10 @@ static int do_login(void)
         if (!fgets(username, sizeof username, stdin))
             return -1;
         char *nl = strchr(username, '\n');
-        if (nl) *nl = 0;
-        if (strlen(username) == 0) continue;
+        if (nl)
+            *nl = 0;
+        if (strlen(username) == 0)
+            continue;
 
         /* read password with echo off */
         t.c_lflag &= ~ECHO;
@@ -92,7 +94,8 @@ static int do_login(void)
             return -1;
         }
         nl = strchr(pass, '\n');
-        if (nl) *nl = 0;
+        if (nl)
+            *nl = 0;
 
         t.c_lflag |= ECHO;
         tcsetattr(0, TCSANOW, &t);
@@ -104,16 +107,19 @@ static int do_login(void)
             return 0;
         }
         char line[512];
-        int auth = 0;
+        int  auth = 0;
         while (fgets(line, sizeof line, f)) {
             char *p = strchr(line, ':');
-            if (!p) continue;
+            if (!p)
+                continue;
             *p = 0;
-            if (strcmp(line, username) != 0) continue;
+            if (strcmp(line, username) != 0)
+                continue;
             /* skip to password field */
             char *hash = ++p;
-            p = strchr(hash, ':');
-            if (p) *p = 0;
+            p          = strchr(hash, ':');
+            if (p)
+                *p = 0;
             /* hash format: $id$salt$encrypted */
             if (strcmp(hash, "*") == 0 || strcmp(hash, "!") == 0) {
                 auth = 0;
@@ -125,7 +131,8 @@ static int do_login(void)
             break;
         }
         fclose(f);
-        if (auth) return 0;
+        if (auth)
+            return 0;
         printf("Login incorrect\n");
     }
     return -1;
@@ -156,24 +163,29 @@ static void cmd_help(void)
 
 static void cmd_cdufetch(void)
 {
-    const char *styles[] = { "", "Default", "Posh", "Linux SH", "DOS", "Kali" };
-    int s = (prompt_style >= 1 && prompt_style <= 5) ? prompt_style : 1;
+    const char *styles[] = {"", "Default", "Posh", "Linux SH", "DOS", "Kali"};
+    int         s        = (prompt_style >= 1 && prompt_style <= 5) ? prompt_style : 1;
 
     /* get uptime from /proc/uptime */
-    FILE *f = fopen("/proc/uptime", "r");
+    FILE  *f      = fopen("/proc/uptime", "r");
     double uptime = 0;
-    if (f) { fscanf(f, "%lf", &uptime); fclose(f); }
+    if (f) {
+        fscanf(f, "%lf", &uptime);
+        fclose(f);
+    }
     int hrs = (int)(uptime / 3600);
     int min = ((int)(uptime / 60)) % 60;
 
     /* get memory info */
-    FILE *mf = fopen("/proc/meminfo", "r");
-    long total_mem = 0, free_mem = 0;
+    FILE *mf        = fopen("/proc/meminfo", "r");
+    long  total_mem = 0, free_mem = 0;
     if (mf) {
         char line[256];
         while (fgets(line, sizeof line, mf)) {
-            if (sscanf(line, "MemTotal: %ld kB", &total_mem) == 1) continue;
-            if (sscanf(line, "MemAvailable: %ld kB", &free_mem) == 1) continue;
+            if (sscanf(line, "MemTotal: %ld kB", &total_mem) == 1)
+                continue;
+            if (sscanf(line, "MemAvailable: %ld kB", &free_mem) == 1)
+                continue;
         }
         fclose(mf);
     }
@@ -218,7 +230,8 @@ static void cmd_passwd(void)
     char old[128] = {0};
     fgets(old, sizeof old, stdin);
     char *nl = strchr(old, '\n');
-    if (nl) *nl = 0;
+    if (nl)
+        *nl = 0;
 
     /* verify old password */
     FILE *f = fopen(PASSWD_DB, "r");
@@ -229,17 +242,21 @@ static void cmd_passwd(void)
         return;
     }
     char line[512];
-    int auth = 0;
+    int  auth = 0;
     while (fgets(line, sizeof line, f)) {
         char *p = strchr(line, ':');
-        if (!p) continue;
+        if (!p)
+            continue;
         *p = 0;
-        if (strcmp(line, username) != 0) continue;
+        if (strcmp(line, username) != 0)
+            continue;
         char *hash = ++p;
-        p = strchr(hash, ':');
-        if (p) *p = 0;
+        p          = strchr(hash, ':');
+        if (p)
+            *p = 0;
         char *enc = crypt(old, hash);
-        if (enc && strcmp(enc, hash) == 0) auth = 1;
+        if (enc && strcmp(enc, hash) == 0)
+            auth = 1;
         break;
     }
     fclose(f);
@@ -255,13 +272,15 @@ static void cmd_passwd(void)
     char new1[128] = {0};
     fgets(new1, sizeof new1, stdin);
     nl = strchr(new1, '\n');
-    if (nl) *nl = 0;
+    if (nl)
+        *nl = 0;
 
     printf("Retype new password: ");
     char new2[128] = {0};
     fgets(new2, sizeof new2, stdin);
     nl = strchr(new2, '\n');
-    if (nl) *nl = 0;
+    if (nl)
+        *nl = 0;
 
     t.c_lflag |= ECHO;
     tcsetattr(0, TCSANOW, &t);
@@ -281,17 +300,20 @@ static void cmd_passwd(void)
     char *new_hash = crypt(new1, salt);
 
     /* rewrite shadow entry */
-    FILE *fin = fopen(PASSWD_DB, "r");
+    FILE *fin  = fopen(PASSWD_DB, "r");
     FILE *fout = fopen(PASSWD_DB ".tmp", "w");
     if (!fin || !fout) {
         printf("Error updating password database.\n");
-        if (fin) fclose(fin);
-        if (fout) fclose(fout);
+        if (fin)
+            fclose(fin);
+        if (fout)
+            fclose(fout);
         return;
     }
     while (fgets(line, sizeof line, fin)) {
         char *p = strchr(line, ':');
-        if (p && strncmp(line, username, p - line) == 0 && (int)(p - line) == (int)strlen(username)) {
+        if (p && strncmp(line, username, p - line) == 0 &&
+            (int)(p - line) == (int)strlen(username)) {
             fprintf(fout, "%s:%s:20000:0:99999:7:::\n", username, new_hash);
             /* skip old entry's remaining fields */
             while (fgets(line, sizeof line, fin)) {
@@ -340,7 +362,10 @@ static void print_prompt(void)
         printf("%s\\>", display_cwd);
         break;
     case STYLE_KALI:
-        printf("\033[1;31m----(\033[0m\033[1;37m%s@GNOS\033[0m\033[1;31m)-[\033[0m\033[1;34m%s\033[0m\033[1;31m]\033[0m\n", username, display_cwd);
+        printf(
+            "\033[1;31m----(\033[0m\033[1;37m%s@GNOS\033[0m\033[1;31m)-[\033[0m\033[1;34m%s\033["
+            "0m\033[1;31m]\033[0m\n",
+            username, display_cwd);
         printf("|--# ");
         break;
     default:
@@ -357,18 +382,19 @@ static int run_external(const char *line)
     if (pid == 0) {
         /* child: parse args and exec */
         char *args[MAX_ARGS];
-        char buf[MAX_INPUT];
+        char  buf[MAX_INPUT];
         strncpy(buf, line, sizeof buf);
         buf[sizeof buf - 1] = 0;
 
-        int argc = 0;
-        char *tok = strtok(buf, " \t\n");
+        int   argc = 0;
+        char *tok  = strtok(buf, " \t\n");
         while (tok && argc < MAX_ARGS - 1) {
             args[argc++] = tok;
-            tok = strtok(NULL, " \t\n");
+            tok          = strtok(NULL, " \t\n");
         }
         args[argc] = NULL;
-        if (argc == 0) _exit(0);
+        if (argc == 0)
+            _exit(0);
 
         execvp(args[0], args);
         fprintf(stderr, "gnos: %s: %s\n", args[0], strerror(errno));
@@ -390,7 +416,7 @@ static int run_external(const char *line)
 /* ---- Main shell loop -------------------------------------------------- */
 static void shell_loop(void)
 {
-    signal(SIGINT,  SIG_IGN);
+    signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
     signal(SIGTSTP, SIG_IGN);
     signal(SIGTTIN, SIG_IGN);
@@ -400,7 +426,7 @@ static void shell_loop(void)
 
     /* command history */
     char history[HIST_SIZE][MAX_INPUT];
-    int hist_count = 0;
+    int  hist_count = 0;
 
     while (1) {
         print_prompt();
@@ -410,10 +436,12 @@ static void shell_loop(void)
 
         /* strip newline */
         char *nl = strchr(input, '\n');
-        if (nl) *nl = 0;
+        if (nl)
+            *nl = 0;
 
         /* skip empty */
-        if (strlen(input) == 0) continue;
+        if (strlen(input) == 0)
+            continue;
 
         /* save history */
         if (hist_count < HIST_SIZE) {
@@ -424,12 +452,13 @@ static void shell_loop(void)
         /* parse command */
         char *cmd = input;
         char *arg = NULL;
-        char *sp = strchr(input, ' ');
+        char *sp  = strchr(input, ' ');
         if (sp) {
             *sp = 0;
             arg = sp + 1;
             /* skip leading spaces */
-            while (*arg == ' ') arg++;
+            while (*arg == ' ')
+                arg++;
         }
 
         /* built-in commands */
@@ -488,7 +517,8 @@ static void shell_loop(void)
 
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    (void)argc;
+    (void)argv;
 
     /* configure terminal */
     struct termios t;

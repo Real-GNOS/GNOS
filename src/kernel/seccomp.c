@@ -42,12 +42,12 @@
 
 /* The seccomp_data snapshot passed to the filter, matching the Linux ABI. */
 struct seccomp_data {
-    int   nr;                    /* syscall number */
-    unsigned int arch;           /* AUDIT_ARCH_X86_64 */
-    unsigned long long args[6];  /* syscall arguments */
+    int                nr;      /* syscall number */
+    unsigned int       arch;    /* AUDIT_ARCH_X86_64 */
+    unsigned long long args[6]; /* syscall arguments */
 };
 
-#define AUDIT_ARCH_X86_64  0xC000003E
+#define AUDIT_ARCH_X86_64 0xC000003E
 
 /* Evaluate a BPF program against a syscall.  Returns the action (lower 16
  * bits masked off) ORed with optional data (e.g., errno for SECCOMP_RET_ERRNO). */
@@ -60,12 +60,12 @@ static uint32_t bpf_run(const struct sock_filter *insn, unsigned int len,
     memset(M, 0, sizeof(M));
 
     unsigned int ticks = len * 4 + 64;
-    unsigned int ip = 0;   /* instruction pointer (index into insn[]) */
+    unsigned int ip    = 0; /* instruction pointer (index into insn[]) */
 
     while (ip < len && ticks--) {
-        const struct sock_filter *pc = &insn[ip];
-        uint16_t code = pc->code;
-        uint32_t k    = pc->k;
+        const struct sock_filter *pc   = &insn[ip];
+        uint16_t                  code = pc->code;
+        uint32_t                  k    = pc->k;
 
         /* Each instruction advances by 1 by default.  Jumps override ip. */
         unsigned int next = ip + 1;
@@ -118,10 +118,12 @@ static uint32_t bpf_run(const struct sock_filter *insn, unsigned int len,
 
         /* ---- store / load scratch memory ------------------------------ */
         case BPF_ST:
-            if (k < 16) M[k] = A;
+            if (k < 16)
+                M[k] = A;
             break;
         case BPF_STX:
-            if (k < 16) M[k] = X;
+            if (k < 16)
+                M[k] = X;
             break;
         case (BPF_LD | BPF_W | BPF_MEM):
             A = (k < 16) ? M[k] : 0;
@@ -149,8 +151,8 @@ static uint32_t bpf_run(const struct sock_filter *insn, unsigned int len,
 /* Called from the syscall entry path (syscall_handler) before dispatch.
  * Returns 0 to allow, or a negative errno / SECCOMP_RET_* action.
  * Must be called with the BKL held (caller is syscall_handler). */
-int seccomp_check(proc_t *p, int syscall_nr, uint64_t a1, uint64_t a2,
-                  uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6)
+int seccomp_check(proc_t *p, int syscall_nr, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                  uint64_t a5, uint64_t a6)
 {
     if (!p)
         return 0;
@@ -162,20 +164,20 @@ int seccomp_check(proc_t *p, int syscall_nr, uint64_t a1, uint64_t a2,
     case SECCOMP_MODE_STRICT:
         /* In strict mode, only read/write/exit/sigreturn are allowed. */
         switch (syscall_nr) {
-        case 0:  /* read */
-        case 1:  /* write */
-        case 8:  /* lseek */
-        case 19: /* readv */
-        case 20: /* writev */
-        case 17: /* pread64 */
-        case 18: /* pwrite64 */
-        case 60: /* exit */
-        case 61: /* wait4 */
+        case 0:   /* read */
+        case 1:   /* write */
+        case 8:   /* lseek */
+        case 19:  /* readv */
+        case 20:  /* writev */
+        case 17:  /* pread64 */
+        case 18:  /* pwrite64 */
+        case 60:  /* exit */
+        case 61:  /* wait4 */
         case 231: /* exit_group */
-        case 15: /* rt_sigreturn */
+        case 15:  /* rt_sigreturn */
             return 0;
         default:
-            return -E_INVAL;  /* EPERM would be correct but errno 38 */
+            return -E_INVAL; /* EPERM would be correct but errno 38 */
         }
 
     case SECCOMP_MODE_FILTER: {
@@ -183,8 +185,8 @@ int seccomp_check(proc_t *p, int syscall_nr, uint64_t a1, uint64_t a2,
             return 0;
 
         struct seccomp_data sd;
-        sd.nr   = syscall_nr;
-        sd.arch = AUDIT_ARCH_X86_64;
+        sd.nr      = syscall_nr;
+        sd.arch    = AUDIT_ARCH_X86_64;
         sd.args[0] = a1;
         sd.args[1] = a2;
         sd.args[2] = a3;
@@ -213,7 +215,8 @@ int seccomp_check(proc_t *p, int syscall_nr, uint64_t a1, uint64_t a2,
             /* Return -(result & 0xffff) as errno. */
             {
                 int e = (int)(result & 0xffff);
-                if (e == 0) e = -E_INVAL;
+                if (e == 0)
+                    e = -E_INVAL;
                 return -e;
             }
         case SECCOMP_RET_KILL_PROCESS:
@@ -223,11 +226,11 @@ int seccomp_check(proc_t *p, int syscall_nr, uint64_t a1, uint64_t a2,
             dbg_puts(" pid=");
             dbg_puts_dec((uint32_t)p->pid);
             dbg_puts("\n");
-            return -E_KILLED;  /* kill the process */
+            return -E_KILLED; /* kill the process */
         case SECCOMP_RET_TRAP:
             /* Deliver SIGSYS to the process. */
             signal_deliver(p, 31 /* SIGSYS */, 0);
-            return -E_INVAL;  /* let the signal handler run */
+            return -E_INVAL; /* let the signal handler run */
         case SECCOMP_RET_TRACE:
             /* For now, treat as allow (strace support would need ptrace). */
             return 0;
@@ -268,7 +271,7 @@ int seccomp_prctl(proc_t *p, int option, uint64_t arg2)
         /* Only allowed transitions: disabled -> strict, disabled -> filter,
          * strict -> filter.  Once set, it can only become stricter. */
         if (p->secc_mode == SECCOMP_MODE_FILTER)
-            return -E_INVAL;  /* already at strictest */
+            return -E_INVAL; /* already at strictest */
         if (mode == SECCOMP_MODE_STRICT) {
             p->secc_mode = SECCOMP_MODE_STRICT;
             return 0;
@@ -308,7 +311,7 @@ int sys_seccomp(uint64_t op, uint64_t flags, uint64_t u_fprog)
         if (p->no_new_privs == 0)
             return -E_INVAL;
         if (p->secc_mode == SECCOMP_MODE_FILTER)
-            return -E_INVAL;  /* already filtered */
+            return -E_INVAL; /* already filtered */
 
         /* Validate the user-space sock_fprog. */
         if (!user_ptr_ok(u_fprog, sizeof(struct sock_fprog)))
@@ -319,12 +322,11 @@ int sys_seccomp(uint64_t op, uint64_t flags, uint64_t u_fprog)
 
         if (kf.len == 0 || kf.len > SECCOMP_BPF_MAXINSNS)
             return -E_INVAL;
-        if (!user_ptr_ok((uint64_t)kf.filter,
-                         kf.len * sizeof(struct sock_filter)))
+        if (!user_ptr_ok((uint64_t)kf.filter, kf.len * sizeof(struct sock_filter)))
             return -E_INVAL;
 
         /* Allocate a kernel copy of the filter. */
-        size_t sz = kf.len * sizeof(struct sock_filter);
+        size_t              sz  = kf.len * sizeof(struct sock_filter);
         struct sock_filter *buf = kmalloc(sz);
         if (!buf)
             return -E_NOMEM;
@@ -340,7 +342,7 @@ int sys_seccomp(uint64_t op, uint64_t flags, uint64_t u_fprog)
 
         /* TSYNC: if requested, also apply to all threads sharing the
          * same address space.  For GNOS this means the thread group. */
-        if (flags & 0x1) {  /* SECCOMP_FILTER_FLAG_TSYNC */
+        if (flags & 0x1) { /* SECCOMP_FILTER_FLAG_TSYNC */
             for (int i = 0; i < proc_capacity(); i++) {
                 proc_t *q = proc_at(i);
                 if (q == p || q->state == PROC_UNUSED)
@@ -403,8 +405,8 @@ void seccomp_exec(proc_t *p)
 void seccomp_free(proc_t *p)
 {
     if (p && p->seccomp_filter) {
-            kfree(p->seccomp_filter);
-            p->seccomp_filter = NULL;
-            p->seccomp_len = 0;
+        kfree(p->seccomp_filter);
+        p->seccomp_filter = NULL;
+        p->seccomp_len    = 0;
     }
 }

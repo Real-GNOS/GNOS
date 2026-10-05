@@ -17,9 +17,9 @@ static int drain(int fd)
     for (;;) {
         long n = sys_read(fd, buf, (long)sizeof(buf));
         if (n == 0)
-            return 0;                  /* end of file */
+            return 0; /* end of file */
         if (n < 0)
-            return 1;                  /* interrupted, or a bad descriptor */
+            return 1; /* interrupted, or a bad descriptor */
 
         long done = 0;
         while (done < n) {

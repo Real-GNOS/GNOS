@@ -25,12 +25,12 @@
 
 #define SYSFS_MAX_FILES 32
 #define SYSFS_BUF       512
-#define SYSFS_MAX_DEPTH 4          /* slashes in relpath: a/b/c/d */
+#define SYSFS_MAX_DEPTH 4 /* slashes in relpath: a/b/c/d */
 
 typedef struct {
-    char       rel[96];            /* path below /sys, e.g. "kernel/ostype" */
-    sysfs_gen_t gen;               /* renders content; never NULL */
-    sysfs_put_t put;               /* optional write handler */
+    char        rel[96]; /* path below /sys, e.g. "kernel/ostype" */
+    sysfs_gen_t gen;     /* renders content; never NULL */
+    sysfs_put_t put;     /* optional write handler */
 } sysfs_ent_t;
 
 static sysfs_ent_t g_ents[SYSFS_MAX_FILES];
@@ -108,8 +108,8 @@ int sysfs_add_file(const char *relpath, sysfs_gen_t gen, sysfs_put_t put)
     sysfs_ent_t *e = &g_ents[g_nents++];
     strncpy(e->rel, relpath, sizeof(e->rel) - 1);
     e->rel[sizeof(e->rel) - 1] = '\0';
-    e->gen = gen;
-    e->put = put;
+    e->gen                     = gen;
+    e->put                     = put;
     return 0;
 }
 
@@ -136,12 +136,10 @@ static int is_dir(const char *relpath)
 {
     size_t n = strlen(relpath);
     for (int i = 0; i < g_nents; i++)
-        if (strncmp(g_ents[i].rel, relpath, n) == 0 &&
-            g_ents[i].rel[n] == '/')
+        if (strncmp(g_ents[i].rel, relpath, n) == 0 && g_ents[i].rel[n] == '/')
             return 1;
     return 0;
 }
-
 
 /* ---- read / write ------------------------------------------------------- */
 
@@ -167,8 +165,7 @@ static int32_t sysfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return (int32_t)len;
 }
 
-static int32_t sysfs_write(vfs_node_t *n, uint64_t off, const void *buf,
-                           uint32_t len)
+static int32_t sysfs_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     sysfs_ent_t *e = (sysfs_ent_t *)n->priv;
     if (!e)
@@ -180,15 +177,18 @@ static int32_t sysfs_write(vfs_node_t *n, uint64_t off, const void *buf,
     return e->put((const char *)buf, len);
 }
 
-static const vfs_ops_t g_sysfs_ops = { .read = sysfs_read, .write = sysfs_write };
+static const vfs_ops_t g_sysfs_ops = {.read = sysfs_read, .write = sysfs_write};
 
 static int32_t sysdir_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
-static const vfs_ops_t g_sysdir_ops = { .read = sysdir_read, .write = NULL };
+static const vfs_ops_t g_sysdir_ops = {.read = sysdir_read, .write = NULL};
 
 /* Fill in a directory node named by the last component of `relpath`. */
 static void fill_dir(vfs_node_t *out, const char *relpath)
@@ -200,8 +200,8 @@ static void fill_dir(vfs_node_t *out, const char *relpath)
             base = p + 1;
     strncpy(out->name, base, VFS_NAME_MAX - 1);
     out->name[VFS_NAME_MAX - 1] = '\0';
-    out->kind = VFS_DIR;
-    out->ops  = &g_sysdir_ops;
+    out->kind                   = VFS_DIR;
+    out->ops                    = &g_sysdir_ops;
 }
 
 static void fill_file(vfs_node_t *out, const char *relpath, sysfs_ent_t *e)
@@ -213,9 +213,9 @@ static void fill_file(vfs_node_t *out, const char *relpath, sysfs_ent_t *e)
             base = p + 1;
     strncpy(out->name, base, VFS_NAME_MAX - 1);
     out->name[VFS_NAME_MAX - 1] = '\0';
-    out->kind = VFS_FILE;
-    out->ops  = &g_sysfs_ops;
-    out->priv = e;
+    out->kind                   = VFS_FILE;
+    out->ops                    = &g_sysfs_ops;
+    out->priv                   = e;
 }
 
 /* ---- resolve ------------------------------------------------------------ */
@@ -236,7 +236,7 @@ int sysfs_resolve(const char *path, vfs_node_t *out)
         return 0;
     }
 
-    const char *rel = path + 5;                 /* skip "/sys/" */
+    const char *rel = path + 5; /* skip "/sys/" */
     if (rel[0] == '\0')
         return -E_NOENT;
 
@@ -258,47 +258,122 @@ int sysfs_resolve(const char *path, vfs_node_t *out)
 
 /* ---- readdir ------------------------------------------------------------ */
 
-int sysfs_readdir(const char *dirpath, uint32_t index, char *name,
-                  uint8_t *type)
+int sysfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *type)
 {
     uint32_t n = 0;
 
     if (strcmp(dirpath, "/sys") == 0) {
-        if (index == n++) { strncpy(name, ".", VFS_NAME_MAX - 1);     *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "..", VFS_NAME_MAX - 1);    *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "kernel", VFS_NAME_MAX);    *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "class", VFS_NAME_MAX);     *type = DT_DIR; return 0; }
+        if (index == n++) {
+            strncpy(name, ".", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "..", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "kernel", VFS_NAME_MAX);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "class", VFS_NAME_MAX);
+            *type = DT_DIR;
+            return 0;
+        }
         return -E_NOENT;
     }
 
     if (strcmp(dirpath, "/sys/kernel") == 0) {
-        if (index == n++) { strncpy(name, ".", VFS_NAME_MAX - 1);     *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "..", VFS_NAME_MAX - 1);    *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "ostype", VFS_NAME_MAX);    *type = DT_REG; return 0; }
-        if (index == n++) { strncpy(name, "osrelease", VFS_NAME_MAX); *type = DT_REG; return 0; }
-        if (index == n++) { strncpy(name, "uptime", VFS_NAME_MAX);    *type = DT_REG; return 0; }
+        if (index == n++) {
+            strncpy(name, ".", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "..", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "ostype", VFS_NAME_MAX);
+            *type = DT_REG;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "osrelease", VFS_NAME_MAX);
+            *type = DT_REG;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "uptime", VFS_NAME_MAX);
+            *type = DT_REG;
+            return 0;
+        }
         return -E_NOENT;
     }
 
     if (strcmp(dirpath, "/sys/class") == 0) {
-        if (index == n++) { strncpy(name, ".", VFS_NAME_MAX - 1);     *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "..", VFS_NAME_MAX - 1);    *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "drm", VFS_NAME_MAX);       *type = DT_DIR; return 0; }
+        if (index == n++) {
+            strncpy(name, ".", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "..", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "drm", VFS_NAME_MAX);
+            *type = DT_DIR;
+            return 0;
+        }
         return -E_NOENT;
     }
 
     if (strcmp(dirpath, "/sys/class/drm") == 0) {
-        if (index == n++) { strncpy(name, ".", VFS_NAME_MAX - 1);     *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "..", VFS_NAME_MAX - 1);    *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "card0", VFS_NAME_MAX);     *type = DT_DIR; return 0; }
+        if (index == n++) {
+            strncpy(name, ".", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "..", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "card0", VFS_NAME_MAX);
+            *type = DT_DIR;
+            return 0;
+        }
         return -E_NOENT;
     }
 
     if (strcmp(dirpath, "/sys/class/drm/card0") == 0) {
-        if (index == n++) { strncpy(name, ".", VFS_NAME_MAX - 1);     *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "..", VFS_NAME_MAX - 1);    *type = DT_DIR; return 0; }
-        if (index == n++) { strncpy(name, "status", VFS_NAME_MAX);    *type = DT_REG; return 0; }
-        if (index == n++) { strncpy(name, "enabled", VFS_NAME_MAX);   *type = DT_REG; return 0; }
+        if (index == n++) {
+            strncpy(name, ".", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "..", VFS_NAME_MAX - 1);
+            *type = DT_DIR;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "status", VFS_NAME_MAX);
+            *type = DT_REG;
+            return 0;
+        }
+        if (index == n++) {
+            strncpy(name, "enabled", VFS_NAME_MAX);
+            *type = DT_REG;
+            return 0;
+        }
         return -E_NOENT;
     }
 

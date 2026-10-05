@@ -32,11 +32,12 @@
 #include "vfs.h"
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 /* From drm_mode_object.c. */
-extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj, uint32_t type);
+extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_object *obj,
+                                     uint32_t type);
 
 /* --------------------------------------------------------------- lifecycle */
 
@@ -44,19 +45,24 @@ extern int drm_mode_object_idr_alloc(struct drm_device *dev, struct drm_mode_obj
  * Publish @fb: give it an id, put it on the device's framebuffer list and
  * on the owning file's list, and count it.
  */
-int drm_framebuffer_init(struct drm_device *dev, struct drm_framebuffer *fb, const struct drm_framebuffer_funcs *funcs)
+int drm_framebuffer_init(struct drm_device *dev, struct drm_framebuffer *fb,
+                         const struct drm_framebuffer_funcs *funcs)
 {
     uint32_t id = 0;
     int      ret;
 
-    if (dev == NULL || fb == NULL) { return -EINVAL; }
+    if (dev == NULL || fb == NULL) {
+        return -EINVAL;
+    }
 
     fb->funcs = funcs;
 
     spin_lock(&dev->mode_config.fb_lock);
     ret = drm_idr_alloc(&dev->mode_config.fb_idr, fb, 1, 0, &id);
     spin_unlock(&dev->mode_config.fb_lock);
-    if (ret != 0) { return ret; }
+    if (ret != 0) {
+        return ret;
+    }
 
     ret = drm_mode_object_idr_alloc(dev, &fb->base, DRM_MODE_OBJECT_FB);
     if (ret != 0) {
@@ -69,7 +75,9 @@ int drm_framebuffer_init(struct drm_device *dev, struct drm_framebuffer *fb, con
     fb->id = (int)id;
 
     ilist_insert_after(&dev->mode_config.fb_list, &fb->head);
-    if (fb->file != NULL) { ilist_insert_after(&fb->file->fbs_head, &fb->filp_head); }
+    if (fb->file != NULL) {
+        ilist_insert_after(&fb->file->fbs_head, &fb->filp_head);
+    }
 
     dev->mode_config.num_fb++;
 
@@ -83,7 +91,9 @@ void drm_framebuffer_cleanup(struct drm_framebuffer *fb)
     struct drm_device *dev;
     int                i;
 
-    if (fb == NULL) { return; }
+    if (fb == NULL) {
+        return;
+    }
 
     dev = fb->base.dev;
 
@@ -109,7 +119,9 @@ void drm_framebuffer_cleanup(struct drm_framebuffer *fb)
         drm_idr_remove(&dev->mode_config.object_idr, fb->base.id);
         spin_unlock(&dev->mode_config.idr_mutex);
 
-        if (dev->mode_config.num_fb > 0) { dev->mode_config.num_fb--; }
+        if (dev->mode_config.num_fb > 0) {
+            dev->mode_config.num_fb--;
+        }
     }
 }
 
@@ -120,12 +132,15 @@ void drm_framebuffer_cleanup(struct drm_framebuffer *fb)
  * kept as a fallback for internal callers holding an old-style id.
  * No reference is handed out.
  */
-struct drm_framebuffer *drm_framebuffer_lookup(struct drm_device *dev, struct drm_file *file_priv, uint32_t id)
+struct drm_framebuffer *drm_framebuffer_lookup(struct drm_device *dev, struct drm_file *file_priv,
+                                               uint32_t id)
 {
     struct drm_framebuffer *fb;
     struct drm_mode_object *obj;
 
-    if (dev == NULL) { return NULL; }
+    if (dev == NULL) {
+        return NULL;
+    }
 
     obj = drm_mode_object_find(dev, file_priv, id, DRM_MODE_OBJECT_FB);
     if (obj != NULL) {
@@ -157,7 +172,9 @@ int drm_mode_addfb(struct drm_device *dev, void *data, struct drm_file *file_pri
     uint32_t                bytes_per_pixel;
     int                     ret;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     if (req->bpp == 32 && req->depth == 24) {
         format = DRM_FORMAT_XRGB8888;
@@ -175,15 +192,25 @@ int drm_mode_addfb(struct drm_device *dev, void *data, struct drm_file *file_pri
         return -EINVAL;
     }
 
-    if (req->width == 0 || req->height == 0) { return -EINVAL; }
-    if (req->width > dev->mode_config.max_width || req->height > dev->mode_config.max_height) { return -EINVAL; }
-    if (req->handle == 0) { return -EINVAL; }
+    if (req->width == 0 || req->height == 0) {
+        return -EINVAL;
+    }
+    if (req->width > dev->mode_config.max_width || req->height > dev->mode_config.max_height) {
+        return -EINVAL;
+    }
+    if (req->handle == 0) {
+        return -EINVAL;
+    }
 
     bytes_per_pixel = req->bpp / 8;
-    if (req->pitch < req->width * bytes_per_pixel) { return -EINVAL; }
+    if (req->pitch < req->width * bytes_per_pixel) {
+        return -EINVAL;
+    }
 
     obj = drm_gem_object_lookup(file_priv, req->handle);
-    if (obj == NULL) { return -ENOENT; }
+    if (obj == NULL) {
+        return -ENOENT;
+    }
     if (obj->size < (size_t)req->pitch * req->height) {
         drm_gem_object_put(obj);
         return -EINVAL;
@@ -196,13 +223,13 @@ int drm_mode_addfb(struct drm_device *dev, void *data, struct drm_file *file_pri
     }
     memset(fb, 0, sizeof(*fb));
 
-    fb->format      = format;
-    fb->modifier    = DRM_FORMAT_MOD_LINEAR;
-    fb->width       = req->width;
-    fb->height      = req->height;
-    fb->pitches[0]  = req->pitch;
-    fb->obj[0]      = obj;
-    fb->file        = file_priv;
+    fb->format     = format;
+    fb->modifier   = DRM_FORMAT_MOD_LINEAR;
+    fb->width      = req->width;
+    fb->height     = req->height;
+    fb->pitches[0] = req->pitch;
+    fb->obj[0]     = obj;
+    fb->file       = file_priv;
 
     ret = drm_framebuffer_init(dev, fb, (dev->driver != NULL) ? dev->driver->fb_funcs : NULL);
     if (ret != 0) {
@@ -231,22 +258,39 @@ int drm_mode_addfb2(struct drm_device *dev, void *data, struct drm_file *file_pr
     int                      i;
     int                      ret;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
-    if (req->pixel_format == DRM_FORMAT_INVALID) { return -EINVAL; }
-    if ((req->flags & ~(DRM_MODE_FB_INTERLACED | DRM_MODE_FB_MODIFIERS)) != 0) { return -EINVAL; }
-    if (req->pixel_format != DRM_FORMAT_XRGB8888 && req->pixel_format != DRM_FORMAT_ARGB8888) { return -EINVAL; }
+    if (req->pixel_format == DRM_FORMAT_INVALID) {
+        return -EINVAL;
+    }
+    if ((req->flags & ~(DRM_MODE_FB_INTERLACED | DRM_MODE_FB_MODIFIERS)) != 0) {
+        return -EINVAL;
+    }
+    if (req->pixel_format != DRM_FORMAT_XRGB8888 && req->pixel_format != DRM_FORMAT_ARGB8888) {
+        return -EINVAL;
+    }
 
-    if (req->width == 0 || req->height == 0) { return -EINVAL; }
-    if (req->width > dev->mode_config.max_width || req->height > dev->mode_config.max_height) { return -EINVAL; }
+    if (req->width == 0 || req->height == 0) {
+        return -EINVAL;
+    }
+    if (req->width > dev->mode_config.max_width || req->height > dev->mode_config.max_height) {
+        return -EINVAL;
+    }
 
     min_pitch = req->width * 4;
-    if (req->pitches[0] < min_pitch) { return -EINVAL; }
+    if (req->pitches[0] < min_pitch) {
+        return -EINVAL;
+    }
 
     if ((req->flags & DRM_MODE_FB_MODIFIERS) != 0) {
-        if (req->modifier[0] != DRM_FORMAT_MOD_LINEAR) { return -EINVAL; }
+        if (req->modifier[0] != DRM_FORMAT_MOD_LINEAR) {
+            return -EINVAL;
+        }
         for (i = 1; i < 4; i++) {
-            if (req->handles[i] != 0 || req->pitches[i] != 0 || req->offsets[i] != 0 || req->modifier[i] != 0) {
+            if (req->handles[i] != 0 || req->pitches[i] != 0 || req->offsets[i] != 0 ||
+                req->modifier[i] != 0) {
                 return -EINVAL;
             }
         }
@@ -256,7 +300,9 @@ int drm_mode_addfb2(struct drm_device *dev, void *data, struct drm_file *file_pr
     }
 
     fb = malloc(sizeof(*fb));
-    if (fb == NULL) { return -ENOMEM; }
+    if (fb == NULL) {
+        return -ENOMEM;
+    }
     memset(fb, 0, sizeof(*fb));
 
     fb->format   = req->pixel_format;
@@ -287,9 +333,9 @@ int drm_mode_addfb2(struct drm_device *dev, void *data, struct drm_file *file_pr
 
         /* Offsets and pitch both have to fit inside the buffer, and the
          * arithmetic is done wide so a hostile pitch cannot wrap. */
-        if (req->offsets[i] > obj->size
-            || (req->height > 0
-                && ((uint64_t)req->pitches[i] * (req->height - 1) + min_pitch > obj->size - req->offsets[i]))) {
+        if (req->offsets[i] > obj->size ||
+            (req->height > 0 && ((uint64_t)req->pitches[i] * (req->height - 1) + min_pitch >
+                                 obj->size - req->offsets[i]))) {
             drm_gem_object_put(obj);
             ret = -EINVAL;
             goto out_release;
@@ -299,7 +345,9 @@ int drm_mode_addfb2(struct drm_device *dev, void *data, struct drm_file *file_pr
     }
 
     ret = drm_framebuffer_init(dev, fb, (dev->driver != NULL) ? dev->driver->fb_funcs : NULL);
-    if (ret != 0) { goto out_release; }
+    if (ret != 0) {
+        goto out_release;
+    }
 
     req->fb_id = (__u32)fb->base.id;
     return 0;
@@ -331,24 +379,36 @@ int drm_mode_rmfb(struct drm_device *dev, void *data, struct drm_file *file_priv
 
     (void)file_priv;
 
-    if (dev == NULL || data == NULL) { return -EINVAL; }
+    if (dev == NULL || data == NULL) {
+        return -EINVAL;
+    }
 
     fb = drm_framebuffer_lookup(dev, file_priv, fb_id);
-    if (fb == NULL) { return -ENOENT; }
+    if (fb == NULL) {
+        return -ENOENT;
+    }
 
-    for (node = dev->mode_config.plane_list.next; node != &dev->mode_config.plane_list; node = node->next) {
+    for (node = dev->mode_config.plane_list.next; node != &dev->mode_config.plane_list;
+         node = node->next) {
         struct drm_plane *plane = container_of(node, struct drm_plane, head);
 
-        if (plane->state == NULL || plane->state->fb != fb) { continue; }
+        if (plane->state == NULL || plane->state->fb != fb) {
+            continue;
+        }
 
         if (plane->state->crtc != NULL && plane == plane->state->crtc->primary) {
-            struct drm_crtc              *crtc    = plane->state->crtc;
-            struct drm_crtc_helper_funcs *helpers = (struct drm_crtc_helper_funcs *)crtc->helper_private;
-            int                           ret;
+            struct drm_crtc              *crtc = plane->state->crtc;
+            struct drm_crtc_helper_funcs *helpers =
+                (struct drm_crtc_helper_funcs *)crtc->helper_private;
+            int ret;
 
-            if (helpers == NULL || helpers->page_flip == NULL) { return -EBUSY; }
+            if (helpers == NULL || helpers->page_flip == NULL) {
+                return -EBUSY;
+            }
             ret = helpers->page_flip(crtc, NULL, NULL, 0);
-            if (ret != 0) { return ret; }
+            if (ret != 0) {
+                return ret;
+            }
         }
 
         plane->state->fb   = NULL;
@@ -374,27 +434,54 @@ int drm_mode_getfb(struct drm_device *dev, void *data, struct drm_file *file_pri
 
     (void)file_priv;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     fb = drm_framebuffer_lookup(dev, file_priv, req->fb_id);
-    if (fb == NULL) { return -ENOENT; }
+    if (fb == NULL) {
+        return -ENOENT;
+    }
 
     req->width  = fb->width;
     req->height = fb->height;
     req->pitch  = fb->pitches[0];
 
     switch (fb->format) {
-        case DRM_FORMAT_XRGB8888: req->bpp = 32; req->depth = 24; break;
-        case DRM_FORMAT_ARGB8888: req->bpp = 32; req->depth = 32; break;
-        case DRM_FORMAT_RGB888:   req->bpp = 24; req->depth = 24; break;
-        case DRM_FORMAT_RGB565:   req->bpp = 16; req->depth = 16; break;
-        case DRM_FORMAT_XRGB1555: req->bpp = 16; req->depth = 15; break;
-        case DRM_FORMAT_C8:       req->bpp = 8;  req->depth = 8;  break;
-        default:                  req->bpp = 32; req->depth = 24; break;
+    case DRM_FORMAT_XRGB8888:
+        req->bpp   = 32;
+        req->depth = 24;
+        break;
+    case DRM_FORMAT_ARGB8888:
+        req->bpp   = 32;
+        req->depth = 32;
+        break;
+    case DRM_FORMAT_RGB888:
+        req->bpp   = 24;
+        req->depth = 24;
+        break;
+    case DRM_FORMAT_RGB565:
+        req->bpp   = 16;
+        req->depth = 16;
+        break;
+    case DRM_FORMAT_XRGB1555:
+        req->bpp   = 16;
+        req->depth = 15;
+        break;
+    case DRM_FORMAT_C8:
+        req->bpp   = 8;
+        req->depth = 8;
+        break;
+    default:
+        req->bpp   = 32;
+        req->depth = 24;
+        break;
     }
 
     req->handle = 0;
-    if (fb->obj[0] != NULL && drm_gem_handle_create(file_priv, fb->obj[0], &req->handle) != 0) { return -ENOMEM; }
+    if (fb->obj[0] != NULL && drm_gem_handle_create(file_priv, fb->obj[0], &req->handle) != 0) {
+        return -ENOMEM;
+    }
 
     return 0;
 }
@@ -408,10 +495,14 @@ int drm_mode_getfb2_ioctl(struct drm_device *dev, void *data, struct drm_file *f
     struct drm_framebuffer  *fb;
     int                      i, j;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     fb = drm_framebuffer_lookup(dev, file_priv, req->fb_id);
-    if (fb == NULL) { return -ENOENT; }
+    if (fb == NULL) {
+        return -ENOENT;
+    }
 
     req->width        = fb->width;
     req->height       = fb->height;
@@ -424,10 +515,14 @@ int drm_mode_getfb2_ioctl(struct drm_device *dev, void *data, struct drm_file *f
         req->pitches[i]  = fb->pitches[i];
         req->offsets[i]  = fb->offsets[i];
 
-        if (fb->obj[i] == NULL) { continue; }
+        if (fb->obj[i] == NULL) {
+            continue;
+        }
         if (drm_gem_handle_create(file_priv, fb->obj[i], &req->handles[i]) != 0) {
             for (j = 0; j < i; j++) {
-                if (req->handles[j] != 0) { drm_gem_handle_delete(file_priv, req->handles[j]); }
+                if (req->handles[j] != 0) {
+                    drm_gem_handle_delete(file_priv, req->handles[j]);
+                }
             }
             return -ENOMEM;
         }
@@ -450,23 +545,36 @@ int drm_mode_dirtyfb(struct drm_device *dev, void *data, struct drm_file *file_p
     unsigned int                  flags;
     int                           ret = 0;
 
-    if (dev == NULL || req == NULL) { return -EINVAL; }
+    if (dev == NULL || req == NULL) {
+        return -EINVAL;
+    }
 
     fb = drm_framebuffer_lookup(dev, file_priv, req->fb_id);
-    if (fb == NULL) { return -ENOENT; }
+    if (fb == NULL) {
+        return -ENOENT;
+    }
 
     /* Either both a count and a pointer, or neither. */
-    if ((req->num_clips == 0) != (req->clips_ptr == 0)) { return -EINVAL; }
+    if ((req->num_clips == 0) != (req->clips_ptr == 0)) {
+        return -EINVAL;
+    }
 
     flags = req->flags & DRM_MODE_FB_DIRTY_FLAGS;
-    if ((flags & DRM_MODE_FB_DIRTY_ANNOTATE_COPY) != 0 && (req->num_clips & 1U) != 0) { return -EINVAL; }
+    if ((flags & DRM_MODE_FB_DIRTY_ANNOTATE_COPY) != 0 && (req->num_clips & 1U) != 0) {
+        return -EINVAL;
+    }
 
     if (req->num_clips != 0) {
-        if (req->num_clips > DRM_MODE_FB_DIRTY_MAX_CLIPS) { return -EINVAL; }
+        if (req->num_clips > DRM_MODE_FB_DIRTY_MAX_CLIPS) {
+            return -EINVAL;
+        }
 
         clips = malloc((size_t)req->num_clips * sizeof(*clips));
-        if (clips == NULL) { return -ENOMEM; }
-        if (copy_from_user(clips, (const void *)(uintptr_t)req->clips_ptr, (size_t)req->num_clips * sizeof(*clips)) != 0) {
+        if (clips == NULL) {
+            return -ENOMEM;
+        }
+        if (copy_from_user(clips, (const void *)(uintptr_t)req->clips_ptr,
+                           (size_t)req->num_clips * sizeof(*clips)) != 0) {
             free(clips);
             return -EFAULT;
         }
@@ -478,9 +586,9 @@ int drm_mode_dirtyfb(struct drm_device *dev, void *data, struct drm_file *file_p
                 unsigned int dst_w = clips[i + 1].x2 - clips[i + 1].x1;
                 unsigned int dst_h = clips[i + 1].y2 - clips[i + 1].y1;
 
-                if (clips[i].x2 < clips[i].x1 || clips[i].y2 < clips[i].y1
-                    || clips[i + 1].x2 < clips[i + 1].x1 || clips[i + 1].y2 < clips[i + 1].y1
-                    || src_w != dst_w || src_h != dst_h) {
+                if (clips[i].x2 < clips[i].x1 || clips[i].y2 < clips[i].y1 ||
+                    clips[i + 1].x2 < clips[i + 1].x1 || clips[i + 1].y2 < clips[i + 1].y1 ||
+                    src_w != dst_w || src_h != dst_h) {
                     free(clips);
                     return -EINVAL;
                 }

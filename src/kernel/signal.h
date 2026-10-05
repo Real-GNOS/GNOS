@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 
-#include "panic.h"      /* regs_t */
+#include "panic.h" /* regs_t */
 #include "proc.h"
 
 /*

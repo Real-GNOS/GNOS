@@ -1,0 +1,269 @@
+/* ===== Admin Panel Global Styles ===== */
+
+.admin-glass {
+  background: rgba(255, 255, 255, 0.72) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+  border: 1px solid rgba(179, 136, 255, 0.15) !important;
+  box-shadow:
+    0 4px 24px rgba(179, 136, 255, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6) !important;
+}
+
+.admin-glass-dark {
+  background: rgba(30, 30, 45, 0.75) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+  border: 1px solid rgba(179, 136, 255, 0.12) !important;
+}
+
+.admin-card {
+  border-radius: 12px !important;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.admin-card:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 8px 32px rgba(179, 136, 255, 0.15),
+    0 2px 8px rgba(179, 136, 255, 0.06) !important;
+}
+
+.admin-page-title {
+  font-size: 24px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #b388ff, #7c4dff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+
+.admin-page-title i, .admin-page-title .el-icon {
+  -webkit-text-fill-color: #b388ff;
+}
+
+.admin-stat-value {
+  font-size: 32px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #b388ff 0%, #7c4dff 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1.2;
+}
+
+/* Glass sidebar */
+.admin-sidebar {
+  background: rgba(30, 30, 45, 0.88) !important;
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border-right: 1px solid rgba(179, 136, 255, 0.1) !important;
+}
+
+.admin-sidebar .el-menu {
+  border-right: none !important;
+}
+
+.admin-sidebar .el-menu-item.is-active {
+  background: linear-gradient(90deg, rgba(179, 136, 255, 0.15) 0%, transparent 100%) !important;
+  border-right: 3px solid #b388ff !important;
+}
+
+/* Anime-style empty state */
+.empty-anime {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  text-align: center;
+}
+
+.empty-anime-svg {
+  width: 200px;
+  height: 200px;
+  margin-bottom: 20px;
+  opacity: 0.8;
+}
+
+.empty-anime-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #7c4dff;
+  margin-bottom: 8px;
+}
+
+.empty-anime-desc {
+  font-size: 14px;
+  color: #999;
+  max-width: 300px;
+}
+
+/* Glass table */
+.admin-table-glass {
+  border-radius: 12px !important;
+  overflow: hidden;
+  backdrop-filter: blur(12px) saturate(180%);
+  background: rgba(255, 255, 255, 0.75) !important;
+  border: 1px solid rgba(179, 136, 255, 0.1) !important;
+}
+
+.admin-table-glass .el-table {
+  --el-table-border-color: rgba(179, 136, 255, 0.08);
+  --el-table-header-bg-color: rgba(179, 136, 255, 0.04);
+  --el-table-row-hover-bg-color: rgba(179, 136, 255, 0.04);
+  background: transparent !important;
+}
+
+.admin-table-glass .el-table th.el-table__cell {
+  background: rgba(179, 136, 255, 0.04) !important;
+  color: #7c4dff;
+  font-weight: 600;
+}
+
+/* Badge glow */
+.badge-glow {
+  position: relative;
+}
+
+.badge-glow::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  background: inherit;
+  filter: blur(8px);
+  opacity: 0.4;
+  z-index: -1;
+}
+
+/* Filter bar glass */
+.filter-bar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(179, 136, 255, 0.1);
+}
+
+.filter-bar .el-input,
+.filter-bar .el-select,
+.filter-bar .el-date-editor {
+  max-width: 220px;
+}
+
+/* Action buttons */
+.action-btn-group {
+  display: flex;
+  gap: 6px;
+}
+
+/* Pagination center */
+.admin-pagination-center {
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
+}
+
+/* Scrollbar for admin */
+.admin-layout-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.admin-layout-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.admin-layout-container::-webkit-scrollbar-thumb {
+  background: rgba(179, 136, 255, 0.3);
+  border-radius: 3px;
+}
+
+.admin-layout-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(179, 136, 255, 0.5);
+}
+
+/* Stats cards */
+.stat-card-neon {
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card-neon::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(179, 136, 255, 0.12), transparent 70%);
+  transform: translate(30px, -30px);
+}
+
+/* Dialog anime style */
+.el-dialog {
+  --el-dialog-bg-color: rgba(255, 255, 255, 0.92) !important;
+  backdrop-filter: blur(24px) !important;
+  border: 1px solid rgba(179, 136, 255, 0.15) !important;
+  border-radius: 16px !important;
+}
+
+.el-dialog__header {
+  border-bottom: 1px solid rgba(179, 136, 255, 0.08);
+  padding: 20px 24px !important;
+}
+
+.el-dialog__title {
+  font-weight: 700 !important;
+  color: #2d2a3a !important;
+  font-size: 18px !important;
+}
+
+.el-dialog__body {
+  padding: 24px !important;
+}
+
+.el-dialog__footer {
+  border-top: 1px solid rgba(179, 136, 255, 0.08);
+  padding: 16px 24px !important;
+}
+
+/* Message box anime */
+.el-message-box {
+  --el-messagebox-bg-color: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(24px) !important;
+  border: 1px solid rgba(179, 136, 255, 0.15) !important;
+  border-radius: 16px !important;
+}
+
+/* Quick transition */
+.fade-slide-enter-active,
+.fade-slide-leave-active {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.fade-slide-enter-from {
+  opacity: 0;
+  transform: translateY(12px);
+}
+
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-12px);
+}
+
+/* Avatar glow */
+.avatar-glow {
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(179, 136, 255, 0.3), 0 0 16px rgba(179, 136, 255, 0.15);
+}

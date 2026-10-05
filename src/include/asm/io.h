@@ -59,8 +59,7 @@ static inline uint32_t inl(uint16_t port)
  * same hazard from the other side; both are cheap, so do both. */
 static inline void io_delay(void)
 {
-    asm volatile("outb %0, %1" : : "a"((uint8_t)0), "Nd"((uint16_t)0x80)
-                 : "memory");
+    asm volatile("outb %0, %1" : : "a"((uint8_t)0), "Nd"((uint16_t)0x80) : "memory");
 }
 
 #endif

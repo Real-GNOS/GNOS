@@ -21,7 +21,7 @@
 extern const uint8_t cjkfont_blob[];
 extern const uint8_t cjkfont_blob_end[];
 
-#define CJK_MAGIC  0x464B4A43u          /* 'CJKF', little-endian */
+#define CJK_MAGIC 0x464B4A43u /* 'CJKF', little-endian */
 
 typedef struct {
     uint32_t magic;
@@ -94,8 +94,8 @@ static int32_t slot_of(uint32_t cp)
     uint32_t lo = 0, hi = g_nrange;
 
     while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2;
-        const cjk_range_t *r = &g_ranges[mid];
+        uint32_t           mid = lo + (hi - lo) / 2;
+        const cjk_range_t *r   = &g_ranges[mid];
         if (cp < r->first)
             hi = mid;
         else if (cp > r->last)
@@ -116,7 +116,7 @@ const uint8_t *cjkfont_glyph(uint32_t cp, int *width)
         return 0;
 
     uint8_t w = g_widths[g];
-    if (!w)                            /* in range, but the font has no glyph */
+    if (!w) /* in range, but the font has no glyph */
         return 0;
 
     if (width)
@@ -133,18 +133,18 @@ const uint8_t *cjkfont_glyph(uint32_t cp, int *width)
  */
 static int is_wide(uint32_t cp)
 {
-    return (cp >= 0x1100 && cp <= 0x115F) ||   /* Hangul Jamo initial      */
-           (cp >= 0x2E80 && cp <= 0x303E) ||   /* CJK radicals, punctuation */
-           (cp >= 0x3041 && cp <= 0x33FF) ||   /* kana, bopomofo, squared   */
-           (cp >= 0x3400 && cp <= 0x4DBF) ||   /* CJK extension A           */
-           (cp >= 0x4E00 && cp <= 0x9FFF) ||   /* CJK unified ideographs    */
-           (cp >= 0xA000 && cp <= 0xA4CF) ||   /* Yi                        */
-           (cp >= 0xAC00 && cp <= 0xD7A3) ||   /* Hangul syllables          */
-           (cp >= 0xF900 && cp <= 0xFAFF) ||   /* CJK compatibility         */
-           (cp >= 0xFE30 && cp <= 0xFE6F) ||   /* CJK compatibility forms   */
-           (cp >= 0xFF00 && cp <= 0xFF60) ||   /* fullwidth forms           */
+    return (cp >= 0x1100 && cp <= 0x115F) || /* Hangul Jamo initial      */
+           (cp >= 0x2E80 && cp <= 0x303E) || /* CJK radicals, punctuation */
+           (cp >= 0x3041 && cp <= 0x33FF) || /* kana, bopomofo, squared   */
+           (cp >= 0x3400 && cp <= 0x4DBF) || /* CJK extension A           */
+           (cp >= 0x4E00 && cp <= 0x9FFF) || /* CJK unified ideographs    */
+           (cp >= 0xA000 && cp <= 0xA4CF) || /* Yi                        */
+           (cp >= 0xAC00 && cp <= 0xD7A3) || /* Hangul syllables          */
+           (cp >= 0xF900 && cp <= 0xFAFF) || /* CJK compatibility         */
+           (cp >= 0xFE30 && cp <= 0xFE6F) || /* CJK compatibility forms   */
+           (cp >= 0xFF00 && cp <= 0xFF60) || /* fullwidth forms           */
            (cp >= 0xFFE0 && cp <= 0xFFE6) ||
-           (cp >= 0x20000 && cp <= 0x3FFFD);   /* the ideographic planes    */
+           (cp >= 0x20000 && cp <= 0x3FFFD); /* the ideographic planes    */
 }
 
 /* Combining marks occupy no column of their own.  The console has no way to
@@ -152,13 +152,11 @@ static int is_wide(uint32_t cp)
  * than letting a combining accent push the rest of the line sideways. */
 static int is_combining(uint32_t cp)
 {
-    return (cp >= 0x0300 && cp <= 0x036F) ||
-           (cp >= 0x1AB0 && cp <= 0x1AFF) ||
+    return (cp >= 0x0300 && cp <= 0x036F) || (cp >= 0x1AB0 && cp <= 0x1AFF) ||
            (cp >= 0x20D0 && cp <= 0x20FF) ||
-           (cp >= 0xFE00 && cp <= 0xFE0F) ||   /* variation selectors */
-           (cp >= 0xFE20 && cp <= 0xFE2F) ||
-           cp == 0x200B ||                     /* zero width space    */
-           cp == 0xFEFF;                       /* byte order mark     */
+           (cp >= 0xFE00 && cp <= 0xFE0F) ||                 /* variation selectors */
+           (cp >= 0xFE20 && cp <= 0xFE2F) || cp == 0x200B || /* zero width space    */
+           cp == 0xFEFF;                                     /* byte order mark     */
 }
 
 int cjkfont_width(uint32_t cp)
@@ -166,7 +164,7 @@ int cjkfont_width(uint32_t cp)
     if (cp == 0)
         return 0;
     if (cp < 0x20 || (cp >= 0x7F && cp < 0xA0))
-        return 0;                              /* C0 / C1 control */
+        return 0; /* C0 / C1 control */
     if (is_combining(cp))
         return 0;
     return is_wide(cp) ? 2 : 1;

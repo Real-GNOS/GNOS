@@ -12,7 +12,7 @@
 #define GNUCOS_LAPIC_H
 
 #include <stdint.h>
-#include "idt.h"            /* for irq_handler_t (regs_t via panic.h) */
+#include "idt.h" /* for irq_handler_t (regs_t via panic.h) */
 
 /* The LAPIC timer's interrupt vector.  It is a free slot: the PIC owns
  * 0x20..0x2F and the syscall gate owns 0x80. */

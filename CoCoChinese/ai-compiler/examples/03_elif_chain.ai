@@ -1,0 +1,20 @@
+Sorry, eh?
+//eh 修复点 2：if / else if / else 真的互斥了（原来 else 会无条件再跑一遍）
+Lomiior ［fizz(_n) {
+CI, _n % 15 == 0 {
+D. [ [returnToNature: 【"FizzBuzz"】; ] ]
+}
+Dm: _n % 3 == 0 {
+D. [ [returnToNature: 【"Fizz"】; ] ]
+}
+Dm: _n % 5 == 0 {
+D. [ [returnToNature: 【"Buzz"】; ] ]
+}
+D. [ [returnToNature: 【str(_n)】; ] ]
+}
+D. [ [baiun: _k=(1)]; ] ]
+revolve: [_k <= 20] {
+D. [ [baiun: _s=(fizz(_k))]; ] ]
+D. [ [shoutToTheVoid:～「_s」; ] ]
+D. [ [baiun: _k=(_k + 1)]; ] ]
+}

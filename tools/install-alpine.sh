@@ -12,7 +12,8 @@
 # What it does NOT do:
 #   - run maintainer scripts (.pre-install/.post-install): there is no shell
 #     environment to run them in, and most payload-only tools do not need
-#     them;
+#     them.  The one that matters -- busybox's applet links -- is reproduced
+#     by hand further down;
 #   - satisfy "so:lib..." virtual dependencies from the full package graph:
 #     a package that needs a library the index cannot name as a plain
 #     package is reported and skipped rather than guessed at.
@@ -174,24 +175,100 @@ echo "$resolved" | sed '/^$/d' | while read -r name ver repo; do
     apk="$CACHE/$name-$ver.apk"
     fetch "$MIRROR/$BRANCH/$repo/$ARCH/$name-$ver.apk" "$apk"
     # Control files sit at the top of the archive; exclude them so they do
-    # not land in the filesystem root.  Payload extraction is additive, so
-    # re-running with more packages merges cleanly.
+    # not land in the filesystem root.  apk stores them as ".PKGINFO" with
+    # no leading "./" -- tar matches --exclude patterns verbatim, so the
+    # "./" prefix never matched anything and these leaked into the tree.
+    # Payload extraction is additive, so re-running with more packages
+    # merges cleanly.
     tar -xzf "$apk" -C "$ROOT" \
-        --exclude='./.PKGINFO' --exclude='./.SIGN*' \
-        --exclude='./.pre-install' --exclude='./.post-install' \
-        --exclude='./.pre-upgrade' --exclude='./.post-upgrade' \
-        --exclude='./.trigger' --exclude='./.installed' \
-        --exclude='./.commit' 2>/dev/null || {
+        --exclude='.PKGINFO' --exclude='.SIGN*' \
+        --exclude='.pre-install' --exclude='.post-install' \
+        --exclude='.pre-upgrade' --exclude='.post-upgrade' \
+        --exclude='.trigger' --exclude='.installed' \
+        --exclude='.commit' 2>/dev/null || {
         # fall back for repos that ship zstd archives
         tar --zstd -xf "$apk" -C "$ROOT" \
-            --exclude='./.PKGINFO' --exclude='./.SIGN*' \
-            --exclude='./.pre-install' --exclude='./.post-install' \
-            --exclude='./.pre-upgrade' --exclude='./.post-upgrade' \
-            --exclude='./.trigger' --exclude='./.installed' \
-            --exclude='./.commit' 2>/dev/null \
+            --exclude='.PKGINFO' --exclude='.SIGN*' \
+            --exclude='.pre-install' --exclude='.post-install' \
+            --exclude='.pre-upgrade' --exclude='.post-upgrade' \
+            --exclude='.trigger' --exclude='.installed' \
+            --exclude='.commit' 2>/dev/null \
             || { echo "install-alpine: cannot unpack $name-$ver.apk" >&2
                  exit 1; }
     }
 done
+
+# ---- busybox applet links -------------------------------------------------
+# Alpine's busybox package ships /bin/busybox and nothing else: the 304
+# applet links come from its .post-install, which is one of the maintainer
+# scripts this tool deliberately does not run -- there is no apk machinery
+# here to run them.  Skip them and the image has no grep, sed, awk, hostname,
+# ifconfig, ping, wget, find, ps ... so /etc/rc and every OpenRC service
+# script dies on its first pipeline.
+#
+# Reproduce that script's work.  It runs `busybox --install -s` with no DIR,
+# which writes each applet to its compiled-in path (bin/, sbin/, usr/bin/,
+# usr/sbin/); --list-full prints exactly those paths, already relative to the
+# root, so no chroot and no root privileges are needed.  busybox is linked
+# against musl and cannot run directly on a glibc host, so invoke it through
+# the loader staged beside it.  A name another package already provides is
+# left alone: apk lets the payload win, and so do we.
+if [ -x "$ROOT/bin/busybox" ] && [ -e "$ROOT/lib/ld-musl-x86_64.so.1" ]; then
+    if list=$("$ROOT/lib/ld-musl-x86_64.so.1" "$ROOT/bin/busybox" \
+              --list-full 2>/dev/null) && [ -n "$list" ]; then
+        n=0
+        for rel in $list; do
+            case "$rel" in
+                bin/*|sbin/*|usr/bin/*|usr/sbin/*) ;;
+                *) continue ;;
+            esac
+            if [ ! -e "$ROOT/$rel" ]; then
+                mkdir -p "$(dirname "$ROOT/$rel")"
+                # absolute, exactly like busybox's own installer: /bin/ash
+                # and usr/bin/awk must both resolve to /bin/busybox.
+                ln -sf /bin/busybox "$ROOT/$rel"
+                n=$((n + 1))
+            fi
+        done
+        echo "busybox: $n applet links"
+    fi
+fi
+
+# ---- font index ----------------------------------------------------------
+# Alpine's mkfontscale package builds the per-directory font index from a
+# .trigger that fires when files land in a font directory:
+#
+#     for i in "$@"; do case "$i" in */encodings) continue;; esac
+#                         mkfontdir "$i"; mkfontscale "$i"; done
+#
+# We unpack without running triggers, so fonts.dir and encodings.dir are
+# absent: Xorg then sees an empty font path and xterm/twm start blank.  Do
+# the trigger's work here with the host's tools.  -b is what makes the .pcf
+# bitmap fonts visible (the default is to ignore them), and the two -e dirs
+# are what fill encodings.dir, which X reads out of the font directory to
+# decode XLFD charset/registry names.  mkfontscale also prints every XLFD it
+# writes, hence stdout is dropped.
+if [ -d "$ROOT/usr/share/fonts" ]; then
+    echo "indexing fonts"
+    find "$ROOT/usr/share/fonts" -mindepth 1 -maxdepth 1 -type d |
+    while read -r fdir; do
+        case "$fdir" in
+            */encodings) continue ;;   # encodings dir holds no fonts
+        esac
+        mkfontdir "$fdir" >/dev/null 2>&1 || true
+        mkfontscale -b \
+            -e "$ROOT/usr/share/fonts/encodings" \
+            -e "$ROOT/usr/share/fonts/encodings/large" \
+            "$fdir" >/dev/null 2>&1 || true
+        # The paths just written are host paths; drop the staging prefix so
+        # they resolve to the image's own /usr/share/fonts/encodings/*.enc.gz.
+        # The path is not at the start of the line (the encoding name is),
+        # so this must not be anchored.
+        if [ -f "$fdir/encodings.dir" ]; then
+            sed -i "s|$ROOT/usr/share/fonts/encodings|/usr/share/fonts/encodings|g" \
+                "$fdir/encodings.dir"
+        fi
+    done
+fi
 
 echo "done: contents staged in $ROOT (make will fold it into the initrd)"

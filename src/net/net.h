@@ -44,32 +44,31 @@
 #define GNOS_NET_H
 
 #include <stdint.h>
-#include "sysnum.h"           /* sockaddr_in_t for struct ifreq */
+#include "sysnum.h" /* sockaddr_in_t for struct ifreq */
 
-#define ETH_ALEN       6
-#define ETH_HDR_LEN    14
-#define NET_MTU        1500
-#define IP_HDR_LEN     20
-#define NET_FRAME_MAX  1518        /* MTU + header + 802.1Q room */
+#define ETH_ALEN      6
+#define ETH_HDR_LEN   14
+#define NET_MTU       1500
+#define IP_HDR_LEN    20
+#define NET_FRAME_MAX 1518 /* MTU + header + 802.1Q room */
 
-#define ETH_P_IP       0x0800
-#define ETH_P_ARP      0x0806
+#define ETH_P_IP  0x0800
+#define ETH_P_ARP 0x0806
 
-#define IP_PROTO_ICMP  1
-#define IP_PROTO_TCP   6
-#define IP_PROTO_UDP   17
+#define IP_PROTO_ICMP 1
+#define IP_PROTO_TCP  6
+#define IP_PROTO_UDP  17
 
 /* Addresses are kept in host byte order everywhere above the wire format;
  * conversion happens exactly at the point a header is built or parsed.  Mixed
  * conventions inside a stack are the single most productive source of bugs
  * that only show up on one endianness of test data. */
 #define IPV4(a, b, c, d) \
-    (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | \
-     ((uint32_t)(c) << 8)  |  (uint32_t)(d))
+    (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | ((uint32_t)(c) << 8) | (uint32_t)(d))
 
-#define IP_ANY        0u
-#define IP_BROADCAST  0xFFFFFFFFu
-#define IP_LOOPBACK   IPV4(127, 0, 0, 1)
+#define IP_ANY       0u
+#define IP_BROADCAST 0xFFFFFFFFu
+#define IP_LOOPBACK  IPV4(127, 0, 0, 1)
 
 static inline uint16_t net_htons(uint16_t v)
 {
@@ -78,8 +77,8 @@ static inline uint16_t net_htons(uint16_t v)
 
 static inline uint32_t net_htonl(uint32_t v)
 {
-    return ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) |
-           ((v & 0x00FF0000u) >> 8)  | ((v & 0xFF000000u) >> 24);
+    return ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) | ((v & 0x00FF0000u) >> 8) |
+           ((v & 0xFF000000u) >> 24);
 }
 
 #define net_ntohs net_htons
@@ -95,8 +94,7 @@ static inline uint16_t net_get16(const uint8_t *p)
 
 static inline uint32_t net_get32(const uint8_t *p)
 {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
 static inline void net_put16(uint8_t *p, uint16_t v)
@@ -126,9 +124,9 @@ typedef struct {
     uint64_t rx_dropped, tx_dropped;
 } netif_t;
 
-#define NET_IF_LO   0
-#define NET_IF_ETH  1
-#define NET_IF_MAX  2
+#define NET_IF_LO  0
+#define NET_IF_ETH 1
+#define NET_IF_MAX 2
 
 /* Bring the stack up on top of whatever e1000_init() found.  Safe to call
  * when there is no NIC: "lo" still works, which is all the self-test and
@@ -144,32 +142,32 @@ netif_t *net_if_by_name(const char *name);
  * layout match Linux exactly, because BusyBox was built against Linux's
  * <linux/if.h> and will not tolerate a near-miss.
  */
-#define SIOCGIFNAME     0x8910
-#define SIOCGIFCONF     0x8912
-#define SIOCGIFFLAGS    0x8913
-#define SIOCSIFFLAGS    0x8914
-#define SIOCGIFADDR     0x8915
-#define SIOCSIFADDR     0x8916
-#define SIOCGIFDSTADDR  0x8917
-#define SIOCSIFDSTADDR  0x8918
-#define SIOCGIFBRDADDR  0x8919
-#define SIOCSIFBRDADDR  0x891a
-#define SIOCGIFNETMASK  0x891b
-#define SIOCSIFNETMASK  0x891c
-#define SIOCGIFMETRIC   0x891d
-#define SIOCSIFMETRIC   0x891e
-#define SIOCGIFMTU      0x8921
-#define SIOCSIFMTU      0x8922
-#define SIOCSIFHWADDR   0x8924
-#define SIOCGIFHWADDR   0x8927
-#define SIOCGIFINDEX    0x8933
+#define SIOCGIFNAME    0x8910
+#define SIOCGIFCONF    0x8912
+#define SIOCGIFFLAGS   0x8913
+#define SIOCSIFFLAGS   0x8914
+#define SIOCGIFADDR    0x8915
+#define SIOCSIFADDR    0x8916
+#define SIOCGIFDSTADDR 0x8917
+#define SIOCSIFDSTADDR 0x8918
+#define SIOCGIFBRDADDR 0x8919
+#define SIOCSIFBRDADDR 0x891a
+#define SIOCGIFNETMASK 0x891b
+#define SIOCSIFNETMASK 0x891c
+#define SIOCGIFMETRIC  0x891d
+#define SIOCSIFMETRIC  0x891e
+#define SIOCGIFMTU     0x8921
+#define SIOCSIFMTU     0x8922
+#define SIOCSIFHWADDR  0x8924
+#define SIOCGIFHWADDR  0x8927
+#define SIOCGIFINDEX   0x8933
 
-#define IFF_UP          0x0001
-#define IFF_BROADCAST   0x0002
-#define IFF_LOOPBACK    0x0008
-#define IFF_RUNNING     0x0040
-#define IFF_MULTICAST   0x1000
-#define ARPHRD_ETHER    1
+#define IFF_UP        0x0001
+#define IFF_BROADCAST 0x0002
+#define IFF_LOOPBACK  0x0008
+#define IFF_RUNNING   0x0040
+#define IFF_MULTICAST 0x1000
+#define ARPHRD_ETHER  1
 
 #define IFNAMSIZ 16
 
@@ -225,8 +223,8 @@ uint16_t net_checksum(const void *data, uint32_t len);
  * IP header, so without this the transport layer would trust a header it has
  * no other way to verify.
  */
-uint16_t net_checksum_pseudo(uint32_t src, uint32_t dst, uint8_t proto,
-                             const void *seg, uint32_t len);
+uint16_t net_checksum_pseudo(uint32_t src, uint32_t dst, uint8_t proto, const void *seg,
+                             uint32_t len);
 
 /* ---- output ------------------------------------------------------------ */
 /*
@@ -246,7 +244,7 @@ uint16_t net_next_ip_id(void);
 typedef struct {
     uint32_t ip;
     uint8_t  mac[6];
-    int      valid;          /* 1 resolved, 0 pending */
+    int      valid; /* 1 resolved, 0 pending */
 } net_arpinfo_t;
 int net_arpinfo_next(int *iter, net_arpinfo_t *out);
 
@@ -258,8 +256,8 @@ int net_is_local(uint32_t dst);
 
 /* ---- upcalls, implemented by the transport layers ---------------------- */
 /* `seg` points at the transport header; `len` is the transport length. */
-void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet,
-               uint16_t ihl, const uint8_t *seg, uint16_t len);
+void udp_input(uint32_t src, uint32_t dst, const uint8_t *packet, uint16_t ihl, const uint8_t *seg,
+               uint16_t len);
 void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len);
 
 /*
@@ -268,7 +266,7 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len);
  * reads ihl out of the first byte and skips that many words to find the ICMP
  * echo reply.
  */
-void raw_input(uint32_t src, uint32_t dst, uint8_t proto,
-               const uint8_t *packet, uint16_t total_len);
+void raw_input(uint32_t src, uint32_t dst, uint8_t proto, const uint8_t *packet,
+               uint16_t total_len);
 
 #endif

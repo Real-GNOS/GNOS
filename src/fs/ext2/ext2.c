@@ -30,8 +30,8 @@
 #include "kstring.h"
 
 /* ---- superblock field offsets ----------------------------------------- */
-#define SB_INODES_COUNT      0
-#define SB_BLOCKS_COUNT      4
+#define SB_INODES_COUNT     0
+#define SB_BLOCKS_COUNT     4
 #define SB_FREE_BLOCKS      12
 #define SB_FREE_INODES      16
 #define SB_FIRST_DATA_BLOCK 20
@@ -45,38 +45,38 @@
 #define SB_INODE_SIZE       88
 #define SB_FEATURE_INCOMPAT 96
 #define SB_FEATURE_ROCOMPAT 100
-#define SB_DESC_SIZE        254      /* rev 1: group descriptor size */
+#define SB_DESC_SIZE        254 /* rev 1: group descriptor size */
 
 /* ---- group descriptor field offsets ----------------------------------- */
-#define GD_SIZE             32
-#define GD_BLOCK_BITMAP      0
-#define GD_INODE_BITMAP      4
-#define GD_INODE_TABLE       8
-#define GD_FREE_BLOCKS      12
-#define GD_FREE_INODES      14
-#define GD_USED_DIRS        16
+#define GD_SIZE         32
+#define GD_BLOCK_BITMAP 0
+#define GD_INODE_BITMAP 4
+#define GD_INODE_TABLE  8
+#define GD_FREE_BLOCKS  12
+#define GD_FREE_INODES  14
+#define GD_USED_DIRS    16
 
 /* ---- inode field offsets ---------------------------------------------- */
-#define I_MODE               0
-#define I_UID                2      /* low 16 bits of the owner uid */
-#define I_SIZE               4
-#define I_ATIME              8
-#define I_CTIME             12
-#define I_MTIME             16
-#define I_DTIME             20
-#define I_GID               24      /* low 16 bits of the owning group */
-#define I_LINKS             26
-#define I_BLOCKS            28
-#define I_FLAGS             32
-#define I_BLOCK             40      /* i_block[15] */
+#define I_MODE   0
+#define I_UID    2 /* low 16 bits of the owner uid */
+#define I_SIZE   4
+#define I_ATIME  8
+#define I_CTIME  12
+#define I_MTIME  16
+#define I_DTIME  20
+#define I_GID    24 /* low 16 bits of the owning group */
+#define I_LINKS  26
+#define I_BLOCKS 28
+#define I_FLAGS  32
+#define I_BLOCK  40 /* i_block[15] */
 
 /* ---- directory entry field offsets ------------------------------------ */
-#define DE_INODE             0
-#define DE_REC_LEN           4
-#define DE_NAME_LEN          6
-#define DE_FILE_TYPE         7
-#define DE_NAME              8
-#define DE_MIN               8      /* header size before the name */
+#define DE_INODE     0
+#define DE_REC_LEN   4
+#define DE_NAME_LEN  6
+#define DE_FILE_TYPE 7
+#define DE_NAME      8
+#define DE_MIN       8 /* header size before the name */
 
 /* ---- little-endian accessors ------------------------------------------ */
 static uint16_t rd16(const uint8_t *p)
@@ -86,8 +86,7 @@ static uint16_t rd16(const uint8_t *p)
 
 static uint32_t rd32(const uint8_t *p)
 {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static void wr16(uint8_t *p, uint16_t v)
@@ -140,16 +139,14 @@ static void wr32(uint8_t *p, uint32_t v)
  * failure the caller can see. */
 static int blkio_rd(ext2_fs_t *fs, uint32_t blk, void *buf)
 {
-    return pagecache_read(fs->blkio.ctx, fs->blkio.read,
-                          (uint64_t)blk * fs->block_size, buf,
+    return pagecache_read(fs->blkio.ctx, fs->blkio.read, (uint64_t)blk * fs->block_size, buf,
                           fs->block_size);
 }
 
 static int blkio_wr(ext2_fs_t *fs, uint32_t blk, const void *buf)
 {
     return pagecache_write(fs->blkio.ctx, fs->blkio.read, fs->blkio.write,
-                           (uint64_t)blk * fs->block_size, buf,
-                           fs->block_size);
+                           (uint64_t)blk * fs->block_size, buf, fs->block_size);
 }
 
 /* Borrow the whole block `blk`, loading it if it is not cached.  Returns a
@@ -157,8 +154,8 @@ static int blkio_wr(ext2_fs_t *fs, uint32_t blk, const void *buf)
  * (which the nesting guarantees cannot happen) or the read failed. */
 static uint8_t *cache_borrow(ext2_fs_t *fs, uint32_t blk)
 {
-    int free_slot = -1;
-    uint32_t oldest = 0xFFFFFFFFu;
+    int      free_slot = -1;
+    uint32_t oldest    = 0xFFFFFFFFu;
 
     for (int i = 0; i < EXT2_CACHE_SLOTS; i++) {
         if (fs->cache_blk[i] == blk) {
@@ -241,7 +238,7 @@ static uint32_t fs_now(ext2_fs_t *fs)
         return 0;
     uint32_t t = rd32(sb + SB_WTIME);
     blk_put(fs, sb);
-    return t ? t : 0x40000000u;          /* 2004, if the image had none */
+    return t ? t : 0x40000000u; /* 2004, if the image had none */
 }
 
 /* Pointer to a whole block, or NULL if it falls outside the volume.  In disk
@@ -297,9 +294,8 @@ static uint8_t *gd_ptr(ext2_fs_t *fs, uint32_t group)
 static uint64_t gd_block(ext2_fs_t *fs, const uint8_t *gd, int which)
 {
     /* which: 0 = block bitmap, 1 = inode bitmap, 2 = inode table */
-    static const int lo_off[3] = { GD_BLOCK_BITMAP, GD_INODE_BITMAP,
-                                   GD_INODE_TABLE };
-    uint64_t blk = rd32(gd + lo_off[which]);
+    static const int lo_off[3] = {GD_BLOCK_BITMAP, GD_INODE_BITMAP, GD_INODE_TABLE};
+    uint64_t         blk       = rd32(gd + lo_off[which]);
     if (fs->has_64bit && fs->desc_size >= 64)
         blk |= (uint64_t)rd32(gd + 20 + which * 4) << 32;
     return blk;
@@ -320,8 +316,7 @@ static uint8_t *inode_ptr(ext2_fs_t *fs, uint32_t ino)
     if (!gd)
         return NULL;
 
-    uint64_t off = gd_block(fs, gd, 2) * fs->block_size +
-                   (uint64_t)idx * fs->inode_size;
+    uint64_t off = gd_block(fs, gd, 2) * fs->block_size + (uint64_t)idx * fs->inode_size;
     blk_put(fs, gd);
 
     if (fs->blkio.read) {
@@ -358,7 +353,7 @@ static void bit_set(uint8_t *bm, uint32_t i)
 
 static void bit_clear(uint8_t *bm, uint32_t i)
 {
-    bm[i >> 3] &= (uint8_t)~(1u << (i & 7));
+    bm[i >> 3] &= (uint8_t) ~(1u << (i & 7));
 }
 
 static void sb_add_free_blocks(ext2_fs_t *fs, int32_t delta)
@@ -420,7 +415,7 @@ static uint32_t balloc(ext2_fs_t *fs)
             gd_add16(gd, GD_FREE_BLOCKS, -1);
             sb_add_free_blocks(fs, -1);
 
-            uint32_t blk = fs->first_data_block + g * fs->blocks_per_group + i;
+            uint32_t blk   = fs->first_data_block + g * fs->blocks_per_group + i;
             fs->alloc_hint = blk;
             zero_block(fs, blk);
 
@@ -588,8 +583,8 @@ static uint32_t slot_get(ext2_fs_t *fs, uint8_t *slot, int alloc, uint32_t *adde
  * files carry EXT4_EXTENTS_FL are read-only; ext2-indirect files on the
  * same volume keep full read-write (bmap handles those below).
  */
-#define EXT4_EH_MAGIC      0xF30A
-#define EXT4_EXT_MAX_LEN   0x8000u
+#define EXT4_EH_MAGIC    0xF30A
+#define EXT4_EXT_MAX_LEN 0x8000u
 
 /* Scan one extent-bearing node (the i_block[] root at depth 0, or a
  * cached leaf block) for the extent covering iblk.  Holes and
@@ -599,19 +594,19 @@ static uint32_t ext4_leaf_bmap(ext2_fs_t *fs, const uint8_t *eh, uint32_t iblk)
     (void)fs;
     uint16_t entries = rd16(eh + 2);
     for (uint16_t i = 0; i < entries; i++) {
-        const uint8_t *ex = eh + 12 + i * 12;
-        uint32_t lblk   = rd32(ex);
-        uint16_t raw    = rd16(ex + 4);
-        uint16_t len    = raw & (EXT4_EXT_MAX_LEN - 1);
-        uint64_t phys   = rd32(ex + 8) | ((uint64_t)rd16(ex + 12) << 32);
+        const uint8_t *ex   = eh + 12 + i * 12;
+        uint32_t       lblk = rd32(ex);
+        uint16_t       raw  = rd16(ex + 4);
+        uint16_t       len  = raw & (EXT4_EXT_MAX_LEN - 1);
+        uint64_t       phys = rd32(ex + 8) | ((uint64_t)rd16(ex + 12) << 32);
 
         if (iblk >= lblk && iblk < lblk + len) {
             if ((raw & EXT4_EXT_MAX_LEN) || !phys)
-                return 0;                /* hole / uninitialized */
+                return 0; /* hole / uninitialized */
             return (uint32_t)(phys + (iblk - lblk));
         }
     }
-    return 0;                            /* beyond the last extent: hole */
+    return 0; /* beyond the last extent: hole */
 }
 
 /* Descend one index node to the child covering iblk.  *node is a borrow;
@@ -623,29 +618,28 @@ static int ext4_descend(ext2_fs_t *fs, uint8_t **node, uint32_t iblk)
     uint16_t depth = rd16(*node + 6);
     while (depth > 0) {
         if (depth > 5)
-            goto corrupt;                /* loop guard on corrupt depth */
+            goto corrupt; /* loop guard on corrupt depth */
 
         uint16_t entries = rd16(*node + 2);
-        uint64_t child = 0;
+        uint64_t child   = 0;
         for (uint16_t i = 0; i < entries; i++) {
             uint8_t *ix = *node + 12 + i * 12;
             if (rd32(ix) <= iblk)
                 child = rd32(ix + 8) | ((uint64_t)rd16(ix + 12) << 32);
             else
-                break;                   /* sorted: past iblk's subtree */
+                break; /* sorted: past iblk's subtree */
         }
         if (!child)
-            goto corrupt;                /* hole before the first extent */
+            goto corrupt; /* hole before the first extent */
 
         uint8_t *next = blk_ptr(fs, child);
         blk_put(fs, *node);
-        if (!next || rd16(next + 0) != EXT4_EH_MAGIC ||
-            rd16(next + 6) != depth - 1)
-            goto corrupt;                /* missing or inconsistent child */
+        if (!next || rd16(next + 0) != EXT4_EH_MAGIC || rd16(next + 6) != depth - 1)
+            goto corrupt; /* missing or inconsistent child */
         *node = next;
         depth = rd16(next + 6);
     }
-    return 1;                            /* *node is a leaf, borrow held */
+    return 1; /* *node is a leaf, borrow held */
 
 corrupt:
     if (*node) {
@@ -658,10 +652,10 @@ corrupt:
 static uint32_t ext4_bmap(ext2_fs_t *fs, uint8_t *ip, uint32_t iblk)
 {
     if (rd16(ip + I_BLOCK) != EXT4_EH_MAGIC || rd16(ip + I_BLOCK + 2) == 0)
-        return 0;                        /* empty / corrupt: read as hole */
+        return 0; /* empty / corrupt: read as hole */
 
-    uint8_t *node = ip;                  /* the root lives in the inode */
-    int is_root = 1;
+    uint8_t *node    = ip; /* the root lives in the inode */
+    int      is_root = 1;
     uint32_t r;
 
     if (rd16(node + 6) > 0) {
@@ -672,7 +666,7 @@ static uint32_t ext4_bmap(ext2_fs_t *fs, uint8_t *ip, uint32_t iblk)
 
     r = ext4_leaf_bmap(fs, node, iblk);
     if (!is_root)
-        blk_put(fs, node);               /* root's borrow belongs to inode_ptr */
+        blk_put(fs, node); /* root's borrow belongs to inode_ptr */
     return r;
 }
 
@@ -682,20 +676,18 @@ static uint32_t ext4_bmap(ext2_fs_t *fs, uint8_t *ip, uint32_t iblk)
  * are created; `added` accumulates how many, so the caller can keep i_blocks
  * truthful.
  */
-static uint32_t bmap(ext2_fs_t *fs, uint8_t *ip, uint32_t iblk,
-                     int alloc, uint32_t *added)
+static uint32_t bmap(ext2_fs_t *fs, uint8_t *ip, uint32_t iblk, int alloc, uint32_t *added)
 {
     /* An extents inode's i_block[] is a tree, not a pointer array; the
      * read path resolves through it, the write path refuses (extents are
      * read-only here).  alloc on such an inode would corrupt the tree. */
-    if (fs->has_extents &&
-        (rd32(ip + I_FLAGS) & EXT4_EXTENTS_FL)) {
+    if (fs->has_extents && (rd32(ip + I_FLAGS) & EXT4_EXTENTS_FL)) {
         if (alloc)
             return 0;
         return ext4_bmap(fs, ip, iblk);
     }
 
-    uint32_t ppb = fs->block_size / 4;      /* pointers per indirect block */
+    uint32_t ppb = fs->block_size / 4; /* pointers per indirect block */
 
     if (iblk < EXT2_NDIR_BLOCKS)
         return slot_get(fs, ip + I_BLOCK + iblk * 4, alloc, added);
@@ -826,8 +818,7 @@ static int parse_sb(ext2_fs_t *fs, uint8_t *sb, uint64_t byte_cap)
     fs->blocks_per_group = rd32(sb + SB_BLOCKS_PER_GROUP);
     fs->inodes_per_group = rd32(sb + SB_INODES_PER_GROUP);
 
-    if (!fs->blocks_per_group || !fs->inodes_per_group ||
-        !fs->inodes_count || !fs->blocks_count)
+    if (!fs->blocks_per_group || !fs->inodes_per_group || !fs->inodes_count || !fs->blocks_count)
         return 0;
 
     /*
@@ -867,10 +858,8 @@ static int parse_sb(ext2_fs_t *fs, uint8_t *sb, uint64_t byte_cap)
      * ignorable by definition and are ignored.
      */
     uint32_t incompat = rd32(sb + SB_FEATURE_INCOMPAT);
-    uint32_t known = (uint32_t)EXT2_FEATURE_INCOMPAT_FILETYPE |
-                     EXT4_FEATURE_INCOMPAT_EXTENTS |
-                     EXT4_FEATURE_INCOMPAT_64BIT |
-                     EXT4_FEATURE_INCOMPAT_FLEX_BG;
+    uint32_t known    = (uint32_t)EXT2_FEATURE_INCOMPAT_FILETYPE | EXT4_FEATURE_INCOMPAT_EXTENTS |
+                     EXT4_FEATURE_INCOMPAT_64BIT | EXT4_FEATURE_INCOMPAT_FLEX_BG;
     if (incompat & ~known)
         return 0;
     fs->has_filetype = (incompat & EXT2_FEATURE_INCOMPAT_FILETYPE) ? 1 : 0;
@@ -893,7 +882,7 @@ static int parse_sb(ext2_fs_t *fs, uint8_t *sb, uint64_t byte_cap)
     }
 
     /* Groups cover everything from the first data block onwards. */
-    uint32_t span = fs->blocks_count - fs->first_data_block;
+    uint32_t span   = fs->blocks_count - fs->first_data_block;
     fs->group_count = (span + fs->blocks_per_group - 1) / fs->blocks_per_group;
     if (!fs->group_count)
         return 0;
@@ -978,8 +967,8 @@ int ext2_is_dir(const ext2_dirent_t *ent)
 }
 
 /* Fill a dirent from an inode number plus the name we found it under. */
-static void ent_fill(ext2_fs_t *fs, ext2_dirent_t *out, uint32_t ino,
-                     const char *name, uint32_t name_len)
+static void ent_fill(ext2_fs_t *fs, ext2_dirent_t *out, uint32_t ino, const char *name,
+                     uint32_t name_len)
 {
     memset(out, 0, sizeof(*out));
     out->ino = ino;
@@ -1001,8 +990,7 @@ static void ent_fill(ext2_fs_t *fs, ext2_dirent_t *out, uint32_t ino,
     }
 }
 
-uint32_t ext2_read(ext2_fs_t *fs, const ext2_dirent_t *ent,
-                   uint32_t off, void *buf, uint32_t len)
+uint32_t ext2_read(ext2_fs_t *fs, const ext2_dirent_t *ent, uint32_t off, void *buf, uint32_t len)
 {
     if (!fs || !ent || !ent->ino || !buf)
         return 0;
@@ -1111,7 +1099,7 @@ int ext2_readdir(ext2_dir_t *dir, ext2_dirent_t *out)
             return 0;
         }
 
-        uint32_t ino = rd32(de + DE_INODE);
+        uint32_t ino  = rd32(de + DE_INODE);
         uint32_t nlen = de[DE_NAME_LEN];
         char     name[EXT2_NAME_MAX];
         if (nlen >= EXT2_NAME_MAX)
@@ -1168,8 +1156,7 @@ uint32_t ext2_parent_ino(ext2_fs_t *fs, uint32_t ino)
         }
 
         uint32_t ino2 = rd32(de + DE_INODE);
-        if (de[DE_NAME_LEN] == 2 && de[DE_NAME] == '.' &&
-            de[DE_NAME + 1] == '.' && ino2) {
+        if (de[DE_NAME_LEN] == 2 && de[DE_NAME] == '.' && de[DE_NAME + 1] == '.' && ino2) {
             blk_put(fs, de);
             blk_put(fs, ip);
             return ino2;
@@ -1192,8 +1179,7 @@ static uint32_t comp_len(const char *p)
 }
 
 /* Find `name` (length `len`) in directory `dino`.  Returns the inode, or 0. */
-static uint32_t dir_find(ext2_fs_t *fs, uint32_t dino,
-                         const char *name, uint32_t len)
+static uint32_t dir_find(ext2_fs_t *fs, uint32_t dino, const char *name, uint32_t len)
 {
     uint8_t *ip = inode_ptr(fs, dino);
     if (!ip)
@@ -1221,8 +1207,7 @@ static uint32_t dir_find(ext2_fs_t *fs, uint32_t dino,
         }
 
         uint32_t ino = rd32(de + DE_INODE);
-        if (ino && de[DE_NAME_LEN] == len &&
-            memcmp(de + DE_NAME, name, len) == 0) {
+        if (ino && de[DE_NAME_LEN] == len && memcmp(de + DE_NAME, name, len) == 0) {
             blk_put(fs, de);
             blk_put(fs, ip);
             return ino;
@@ -1236,9 +1221,9 @@ static uint32_t dir_find(ext2_fs_t *fs, uint32_t dino,
 }
 
 /* ---- symbolic links --------------------------------------------------- */
-#define SYMLINK_MAX  4096          /* longest target we will store or follow */
-#define PW_MAXCOMP   64            /* longest path, in components */
-#define PW_LOOP      8             /* max symlink expansions per lookup */
+#define SYMLINK_MAX 4096 /* longest target we will store or follow */
+#define PW_MAXCOMP  64   /* longest path, in components */
+#define PW_LOOP     8    /* max symlink expansions per lookup */
 
 /*
  * Read a symlink's target into buf (cap bytes).  Returns the length, or a
@@ -1277,7 +1262,7 @@ static int read_symlink_target(ext2_fs_t *fs, uint32_t ino, char *buf, uint32_t 
     blk_put(fs, ip);
 
     uint32_t got = ext2_read(fs, &ent, 0, buf, n);
-    buf[got] = '\0';
+    buf[got]     = '\0';
     return (int)got;
 }
 
@@ -1292,9 +1277,8 @@ static int read_symlink_target(ext2_fs_t *fs, uint32_t ino, char *buf, uint32_t 
  * creator/unlinker can place or remove it), and the return value is the
  * resolved inode (the target's, when the final symlink was followed).
  */
-static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
-                          uint32_t *parent_out, char *leaf_buf,
-                          uint32_t *leaf_len_out)
+static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow, uint32_t *parent_out,
+                          char *leaf_buf, uint32_t *leaf_len_out)
 {
     if (!path || path[0] != '/')
         return 0;
@@ -1302,12 +1286,15 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
     char comp[PW_MAXCOMP][EXT2_NAME_MAX];
     int  ncomp = 0;
 
-    {   /* split the path into components, skipping empty runs of slashes */
+    { /* split the path into components, skipping empty runs of slashes */
         const char *p = path;
         while (*p) {
-            while (*p == '/') p++;
-            if (!*p) break;
-            if (ncomp >= PW_MAXCOMP) return 0;
+            while (*p == '/')
+                p++;
+            if (!*p)
+                break;
+            if (ncomp >= PW_MAXCOMP)
+                return 0;
             uint32_t l = 0;
             while (*p && *p != '/') {
                 if (l < EXT2_NAME_MAX - 1)
@@ -1319,10 +1306,13 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
         }
     }
 
-    if (ncomp == 0) {                 /* "/" resolves to the root itself */
-        if (parent_out) *parent_out = EXT2_ROOT_INO;
-        if (leaf_buf)   leaf_buf[0] = '\0';
-        if (leaf_len_out) *leaf_len_out = 0;
+    if (ncomp == 0) { /* "/" resolves to the root itself */
+        if (parent_out)
+            *parent_out = EXT2_ROOT_INO;
+        if (leaf_buf)
+            leaf_buf[0] = '\0';
+        if (leaf_len_out)
+            *leaf_len_out = 0;
         return EXT2_ROOT_INO;
     }
 
@@ -1334,9 +1324,9 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
         uint32_t ino = dir_find(fs, cwd, comp[i], (uint32_t)strlen(comp[i]));
         if (!ino) {
             if (i != ncomp - 1)
-                return 0;             /* a missing intermediate name */
+                return 0; /* a missing intermediate name */
             parent = cwd;
-            cur    = 0;                /* the final name does not exist */
+            cur    = 0; /* the final name does not exist */
             goto found;
         }
 
@@ -1347,7 +1337,7 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
 
         if (mt == EXT2_S_IFLNK) {
             if (i == ncomp - 1 && !follow) {
-                parent = cwd;         /* the symlink name itself */
+                parent = cwd; /* the symlink name itself */
                 cur    = ino;
                 blk_put(fs, ip);
                 goto found;
@@ -1355,7 +1345,7 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
             /* Expand the target into the component list and re-walk. */
             if (i >= PW_LOOP) {
                 blk_put(fs, ip);
-                return 0;             /* too many nested symlinks */
+                return 0; /* too many nested symlinks */
             }
             char target[SYMLINK_MAX];
             int  tlen = read_symlink_target(fs, ino, target, sizeof target);
@@ -1368,9 +1358,12 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
             {
                 const char *p = target;
                 while (*p) {
-                    while (*p == '/') p++;
-                    if (!*p) break;
-                    if (nt >= PW_MAXCOMP) return 0;
+                    while (*p == '/')
+                        p++;
+                    if (!*p)
+                        break;
+                    if (nt >= PW_MAXCOMP)
+                        return 0;
                     uint32_t l = 0;
                     while (*p && *p != '/') {
                         if (l < EXT2_NAME_MAX - 1)
@@ -1393,17 +1386,29 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
             memcpy(save, comp, sizeof save);
             int sn = ncomp, k = 0;
             if (!is_abs)
-                for (int j = 0; j < i; j++) { strncpy(comp[k], save[j], EXT2_NAME_MAX - 1); comp[k][EXT2_NAME_MAX - 1] = '\0'; k++; }
-            for (int j = 0; j < nt; j++) { strncpy(comp[k], tcomp[j], EXT2_NAME_MAX - 1); comp[k][EXT2_NAME_MAX - 1] = '\0'; k++; }
+                for (int j = 0; j < i; j++) {
+                    strncpy(comp[k], save[j], EXT2_NAME_MAX - 1);
+                    comp[k][EXT2_NAME_MAX - 1] = '\0';
+                    k++;
+                }
+            for (int j = 0; j < nt; j++) {
+                strncpy(comp[k], tcomp[j], EXT2_NAME_MAX - 1);
+                comp[k][EXT2_NAME_MAX - 1] = '\0';
+                k++;
+            }
             if (!is_abs)
-                for (int j = i + 1; j < sn; j++) { strncpy(comp[k], save[j], EXT2_NAME_MAX - 1); comp[k][EXT2_NAME_MAX - 1] = '\0'; k++; }
+                for (int j = i + 1; j < sn; j++) {
+                    strncpy(comp[k], save[j], EXT2_NAME_MAX - 1);
+                    comp[k][EXT2_NAME_MAX - 1] = '\0';
+                    k++;
+                }
             ncomp = k;
 
-            if (is_abs) {                  /* absolute: restart from root */
+            if (is_abs) { /* absolute: restart from root */
                 cwd = EXT2_ROOT_INO;
                 i   = -1;
-            } else {                       /* relative: continue in cwd */
-                i   = i - 1;
+            } else { /* relative: continue in cwd */
+                i = i - 1;
             }
             continue;
         }
@@ -1415,7 +1420,7 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
         } else {
             if (i != ncomp - 1) {
                 blk_put(fs, ip);
-                return 0;                 /* a non-directory mid-path */
+                return 0; /* a non-directory mid-path */
             }
             parent = cwd;
             cur    = ino;
@@ -1426,17 +1431,18 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow,
     }
 
 found:
-    if (parent_out)   *parent_out = parent;
+    if (parent_out)
+        *parent_out = parent;
     if (leaf_buf) {
         strncpy(leaf_buf, comp[ncomp - 1], EXT2_NAME_MAX - 1);
         leaf_buf[EXT2_NAME_MAX - 1] = '\0';
     }
-    if (leaf_len_out) *leaf_len_out = (uint32_t)strlen(comp[ncomp - 1]);
+    if (leaf_len_out)
+        *leaf_len_out = (uint32_t)strlen(comp[ncomp - 1]);
     return cur;
 }
 
-int ext2_lookup(ext2_fs_t *fs, const char *path, ext2_dirent_t *out,
-                int follow_final)
+int ext2_lookup(ext2_fs_t *fs, const char *path, ext2_dirent_t *out, int follow_final)
 {
     if (!fs || !path || path[0] != '/')
         return 0;
@@ -1447,9 +1453,9 @@ int ext2_lookup(ext2_fs_t *fs, const char *path, ext2_dirent_t *out,
     strncpy(pb, path, sizeof pb - 1);
     pb[sizeof pb - 1] = '\0';
 
-    char        leaf[EXT2_NAME_MAX];
-    uint32_t    leaf_len = 0;
-    uint32_t    ino      = path_walk(fs, pb, follow_final, NULL, leaf, &leaf_len);
+    char     leaf[EXT2_NAME_MAX];
+    uint32_t leaf_len = 0;
+    uint32_t ino      = path_walk(fs, pb, follow_final, NULL, leaf, &leaf_len);
 
     if (!ino)
         return 0;
@@ -1458,14 +1464,13 @@ int ext2_lookup(ext2_fs_t *fs, const char *path, ext2_dirent_t *out,
         if (leaf_len)
             ent_fill(fs, out, ino, leaf, leaf_len);
         else
-            ent_fill(fs, out, ino, "/", 1);      /* the root itself */
+            ent_fill(fs, out, ino, "/", 1); /* the root itself */
     }
     return 1;
 }
 
 /* ---- writing ---------------------------------------------------------- */
-uint32_t ext2_write(ext2_fs_t *fs, ext2_dirent_t *ent,
-                    uint32_t off, const void *buf, uint32_t len)
+uint32_t ext2_write(ext2_fs_t *fs, ext2_dirent_t *ent, uint32_t off, const void *buf, uint32_t len)
 {
     if (!fs || !ent || !ent->ino || !buf || !len)
         return 0;
@@ -1499,7 +1504,7 @@ uint32_t ext2_write(ext2_fs_t *fs, ext2_dirent_t *ent,
         uint32_t blk = bmap(fs, ip, iblk, 1, &added);
         uint8_t *dst = blk ? blk_ptr(fs, blk) : NULL;
         if (!dst)
-            break;                              /* the volume is full */
+            break; /* the volume is full */
 
         memcpy(dst + skip, s + done, take);
         blk_put(fs, dst);
@@ -1540,14 +1545,13 @@ int ext2_truncate(ext2_fs_t *fs, ext2_dirent_t *ent)
 /* statfs(2) fodder: the four superblock counters df(1) actually prints.  Read
  * live rather than cached in ext2_fs_t because the free counts move on every
  * allocation. */
-void ext2_usage(ext2_fs_t *fs, uint64_t *blocks, uint64_t *bfree,
-                uint64_t *files, uint64_t *ffree)
+void ext2_usage(ext2_fs_t *fs, uint64_t *blocks, uint64_t *bfree, uint64_t *files, uint64_t *ffree)
 {
     uint8_t *sb = sb_ptr(fs);
-    *blocks = sb ? rd32(sb + SB_BLOCKS_COUNT) : 0;
-    *bfree  = sb ? rd32(sb + SB_FREE_BLOCKS)  : 0;
-    *files  = sb ? rd32(sb + SB_INODES_COUNT) : 0;
-    *ffree  = sb ? rd32(sb + SB_FREE_INODES)  : 0;
+    *blocks     = sb ? rd32(sb + SB_BLOCKS_COUNT) : 0;
+    *bfree      = sb ? rd32(sb + SB_FREE_BLOCKS) : 0;
+    *files      = sb ? rd32(sb + SB_INODES_COUNT) : 0;
+    *ffree      = sb ? rd32(sb + SB_FREE_INODES) : 0;
     if (sb)
         blk_put(fs, sb);
 }
@@ -1590,10 +1594,10 @@ int ext2_setsize(ext2_fs_t *fs, ext2_dirent_t *ent, uint64_t len)
 
     if (nlen == 0) {
         blk_put(fs, ip);
-        return ext2_truncate(fs, ent);      /* the one path that frees blocks */
+        return ext2_truncate(fs, ent); /* the one path that frees blocks */
     }
 
-    for (uint32_t off = nlen; off < cur; ) {
+    for (uint32_t off = nlen; off < cur;) {
         uint32_t skip = off % fs->block_size;
         uint32_t take = fs->block_size - skip;
         if (take > cur - off)
@@ -1663,8 +1667,7 @@ int ext2_chown(ext2_fs_t *fs, ext2_dirent_t *ent, uint32_t uid, uint32_t gid)
 {
     if (!fs || !ent || !ent->ino)
         return EXT2_EINVAL;
-    if ((uid != (uint32_t)-1 && uid > 0xFFFFu) ||
-        (gid != (uint32_t)-1 && gid > 0xFFFFu))
+    if ((uid != (uint32_t)-1 && uid > 0xFFFFu) || (gid != (uint32_t)-1 && gid > 0xFFFFu))
         return EXT2_EINVAL;
 
     uint8_t *ip = inode_ptr(fs, ent->ino);
@@ -1694,8 +1697,8 @@ int ext2_chown(ext2_fs_t *fs, ext2_dirent_t *ent, uint32_t uid, uint32_t gid)
 /* ---- directory mutation ----------------------------------------------- */
 /* Fill in an entry's inode, name and type.  rec_len belongs to the caller,
  * who is the only one who knows how much room the slot really spans. */
-static void put_entry(ext2_fs_t *fs, uint8_t *de, uint32_t ino,
-                      const char *name, uint32_t len, uint8_t ft)
+static void put_entry(ext2_fs_t *fs, uint8_t *de, uint32_t ino, const char *name, uint32_t len,
+                      uint8_t ft)
 {
     wr32(de + DE_INODE, ino);
     de[DE_NAME_LEN]  = (uint8_t)len;
@@ -1707,9 +1710,12 @@ static void put_entry(ext2_fs_t *fs, uint8_t *de, uint32_t ino,
 static uint8_t mode_to_ft(uint16_t mode)
 {
     switch (mode & EXT2_S_IFMT) {
-    case EXT2_S_IFDIR:  return EXT2_FT_DIR;
-    case EXT2_S_IFLNK:  return EXT2_FT_SYMLINK;
-    default:            return EXT2_FT_REG;
+    case EXT2_S_IFDIR:
+        return EXT2_FT_DIR;
+    case EXT2_S_IFLNK:
+        return EXT2_FT_SYMLINK;
+    default:
+        return EXT2_FT_REG;
     }
 }
 
@@ -1727,8 +1733,8 @@ static uint32_t ent_need(uint32_t name_len)
  * entry whose rec_len is bigger than the entry needs, shrinking it to its
  * true size, and building the new entry in the remainder.
  */
-static int dir_add(ext2_fs_t *fs, uint32_t dino, const char *name,
-                   uint32_t len, uint32_t ino, uint16_t child_mode)
+static int dir_add(ext2_fs_t *fs, uint32_t dino, const char *name, uint32_t len, uint32_t ino,
+                   uint16_t child_mode)
 {
     if (!len || len > 255)
         return EXT2_EINVAL;
@@ -1761,7 +1767,7 @@ static int dir_add(ext2_fs_t *fs, uint32_t dino, const char *name,
 
         if (rec - used >= need) {
             uint8_t *slot = de;
-            if (used) {                          /* split the live entry */
+            if (used) { /* split the live entry */
                 wr16(de + DE_REC_LEN, (uint16_t)used);
                 slot = de + used;
                 wr16(slot + DE_REC_LEN, (uint16_t)(rec - used));
@@ -1810,9 +1816,9 @@ static int dir_remove(ext2_fs_t *fs, uint32_t dino, const char *name, uint32_t l
         return EXT2_ENOTDIR;
     }
 
-    uint32_t size     = rd32(dp + I_SIZE);
-    uint32_t off      = 0;
-    uint32_t prev_off = 0;
+    uint32_t size      = rd32(dp + I_SIZE);
+    uint32_t off       = 0;
+    uint32_t prev_off  = 0;
     int      have_prev = 0;
 
     while (off + DE_MIN <= size) {
@@ -1824,16 +1830,12 @@ static int dir_remove(ext2_fs_t *fs, uint32_t dino, const char *name, uint32_t l
         if (rec < DE_MIN || (rec & 3) || off + rec > size)
             break;
 
-        if (rd32(de + DE_INODE) && de[DE_NAME_LEN] == len &&
-            memcmp(de + DE_NAME, name, len) == 0) {
-
-            int same_block = have_prev &&
-                             (prev_off / fs->block_size) == (off / fs->block_size);
+        if (rd32(de + DE_INODE) && de[DE_NAME_LEN] == len && memcmp(de + DE_NAME, name, len) == 0) {
+            int same_block = have_prev && (prev_off / fs->block_size) == (off / fs->block_size);
             if (same_block) {
                 uint8_t *pd = de_at(fs, dp, prev_off);
                 if (pd) {
-                    wr16(pd + DE_REC_LEN,
-                         (uint16_t)(rd16(pd + DE_REC_LEN) + rec));
+                    wr16(pd + DE_REC_LEN, (uint16_t)(rd16(pd + DE_REC_LEN) + rec));
                     blk_put(fs, pd);
                 }
             } else {
@@ -1846,7 +1848,7 @@ static int dir_remove(ext2_fs_t *fs, uint32_t dino, const char *name, uint32_t l
 
         prev_off  = off;
         have_prev = 1;
-        off      += rec;
+        off += rec;
         blk_put(fs, de);
     }
     blk_put(fs, dp);
@@ -1869,9 +1871,9 @@ int ext2_create(ext2_fs_t *fs, const char *path, int isdir, ext2_dirent_t *out)
     if (!fs || !path || path[0] != '/')
         return EXT2_EINVAL;
 
-    uint32_t    parent   = 0;
-    char        leaf[EXT2_NAME_MAX];
-    uint32_t    leaf_len = 0;
+    uint32_t parent = 0;
+    char     leaf[EXT2_NAME_MAX];
+    uint32_t leaf_len = 0;
 
     char pb[SYMLINK_MAX];
     strncpy(pb, path, sizeof pb - 1);
@@ -1880,7 +1882,7 @@ int ext2_create(ext2_fs_t *fs, const char *path, int isdir, ext2_dirent_t *out)
     if (path_walk(fs, pb, 0, &parent, leaf, &leaf_len))
         return EXT2_EEXIST;
     if (!parent)
-        return EXT2_ENOENT;              /* a directory along the way is missing */
+        return EXT2_ENOENT; /* a directory along the way is missing */
     if (!leaf_len || leaf_len > 255)
         return EXT2_EINVAL;
 
@@ -1906,11 +1908,10 @@ int ext2_create(ext2_fs_t *fs, const char *path, int isdir, ext2_dirent_t *out)
     }
 
     memset(ip, 0, fs->inode_size);
-    wr16(ip + I_MODE, (uint16_t)(isdir ? (EXT2_S_IFDIR | 0755)
-                                       : (EXT2_S_IFREG | 0644)));
+    wr16(ip + I_MODE, (uint16_t)(isdir ? (EXT2_S_IFDIR | 0755) : (EXT2_S_IFREG | 0644)));
     wr16(ip + I_UID, (uint16_t)fs->creator_uid);
     wr16(ip + I_GID, (uint16_t)fs->creator_gid);
-    wr16(ip + I_LINKS, (uint16_t)(isdir ? 2 : 1));   /* a dir links to itself */
+    wr16(ip + I_LINKS, (uint16_t)(isdir ? 2 : 1)); /* a dir links to itself */
 
     uint32_t now = fs_now(fs);
     wr32(ip + I_ATIME, now);
@@ -1970,20 +1971,20 @@ int ext2_unlink(ext2_fs_t *fs, const char *path)
     if (!fs || !path || path[0] != '/')
         return EXT2_EINVAL;
 
-    uint32_t    parent   = 0;
-    char        leaf[EXT2_NAME_MAX];
-    uint32_t    leaf_len = 0;
+    uint32_t parent = 0;
+    char     leaf[EXT2_NAME_MAX];
+    uint32_t leaf_len = 0;
 
     char pb[SYMLINK_MAX];
     strncpy(pb, path, sizeof pb - 1);
     pb[sizeof pb - 1] = '\0';
 
-    uint32_t    ino      = path_walk(fs, pb, 0, &parent, leaf, &leaf_len);
+    uint32_t ino = path_walk(fs, pb, 0, &parent, leaf, &leaf_len);
 
     if (!ino)
         return EXT2_ENOENT;
     if (!leaf_len || ino == EXT2_ROOT_INO)
-        return EXT2_EINVAL;              /* "/" is not something we may remove */
+        return EXT2_EINVAL; /* "/" is not something we may remove */
 
     uint8_t *ip = inode_ptr(fs, ino);
     if (!ip)
@@ -2016,13 +2017,13 @@ int ext2_unlink(ext2_fs_t *fs, const char *path)
             wr16(ip + I_LINKS, (uint16_t)(--links));
         if (links) {
             blk_put(fs, ip);
-            return EXT2_OK;              /* another name still refers to it */
+            return EXT2_OK; /* another name still refers to it */
         }
     }
 
     inode_free_blocks(fs, ip);
     wr32(ip + I_SIZE, 0);
-    wr32(ip + I_DTIME, fs_now(fs));      /* a non-zero dtime means "deleted" */
+    wr32(ip + I_DTIME, fs_now(fs)); /* a non-zero dtime means "deleted" */
     ifree(fs, ino, isdir);
     blk_put(fs, ip);
     return EXT2_OK;
@@ -2040,11 +2041,11 @@ int ext2_symlink(ext2_fs_t *fs, const char *target, const char *path)
     strncpy(pb, path, sizeof pb - 1);
     pb[sizeof pb - 1] = '\0';
 
-    uint32_t    parent   = 0;
-    char        leaf[EXT2_NAME_MAX];
-    uint32_t    leaf_len = 0;
+    uint32_t parent = 0;
+    char     leaf[EXT2_NAME_MAX];
+    uint32_t leaf_len = 0;
     if (path_walk(fs, pb, 0, &parent, leaf, &leaf_len))
-        return EXT2_EEXIST;              /* the name already exists */
+        return EXT2_EEXIST; /* the name already exists */
     if (!parent)
         return EXT2_ENOENT;
     if (!leaf_len || leaf_len > 255)
@@ -2110,8 +2111,7 @@ int ext2_symlink(ext2_fs_t *fs, const char *target, const char *path)
         blk_put(fs, ip);
     }
 
-    int r = dir_add(fs, parent, leaf, leaf_len, ino,
-                    (uint16_t)(EXT2_S_IFLNK | 0777));
+    int r = dir_add(fs, parent, leaf, leaf_len, ino, (uint16_t)(EXT2_S_IFLNK | 0777));
     if (r != EXT2_OK) {
         ip = inode_ptr(fs, ino);
         if (ip) {
@@ -2129,8 +2129,7 @@ int ext2_symlink(ext2_fs_t *fs, const char *target, const char *path)
 /* ---- hard links -------------------------------------------------------- */
 int ext2_link(ext2_fs_t *fs, const char *oldpath, const char *newpath)
 {
-    if (!fs || !oldpath || !newpath ||
-        oldpath[0] != '/' || newpath[0] != '/')
+    if (!fs || !oldpath || !newpath || oldpath[0] != '/' || newpath[0] != '/')
         return EXT2_EINVAL;
 
     /* Resolve the source inode (no final symlink follow: link(2) links the
@@ -2139,18 +2138,18 @@ int ext2_link(ext2_fs_t *fs, const char *oldpath, const char *newpath)
     if (!ext2_lookup(fs, oldpath, &src, 0))
         return EXT2_ENOENT;
     if ((src.mode & EXT2_S_IFMT) == EXT2_S_IFDIR)
-        return EXT2_EISDIR;              /* hard links to dirs are not allowed */
+        return EXT2_EISDIR; /* hard links to dirs are not allowed */
 
     /* Walk the destination's parent, refusing an existing name. */
     char pb[SYMLINK_MAX];
     strncpy(pb, newpath, sizeof pb - 1);
     pb[sizeof pb - 1] = '\0';
 
-    uint32_t    parent   = 0;
-    char        leaf[EXT2_NAME_MAX];
-    uint32_t    leaf_len = 0;
+    uint32_t parent = 0;
+    char     leaf[EXT2_NAME_MAX];
+    uint32_t leaf_len = 0;
     if (path_walk(fs, pb, 0, &parent, leaf, &leaf_len))
-        return EXT2_EEXIST;              /* the name already exists */
+        return EXT2_EEXIST; /* the name already exists */
     if (!parent)
         return EXT2_ENOENT;
     if (!leaf_len || leaf_len > 255)
@@ -2189,10 +2188,10 @@ int ext2_readlink(ext2_fs_t *fs, const char *path, char *buf, uint32_t cap)
     strncpy(pb, path, sizeof pb - 1);
     pb[sizeof pb - 1] = '\0';
 
-    uint32_t    parent   = 0;
-    char        leaf[EXT2_NAME_MAX];
-    uint32_t    leaf_len = 0;
-    uint32_t    ino      = path_walk(fs, pb, 0, &parent, leaf, &leaf_len);
+    uint32_t parent = 0;
+    char     leaf[EXT2_NAME_MAX];
+    uint32_t leaf_len = 0;
+    uint32_t ino      = path_walk(fs, pb, 0, &parent, leaf, &leaf_len);
     if (!ino)
         return EXT2_ENOENT;
 
@@ -2210,9 +2209,12 @@ int ext2_rename(ext2_fs_t *fs, const char *src, const char *dst)
     /* Resolve both names literally (no trailing-symlink following): rename
      * operates on the source and destination names themselves. */
     char spb[SYMLINK_MAX];
-    strncpy(spb, src, sizeof spb - 1); spb[sizeof spb - 1] = '\0';
-    uint32_t sparent = 0; char sleaf[EXT2_NAME_MAX]; uint32_t sleaf_len = 0;
-    uint32_t sino = path_walk(fs, spb, 0, &sparent, sleaf, &sleaf_len);
+    strncpy(spb, src, sizeof spb - 1);
+    spb[sizeof spb - 1] = '\0';
+    uint32_t sparent    = 0;
+    char     sleaf[EXT2_NAME_MAX];
+    uint32_t sleaf_len = 0;
+    uint32_t sino      = path_walk(fs, spb, 0, &sparent, sleaf, &sleaf_len);
     if (!sino)
         return EXT2_ENOENT;
     if (sino == EXT2_ROOT_INO)
@@ -2225,9 +2227,12 @@ int ext2_rename(ext2_fs_t *fs, const char *src, const char *dst)
     int      sisdir = (smode & EXT2_S_IFMT) == EXT2_S_IFDIR;
 
     char dpb[SYMLINK_MAX];
-    strncpy(dpb, dst, sizeof dpb - 1); dpb[sizeof dpb - 1] = '\0';
-    uint32_t dparent = 0; char dleaf[EXT2_NAME_MAX]; uint32_t dleaf_len = 0;
-    uint32_t dino = path_walk(fs, dpb, 0, &dparent, dleaf, &dleaf_len);
+    strncpy(dpb, dst, sizeof dpb - 1);
+    dpb[sizeof dpb - 1] = '\0';
+    uint32_t dparent    = 0;
+    char     dleaf[EXT2_NAME_MAX];
+    uint32_t dleaf_len = 0;
+    uint32_t dino      = path_walk(fs, dpb, 0, &dparent, dleaf, &dleaf_len);
     if (dino == EXT2_ROOT_INO) {
         blk_put(fs, sip);
         return EXT2_EINVAL;
@@ -2246,7 +2251,7 @@ int ext2_rename(ext2_fs_t *fs, const char *src, const char *dst)
         }
     }
 
-    uint8_t *dip = dino ? inode_ptr(fs, dino) : NULL;
+    uint8_t *dip    = dino ? inode_ptr(fs, dino) : NULL;
     int      disdir = dip && (rd16(dip + I_MODE) & EXT2_S_IFMT) == EXT2_S_IFDIR;
 
     /* Type mismatches POSIX rejects: dir over file, file over dir. */

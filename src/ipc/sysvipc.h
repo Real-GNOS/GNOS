@@ -50,28 +50,28 @@
 #define IPC_EXCL    02000
 #define IPC_NOWAIT  04000
 
-#define IPC_RMID    0
-#define IPC_SET     1
-#define IPC_STAT    2
-#define IPC_INFO    3
+#define IPC_RMID 0
+#define IPC_SET  1
+#define IPC_STAT 2
+#define IPC_INFO 3
 
 /* semctl commands beyond IPC_* */
-#define SEM_UNDO    0x1000
-#define GETPID      11
-#define GETVAL      12
-#define GETALL      13
-#define GETNCNT     14
-#define GETZCNT     15
-#define SETVAL      16
-#define SETALL      17
+#define SEM_UNDO 0x1000
+#define GETPID   11
+#define GETVAL   12
+#define GETALL   13
+#define GETNCNT  14
+#define GETZCNT  15
+#define SETVAL   16
+#define SETALL   17
 
 /* msgrcv/msgsnd flags beyond IPC_* */
 #define MSG_NOERROR 010000
 #define MSG_EXCEPT  020000
 
 /* shmat flags */
-#define SHM_RDONLY  010000
-#define SHM_RND     020000
+#define SHM_RDONLY 010000
+#define SHM_RND    020000
 
 /* ---- ABI structs (kernel copies of the musl layouts) -------------------- */
 typedef struct {
@@ -119,15 +119,13 @@ _Static_assert(sizeof(kshmid_ds_t) == 112, "shmid_ds ABI size");
 /* Message queues */
 long sysv_msgget(int32_t key, int flags);
 long sysv_msgsnd(int msqid, uint64_t umsgp, size_t msgsz, int flags);
-long sysv_msgrcv(int msqid, uint64_t umsgp, size_t msgsz, long msgtyp,
-                 int flags);
+long sysv_msgrcv(int msqid, uint64_t umsgp, size_t msgsz, long msgtyp, int flags);
 long sysv_msgctl(int msqid, int cmd, uint64_t ubuf);
 
 /* Semaphores */
 long sysv_semget(int32_t key, int nsems, int flags);
 long sysv_semop(int semid, uint64_t usops, size_t nsops);
-long sysv_semtimedop(int semid, uint64_t usops, size_t nsops,
-                     uint64_t utimeout);
+long sysv_semtimedop(int semid, uint64_t usops, size_t nsops, uint64_t utimeout);
 long sysv_semctl(int semid, int semnum, int cmd, uint64_t uarg);
 
 /* Shared memory */

@@ -30,7 +30,9 @@
 /* Stacking order, from back to front. */
 void drm_plane_create_zpos_property(struct drm_plane *plane, unsigned int zpos)
 {
-    if (plane == NULL) { return; }
+    if (plane == NULL) {
+        return;
+    }
 
     plane->zpos_property_default = zpos;
 }
@@ -38,7 +40,9 @@ void drm_plane_create_zpos_property(struct drm_plane *plane, unsigned int zpos)
 /* Which rotations and reflections the plane can apply. */
 int drm_plane_create_rotation_property(struct drm_plane *plane, unsigned int rotation)
 {
-    if (plane == NULL) { return -EINVAL; }
+    if (plane == NULL) {
+        return -EINVAL;
+    }
 
     (void)rotation; /* published once properties are wired up */
 
@@ -48,7 +52,9 @@ int drm_plane_create_rotation_property(struct drm_plane *plane, unsigned int rot
 /* Which pixel blend modes the plane's hardware understands. */
 int drm_plane_create_blend_mode_property(struct drm_plane *plane, unsigned int blend_mode)
 {
-    if (plane == NULL) { return -EINVAL; }
+    if (plane == NULL) {
+        return -EINVAL;
+    }
 
     (void)blend_mode;
 
@@ -58,7 +64,9 @@ int drm_plane_create_blend_mode_property(struct drm_plane *plane, unsigned int b
 /* Constant transparency applied across the whole plane. */
 int drm_plane_create_alpha_property(struct drm_plane *plane)
 {
-    if (plane == NULL) { return -EINVAL; }
+    if (plane == NULL) {
+        return -EINVAL;
+    }
 
     return 0;
 }

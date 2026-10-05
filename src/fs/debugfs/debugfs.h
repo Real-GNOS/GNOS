@@ -20,8 +20,7 @@ int debugfs_resolve(const char *path, vfs_node_t *out);
 /* Enumerate a debugfs directory for getdents64.  `index` is the entry number
  * to report, starting at 0 (which is "."), and `name`/`type` are filled in.
  * Returns 0 on success or -E_NOENT once the directory is exhausted. */
-int debugfs_readdir(const char *dirpath, uint32_t index, char *name,
-                    uint8_t *type);
+int debugfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *type);
 
 /* The string builder used by generators -- opaque to callers. */
 typedef struct {

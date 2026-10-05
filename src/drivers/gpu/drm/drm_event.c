@@ -18,9 +18,9 @@
 
 typedef struct {
     drm_event_vblank_t ev[DRM_EVQ_CAP];
-    unsigned head, count;
-    uint32_t seq;
-    uint64_t now_ms;
+    unsigned           head, count;
+    uint32_t           seq;
+    uint64_t           now_ms;
 } drm_evq_t;
 
 static drm_evq_t g_evq;
@@ -29,18 +29,18 @@ void drm_queue_event(uint64_t user_data)
 {
     g_evq.seq++;
     drm_event_vblank_t *e = &g_evq.ev[(g_evq.head + g_evq.count) % DRM_EVQ_CAP];
-    e->base.length = sizeof(drm_event_vblank_t);
-    e->base.type = DRM_EVENT_FLIP_COMPLETE;
-    e->user_data = user_data;
-    e->tv_sec = 0;
-    e->tv_usec = 0;
-    e->sequence = g_evq.seq;
-    e->crtc_id = 1;
+    e->base.length        = sizeof(drm_event_vblank_t);
+    e->base.type          = DRM_EVENT_FLIP_COMPLETE;
+    e->user_data          = user_data;
+    e->tv_sec             = 0;
+    e->tv_usec            = 0;
+    e->sequence           = g_evq.seq;
+    e->crtc_id            = 1;
     if (g_evq.count < DRM_EVQ_CAP)
         g_evq.count++;
     else
         g_evq.head = (g_evq.head + 1) % DRM_EVQ_CAP;
-    sched_wake_reason(WAIT_PIPE);       /* a poll() sleeper may be parked */
+    sched_wake_reason(WAIT_PIPE); /* a poll() sleeper may be parked */
 }
 
 int32_t drm_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
@@ -63,15 +63,15 @@ int32_t drm_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     }
     if (len >= sizeof(drm_event_vblank_t)) {
         drm_event_vblank_t e = g_evq.ev[g_evq.head];
-        g_evq.head = (g_evq.head + 1) % DRM_EVQ_CAP;
+        g_evq.head           = (g_evq.head + 1) % DRM_EVQ_CAP;
         g_evq.count--;
         asm volatile("sti");
         memcpy(buf, &e, sizeof e);
         return (int32_t)sizeof e;
     }
-    drm_event_t e = { .length = g_evq.ev[g_evq.head].base.length,
-                      .type = g_evq.ev[g_evq.head].base.type };
-    g_evq.head = (g_evq.head + 1) % DRM_EVQ_CAP;
+    drm_event_t e = {.length = g_evq.ev[g_evq.head].base.length,
+                     .type   = g_evq.ev[g_evq.head].base.type};
+    g_evq.head    = (g_evq.head + 1) % DRM_EVQ_CAP;
     g_evq.count--;
     asm volatile("sti");
     memcpy(buf, &e, sizeof e);

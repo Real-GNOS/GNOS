@@ -30,15 +30,15 @@
 extern uint64_t g_hhdm;
 
 typedef struct {
-    char     sig[8];            /* "RSD PTR " */
-    uint8_t  checksum;          /* over the first 20 bytes */
+    char     sig[8];   /* "RSD PTR " */
+    uint8_t  checksum; /* over the first 20 bytes */
     char     oem_id[6];
-    uint8_t  revision;          /* 0 = ACPI 1.0, 2 = ACPI 2.0+ */
+    uint8_t  revision; /* 0 = ACPI 1.0, 2 = ACPI 2.0+ */
     uint32_t rsdt_addr;
     /* ACPI 2.0+ only, present when revision >= 2 */
     uint32_t length;
     uint64_t xsdt_addr;
-    uint8_t  ext_checksum;      /* over `length` bytes */
+    uint8_t  ext_checksum; /* over `length` bytes */
     uint8_t  reserved[3];
 } __attribute__((packed)) acpi_rsdp_t;
 
@@ -112,25 +112,25 @@ typedef struct {
 } __attribute__((packed)) acpi_hpet_t;
 
 static const acpi_sdt_t *g_tables[ACPI_MAX_TABLES];
-static int      g_ntables;
-static int      g_cpus;
-static uint64_t g_lapic, g_ioapic, g_hpet;
-static uint16_t g_pm1a_cnt;
-static uint16_t g_pm1a_evt;
-static uint16_t g_slp_typ;      /* SLP_TYP field (pre-shifted) for S5 */
+static int               g_ntables;
+static int               g_cpus;
+static uint64_t          g_lapic, g_ioapic, g_hpet;
+static uint16_t          g_pm1a_cnt;
+static uint16_t          g_pm1a_evt;
+static uint16_t          g_slp_typ; /* SLP_TYP field (pre-shifted) for S5 */
 
 /* PM1a event register bits: bit 8 is the power button in both the status
  * and the enable register (ACPI spec, PM1 Status/Enable). */
-#define PM1_PWRBTN  0x0100
+#define PM1_PWRBTN 0x0100
 /* PM1a control register bits: bit 13 is SLP_EN, bits 12:10 are SLP_TYP. */
-#define PM1_SLP_EN  0x2000
+#define PM1_SLP_EN 0x2000
 
 /* ---- helpers ----------------------------------------------------------- */
 
 static int checksum_ok(const void *p, uint32_t len)
 {
-    const uint8_t *b = (const uint8_t *)p;
-    uint8_t sum = 0;
+    const uint8_t *b   = (const uint8_t *)p;
+    uint8_t        sum = 0;
     for (uint32_t i = 0; i < len; i++)
         sum = (uint8_t)(sum + b[i]);
     return sum == 0;
@@ -138,13 +138,12 @@ static int checksum_ok(const void *p, uint32_t len)
 
 static int sig_is(const char *sig4, const char *want)
 {
-    return sig4[0] == want[0] && sig4[1] == want[1] &&
-           sig4[2] == want[2] && sig4[3] == want[3];
+    return sig4[0] == want[0] && sig4[1] == want[1] && sig4[2] == want[2] && sig4[3] == want[3];
 }
 
 static void put_sig(const char *sig4)
 {
-    char tmp[5] = { sig4[0], sig4[1], sig4[2], sig4[3], 0 };
+    char tmp[5] = {sig4[0], sig4[1], sig4[2], sig4[3], 0};
     dbg_puts(tmp);
 }
 
@@ -167,8 +166,7 @@ static const acpi_rsdp_t *validate_rsdp(const void *p)
         return NULL;
     /* A 2.0 RSDP is only trustworthy if the extended checksum agrees too --
      * and that is the one covering the XSDT pointer we are about to use. */
-    if (r->revision >= 2 && (r->length < sizeof(acpi_rsdp_t) ||
-                             !checksum_ok(r, r->length)))
+    if (r->revision >= 2 && (r->length < sizeof(acpi_rsdp_t) || !checksum_ok(r, r->length)))
         return NULL;
     return r;
 }
@@ -197,8 +195,8 @@ static const acpi_rsdp_t *find_rsdp(uint64_t hint)
     }
 
     /* The EBDA segment address lives as a 16-bit paragraph count at 0x40E. */
-    const uint16_t *bda = (const uint16_t *)pmm_virt(0x40E);
-    uint64_t ebda = (uint64_t)(*bda) << 4;
+    const uint16_t *bda  = (const uint16_t *)pmm_virt(0x40E);
+    uint64_t        ebda = (uint64_t)(*bda) << 4;
     if (ebda >= 0x400 && ebda < 0xA0000) {
         const acpi_rsdp_t *r = scan_range(ebda, ebda + 1024);
         if (r)
@@ -212,7 +210,7 @@ static const acpi_rsdp_t *find_rsdp(uint64_t hint)
 static void parse_madt(const acpi_sdt_t *hdr)
 {
     const acpi_madt_t *m = (const acpi_madt_t *)hdr;
-    g_lapic = m->lapic_addr;
+    g_lapic              = m->lapic_addr;
 
     const uint8_t *p   = (const uint8_t *)hdr + sizeof(acpi_madt_t);
     const uint8_t *end = (const uint8_t *)hdr + hdr->length;
@@ -241,7 +239,7 @@ static void parse_madt(const acpi_sdt_t *hdr)
             /* When present this supersedes the 32-bit address in the header,
              * which is the only way a LAPIC above 4 GiB can be described. */
             const madt_lapic_override_t *o = (const madt_lapic_override_t *)e;
-            g_lapic = o->addr;
+            g_lapic                        = o->addr;
             break;
         }
         }
@@ -254,8 +252,8 @@ static void parse_fadt(const acpi_sdt_t *hdr)
     if (hdr->length < sizeof(acpi_fadt_t))
         return;
     const acpi_fadt_t *f = (const acpi_fadt_t *)hdr;
-    g_pm1a_cnt = (uint16_t)f->pm1a_cnt_blk;
-    g_pm1a_evt = (uint16_t)f->pm1a_evt_blk;
+    g_pm1a_cnt           = (uint16_t)f->pm1a_cnt_blk;
+    g_pm1a_evt           = (uint16_t)f->pm1a_evt_blk;
 }
 
 static void parse_hpet(const acpi_sdt_t *hdr)
@@ -263,7 +261,7 @@ static void parse_hpet(const acpi_sdt_t *hdr)
     if (hdr->length < sizeof(acpi_hpet_t))
         return;
     const acpi_hpet_t *h = (const acpi_hpet_t *)hdr;
-    g_hpet = h->address;
+    g_hpet               = h->address;
 }
 
 static void index_table(const acpi_sdt_t *t)
@@ -308,21 +306,25 @@ static uint16_t s5_slp_typ(void)
         if (p[0] != '_' || p[1] != 'S' || p[2] != '5')
             continue;
         const uint8_t *q = p + 3;
-        if (q < end && *q == 0x08)              /* NameOp */
+        if (q < end && *q == 0x08) /* NameOp */
             q++;
-        if (q + 2 > end || (*q != 0x12 && *q != 0x13))  /* PackageOp */
+        if (q + 2 > end || (*q != 0x12 && *q != 0x13)) /* PackageOp */
             continue;
         q++;
         int nelem = *q++;
         if (nelem < 1 || q >= end)
             continue;
-        switch (*q) {                           /* first element: SLP_TYP */
-        case 0x00:  return 0;                   /* Zero */
-        case 0x01:  return 1u << 10;            /* One */
-        case 0x0A:  return (uint16_t)((q[1] & 0x7) << 10);   /* BytePrefix */
-        case 0x0B:  return (uint16_t)(((q[1] | ((uint16_t)q[2] << 8)) & 0x7)
-                                      << 10);   /* WordPrefix */
-        default:    return 0;
+        switch (*q) { /* first element: SLP_TYP */
+        case 0x00:
+            return 0; /* Zero */
+        case 0x01:
+            return 1u << 10; /* One */
+        case 0x0A:
+            return (uint16_t)((q[1] & 0x7) << 10); /* BytePrefix */
+        case 0x0B:
+            return (uint16_t)(((q[1] | ((uint16_t)q[2] << 8)) & 0x7) << 10); /* WordPrefix */
+        default:
+            return 0;
         }
     }
     return 0;
@@ -337,7 +339,7 @@ static void pm1a_sci(regs_t *r)
     (void)r;
     uint16_t sts = inw(g_pm1a_evt);
     if (sts & PM1_PWRBTN) {
-        outw(g_pm1a_evt, PM1_PWRBTN);       /* write-1-to-clear */
+        outw(g_pm1a_evt, PM1_PWRBTN); /* write-1-to-clear */
         dbg_puts("ACPI: power button -- powering off\r\n");
         acpi_poweroff();
     }
@@ -352,9 +354,9 @@ void acpi_pm1_init(void)
         return;
     }
 
-    outw(g_pm1a_evt, PM1_PWRBTN);           /* clear a stale status bit */
-    outw(g_pm1a_evt + 2, PM1_PWRBTN);       /* arm PWRBTN_EN */
-    irq_install(9, pm1a_sci, "acpi");               /* SCI is GSI 9 */
+    outw(g_pm1a_evt, PM1_PWRBTN);     /* clear a stale status bit */
+    outw(g_pm1a_evt + 2, PM1_PWRBTN); /* arm PWRBTN_EN */
+    irq_install(9, pm1a_sci, "acpi"); /* SCI is GSI 9 */
     dbg_puts("ACPI: power button armed (SCI on IRQ 9)\r\n");
 }
 
@@ -389,9 +391,9 @@ int acpi_init(uint64_t rsdp)
 {
     g_ntables = 0;
     g_cpus    = 0;
-    g_lapic   = g_ioapic = g_hpet = 0;
-    g_pm1a_cnt = 0;
-    g_pm1a_evt = 0;
+    g_lapic = g_ioapic = g_hpet = 0;
+    g_pm1a_cnt                  = 0;
+    g_pm1a_evt                  = 0;
 
     const acpi_rsdp_t *r = find_rsdp(rsdp);
     if (r)
@@ -410,7 +412,7 @@ int acpi_init(uint64_t rsdp)
     /* Prefer the XSDT: on a machine with tables above 4 GiB the RSDT cannot
      * even express where they are. */
     const acpi_sdt_t *root = NULL;
-    int xsdt = 0;
+    int               xsdt = 0;
     if (r->revision >= 2 && r->xsdt_addr) {
         root = sdt_at(r->xsdt_addr);
         xsdt = 1;
@@ -419,17 +421,15 @@ int acpi_init(uint64_t rsdp)
         root = sdt_at(r->rsdt_addr);
         xsdt = 0;
     }
-    if (!root || root->length < sizeof(acpi_sdt_t) ||
-        !checksum_ok(root, root->length)) {
+    if (!root || root->length < sizeof(acpi_sdt_t) || !checksum_ok(root, root->length)) {
         dbg_puts("ACPI: root table missing or corrupt\r\n");
         return 0;
     }
 
     index_table(root);
 
-    uint32_t entries = (root->length - (uint32_t)sizeof(acpi_sdt_t)) /
-                       (xsdt ? 8u : 4u);
-    const uint8_t *arr = (const uint8_t *)root + sizeof(acpi_sdt_t);
+    uint32_t       entries = (root->length - (uint32_t)sizeof(acpi_sdt_t)) / (xsdt ? 8u : 4u);
+    const uint8_t *arr     = (const uint8_t *)root + sizeof(acpi_sdt_t);
     for (uint32_t i = 0; i < entries; i++) {
         uint64_t phys;
         if (xsdt) {
@@ -466,17 +466,35 @@ const acpi_sdt_t *acpi_find(const char *sig)
     return NULL;
 }
 
-int               acpi_table_count(void) { return g_ntables; }
+int acpi_table_count(void)
+{
+    return g_ntables;
+}
 const acpi_sdt_t *acpi_table(int i)
 {
     return (i >= 0 && i < g_ntables) ? g_tables[i] : NULL;
 }
 
-int      acpi_cpu_count(void)    { return g_cpus; }
-uint64_t acpi_lapic_base(void)   { return g_lapic; }
-uint64_t acpi_ioapic_base(void)  { return g_ioapic; }
-uint64_t acpi_hpet_base(void)    { return g_hpet; }
-uint16_t acpi_pm1a_control(void) { return g_pm1a_cnt; }
+int acpi_cpu_count(void)
+{
+    return g_cpus;
+}
+uint64_t acpi_lapic_base(void)
+{
+    return g_lapic;
+}
+uint64_t acpi_ioapic_base(void)
+{
+    return g_ioapic;
+}
+uint64_t acpi_hpet_base(void)
+{
+    return g_hpet;
+}
+uint16_t acpi_pm1a_control(void)
+{
+    return g_pm1a_cnt;
+}
 
 void acpi_dump(void)
 {
@@ -524,9 +542,9 @@ void acpi_self_test(void)
      * signature -- that is what proves the index and the memory agree. */
     for (int i = 0; i < g_ntables && ok; i++) {
         const acpi_sdt_t *t = g_tables[i];
-        ok = ok && checksum_ok(t, t->length);
-        ok = ok && (t->length >= sizeof(acpi_sdt_t));
-        ok = ok && (acpi_find(t->sig) != NULL);
+        ok                  = ok && checksum_ok(t, t->length);
+        ok                  = ok && (t->length >= sizeof(acpi_sdt_t));
+        ok                  = ok && (acpi_find(t->sig) != NULL);
     }
 
     /* A machine with ACPI at all has an FADT; without one there is no DSDT

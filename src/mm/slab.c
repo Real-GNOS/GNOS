@@ -42,62 +42,62 @@
 #include "pmm.h"
 
 #define SLAB_ALIGN_MIN      16u
-#define SLAB_COLOUR_ALIGN   64u      /* one cache line                    */
-#define SLAB_COLOUR_MAX     16u      /* at most 16 distinct colour steps  */
-#define SLAB_OBJ_MIN        16u      /* the freelist needs a pointer word */
-#define SLAB_MAX_SLAB_ORDER 4u       /* a slab is at most 16 KiB          */
-#define SLAB_AC_SIZE        16u      /* per-CPU array cache depth         */
-#define SLAB_AC_BATCH       8u       /* refill/drain batch                */
-#define SLAB_CPUS           4u       /* matches NR_RQ                     */
+#define SLAB_COLOUR_ALIGN   64u /* one cache line                    */
+#define SLAB_COLOUR_MAX     16u /* at most 16 distinct colour steps  */
+#define SLAB_OBJ_MIN        16u /* the freelist needs a pointer word */
+#define SLAB_MAX_SLAB_ORDER 4u  /* a slab is at most 16 KiB          */
+#define SLAB_AC_SIZE        16u /* per-CPU array cache depth         */
+#define SLAB_AC_BATCH       8u  /* refill/drain batch                */
+#define SLAB_CPUS           4u  /* matches NR_RQ                     */
 
 /* One run of objects.  Page aligned (we over-allocate and round up), power
  * of two in size, so the header is found by masking an object address. */
 typedef struct kmem_slab {
     struct kmem_slab *next, *prev;
-    void             *raw;      /* the kmalloc pointer the run sits inside */
-    uint64_t          objmask;   /* AND an object address with this -> slab */
+    void             *raw;     /* the kmalloc pointer the run sits inside */
+    uint64_t          objmask; /* AND an object address with this -> slab */
     kmem_cache_t     *cache;
-    void             *freelist;  /* chained through the free objects        */
-    uint32_t          in_use;    /* objects on loan                         */
-    uint32_t          colour;    /* this slab's colour step                 */
+    void             *freelist; /* chained through the free objects        */
+    uint32_t          in_use;   /* objects on loan                         */
+    uint32_t          colour;   /* this slab's colour step                 */
 } kmem_slab_t;
 
 /* Per-CPU array cache of hot object pointers. */
 typedef struct {
     uint32_t avail;
-    uint32_t limit;              /* SLAB_AC_SIZE for now                    */
+    uint32_t limit; /* SLAB_AC_SIZE for now                    */
     void    *entry[SLAB_AC_SIZE];
 } kmem_ac_t;
 
 struct kmem_cache {
-    const char   *name;
-    uint32_t      obj_size;      /* as the caller asked                     */
-    uint32_t      buf_size;      /* rounded, freelist-ready stride          */
-    uint32_t      align;
-    uint32_t      flags;
-    kmem_ctor_t   ctor;
+    const char *name;
+    uint32_t    obj_size; /* as the caller asked                     */
+    uint32_t    buf_size; /* rounded, freelist-ready stride          */
+    uint32_t    align;
+    uint32_t    flags;
+    kmem_ctor_t ctor;
 
-    uint32_t      objs_per_slab;
-    uint64_t      slab_size;     /* bytes per slab run (power of two)       */
-    uint32_t      colour_next;   /* next slab's colour step                 */
-    uint32_t      colour_max;    /* number of usable colour steps           */
-    uint32_t      colour_off;    /* bytes per colour step                   */
+    uint32_t objs_per_slab;
+    uint64_t slab_size;   /* bytes per slab run (power of two)       */
+    uint32_t colour_next; /* next slab's colour step                 */
+    uint32_t colour_max;  /* number of usable colour steps           */
+    uint32_t colour_off;  /* bytes per colour step                   */
 
-    kmem_slab_t  *slabs_full;
-    kmem_slab_t  *slabs_partial;
-    kmem_slab_t  *slabs_free;
-    uint32_t      num_full, num_partial, num_free;
+    kmem_slab_t *slabs_full;
+    kmem_slab_t *slabs_partial;
+    kmem_slab_t *slabs_free;
+    uint32_t     num_full, num_partial, num_free;
 
-    kmem_ac_t     ac[SLAB_CPUS];
+    kmem_ac_t ac[SLAB_CPUS];
 
     /* statistics, all relaxed */
-    uint32_t      ac_hits, slab_hits, grown, reaped;
+    uint32_t ac_hits, slab_hits, grown, reaped;
 
-    kmem_cache_t *next;          /* registry chain for /proc/slabinfo       */
+    kmem_cache_t *next; /* registry chain for /proc/slabinfo       */
 };
 
-static kmem_cache_t *g_caches;          /* all live caches                  */
-static int           g_slab_ready;      /* set after slab_init              */
+static kmem_cache_t *g_caches;     /* all live caches                  */
+static int           g_slab_ready; /* set after slab_init              */
 
 static uint64_t align_up(uint64_t v, uint64_t a)
 {
@@ -144,25 +144,24 @@ static kmem_slab_t *slab_grow(kmem_cache_t *c)
     uint8_t *raw = kmalloc((uint32_t)c->slab_size * 2);
     if (!raw)
         return NULL;
-    uint64_t base = align_up((uint64_t)(uintptr_t)raw, c->slab_size);
-    kmem_slab_t *s = (kmem_slab_t *)base;
+    uint64_t     base = align_up((uint64_t)(uintptr_t)raw, c->slab_size);
+    kmem_slab_t *s    = (kmem_slab_t *)base;
 
-    s->cache   = c;
-    s->raw     = raw;            /* slab_destroy must free THIS, not the
-                                    aligned base: kfree takes the pointer
-                                    kmalloc returned, and an interior
-                                    aligned address silently corrupted the
-                                    heap (the original ACPICA-era bug) */
+    s->cache = c;
+    s->raw   = raw; /* slab_destroy must free THIS, not the
+                       aligned base: kfree takes the pointer
+                       kmalloc returned, and an interior
+                       aligned address silently corrupted the
+                       heap (the original ACPICA-era bug) */
     s->objmask = ~(c->slab_size - 1);
     s->in_use  = 0;
 
     /* colour this slab */
-    s->colour = c->colour_next;
+    s->colour      = c->colour_next;
     c->colour_next = (c->colour_next + 1) % c->colour_max;
 
-    uint8_t *objs = (uint8_t *)base + c->slab_size
-                  - c->objs_per_slab * c->buf_size
-                  + s->colour * c->colour_off;
+    uint8_t *objs =
+        (uint8_t *)base + c->slab_size - c->objs_per_slab * c->buf_size + s->colour * c->colour_off;
 
     /* chain the objects; the constructor runs once per object ever */
     s->freelist = NULL;
@@ -184,7 +183,7 @@ static kmem_slab_t *slab_grow(kmem_cache_t *c)
 
 static void slab_destroy(kmem_cache_t *c, kmem_slab_t *s)
 {
-    (void)c;                         /* destructors would live here */
+    (void)c; /* destructors would live here */
     /* Free the RAW kmalloc pointer: `s` is the slab_size-aligned interior
      * address, and freeing that made the heap see a bogus header. */
     kfree(s->raw);
@@ -192,8 +191,8 @@ static void slab_destroy(kmem_cache_t *c, kmem_slab_t *s)
 
 /* ---- cache lifecycle --------------------------------------------------- */
 
-kmem_cache_t *kmem_cache_create(const char *name, uint32_t size, uint32_t align,
-                                uint32_t flags, kmem_ctor_t ctor)
+kmem_cache_t *kmem_cache_create(const char *name, uint32_t size, uint32_t align, uint32_t flags,
+                                kmem_ctor_t ctor)
 {
     if (!name || !size || size > 64 * 1024)
         return NULL;
@@ -219,7 +218,7 @@ kmem_cache_t *kmem_cache_create(const char *name, uint32_t size, uint32_t align,
     /* buffer stride: big enough for the object, a freelist pointer when the
      * object is smaller than one, and the requested alignment */
     uint32_t need = c->obj_size < SLAB_OBJ_MIN ? SLAB_OBJ_MIN : c->obj_size;
-    c->buf_size = (uint32_t)align_up(need, c->align);
+    c->buf_size   = (uint32_t)align_up(need, c->align);
 
     /* slab geometry: one page for anything that fits, doubling while the
      * object stride demands more, capped at SLAB_MAX_SLAB_ORDER pages.
@@ -233,23 +232,22 @@ kmem_cache_t *kmem_cache_create(const char *name, uint32_t size, uint32_t align,
     /* how many objects fit behind the slab header; the tail waste is then
      * split into cache-line colour steps (at least one, meaning "no
      * colouring" for a geometry with no room for it) */
-    uint64_t avail = c->slab_size - sizeof(kmem_slab_t);
+    uint64_t avail   = c->slab_size - sizeof(kmem_slab_t);
     c->objs_per_slab = (uint32_t)(avail / c->buf_size);
     if (!c->objs_per_slab)
         c->objs_per_slab = 1;
 
     uint64_t waste = avail - (uint64_t)c->objs_per_slab * c->buf_size;
     uint64_t steps = waste / SLAB_COLOUR_ALIGN;
-    c->colour_off = (uint32_t)SLAB_COLOUR_ALIGN;
-    c->colour_max = (uint32_t)(steps > SLAB_COLOUR_MAX ? SLAB_COLOUR_MAX
-                                                       : (steps ? steps : 1));
+    c->colour_off  = (uint32_t)SLAB_COLOUR_ALIGN;
+    c->colour_max  = (uint32_t)(steps > SLAB_COLOUR_MAX ? SLAB_COLOUR_MAX : (steps ? steps : 1));
 
     for (uint32_t i = 0; i < SLAB_CPUS; i++) {
         c->ac[i].limit = SLAB_AC_SIZE;
         c->ac[i].avail = 0;
     }
 
-    c->next = g_caches;
+    c->next  = g_caches;
     g_caches = c;
     return c;
 }
@@ -277,9 +275,8 @@ void kmem_cache_destroy(kmem_cache_t *c)
     for (uint32_t cpu = 0; cpu < SLAB_CPUS; cpu++) {
         kmem_ac_t *ac = &c->ac[cpu];
         while (ac->avail) {
-            void *o = ac->entry[--ac->avail];
-            kmem_slab_t *sl = (kmem_slab_t *)((uint64_t)o &
-                              ~(c->slab_size - 1));
+            void        *o  = ac->entry[--ac->avail];
+            kmem_slab_t *sl = (kmem_slab_t *)((uint64_t)o & ~(c->slab_size - 1));
             if (sl->in_use == c->objs_per_slab) {
                 slab_list_del(&c->slabs_full, sl);
                 c->num_full--;
@@ -287,7 +284,7 @@ void kmem_cache_destroy(kmem_cache_t *c)
                 slab_list_del(&c->slabs_partial, sl);
                 c->num_partial--;
             }
-            *(void **)o = sl->freelist;
+            *(void **)o  = sl->freelist;
             sl->freelist = o;
             sl->in_use--;
             slab_rehome(c, sl);
@@ -328,8 +325,8 @@ void *kmem_cache_alloc(kmem_cache_t *c)
         return NULL;
 
     /* 1. this CPU's array cache */
-    unsigned cpu = 0;                    /* BKL serialises; cpu id unused yet */
-    kmem_ac_t *ac = &c->ac[cpu];
+    unsigned   cpu = 0; /* BKL serialises; cpu id unused yet */
+    kmem_ac_t *ac  = &c->ac[cpu];
     if (ac->avail) {
         ac->avail--;
         c->ac_hits++;
@@ -351,12 +348,12 @@ void *kmem_cache_alloc(kmem_cache_t *c)
 
     uint32_t n = 0;
     while (s->freelist && ac->avail < ac->limit && n < SLAB_AC_BATCH) {
-        void *o = s->freelist;
+        void *o     = s->freelist;
         s->freelist = *(void **)o;
         s->in_use++;
         ac->entry[ac->avail++] = o;
         n++;
-        if (!s->freelist) {              /* slab just went full */
+        if (!s->freelist) { /* slab just went full */
             slab_list_del(&c->slabs_partial, s);
             slab_list_add(&c->slabs_full, s);
             c->num_partial--;
@@ -401,8 +398,7 @@ static void ac_drain(kmem_cache_t *c, kmem_ac_t *ac)
         void *o = ac->entry[--ac->avail];
         /* find the slab by mask: every run is page aligned and a power of
          * two in size, so its header sits at (obj & ~(slab_size - 1)) */
-        kmem_slab_t *sl = (kmem_slab_t *)((uint64_t)o &
-                          ~(c->slab_size - 1));
+        kmem_slab_t *sl = (kmem_slab_t *)((uint64_t)o & ~(c->slab_size - 1));
         if (sl->in_use == c->objs_per_slab) {
             slab_list_del(&c->slabs_full, sl);
             c->num_full--;
@@ -410,7 +406,7 @@ static void ac_drain(kmem_cache_t *c, kmem_ac_t *ac)
             slab_list_del(&c->slabs_partial, sl);
             c->num_partial--;
         }
-        *(void **)o = sl->freelist;
+        *(void **)o  = sl->freelist;
         sl->freelist = o;
         sl->in_use--;
         slab_rehome(c, sl);
@@ -423,8 +419,8 @@ void kmem_cache_free(kmem_cache_t *c, void *obj)
         return;
 
     /* 1. this CPU's array cache, if there is room */
-    unsigned cpu = 0;
-    kmem_ac_t *ac = &c->ac[cpu];
+    unsigned   cpu = 0;
+    kmem_ac_t *ac  = &c->ac[cpu];
     if (ac->avail < ac->limit) {
         ac->entry[ac->avail++] = obj;
         return;
@@ -436,8 +432,7 @@ void kmem_cache_free(kmem_cache_t *c, void *obj)
         void *o = ac->entry[--ac->avail];
         /* find the slab by mask: every run is page aligned and a power of
          * two in size, so its header sits at (obj & ~(slab_size - 1)) */
-        kmem_slab_t *sl = (kmem_slab_t *)((uint64_t)o &
-                          ~(c->slab_size - 1));
+        kmem_slab_t *sl = (kmem_slab_t *)((uint64_t)o & ~(c->slab_size - 1));
         if (sl->in_use == c->objs_per_slab) {
             slab_list_del(&c->slabs_full, sl);
             c->num_full--;
@@ -448,7 +443,7 @@ void kmem_cache_free(kmem_cache_t *c, void *obj)
             slab_list_del(&c->slabs_partial, sl);
             c->num_partial--;
         }
-        *(void **)o = sl->freelist;
+        *(void **)o  = sl->freelist;
         sl->freelist = o;
         sl->in_use--;
         slab_rehome(c, sl);
@@ -466,7 +461,7 @@ void kmem_cache_free(kmem_cache_t *c, void *obj)
 int kmem_slabinfo_next(int *iter, kmem_slabinfo_t *out)
 {
     kmem_cache_t *c = g_caches;
-    int i = 0;
+    int           i = 0;
     while (c && i < *iter) {
         c = c->next;
         i++;
@@ -478,25 +473,25 @@ int kmem_slabinfo_next(int *iter, kmem_slabinfo_t *out)
     uint32_t active = 0, total = 0;
     for (kmem_slab_t *s = c->slabs_full; s; s = s->next) {
         active += s->in_use;
-        total  += c->objs_per_slab;
+        total += c->objs_per_slab;
     }
     for (kmem_slab_t *s = c->slabs_partial; s; s = s->next) {
         active += s->in_use;
-        total  += c->objs_per_slab;
+        total += c->objs_per_slab;
     }
     for (kmem_slab_t *s = c->slabs_free; s; s = s->next)
         total += c->objs_per_slab;
 
-    out->name         = c->name;
-    out->obj_size     = c->obj_size;
-    out->objs_per_slab= c->objs_per_slab;
-    out->active_objs  = active + c->ac[0].avail;
-    out->num_objs     = total;
-    out->num_full     = c->num_full;
-    out->num_partial  = c->num_partial;
-    out->num_slabs    = c->num_full + c->num_partial + c->num_free;
-    out->ac_hits      = c->ac_hits;
-    out->slab_hits    = c->slab_hits;
+    out->name          = c->name;
+    out->obj_size      = c->obj_size;
+    out->objs_per_slab = c->objs_per_slab;
+    out->active_objs   = active + c->ac[0].avail;
+    out->num_objs      = total;
+    out->num_full      = c->num_full;
+    out->num_partial   = c->num_partial;
+    out->num_slabs     = c->num_full + c->num_partial + c->num_free;
+    out->ac_hits       = c->ac_hits;
+    out->slab_hits     = c->slab_hits;
     return 0;
 }
 

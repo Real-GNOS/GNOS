@@ -8,16 +8,16 @@
  */
 #include "ulib.h"
 
-#define MAX_KEEP  32
-#define COLS      160
-#define CHUNK     512
-#define PATH_MAX  128
+#define MAX_KEEP 32
+#define COLS     160
+#define CHUNK    512
+#define PATH_MAX 128
 
 static char ring[MAX_KEEP][COLS];
 static int  rlen[MAX_KEEP];
-static int  head;                     /* next slot to fill */
-static int  filled;                   /* how many slots hold a line */
-static int  cur;                      /* length of the line being built */
+static int  head;   /* next slot to fill */
+static int  filled; /* how many slots hold a line */
+static int  cur;    /* length of the line being built */
 
 static void reset(void)
 {
@@ -27,7 +27,7 @@ static void reset(void)
 static void commit(void)
 {
     rlen[head] = cur;
-    head = (head + 1) % MAX_KEEP;
+    head       = (head + 1) % MAX_KEEP;
     if (filled < MAX_KEEP)
         filled++;
     cur = 0;
@@ -45,7 +45,7 @@ static void feed(char c)
 
 static void flush(int keep)
 {
-    if (cur)                          /* a last line with no newline */
+    if (cur) /* a last line with no newline */
         commit();
 
     int n = (keep < filled) ? keep : filled;

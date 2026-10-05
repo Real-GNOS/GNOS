@@ -33,14 +33,14 @@ void fbcon_init(const bootinfo_t *bi);
 
 /* Claim a console.  Returns its id, or -1 when they are all taken.  Console 0
  * is allocated by fbcon_init() and must not be claimed again. */
-int  fbcon_alloc(void);
+int fbcon_alloc(void);
 
 /* Put `con` on the screen and repaint from its cells.  A no-op if it is
  * already active or the id is not a live console. */
 void fbcon_activate(int con);
 
 /* The console currently on screen. */
-int  fbcon_active(void);
+int fbcon_active(void);
 
 /* ---- per-console output ------------------------------------------------ */
 /* Write one character.  Understands \n, \r, \b and \t, and scrolls. */
@@ -70,10 +70,8 @@ void fbcon_size(uint32_t *cols, uint32_t *rows);
  * Linux vcsa sense: attr = (bg << 4) | fg), or overwrite one.  Setting a
  * cell repaints it on screen when the console is active.  Returns 0 or
  * -EINVAL for out-of-range coordinates. */
-int  fbcon_get_cell(int con, uint32_t row, uint32_t col,
-                    uint32_t *cp, uint8_t *attr);
-int  fbcon_set_cell(int con, uint32_t row, uint32_t col, uint32_t cp,
-                    uint8_t attr);
+int fbcon_get_cell(int con, uint32_t row, uint32_t col, uint32_t *cp, uint8_t *attr);
+int fbcon_set_cell(int con, uint32_t row, uint32_t col, uint32_t cp, uint8_t attr);
 
 /* The pixel geometry of the current mode (any pointer may be NULL). */
 void fbcon_geometry(uint32_t *w, uint32_t *h, uint32_t *pitch);

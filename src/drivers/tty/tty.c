@@ -56,15 +56,15 @@
 #define KBD_DATA   0x60
 #define KBD_STATUS 0x64
 
-#define LINE_MAX   256
-#define RING_SIZE  1024
+#define LINE_MAX  256
+#define RING_SIZE 1024
 
 /*
  * End-of-file is kept *out of band*.  Storing it as the byte 0x04 would make
  * a raw-mode read of a literal Ctrl-D indistinguishable from end of input, so
  * the ring holds 16-bit cells and the marker uses a value no byte can have.
  */
-#define RING_EOF   0x100u
+#define RING_EOF 0x100u
 
 /* The PIT runs at SCHED_HZ (100) Hz and c_cc[VTIME] counts tenths of a
  * second, so one VTIME unit is ten ticks. */
@@ -73,21 +73,21 @@
 /* One virtual terminal.  Everything that used to be a file-scope singleton
  * now lives in here, one copy per terminal. */
 typedef struct {
-    int      con;                    /* the fbcon console it draws on */
+    int con; /* the fbcon console it draws on */
 
-    char     line[LINE_MAX];         /* the line being edited (canonical) */
+    char     line[LINE_MAX]; /* the line being edited (canonical) */
     uint32_t line_len;
 
-    uint16_t ring[RING_SIZE];        /* finished input waiting to be read */
+    uint16_t          ring[RING_SIZE]; /* finished input waiting to be read */
     volatile uint32_t head, tail;
 
-    termios_t tio;                   /* this terminal's line discipline */
-    int      fg_pgid;                /* foreground group, 0 = nobody */
-    int      sid;                    /* session that claimed it, 0 = free */
+    termios_t tio;     /* this terminal's line discipline */
+    int       fg_pgid; /* foreground group, 0 = nobody */
+    int       sid;     /* session that claimed it, 0 = free */
 } vt_t;
 
 static vt_t g_vt[NR_VT];
-static int  g_active;                /* the terminal on screen */
+static int  g_active; /* the terminal on screen */
 
 /* Modifier state.  The keyboard is one device shared by every terminal, so
  * unlike the discipline state this really is global. */
@@ -111,7 +111,7 @@ static inline void outb(uint16_t port, uint8_t v)
 
 /* The 8042 command port, separate from the keyboard data port. */
 #define KBD_CMD     0x64
-#define KBD_ENABLE  0xAE            /* enable the first PS/2 port (keyboard) */
+#define KBD_ENABLE  0xAE /* enable the first PS/2 port (keyboard) */
 #define KBD_DISABLE 0xAD
 
 /*
@@ -121,17 +121,17 @@ static inline void outb(uint16_t port, uint8_t v)
  * cursor and editing keys, which is exactly what readline expects in raw
  * mode -- so the arrow keys move the cursor instead of printing garbage.
  */
-static const char * const kbd_ext_map[128] = {
-    [0x47] = "\033[1~",   /* Home     */
-    [0x48] = "\033[A",    /* Up       */
-    [0x49] = "\033[5~",   /* PageUp   */
-    [0x4B] = "\033[D",    /* Left     */
-    [0x4D] = "\033[C",    /* Right    */
-    [0x4F] = "\033[4~",   /* End      */
-    [0x50] = "\033[B",    /* Down     */
-    [0x51] = "\033[6~",   /* PageDown */
-    [0x52] = "\033[2~",   /* Insert   */
-    [0x53] = "\033[3~",   /* Delete   */
+static const char *const kbd_ext_map[128] = {
+    [0x47] = "\033[1~", /* Home     */
+    [0x48] = "\033[A",  /* Up       */
+    [0x49] = "\033[5~", /* PageUp   */
+    [0x4B] = "\033[D",  /* Left     */
+    [0x4D] = "\033[C",  /* Right    */
+    [0x4F] = "\033[4~", /* End      */
+    [0x50] = "\033[B",  /* Down     */
+    [0x51] = "\033[6~", /* PageDown */
+    [0x52] = "\033[2~", /* Insert   */
+    [0x53] = "\033[3~", /* Delete   */
 };
 
 /*
@@ -143,19 +143,17 @@ static const char * const kbd_ext_map[128] = {
  * really does see the carriage return, instead of us having decided for it.
  */
 static const char kbd_map[128] = {
-    0,   27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0x7F,
-    '\t','q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\r',
-    0,   'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
-    0,   '\\','z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',
-    0,   '*', 0,   ' ',
+    0,    27,  '1', '2', '3', '4', '5', '6', '7', '8', '9',  '0', '-', '=',  0x7F,
+    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p',  '[', ']', '\r', 0,
+    'a',  's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0,   '\\', 'z',
+    'x',  'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,   '*',  0,   ' ',
 };
 
 static const char kbd_map_shift[128] = {
-    0,   27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', 0x7F,
-    '\t','Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\r',
-    0,   'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~',
-    0,   '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?',
-    0,   '*', 0,   ' ',
+    0,    27,  '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+',  0x7F,
+    '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\r', 0,
+    'A',  'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,   '|',  'Z',
+    'X',  'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0,   '*', 0,   ' ',
 };
 
 /* ---- which terminal is this call about? -------------------------------- */
@@ -193,7 +191,10 @@ int tty_vt_active(void)
 }
 
 /* ---- the input ring ---------------------------------------------------- */
-static int ring_empty(const vt_t *v) { return v->head == v->tail; }
+static int ring_empty(const vt_t *v)
+{
+    return v->head == v->tail;
+}
 
 static uint32_t ring_avail(const vt_t *v)
 {
@@ -214,9 +215,9 @@ static void ring_put(vt_t *v, uint16_t c)
 {
     uint32_t next = (v->head + 1) % RING_SIZE;
     if (next == v->tail)
-        return;                     /* full: drop, we have nowhere to block */
+        return; /* full: drop, we have nowhere to block */
     v->ring[v->head] = c;
-    v->head = next;
+    v->head          = next;
 }
 
 static void ring_flush(vt_t *v)
@@ -252,8 +253,7 @@ static void echo_char(vt_t *v, uint8_t c)
     if (!(v->tio.c_lflag & ECHO))
         return;
 
-    if ((v->tio.c_lflag & ECHOCTL) && c < 0x20 &&
-        c != '\n' && c != '\r' && c != '\t') {
+    if ((v->tio.c_lflag & ECHOCTL) && c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
         out_char(v, '^');
         out_char(v, (char)(c + '@'));
         return;
@@ -304,15 +304,18 @@ static void vt_input_char(vt_t *v, uint8_t c)
     /* ---- c_lflag & ISIG: the keys that generate signals ----------------- */
     if (v->tio.c_lflag & ISIG) {
         int sig = 0;
-        if (c == v->tio.c_cc[VINTR])      sig = SIGINT;
-        else if (c == v->tio.c_cc[VQUIT]) sig = SIGQUIT;
-        else if (c == v->tio.c_cc[VSUSP]) sig = SIGTSTP;
+        if (c == v->tio.c_cc[VINTR])
+            sig = SIGINT;
+        else if (c == v->tio.c_cc[VQUIT])
+            sig = SIGQUIT;
+        else if (c == v->tio.c_cc[VSUSP])
+            sig = SIGTSTP;
 
         if (sig) {
             echo_char(v, c);
             if (v->tio.c_lflag & ECHO)
                 out_char(v, '\n');
-            v->line_len = 0;            /* the half-typed line is gone */
+            v->line_len = 0; /* the half-typed line is gone */
 
             if (v->fg_pgid)
                 proc_signal_group(v->fg_pgid, sig);
@@ -344,7 +347,7 @@ static void vt_input_char(vt_t *v, uint8_t c)
     /* ---- canonical: assemble a line ------------------------------------- */
     if (c == v->tio.c_cc[VEOF]) {
         if (v->line_len)
-            line_flush(v, 0);           /* deliver the partial line */
+            line_flush(v, 0); /* deliver the partial line */
         else {
             ring_put(v, RING_EOF);
             sched_wake_poll_channels();
@@ -464,8 +467,8 @@ void tty_vt_release_session(int sid)
  * never reach the line discipline, or every switch would also type garbage
  * into whatever shell was listening.
  */
-#define KEY_F1  0x3B
-#define KEY_F6  0x40
+#define KEY_F1 0x3B
+#define KEY_F6 0x40
 
 static int vt_hotkey(uint8_t code)
 {
@@ -496,8 +499,8 @@ static void kbd_feed(uint8_t sc)
         return;
     }
 
-    int release = sc & 0x80;
-    uint8_t code = (uint8_t)(sc & 0x7F);
+    int     release = sc & 0x80;
+    uint8_t code    = (uint8_t)(sc & 0x7F);
 
     /* Second half of an extended sequence.  Modifier releases do nothing;
      * key releases are ignored; otherwise the make code yields an escape
@@ -514,11 +517,11 @@ static void kbd_feed(uint8_t sc)
                 g_alt = 0;
             return;
         }
-        if (code == 0x1D) {             /* right control */
+        if (code == 0x1D) { /* right control */
             g_ctrl = 1;
             return;
         }
-        if (code == 0x38) {             /* right alt */
+        if (code == 0x38) { /* right alt */
             g_alt = 1;
             return;
         }
@@ -531,16 +534,17 @@ static void kbd_feed(uint8_t sc)
     }
 
     switch (code) {
-    case 0x2A: case 0x36:            /* left / right shift */
+    case 0x2A:
+    case 0x36: /* left / right shift */
         g_shift = !release;
         return;
-    case 0x1D:                       /* left control */
+    case 0x1D: /* left control */
         g_ctrl = !release;
         return;
-    case 0x38:                       /* left alt */
+    case 0x38: /* left alt */
         g_alt = !release;
         return;
-    case 0x3A:                       /* caps lock */
+    case 0x3A: /* caps lock */
         if (!release)
             g_caps = !g_caps;
         return;
@@ -562,9 +566,9 @@ static void kbd_feed(uint8_t sc)
         c = (char)(c - 'A' + 'a');
 
     if (g_ctrl && ((c | 0x20) >= 'a' && (c | 0x20) <= 'z'))
-        c = (char)((c | 0x20) - 'a' + 1);      /* Ctrl-A .. Ctrl-Z */
+        c = (char)((c | 0x20) - 'a' + 1); /* Ctrl-A .. Ctrl-Z */
     else if (g_ctrl && c == '\\')
-        c = 0x1C;                              /* Ctrl-\ */
+        c = 0x1C; /* Ctrl-\ */
 
     tty_input_char((uint8_t)c);
 }
@@ -698,7 +702,7 @@ static int32_t vt_read(vt_t *v, char *buf, uint32_t len)
             if (avail && avail >= want)
                 break;
             if (want == 0 && vtime == 0)
-                break;                      /* a pure poll: 0 bytes is fine */
+                break; /* a pure poll: 0 bytes is fine */
         }
 
         if (!p) {
@@ -724,11 +728,11 @@ static int32_t vt_read(vt_t *v, char *buf, uint32_t len)
         sched_block_irqoff(WAIT_TTY);
     }
 
-    uint32_t n = 0;
-    int eof = 0;
+    uint32_t n   = 0;
+    int      eof = 0;
     while (n < len && !ring_empty(v)) {
         uint16_t c = v->ring[v->tail];
-        v->tail = (v->tail + 1) % RING_SIZE;
+        v->tail    = (v->tail + 1) % RING_SIZE;
         if (c == RING_EOF) {
             eof = 1;
             break;
@@ -755,8 +759,14 @@ int32_t tty_read(char *buf, uint32_t len)
     return vt_read(vt_current(), buf, len);
 }
 
-void tty_set_pgrp(int pgid) { vt_current()->fg_pgid = pgid; }
-int  tty_get_pgrp(void)     { return vt_current()->fg_pgid; }
+void tty_set_pgrp(int pgid)
+{
+    vt_current()->fg_pgid = pgid;
+}
+int tty_get_pgrp(void)
+{
+    return vt_current()->fg_pgid;
+}
 
 static int vt_check_ttou(vt_t *v)
 {
@@ -796,7 +806,7 @@ static void vt_set_termios(vt_t *v, const termios_t *t, int flush)
     if ((v->tio.c_lflag & ICANON) && !(t->c_lflag & ICANON) && v->line_len)
         line_flush(v, 0);
 
-    v->tio = *t;
+    v->tio        = *t;
     v->tio.c_line = 0;
 
     if (flush) {
@@ -837,8 +847,7 @@ static int32_t tty_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t le
     return vt_read(vt_of_node(n), (char *)buf, len);
 }
 
-static int32_t tty_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                              uint32_t len)
+static int32_t tty_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)off;
     return vt_write(vt_of_node(n), (const char *)buf, len);
@@ -856,8 +865,8 @@ static int32_t vt_ioctl(vt_t *v, uint64_t cmd, uint64_t arg)
         if (!user_ptr_ok(arg, sizeof(vt_stat_t)))
             return -E_FAULT;
         vt_stat_t *st = (vt_stat_t *)(uintptr_t)arg;
-        st->v_active = (uint16_t)(g_active + 1);
-        st->v_signal = 0;
+        st->v_active  = (uint16_t)(g_active + 1);
+        st->v_signal  = 0;
         /* Bit N means terminal N exists.  All of them always do here -- they
          * are statically allocated -- and bit 0 is set the way Linux sets it,
          * for a terminal 0 that has never existed. */
@@ -902,8 +911,8 @@ static int32_t vt_ioctl(vt_t *v, uint64_t cmd, uint64_t arg)
         if (!user_ptr_ok(arg, sizeof(vt_mode_t)))
             return -E_FAULT;
         vt_mode_t *m = (vt_mode_t *)(uintptr_t)arg;
-        m->mode  = VT_AUTO;
-        m->waitv = 0;
+        m->mode      = VT_AUTO;
+        m->waitv     = 0;
         m->relsig = m->acqsig = m->frsig = 0;
         return 0;
     }
@@ -1025,8 +1034,13 @@ static int32_t tty_node_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         return 0;
     }
 
-    case VT_OPENQRY: case VT_GETMODE: case VT_SETMODE: case VT_GETSTATE:
-    case VT_ACTIVATE: case VT_WAITACTIVE: case VT_DISALLOCATE:
+    case VT_OPENQRY:
+    case VT_GETMODE:
+    case VT_SETMODE:
+    case VT_GETSTATE:
+    case VT_ACTIVATE:
+    case VT_WAITACTIVE:
+    case VT_DISALLOCATE:
         return vt_ioctl(v, cmd, arg);
 
     default:
@@ -1053,24 +1067,23 @@ static void termios_defaults(termios_t *t)
     t->c_iflag = ICRNL | IXON;
     t->c_oflag = OPOST | ONLCR;
     t->c_cflag = B38400 | CS8 | CREAD | CLOCAL | HUPCL;
-    t->c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE |
-                 IEXTEN;
+    t->c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN;
 
-    t->c_cc[VINTR]    = 0x03;      /* ^C */
-    t->c_cc[VQUIT]    = 0x1C;      /* ^\ */
-    t->c_cc[VERASE]   = 0x7F;      /* DEL */
-    t->c_cc[VKILL]    = 0x15;      /* ^U */
-    t->c_cc[VEOF]     = 0x04;      /* ^D */
+    t->c_cc[VINTR]    = 0x03; /* ^C */
+    t->c_cc[VQUIT]    = 0x1C; /* ^\ */
+    t->c_cc[VERASE]   = 0x7F; /* DEL */
+    t->c_cc[VKILL]    = 0x15; /* ^U */
+    t->c_cc[VEOF]     = 0x04; /* ^D */
     t->c_cc[VTIME]    = 0;
     t->c_cc[VMIN]     = 1;
-    t->c_cc[VSTART]   = 0x11;      /* ^Q */
-    t->c_cc[VSTOP]    = 0x13;      /* ^S */
-    t->c_cc[VSUSP]    = 0x1A;      /* ^Z */
+    t->c_cc[VSTART]   = 0x11; /* ^Q */
+    t->c_cc[VSTOP]    = 0x13; /* ^S */
+    t->c_cc[VSUSP]    = 0x1A; /* ^Z */
     t->c_cc[VEOL]     = 0;
-    t->c_cc[VREPRINT] = 0x12;      /* ^R */
-    t->c_cc[VDISCARD] = 0x0F;      /* ^O */
-    t->c_cc[VWERASE]  = 0x17;      /* ^W */
-    t->c_cc[VLNEXT]   = 0x16;      /* ^V */
+    t->c_cc[VREPRINT] = 0x12; /* ^R */
+    t->c_cc[VDISCARD] = 0x0F; /* ^O */
+    t->c_cc[VWERASE]  = 0x17; /* ^W */
+    t->c_cc[VLNEXT]   = 0x16; /* ^V */
     t->c_cc[VEOL2]    = 0;
 }
 
@@ -1079,7 +1092,7 @@ void tty_init(void)
     memset(g_vt, 0, sizeof(g_vt));
     g_active = 0;
     g_shift = g_caps = g_ctrl = g_alt = 0;
-    g_ext = 0;
+    g_ext                             = 0;
 
     for (int i = 0; i < NR_VT; i++) {
         /* Terminal 1 draws on console 0, the one fbcon_init() already made
@@ -1096,9 +1109,9 @@ void tty_init(void)
      * controller to accept a command, enable the keyboard port, then drain
      * its buffer so the first IRQ is a real keystroke.
      */
-    while (inb(KBD_STATUS) & 0x02)          /* wait for input buffer empty */
+    while (inb(KBD_STATUS) & 0x02) /* wait for input buffer empty */
         ;
-    outb(KBD_CMD, KBD_ENABLE);              /* enable PS/2 port 1 (keyboard) */
+    outb(KBD_CMD, KBD_ENABLE); /* enable PS/2 port 1 (keyboard) */
     while (inb(KBD_STATUS) & 1)
         (void)inb(KBD_DATA);
 
@@ -1115,15 +1128,13 @@ void tty_init(void)
     };
     for (int i = 0; i < NR_VT; i++) {
         vfs_register_dev(vt_names[i], &g_tty_ops, &g_vt[i]);
-        subsys_set_state(subsys_register(vt_names[i], vt_names[i],
-                                         SUBSYS_CLASS_TTY, 4, i + 1),
+        subsys_set_state(subsys_register(vt_names[i], vt_names[i], SUBSYS_CLASS_TTY, 4, i + 1),
                          SUBSYS_STATE_LIVE);
     }
     vfs_register_dev("tty", &g_tty_ops, NULL);
     vfs_register_dev("console", &g_tty_ops, &g_vt[0]);
-    vcs_init();   /* /dev/vcs, /dev/vcsa: the active screen as a file */
-    subsys_set_state(subsys_register("tty", "tty", SUBSYS_CLASS_TTY, 5, 0),
-                     SUBSYS_STATE_LIVE);
+    vcs_init(); /* /dev/vcs, /dev/vcsa: the active screen as a file */
+    subsys_set_state(subsys_register("tty", "tty", SUBSYS_CLASS_TTY, 5, 0), SUBSYS_STATE_LIVE);
     subsys_set_state(subsys_register("console", "console", SUBSYS_CLASS_TTY, 5, 1),
                      SUBSYS_STATE_LIVE);
 

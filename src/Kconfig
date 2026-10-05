@@ -353,6 +353,14 @@ config GNOS_DRM
     help
       Direct Rendering Manager 图形框架。提供 GPU 渲染接口。
 
+config GNOS_DRM_SVGA
+    bool "VMware SVGA II 显卡驱动"
+    default y
+    depends on GNOS_DRM
+    help
+      VMware SVGA II (15ad:0405) 驱动。提供 modesetting 与独立显存扫描输出，
+      QEMU 下需 -device vmware-svga。无此设备时自动退回帧缓冲控制台。
+
 config GNOS_DRM_I915
     bool "Intel i915 GEM/KMS 驱动"
     default y

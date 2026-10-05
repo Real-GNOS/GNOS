@@ -20,18 +20,18 @@
 #include "timer.h"
 #include "anonfd.h"
 
-#define TFD_TIMER_ABSTIME        1
-#define TFD_TIMER_CANCEL_ON_SET  2
-#define TFD_NONBLOCK             O_NONBLOCK
-#define TFD_CLOEXEC              O_CLOEXEC
+#define TFD_TIMER_ABSTIME       1
+#define TFD_TIMER_CANCEL_ON_SET 2
+#define TFD_NONBLOCK            O_NONBLOCK
+#define TFD_CLOEXEC             O_CLOEXEC
 
-#define TIMERFD_MAX  32
+#define TIMERFD_MAX 32
 
 typedef struct {
-    int      active;            /* armed */
-    uint64_t next;              /* next expiry, in ticks */
-    uint64_t period;            /* interval, in ticks; 0 = one-shot */
-    uint64_t expirations;       /* pending expirations, read() drains */
+    int      active;      /* armed */
+    uint64_t next;        /* next expiry, in ticks */
+    uint64_t period;      /* interval, in ticks; 0 = one-shot */
+    uint64_t expirations; /* pending expirations, read() drains */
     int      nonblock;
 } timerfd_t;
 
@@ -49,7 +49,7 @@ typedef struct {
 typedef struct {
     k_timespec_t it_interval;
     k_timespec_t it_value;
-} k_itimerspec_t;                        /* 32 bytes */
+} k_itimerspec_t; /* 32 bytes */
 
 /* ticks -> itimerspec value field; a zero timespec is written as 0/0. */
 static void ticks_to_ts(uint64_t ticks, k_timespec_t *ts)
@@ -76,7 +76,7 @@ static int32_t timerfd_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
 
     for (;;) {
         if (t->expirations > 0) {
-            uint64_t v = t->expirations;
+            uint64_t v     = t->expirations;
             t->expirations = 0;
             memcpy(buf, &v, 8);
             return 8;
@@ -87,11 +87,13 @@ static int32_t timerfd_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
     }
 }
 
-static int32_t timerfd_write(vfs_node_t *n, uint64_t off, const void *buf,
-                             uint32_t len)
+static int32_t timerfd_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
-    return -E_INVAL;                    /* timerfds are read-only */
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
+    return -E_INVAL; /* timerfds are read-only */
 }
 
 static int timerfd_poll(vfs_node_t *n, int16_t events, int16_t *revents)
@@ -160,15 +162,18 @@ int64_t sys_timerfd_create(uint64_t clockid, uint64_t flags)
 
     int slot = -1;
     for (int i = 0; i < TIMERFD_MAX; i++)
-        if (!g_timers[i]) { slot = i; break; }
+        if (!g_timers[i]) {
+            slot = i;
+            break;
+        }
     if (slot < 0) {
         kfree(t);
         return -E_NOMEM;
     }
     g_timers[slot] = t;
 
-    int h = vfs_anon_open(VFS_ANON, &g_timerfd_ops, t,
-                          t->nonblock ? (O_RDWR | O_NONBLOCK) : O_RDWR);
+    int h =
+        vfs_anon_open(VFS_ANON, &g_timerfd_ops, t, t->nonblock ? (O_RDWR | O_NONBLOCK) : O_RDWR);
     if (h < 0) {
         g_timers[slot] = NULL;
         kfree(t);
@@ -188,8 +193,7 @@ static timerfd_t *fd_timerfd(int fd)
     return (timerfd_t *)n->priv;
 }
 
-int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t uin,
-                            uint64_t uout)
+int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t uin, uint64_t uout)
 {
     if (flags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET))
         return -E_INVAL;
@@ -209,18 +213,16 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t uin,
     if (!t->active)
         out.it_value.tv_sec = out.it_value.tv_nsec = 0;
     else
-        ticks_to_ts(t->next > timer_ticks() ? t->next - timer_ticks() : 0,
-                    &out.it_value);
+        ticks_to_ts(t->next > timer_ticks() ? t->next - timer_ticks() : 0, &out.it_value);
 
     uint64_t value = ts_to_ticks(&in.it_value);
     if (value == 0) {
-        t->active = 0;                  /* disarm; counter survives */
+        t->active = 0; /* disarm; counter survives */
     } else {
-        t->active    = 1;
-        t->period    = ts_to_ticks(&in.it_interval);
-        t->next      = (flags & TFD_TIMER_ABSTIME)
-                           ? value : timer_ticks() + value;
-        t->expirations = 0;             /* arming resets the counter */
+        t->active      = 1;
+        t->period      = ts_to_ticks(&in.it_interval);
+        t->next        = (flags & TFD_TIMER_ABSTIME) ? value : timer_ticks() + value;
+        t->expirations = 0; /* arming resets the counter */
     }
     sched_wake_reason(WAIT_PIPE);
 
@@ -244,8 +246,7 @@ int64_t sys_timerfd_gettime(uint64_t fd, uint64_t uout)
     if (!t->active)
         out.it_value.tv_sec = out.it_value.tv_nsec = 0;
     else
-        ticks_to_ts(t->next > timer_ticks() ? t->next - timer_ticks() : 0,
-                    &out.it_value);
+        ticks_to_ts(t->next > timer_ticks() ? t->next - timer_ticks() : 0, &out.it_value);
     memcpy((void *)(uintptr_t)uout, &out, sizeof(out));
     return 0;
 }

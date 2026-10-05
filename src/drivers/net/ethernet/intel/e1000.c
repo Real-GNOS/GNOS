@@ -37,79 +37,79 @@
 #include "proc.h"
 
 /* ---- register offsets (from BAR0) ---------------------------------- */
-#define E1000_CTRL    0x0000    /* device control */
-#define E1000_STATUS  0x0008    /* device status */
-#define E1000_EERD    0x0014    /* EEPROM read */
-#define E1000_MDIC    0x0020    /* PHY management interface */
-#define E1000_ICR     0x00C0    /* interrupt cause read (read = ack) */
-#define E1000_IMS     0x00D0    /* interrupt mask set */
-#define E1000_IMC     0x00D8    /* interrupt mask clear */
-#define E1000_RCTL    0x0100    /* receive control */
-#define E1000_TCTL    0x0400    /* transmit control */
-#define E1000_TIPG    0x0410    /* transmit inter-packet gap */
-#define E1000_RDBAL   0x2800    /* rx ring base, low 32 bits */
-#define E1000_RDBAH   0x2804
-#define E1000_RDLEN   0x2808    /* rx ring length in BYTES */
-#define E1000_RDH     0x2810    /* rx head  (card writes) */
-#define E1000_RDT     0x2818    /* rx tail  (we write) */
-#define E1000_TDBAL   0x3800
-#define E1000_TDBAH   0x3804
-#define E1000_TDLEN   0x3808
-#define E1000_TDH     0x3810
-#define E1000_TDT     0x3818
-#define E1000_MTA     0x5200    /* multicast table array, 128 dwords */
-#define E1000_RAL0    0x5400    /* receive address, low  */
-#define E1000_RAH0    0x5404    /* receive address, high (bit31 = valid) */
+#define E1000_CTRL   0x0000 /* device control */
+#define E1000_STATUS 0x0008 /* device status */
+#define E1000_EERD   0x0014 /* EEPROM read */
+#define E1000_MDIC   0x0020 /* PHY management interface */
+#define E1000_ICR    0x00C0 /* interrupt cause read (read = ack) */
+#define E1000_IMS    0x00D0 /* interrupt mask set */
+#define E1000_IMC    0x00D8 /* interrupt mask clear */
+#define E1000_RCTL   0x0100 /* receive control */
+#define E1000_TCTL   0x0400 /* transmit control */
+#define E1000_TIPG   0x0410 /* transmit inter-packet gap */
+#define E1000_RDBAL  0x2800 /* rx ring base, low 32 bits */
+#define E1000_RDBAH  0x2804
+#define E1000_RDLEN  0x2808 /* rx ring length in BYTES */
+#define E1000_RDH    0x2810 /* rx head  (card writes) */
+#define E1000_RDT    0x2818 /* rx tail  (we write) */
+#define E1000_TDBAL  0x3800
+#define E1000_TDBAH  0x3804
+#define E1000_TDLEN  0x3808
+#define E1000_TDH    0x3810
+#define E1000_TDT    0x3818
+#define E1000_MTA    0x5200 /* multicast table array, 128 dwords */
+#define E1000_RAL0   0x5400 /* receive address, low  */
+#define E1000_RAH0   0x5404 /* receive address, high (bit31 = valid) */
 
 /* Statistics.  These are the only way to tell "the MAC never saw the frame"
  * apart from "the MAC saw it and could not put it anywhere", which are two
  * completely different bugs that look identical from the descriptor ring. */
-#define E1000_CRCERRS 0x4000    /* CRC errors */
-#define E1000_MPC     0x4010    /* missed packets (no buffer available) */
-#define E1000_GPRC    0x4074    /* good packets received */
-#define E1000_RNBC    0x40A0    /* receive no buffers */
-#define E1000_TPR     0x40D0    /* total packets received (before filter) */
-#define E1000_TPT     0x40D4    /* total packets transmitted */
+#define E1000_CRCERRS 0x4000 /* CRC errors */
+#define E1000_MPC     0x4010 /* missed packets (no buffer available) */
+#define E1000_GPRC    0x4074 /* good packets received */
+#define E1000_RNBC    0x40A0 /* receive no buffers */
+#define E1000_TPR     0x40D0 /* total packets received (before filter) */
+#define E1000_TPT     0x40D4 /* total packets transmitted */
 
 /* CTRL bits */
-#define CTRL_SLU      (1u << 6)    /* set link up */
-#define CTRL_RST      (1u << 26)   /* device reset (self-clearing) */
+#define CTRL_SLU (1u << 6)  /* set link up */
+#define CTRL_RST (1u << 26) /* device reset (self-clearing) */
 
 /* STATUS bits */
-#define STATUS_LU     (1u << 1)    /* link up */
-#define STATUS_FD     (1u << 0)    /* full duplex */
+#define STATUS_LU (1u << 1) /* link up */
+#define STATUS_FD (1u << 0) /* full duplex */
 
 /* Interrupt causes (same bit layout in ICR, IMS and IMC) */
-#define ICR_TXDW      (1u << 0)    /* transmit descriptor written back */
-#define ICR_LSC       (1u << 2)    /* link status change */
-#define ICR_RXDMT0    (1u << 4)    /* rx ring is running low */
-#define ICR_RXO       (1u << 6)    /* receiver overrun */
-#define ICR_RXT0      (1u << 7)    /* receive timer: frames are waiting */
+#define ICR_TXDW   (1u << 0) /* transmit descriptor written back */
+#define ICR_LSC    (1u << 2) /* link status change */
+#define ICR_RXDMT0 (1u << 4) /* rx ring is running low */
+#define ICR_RXO    (1u << 6) /* receiver overrun */
+#define ICR_RXT0   (1u << 7) /* receive timer: frames are waiting */
 
 /* RCTL bits */
-#define RCTL_EN       (1u << 1)    /* receiver enable */
-#define RCTL_UPE      (1u << 3)    /* unicast promiscuous */
-#define RCTL_MPE      (1u << 4)    /* multicast promiscuous */
-#define RCTL_BAM      (1u << 15)   /* accept broadcast */
-#define RCTL_SECRC    (1u << 26)   /* strip the ethernet CRC for us */
+#define RCTL_EN    (1u << 1)  /* receiver enable */
+#define RCTL_UPE   (1u << 3)  /* unicast promiscuous */
+#define RCTL_MPE   (1u << 4)  /* multicast promiscuous */
+#define RCTL_BAM   (1u << 15) /* accept broadcast */
+#define RCTL_SECRC (1u << 26) /* strip the ethernet CRC for us */
 /* BSIZE == 00 with no BSEX means 2048-byte buffers, which is what we
  * allocate, so there is no bit to set for it. */
 
 /* TCTL bits */
-#define TCTL_EN       (1u << 1)    /* transmitter enable */
-#define TCTL_PSP      (1u << 3)    /* pad short packets to 64 bytes */
-#define TCTL_CT_SHIFT   4          /* collision threshold */
-#define TCTL_COLD_SHIFT 12         /* collision distance */
+#define TCTL_EN         (1u << 1) /* transmitter enable */
+#define TCTL_PSP        (1u << 3) /* pad short packets to 64 bytes */
+#define TCTL_CT_SHIFT   4         /* collision threshold */
+#define TCTL_COLD_SHIFT 12        /* collision distance */
 
 /* transmit descriptor command bits */
-#define TXD_CMD_EOP   0x01         /* end of packet */
-#define TXD_CMD_IFCS  0x02         /* insert the FCS/CRC for us */
-#define TXD_CMD_RS    0x08         /* report status when done */
-#define TXD_STAT_DD   0x01         /* descriptor done */
+#define TXD_CMD_EOP  0x01 /* end of packet */
+#define TXD_CMD_IFCS 0x02 /* insert the FCS/CRC for us */
+#define TXD_CMD_RS   0x08 /* report status when done */
+#define TXD_STAT_DD  0x01 /* descriptor done */
 
 /* receive descriptor status bits */
-#define RXD_STAT_DD   0x01
-#define RXD_STAT_EOP  0x02
+#define RXD_STAT_DD  0x01
+#define RXD_STAT_EOP 0x02
 
 /* PHY registers, reached through MDIC.  The e1000's PHY is always at
  * address 1; register 0 is the MII basic control register, whose bit 14 is
@@ -120,9 +120,9 @@
 #define PHY_BMCR      0
 #define BMCR_LOOPBACK 0x4000
 
-#define NRX 16                 /* rx descriptors (ring must be 128B-aligned) */
-#define NTX 8                  /* tx descriptors */
-#define BUFSZ 2048             /* per-descriptor buffer, matches RCTL BSIZE */
+#define NRX   16   /* rx descriptors (ring must be 128B-aligned) */
+#define NTX   8    /* tx descriptors */
+#define BUFSZ 2048 /* per-descriptor buffer, matches RCTL BSIZE */
 
 /* Legacy descriptor layouts, exactly as the card expects them in memory.
  * packed matters: a stray compiler pad byte here and the card reads garbage. */
@@ -145,19 +145,23 @@ typedef struct __attribute__((packed)) {
     uint16_t special;
 } rx_desc_t;
 
-static volatile uint8_t *g_regs;        /* BAR0, uncacheable */
-static int      g_ok;
-static uint8_t  g_mac[6];
-static uint8_t  g_irq;
+static volatile uint8_t *g_regs; /* BAR0, uncacheable */
+static int               g_ok;
+static uint8_t           g_mac[6];
+static uint8_t           g_irq;
 
 /* volatile: these words are written by the card behind the CPU's back, so
  * every read has to actually happen. */
-static volatile tx_desc_t *g_tx;  static uint64_t g_tx_phys;
-static volatile rx_desc_t *g_rx;  static uint64_t g_rx_phys;
-static uint8_t   *g_txbuf[NTX];  static uint64_t g_txbuf_phys[NTX];
-static uint8_t   *g_rxbuf[NRX];  static uint64_t g_rxbuf_phys[NRX];
-static unsigned   g_tx_tail;
-static unsigned   g_rx_head;
+static volatile tx_desc_t *g_tx;
+static uint64_t            g_tx_phys;
+static volatile rx_desc_t *g_rx;
+static uint64_t            g_rx_phys;
+static uint8_t            *g_txbuf[NTX];
+static uint64_t            g_txbuf_phys[NTX];
+static uint8_t            *g_rxbuf[NRX];
+static uint64_t            g_rxbuf_phys[NRX];
+static unsigned            g_tx_tail;
+static unsigned            g_rx_head;
 
 static uint64_t g_tx_frames, g_rx_frames, g_irqs;
 
@@ -201,12 +205,10 @@ static int eeprom_read(uint8_t word, uint16_t *out)
 /* ---- PHY ------------------------------------------------------------- */
 static void phy_write(uint8_t reg, uint16_t val)
 {
-    reg_write(E1000_MDIC, (uint32_t)val |
-                          ((uint32_t)reg << 16) |
-                          ((uint32_t)PHY_ADDR << 21) |
-                          (1u << 26));            /* OP = write */
+    reg_write(E1000_MDIC, (uint32_t)val | ((uint32_t)reg << 16) | ((uint32_t)PHY_ADDR << 21) |
+                              (1u << 26)); /* OP = write */
     for (int i = 0; i < 10000; i++) {
-        if (reg_read(E1000_MDIC) & (1u << 28))    /* R: ready */
+        if (reg_read(E1000_MDIC) & (1u << 28)) /* R: ready */
             return;
         io_delay();
     }
@@ -214,9 +216,8 @@ static void phy_write(uint8_t reg, uint16_t val)
 
 static uint16_t phy_read(uint8_t reg)
 {
-    reg_write(E1000_MDIC, ((uint32_t)reg << 16) |
-                          ((uint32_t)PHY_ADDR << 21) |
-                          (2u << 26));            /* OP = read */
+    reg_write(E1000_MDIC,
+              ((uint32_t)reg << 16) | ((uint32_t)PHY_ADDR << 21) | (2u << 26)); /* OP = read */
     for (int i = 0; i < 10000; i++) {
         uint32_t v = reg_read(E1000_MDIC);
         if (v & (1u << 28))
@@ -241,7 +242,7 @@ static void e1000_irq(regs_t *r)
     (void)r;
     uint32_t icr = reg_read(E1000_ICR);
     if (!icr)
-        return;                          /* not us: PCI lines are shared */
+        return; /* not us: PCI lines are shared */
 
     g_irqs++;
 
@@ -297,15 +298,14 @@ static void rx_init(void)
     /* Promiscuous: in loopback the frame we get back was addressed to us
      * anyway, but promiscuous mode means a misconfigured RAL/RAH cannot
      * quietly turn a working test into a failing one. */
-    reg_write(E1000_RCTL, RCTL_EN | RCTL_UPE | RCTL_MPE | RCTL_BAM |
-                          RCTL_SECRC);
+    reg_write(E1000_RCTL, RCTL_EN | RCTL_UPE | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
 }
 
 static void tx_init(void)
 {
     for (int i = 0; i < NTX; i++) {
         g_tx[i].addr   = g_txbuf_phys[i];
-        g_tx[i].status = TXD_STAT_DD;   /* all slots free to begin with */
+        g_tx[i].status = TXD_STAT_DD; /* all slots free to begin with */
         g_tx[i].cmd    = 0;
     }
     reg_write(E1000_TDBAL, (uint32_t)(g_tx_phys & 0xFFFFFFFF));
@@ -315,23 +315,34 @@ static void tx_init(void)
     reg_write(E1000_TDT, 0);
     g_tx_tail = 0;
 
-    reg_write(E1000_TCTL, TCTL_EN | TCTL_PSP |
-                          (0x10u << TCTL_CT_SHIFT) |
-                          (0x40u << TCTL_COLD_SHIFT));
+    reg_write(E1000_TCTL,
+              TCTL_EN | TCTL_PSP | (0x10u << TCTL_CT_SHIFT) | (0x40u << TCTL_COLD_SHIFT));
     /* IPGT=10, IPGR1=8, IPGR2=6: the IEEE 802.3 standard gap. */
     reg_write(E1000_TIPG, 0x0060200A);
 }
 
 /* ---- public API ------------------------------------------------------ */
-int e1000_present(void) { return g_ok; }
-const uint8_t *e1000_mac(void) { return g_mac; }
-int e1000_link_up(void) { return g_ok && (reg_read(E1000_STATUS) & STATUS_LU); }
+int e1000_present(void)
+{
+    return g_ok;
+}
+const uint8_t *e1000_mac(void)
+{
+    return g_mac;
+}
+int e1000_link_up(void)
+{
+    return g_ok && (reg_read(E1000_STATUS) & STATUS_LU);
+}
 
 void e1000_stats(uint64_t *tx_frames, uint64_t *rx_frames, uint64_t *irqs)
 {
-    if (tx_frames) *tx_frames = g_tx_frames;
-    if (rx_frames) *rx_frames = g_rx_frames;
-    if (irqs)      *irqs      = g_irqs;
+    if (tx_frames)
+        *tx_frames = g_tx_frames;
+    if (rx_frames)
+        *rx_frames = g_rx_frames;
+    if (irqs)
+        *irqs = g_irqs;
 }
 
 int e1000_init(void)
@@ -342,7 +353,7 @@ int e1000_init(void)
         return 0;
     }
 
-    pci_enable(d);                       /* memory space + BUS MASTER */
+    pci_enable(d); /* memory space + BUS MASTER */
     uint64_t base = pci_map_bar(d, 0);
     if (!base) {
         dbg_puts("E1000: BAR0 is not a mappable memory region\r\n");
@@ -359,7 +370,7 @@ int e1000_init(void)
     for (int i = 0; i < 1000 && (reg_read(E1000_CTRL) & CTRL_RST); i++)
         spin(10);
     reg_write(E1000_IMC, 0xFFFFFFFF);
-    (void)reg_read(E1000_ICR);           /* reading ICR clears it */
+    (void)reg_read(E1000_ICR); /* reading ICR clears it */
 
     reg_write(E1000_CTRL, reg_read(E1000_CTRL) | CTRL_SLU);
 
@@ -367,21 +378,26 @@ int e1000_init(void)
      * already latched into RAL/RAH. */
     uint16_t w0, w1, w2;
     if (eeprom_read(0, &w0) && eeprom_read(1, &w1) && eeprom_read(2, &w2)) {
-        g_mac[0] = (uint8_t)w0; g_mac[1] = (uint8_t)(w0 >> 8);
-        g_mac[2] = (uint8_t)w1; g_mac[3] = (uint8_t)(w1 >> 8);
-        g_mac[4] = (uint8_t)w2; g_mac[5] = (uint8_t)(w2 >> 8);
+        g_mac[0] = (uint8_t)w0;
+        g_mac[1] = (uint8_t)(w0 >> 8);
+        g_mac[2] = (uint8_t)w1;
+        g_mac[3] = (uint8_t)(w1 >> 8);
+        g_mac[4] = (uint8_t)w2;
+        g_mac[5] = (uint8_t)(w2 >> 8);
     } else {
         uint32_t ral = reg_read(E1000_RAL0), rah = reg_read(E1000_RAH0);
-        g_mac[0] = (uint8_t)ral;        g_mac[1] = (uint8_t)(ral >> 8);
-        g_mac[2] = (uint8_t)(ral >> 16); g_mac[3] = (uint8_t)(ral >> 24);
-        g_mac[4] = (uint8_t)rah;        g_mac[5] = (uint8_t)(rah >> 8);
+        g_mac[0] = (uint8_t)ral;
+        g_mac[1] = (uint8_t)(ral >> 8);
+        g_mac[2] = (uint8_t)(ral >> 16);
+        g_mac[3] = (uint8_t)(ral >> 24);
+        g_mac[4] = (uint8_t)rah;
+        g_mac[5] = (uint8_t)(rah >> 8);
     }
 
     /* Tell the card which unicast address is ours (bit 31 = address valid). */
     reg_write(E1000_RAL0, (uint32_t)g_mac[0] | ((uint32_t)g_mac[1] << 8) |
-                          ((uint32_t)g_mac[2] << 16) | ((uint32_t)g_mac[3] << 24));
-    reg_write(E1000_RAH0, (uint32_t)g_mac[4] | ((uint32_t)g_mac[5] << 8) |
-                          (1u << 31));
+                              ((uint32_t)g_mac[2] << 16) | ((uint32_t)g_mac[3] << 24));
+    reg_write(E1000_RAH0, (uint32_t)g_mac[4] | ((uint32_t)g_mac[5] << 8) | (1u << 31));
 
     /* An uninitialised multicast filter is a random filter. */
     for (int i = 0; i < 128; i++)
@@ -405,15 +421,15 @@ int e1000_init(void)
     /* Only now that a ring exists is it safe to let the card interrupt us. */
     if (g_irq < 16) {
         irq_install(g_irq, e1000_irq, "e1000");
-        reg_write(E1000_IMS, ICR_TXDW | ICR_LSC | ICR_RXDMT0 | ICR_RXO |
-                             ICR_RXT0);
+        reg_write(E1000_IMS, ICR_TXDW | ICR_LSC | ICR_RXDMT0 | ICR_RXO | ICR_RXT0);
     }
 
     g_ok = 1;
     dbg_puts("E1000: 8086:100E up, mac ");
     for (int i = 0; i < 6; i++) {
         dbg_puts_hexn(g_mac[i], 2);
-        if (i != 5) dbg_puts(":");
+        if (i != 5)
+            dbg_puts(":");
     }
     dbg_puts(", irq ");
     dbg_puts_dec(g_irq);
@@ -428,7 +444,7 @@ int e1000_send(const void *frame, uint16_t len)
     if (!g_ok || len == 0 || len > BUFSZ)
         return 0;
 
-    unsigned i = g_tx_tail;
+    unsigned            i = g_tx_tail;
     volatile tx_desc_t *d = &g_tx[i];
 
     /* The slot must have come back from the card before we reuse it. */
@@ -438,13 +454,13 @@ int e1000_send(const void *frame, uint16_t len)
         return 0;
 
     memcpy(g_txbuf[i], frame, len);
-    d->addr   = g_txbuf_phys[i];
-    d->length = len;
-    d->cso    = 0;
-    d->css    = 0;
+    d->addr    = g_txbuf_phys[i];
+    d->length  = len;
+    d->cso     = 0;
+    d->css     = 0;
     d->special = 0;
-    d->status = 0;
-    d->cmd    = TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS;
+    d->status  = 0;
+    d->cmd     = TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS;
 
     g_tx_tail = (i + 1) % NTX;
     reg_write(E1000_TDT, g_tx_tail);
@@ -467,7 +483,7 @@ uint16_t e1000_recv(void *buf, uint16_t max)
 
     volatile rx_desc_t *d = &g_rx[g_rx_head];
     if (!(d->status & RXD_STAT_DD))
-        return 0;                        /* card has not filled this one */
+        return 0; /* card has not filled this one */
 
     uint16_t len = d->length;
     if (len > max)
@@ -499,27 +515,46 @@ static uint16_t recv_wait(void *buf, uint16_t max, int tries)
  * next person to touch the ring code will want it too. */
 static void dump_state(void)
 {
-    dbg_puts("       STATUS=0x"); dbg_puts_hexn(reg_read(E1000_STATUS), 8);
-    dbg_puts(" CTRL=0x");   dbg_puts_hexn(reg_read(E1000_CTRL), 8);
-    dbg_puts(" BMCR=0x");   dbg_puts_hexn(phy_read(PHY_BMCR), 4);
-    dbg_puts("\r\n       RCTL=0x"); dbg_puts_hexn(reg_read(E1000_RCTL), 8);
-    dbg_puts(" RDH=");      dbg_puts_dec(reg_read(E1000_RDH));
-    dbg_puts(" RDT=");      dbg_puts_dec(reg_read(E1000_RDT));
-    dbg_puts(" rx[0].sta=0x"); dbg_puts_hexn(g_rx[0].status, 2);
-    dbg_puts("\r\n       TCTL=0x"); dbg_puts_hexn(reg_read(E1000_TCTL), 8);
-    dbg_puts(" TDH=");      dbg_puts_dec(reg_read(E1000_TDH));
-    dbg_puts(" TDT=");      dbg_puts_dec(reg_read(E1000_TDT));
-    dbg_puts(" ICR=0x");    dbg_puts_hexn(reg_read(E1000_ICR), 8);
-    dbg_puts("\r\n       RDBA=0x"); dbg_puts_hexn(
-        ((uint64_t)reg_read(E1000_RDBAH) << 32) | reg_read(E1000_RDBAL), 16);
-    dbg_puts(" ring@0x");   dbg_puts_hexn(g_rx_phys, 16);
-    dbg_puts(" RDLEN=");    dbg_puts_dec(reg_read(E1000_RDLEN));
-    dbg_puts("\r\n       TPT=");  dbg_puts_dec(reg_read(E1000_TPT));
-    dbg_puts(" TPR=");      dbg_puts_dec(reg_read(E1000_TPR));
-    dbg_puts(" GPRC=");     dbg_puts_dec(reg_read(E1000_GPRC));
-    dbg_puts(" MPC=");      dbg_puts_dec(reg_read(E1000_MPC));
-    dbg_puts(" RNBC=");     dbg_puts_dec(reg_read(E1000_RNBC));
-    dbg_puts(" CRCERRS=");  dbg_puts_dec(reg_read(E1000_CRCERRS));
+    dbg_puts("       STATUS=0x");
+    dbg_puts_hexn(reg_read(E1000_STATUS), 8);
+    dbg_puts(" CTRL=0x");
+    dbg_puts_hexn(reg_read(E1000_CTRL), 8);
+    dbg_puts(" BMCR=0x");
+    dbg_puts_hexn(phy_read(PHY_BMCR), 4);
+    dbg_puts("\r\n       RCTL=0x");
+    dbg_puts_hexn(reg_read(E1000_RCTL), 8);
+    dbg_puts(" RDH=");
+    dbg_puts_dec(reg_read(E1000_RDH));
+    dbg_puts(" RDT=");
+    dbg_puts_dec(reg_read(E1000_RDT));
+    dbg_puts(" rx[0].sta=0x");
+    dbg_puts_hexn(g_rx[0].status, 2);
+    dbg_puts("\r\n       TCTL=0x");
+    dbg_puts_hexn(reg_read(E1000_TCTL), 8);
+    dbg_puts(" TDH=");
+    dbg_puts_dec(reg_read(E1000_TDH));
+    dbg_puts(" TDT=");
+    dbg_puts_dec(reg_read(E1000_TDT));
+    dbg_puts(" ICR=0x");
+    dbg_puts_hexn(reg_read(E1000_ICR), 8);
+    dbg_puts("\r\n       RDBA=0x");
+    dbg_puts_hexn(((uint64_t)reg_read(E1000_RDBAH) << 32) | reg_read(E1000_RDBAL), 16);
+    dbg_puts(" ring@0x");
+    dbg_puts_hexn(g_rx_phys, 16);
+    dbg_puts(" RDLEN=");
+    dbg_puts_dec(reg_read(E1000_RDLEN));
+    dbg_puts("\r\n       TPT=");
+    dbg_puts_dec(reg_read(E1000_TPT));
+    dbg_puts(" TPR=");
+    dbg_puts_dec(reg_read(E1000_TPR));
+    dbg_puts(" GPRC=");
+    dbg_puts_dec(reg_read(E1000_GPRC));
+    dbg_puts(" MPC=");
+    dbg_puts_dec(reg_read(E1000_MPC));
+    dbg_puts(" RNBC=");
+    dbg_puts_dec(reg_read(E1000_RNBC));
+    dbg_puts(" CRCERRS=");
+    dbg_puts_dec(reg_read(E1000_CRCERRS));
     dbg_puts("\r\n");
 }
 
@@ -527,16 +562,17 @@ static void dump_state(void)
 static int test_loopback(void)
 {
     static const char payload[] = "GNOS-E1000-LOOPBACK";
-    static uint8_t got[BUFSZ];        /* static: 2 KiB is a lot of boot stack */
-    uint8_t frame[64];
+    static uint8_t    got[BUFSZ]; /* static: 2 KiB is a lot of boot stack */
+    uint8_t           frame[64];
 
     phy_write(PHY_BMCR, (uint16_t)(phy_read(PHY_BMCR) | BMCR_LOOPBACK));
     spin(2000);
 
     memset(frame, 0, sizeof frame);
-    memcpy(frame + 0, g_mac, 6);              /* destination: ourselves */
-    memcpy(frame + 6, g_mac, 6);              /* source */
-    frame[12] = 0x88; frame[13] = 0xB5;       /* IEEE local experimental #1 */
+    memcpy(frame + 0, g_mac, 6); /* destination: ourselves */
+    memcpy(frame + 6, g_mac, 6); /* source */
+    frame[12] = 0x88;
+    frame[13] = 0xB5; /* IEEE local experimental #1 */
     memcpy(frame + 14, payload, sizeof payload);
 
     int ok = 0;
@@ -576,32 +612,36 @@ static int test_loopback(void)
  */
 #define ETHERTYPE_ARP 0x0806
 
-static const uint8_t IP_SELF[4] = { 10, 0, 2, 15 };   /* QEMU hands us .15 */
-static const uint8_t IP_GW[4]   = { 10, 0, 2,  2 };   /* the gateway/host */
+static const uint8_t IP_SELF[4] = {10, 0, 2, 15}; /* QEMU hands us .15 */
+static const uint8_t IP_GW[4]   = {10, 0, 2, 2};  /* the gateway/host */
 
 static int test_arp(void)
 {
     static uint8_t got[BUFSZ];
-    uint8_t f[42];
+    uint8_t        f[42];
 
     if (!e1000_link_up()) {
         dbg_puts("E1000: ARP skipped (no link)\r\n");
-        return 1;                         /* not a driver bug */
+        return 1; /* not a driver bug */
     }
 
     memset(f, 0, sizeof f);
-    memset(f + 0, 0xFF, 6);               /* dst: broadcast */
-    memcpy(f + 6, g_mac, 6);              /* src: us */
-    f[12] = ETHERTYPE_ARP >> 8; f[13] = ETHERTYPE_ARP & 0xFF;
-    f[14] = 0x00; f[15] = 0x01;           /* htype: ethernet */
-    f[16] = 0x08; f[17] = 0x00;           /* ptype: IPv4 */
-    f[18] = 6;                            /* hardware address length */
-    f[19] = 4;                            /* protocol address length */
-    f[20] = 0x00; f[21] = 0x01;           /* oper: request */
-    memcpy(f + 22, g_mac, 6);             /* sender hardware address */
-    memcpy(f + 28, IP_SELF, 4);           /* sender protocol address */
+    memset(f + 0, 0xFF, 6);  /* dst: broadcast */
+    memcpy(f + 6, g_mac, 6); /* src: us */
+    f[12] = ETHERTYPE_ARP >> 8;
+    f[13] = ETHERTYPE_ARP & 0xFF;
+    f[14] = 0x00;
+    f[15] = 0x01; /* htype: ethernet */
+    f[16] = 0x08;
+    f[17] = 0x00; /* ptype: IPv4 */
+    f[18] = 6;    /* hardware address length */
+    f[19] = 4;    /* protocol address length */
+    f[20] = 0x00;
+    f[21] = 0x01;               /* oper: request */
+    memcpy(f + 22, g_mac, 6);   /* sender hardware address */
+    memcpy(f + 28, IP_SELF, 4); /* sender protocol address */
     /* target hardware address stays zero -- that is what we are asking for */
-    memcpy(f + 38, IP_GW, 4);             /* target protocol address */
+    memcpy(f + 38, IP_GW, 4); /* target protocol address */
 
     if (!e1000_send(f, sizeof f)) {
         dbg_puts("E1000: ARP FAIL (request never left the card)\r\n");
@@ -619,16 +659,17 @@ static int test_arp(void)
             continue;
         uint16_t et = (uint16_t)((got[12] << 8) | got[13]);
         if (et != ETHERTYPE_ARP)
-            continue;                     /* something else on the wire */
+            continue; /* something else on the wire */
         if (got[20] != 0x00 || got[21] != 0x02)
-            continue;                     /* not a reply */
+            continue; /* not a reply */
         if (memcmp(got + 28, IP_GW, 4) != 0)
-            continue;                     /* not the gateway answering */
+            continue; /* not the gateway answering */
 
         dbg_puts("E1000: ARP PASS, 10.0.2.2 is at ");
         for (int i = 0; i < 6; i++) {
             dbg_puts_hexn(got[22 + i], 2);
-            if (i != 5) dbg_puts(":");
+            if (i != 5)
+                dbg_puts(":");
         }
         dbg_puts("\r\n");
         return 1;

@@ -32,7 +32,7 @@
 #define RC_SHELL    "/bin/sh"      /* the one-shot startup script */
 #define RC_PATH     "/etc/rc"
 
-#define NR_TTY      6              /* must match the kernel's NR_VT */
+#define NR_TTY 6 /* must match the kernel's NR_VT */
 
 /* If the shell cannot even start, stop trying: an exec that fails instantly
  * in a restart loop is a fork bomb with extra steps. */
@@ -40,7 +40,7 @@
 
 static void ignore_terminal_signals(void)
 {
-    signal(SIGINT,  SIG_IGN);
+    signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
     signal(SIGTSTP, SIG_IGN);
     signal(SIGTTIN, SIG_IGN);
@@ -49,7 +49,7 @@ static void ignore_terminal_signals(void)
 
 static void default_terminal_signals(void)
 {
-    signal(SIGINT,  SIG_DFL);
+    signal(SIGINT, SIG_DFL);
     signal(SIGQUIT, SIG_DFL);
     signal(SIGTSTP, SIG_DFL);
     signal(SIGTTIN, SIG_DFL);
@@ -118,7 +118,9 @@ static void run_rc(void)
 static int spawn_getty(int n)
 {
     char name[8];
-    name[0] = 't'; name[1] = 't'; name[2] = 'y';
+    name[0] = 't';
+    name[1] = 't';
+    name[2] = 'y';
     name[3] = (char)('0' + n);
     name[4] = 0;
 
@@ -185,7 +187,7 @@ static void run_single_user(void)
 
     if (pid == 0) {
         char *av[2];
-        av[0] = (char *)"-bash";       /* leading '-' => login shell */
+        av[0] = (char *)"-bash"; /* leading '-' => login shell */
         av[1] = 0;
 
         setpgid(0, 0);
@@ -220,16 +222,15 @@ int main(int argc, char **argv)
      * as argv[1..], Linux style; "single" / "S" / "-s" mean single-user. */
     int single = 0;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "single") == 0 ||
-            strcmp(argv[i], "S") == 0 ||
+        if (strcmp(argv[i], "single") == 0 || strcmp(argv[i], "S") == 0 ||
             strcmp(argv[i], "-s") == 0)
             single = 1;
     }
 
     if (single)
-        run_single_user();      /* drops to root bash; returns on exit */
+        run_single_user(); /* drops to root bash; returns on exit */
 
-    run_rc();                       /* one-shot /etc/rc before the prompts */
+    run_rc(); /* one-shot /etc/rc before the prompts */
 
     /*
      * One getty per virtual terminal, respawned for ever -- the classic
@@ -246,7 +247,7 @@ int main(int argc, char **argv)
 
     for (;;) {
         int status = 0;
-        int who = waitpid(-1, &status, 0);
+        int who    = waitpid(-1, &status, 0);
 
         if (who < 0) {
             /* Nothing left to wait for.  Every terminal must have been given
@@ -268,7 +269,7 @@ int main(int argc, char **argv)
             if (gettys[i] == who)
                 slot = i;
 
-        if (slot < 0)                   /* an orphan re-parented onto us */
+        if (slot < 0) /* an orphan re-parented onto us */
             continue;
 
         /* Exit code 127 is what our own child uses when execv() fails, so it

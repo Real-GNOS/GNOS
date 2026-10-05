@@ -15,19 +15,20 @@
 #include "vmm.h"
 #include "vfs.h"
 
-typedef struct { uint64_t base, len; } iovec_t;
+typedef struct {
+    uint64_t base, len;
+} iovec_t;
 
 extern uint64_t g_hhdm;
 
 /* Copy between the caller's buffer and `as` at `va`, page at a time. */
-static int64_t xcopy(addrspace_t *as, uint64_t va, uint8_t *local,
-                    uint32_t len, int writing)
+static int64_t xcopy(addrspace_t *as, uint64_t va, uint8_t *local, uint32_t len, int writing)
 {
     uint64_t done = 0;
     while (done < len) {
-        uint64_t cur = va + done;
+        uint64_t cur     = va + done;
         uint32_t in_page = (uint32_t)(cur & 0xFFF);
-        uint32_t n = len - (uint32_t)done;
+        uint32_t n       = len - (uint32_t)done;
         if (n > 4096 - in_page)
             n = 4096 - in_page;
 
@@ -44,18 +45,27 @@ static int64_t xcopy(addrspace_t *as, uint64_t va, uint8_t *local,
         }
         uint8_t *remote = (uint8_t *)(uintptr_t)(phys + g_hhdm) + in_page;
 
-        if (writing)
+        if (writing) {
+            /* process_vm_writev reached through the direct map, so the target
+             * PTE's read-only bit never stops it.  Giving the target its own
+             * copy first keeps the write from landing in a frame the target
+             * is sharing with the parent it forked from. */
+            if (vmm_page_is_cow(as, cur) && !vmm_cow_break(as, cur))
+                return done ? (int64_t)done : -E_FAULT;
+            phys = vmm_resolve(as, cur & ~0xFFFULL);
+            if (!phys)
+                return done ? (int64_t)done : -E_FAULT;
+            remote = (uint8_t *)(uintptr_t)(phys + g_hhdm) + in_page;
             memcpy(remote, local + done, n);
-        else
+        } else
             memcpy(local + done, remote, n);
         done += n;
     }
     return (int64_t)done;
 }
 
-static int64_t process_vm_common(uint64_t pid, uint64_t uliov, uint64_t liovcnt,
-                                 uint64_t uriov, uint64_t riovcnt, uint64_t flags,
-                                 int writing)
+static int64_t process_vm_common(uint64_t pid, uint64_t uliov, uint64_t liovcnt, uint64_t uriov,
+                                 uint64_t riovcnt, uint64_t flags, int writing)
 {
     if (flags || !liovcnt || !riovcnt || liovcnt > 1024 || riovcnt > 1024)
         return -E_INVAL;
@@ -64,7 +74,7 @@ static int64_t process_vm_common(uint64_t pid, uint64_t uliov, uint64_t liovcnt,
     if (!target || !target->as)
         return -E_SRCH;
     if (target == proc_current())
-        return -E_PERM;               /* use regular memory access */
+        return -E_PERM; /* use regular memory access */
 
     iovec_t *liov = (iovec_t *)(uintptr_t)uliov;
     iovec_t *riov = (iovec_t *)(uintptr_t)uriov;
@@ -72,31 +82,42 @@ static int64_t process_vm_common(uint64_t pid, uint64_t uliov, uint64_t liovcnt,
         !user_ptr_ok(uriov, riovcnt * sizeof(iovec_t)))
         return -E_FAULT;
 
-    int64_t total = 0;
+    int64_t  total = 0;
     uint64_t li = 0, ri = 0, loff = 0, roff = 0;
 
     while (li < liovcnt && ri < riovcnt) {
         uint64_t lleft = liov[li].len - loff;
         uint64_t rleft = riov[ri].len - roff;
-        uint32_t n = (uint32_t)((lleft < rleft) ? lleft : rleft);
+        uint32_t n     = (uint32_t)((lleft < rleft) ? lleft : rleft);
         if (!n) {
-            if (!lleft) { li++; loff = 0; }
-            if (!rleft) { ri++; roff = 0; }
+            if (!lleft) {
+                li++;
+                loff = 0;
+            }
+            if (!rleft) {
+                ri++;
+                roff = 0;
+            }
             continue;
         }
         if (!user_ptr_ok(liov[li].base, liov[li].len))
             return total ? total : -E_FAULT;
 
         int64_t r = xcopy(target->as, riov[ri].base + roff,
-                          (uint8_t *)(uintptr_t)(liov[li].base + loff), n,
-                          writing);
+                          (uint8_t *)(uintptr_t)(liov[li].base + loff), n, writing);
         if (r <= 0)
             return total ? total : (r < 0 ? r : total);
         total += r;
         loff += (uint64_t)r;
         roff += (uint64_t)r;
-        if (loff >= liov[li].len) { li++; loff = 0; }
-        if (roff >= riov[ri].len) { ri++; roff = 0; }
+        if (loff >= liov[li].len) {
+            li++;
+            loff = 0;
+        }
+        if (roff >= riov[ri].len) {
+            ri++;
+            roff = 0;
+        }
     }
     return total;
 }
@@ -116,17 +137,22 @@ static int64_t process_vm_common(uint64_t pid, uint64_t uliov, uint64_t liovcnt,
 #define MADV_PAGEOUT    21
 #define USER_CEILING    0x0000800000000000ULL
 
-int64_t sys_process_madvise(uint64_t pidfd, uint64_t uiov, uint64_t vlen,
-                            uint64_t advice, uint64_t flags)
+int64_t sys_process_madvise(uint64_t pidfd, uint64_t uiov, uint64_t vlen, uint64_t advice,
+                            uint64_t flags)
 {
     if (flags)
         return -E_INVAL;
     if (!vlen || vlen > 1024)
         return -E_INVAL;
     switch (advice) {
-    case MADV_NORMAL: case MADV_RANDOM: case MADV_SEQUENTIAL:
-    case MADV_WILLNEED: case MADV_DONTNEED: case MADV_FREE:
-    case MADV_COLD: case MADV_PAGEOUT:
+    case MADV_NORMAL:
+    case MADV_RANDOM:
+    case MADV_SEQUENTIAL:
+    case MADV_WILLNEED:
+    case MADV_DONTNEED:
+    case MADV_FREE:
+    case MADV_COLD:
+    case MADV_PAGEOUT:
         break;
     default:
         return -E_INVAL;
@@ -139,11 +165,11 @@ int64_t sys_process_madvise(uint64_t pidfd, uint64_t uiov, uint64_t vlen,
     if (!pidfd_proc_of((int)pidfd))
         return -E_BADF;
 
-    const iovec_t *iov = (const iovec_t *)(uintptr_t)uiov;
-    uint64_t total = 0;
+    const iovec_t *iov   = (const iovec_t *)(uintptr_t)uiov;
+    uint64_t       total = 0;
     for (uint64_t i = 0; i < vlen; i++) {
         if (iov[i].base >= USER_CEILING)
-            return -E_INVAL;            /* kernel addresses are not adviceable */
+            return -E_INVAL; /* kernel addresses are not adviceable */
         if (iov[i].len > USER_CEILING - iov[i].base)
             return -E_INVAL;
         total += iov[i].len;
@@ -151,14 +177,14 @@ int64_t sys_process_madvise(uint64_t pidfd, uint64_t uiov, uint64_t vlen,
     return (int64_t)total;
 }
 
-int64_t sys_process_vm_readv(uint64_t pid, uint64_t liov, uint64_t liovcnt,
-                             uint64_t riov, uint64_t riovcnt, uint64_t flags)
+int64_t sys_process_vm_readv(uint64_t pid, uint64_t liov, uint64_t liovcnt, uint64_t riov,
+                             uint64_t riovcnt, uint64_t flags)
 {
     return process_vm_common(pid, liov, liovcnt, riov, riovcnt, flags, 0);
 }
 
-int64_t sys_process_vm_writev(uint64_t pid, uint64_t liov, uint64_t liovcnt,
-                              uint64_t riov, uint64_t riovcnt, uint64_t flags)
+int64_t sys_process_vm_writev(uint64_t pid, uint64_t liov, uint64_t liovcnt, uint64_t riov,
+                              uint64_t riovcnt, uint64_t flags)
 {
     return process_vm_common(pid, liov, liovcnt, riov, riovcnt, flags, 1);
 }

@@ -10,14 +10,14 @@
  */
 #include <stdint.h>
 
-#define SYS_read     0
-#define SYS_write    1
-#define SYS_open     2
-#define SYS_close    3
-#define SYS_getpid  39
-#define SYS_exit    60
+#define SYS_read   0
+#define SYS_write  1
+#define SYS_open   2
+#define SYS_close  3
+#define SYS_getpid 39
+#define SYS_exit   60
 
-#define O_RDWR       2
+#define O_RDWR 2
 
 static long syscall3(long nr, long a, long b, long c)
 {
@@ -29,12 +29,32 @@ static long syscall3(long nr, long a, long b, long c)
     return ret;
 }
 
-static long sys_open(const char *p, long f) { return syscall3(SYS_open, (long)p, f, 0); }
-static long sys_read(long fd, void *b, long n)  { return syscall3(SYS_read, fd, (long)b, n); }
-static long sys_write(long fd, const void *b, long n) { return syscall3(SYS_write, fd, (long)b, n); }
-static long sys_getpid(void) { return syscall3(SYS_getpid, 0, 0, 0); }
-static long sys_close(long fd) { return syscall3(SYS_close, fd, 0, 0); }
-static void sys_exit(long c)  { syscall3(SYS_exit, c, 0, 0); for (;;) { } }
+static long sys_open(const char *p, long f)
+{
+    return syscall3(SYS_open, (long)p, f, 0);
+}
+static long sys_read(long fd, void *b, long n)
+{
+    return syscall3(SYS_read, fd, (long)b, n);
+}
+static long sys_write(long fd, const void *b, long n)
+{
+    return syscall3(SYS_write, fd, (long)b, n);
+}
+static long sys_getpid(void)
+{
+    return syscall3(SYS_getpid, 0, 0, 0);
+}
+static long sys_close(long fd)
+{
+    return syscall3(SYS_close, fd, 0, 0);
+}
+static void sys_exit(long c)
+{
+    syscall3(SYS_exit, c, 0, 0);
+    for (;;) {
+    }
+}
 
 static unsigned slen(const char *s)
 {
@@ -52,7 +72,7 @@ static void puts_fd(long fd, const char *s)
 static void put_dec(long fd, long v)
 {
     char buf[24];
-    int i = 0;
+    int  i = 0;
     if (v == 0)
         buf[i++] = '0';
     while (v > 0) {
@@ -60,7 +80,7 @@ static void put_dec(long fd, long v)
         v /= 10;
     }
     char out[24];
-    int n = 0;
+    int  n = 0;
     while (i--)
         out[n++] = buf[i];
     sys_write(fd, out, n);
@@ -69,7 +89,8 @@ static void put_dec(long fd, long v)
 static int streq(const char *a, const char *b)
 {
     while (*a && *a == *b) {
-        a++; b++;
+        a++;
+        b++;
     }
     return *a == *b;
 }
@@ -115,8 +136,8 @@ void _start(void)
             puts_fd(tty, "init: exiting\n");
             sys_close(tty);
             sys_exit(0);
-        } else if (line[0] == 'e' && line[1] == 'c' && line[2] == 'h' &&
-                   line[3] == 'o' && (line[4] == ' ' || line[4] == 0)) {
+        } else if (line[0] == 'e' && line[1] == 'c' && line[2] == 'h' && line[3] == 'o' &&
+                   (line[4] == ' ' || line[4] == 0)) {
             puts_fd(tty, line[4] ? line + 5 : "");
             puts_fd(tty, "\n");
         } else {

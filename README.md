@@ -11,18 +11,21 @@
 > 🚀 **这是你见过迄今为止最强的小学生开发的操作系统** —— 由一位**六年级学生**独立开发。
 > x86_64 真内核：SMP 多核 + EEVDF 现代调度器 + Linux ABI + 网络栈 + Wayland 桌面。
 
-GNOS 是一个面向 x86_64 的教学型操作系统。它用约 5.8 万行自研代码实现了一个
+GNOS 是一个面向 x86_64 的教学型操作系统。它用约 5.9 万行自研代码实现了一个
 尽可能贴近 Linux 的用户态 ABI，使得 **musl、BusyBox 1.38、GNU Bash 5.3 和
 GNU coreutils 9.9 这些真实的第三方用户软件可以直接在其上运行**——不靠兼容层、
 不靠模拟，靠的是内核本身。
 
 > 代码中的命名前缀多为 GNU/gnucos；内核镜像为 `GNOSKr.elf`，项目文档见
-> `ANALYSIS.md`。
+> `ANALYSIS.md`。许可（GPL-2.0）见 `LICENSE`，第三方致谢汇总见 `NOTICE`，
+> 贡献约定和架构细则见 `CONTRIBUTING.md`（英文版 `CONTRIBUTING.md.en`）。
+
+（English README: `README.en.md`）
 
 ## 设计哲学
 
 - **Linux/x86-64 syscall ABI 是唯一契约**：系统调用编号、寄存器约定、错误码
-  （负 errno）均对齐 Linux（见 `src/shared/sysnum.h`，当前 175 个调用）。内核与
+  （负 errno）均对齐 Linux（见 `src/include/uapi/linux/sysnum.h`，当前 219 个调用）。内核与
   用户态共享这一份头文件，二者不会漂移。
 - **真货优先**：与其自造玩具用户态，不如把内核做对，让成熟的第三方用户栈直接
   跑起来。Bash 的 `bash_cv_termcap_lib=gnutermcap`、coreutils 的
@@ -80,13 +83,18 @@ GNU coreutils 9.9 这些真实的第三方用户软件可以直接在其上运�
 ```
 GNOS/
 ├── src/
+│   ├── arch/            # GDT/IDT/ISR、SMP 入口、页表
 │   ├── bootloader/      # Limine 引导相关
-│   ├── init/            # 内核入口与链接脚本
-│   ├── kernel/          # 内核本体（约 5 万行）
-│   ├── shared/          # 内核/用户共享契约：sysnum.h（syscall 编号）
-│   ├── user/            # ulib 程序、crt0、rc 脚本
-│   ├── include/         # limine.h（引导协议布局，净室自研，GPLv2）
-│   └── rootfs/          # 打包进 initrd 的 /etc（测试脚本、fstab…）
+│   ├── drivers/         # PCI、e1000、ATA/NVMe、HDA/AC97、输入、DRM……
+│   ├── fs/              # VFS、tmpfs、procfs、ext2、fat、iso9660
+│   ├── include/uapi/linux/sysnum.h  # 内核/用户共享契约（syscall 编号）
+│   ├── init/            # 内核入口、kaslr、链接脚本
+│   ├── kernel/          # 进程/调度/syscall/原语内核本体（约 4.8 万行，含 fs/mm/arch……）
+│   ├── mm/              # PMM、VMM、COW、kheap
+│   ├── net/             # e1000 栈、tcp、sock、AF_UNIX
+│   ├── usr/             # init、getty、login、shell、测试程序
+│   ├── rootfs/          # 覆盖进 initrd 的 /etc（fstab、bashrc…）与起动脚本
+│   └── vendor/          # acpica、mbedtls、fatfs 等第三方（见 NOTICE）
 ├── lib/                 # termcap 等
 ├── limine/              # Limine 引导文件（limine-bios-cd.bin 等）
 ├── tools/               # 构建辅助脚本
@@ -124,7 +132,7 @@ QEMU 配置：512 MiB 内存、e1000 网卡（user 网络）、音频设备（HD
   （ata 磁盘引导）。
 - 图形：fbcon/fbdev 之外已有 DRM 驱动与 Wayland 桌面栈（`startxfce` 拉起 labwc
   合成器 + Xfce），`/dev/fb0` 仍为最后写入者胜。
-- 175 个系统调用已覆盖 musl（含 pthread）/Bash/coreutils/BusyBox 的实际使用路径，
+- 219 个系统调用已覆盖 musl（含 pthread）/Bash/coreutils/BusyBox 的实际使用路径，
   但不是完整的 Linux 面（如部分网络 syscall 深度等）。
 - 教学定位：无完整安全边界、无多用户隔离。
 
@@ -137,3 +145,21 @@ GPLv2，第三方组件各自遵循上游许可。
 > 协议的公开行为规范重新实现结构布局，未复制任何 Apache-2.0 源文件，故整体为
 > GPLv2。其余第三方源码树（musl、busybox、bash、coreutils、openrc 等）各自遵循
 > 其上游许可，见上文「构建与运行」。
+
+## KASLR
+
+内核每次开机的虚拟基址都不同。Limine 把内核固定映射在 0xFFFFFFFF80000000
+且协议不接受运行时改基址，所以内核在入口处**自己搬自己**（src/init/kaslr.c）：
+
+1. 用同一份物理页在新窗口建 2 MiB 别名映射（ Limine 的页表经 hhdm 原地修改）；
+2. 经 hhdm 重写全部 724 条 R_X86_64_RELATIVE 重定位（不能走旧视图——
+   .limine_requests 段是只读映射，写它必 page fault）；
+3. 间接跳转到新基址，永不回头。熵源 RDTSC ^ RDRAND，约 460 个槽位。
+
+配套改动：vmm.c 的 walk() 遇到大页自动拆分成 4K 页表（此前是 panic）；
+kernel_entry 拆成薄入口 + kernel_main（ relocated 后执行流不得再回旧基址）。
+
+验证（headless 三连启动）：kvirt = 0xFFFFFFFFA9BAD000 / B73B1000 / 99B9D000，
+各不相同；5 项自检全 PASS；启动一路走到 SMP 调度器。物理基址由 Limine
+随机化（kphys 每次微变，如 0xBA99D000/0xBA9A3000/0xBA9AD000）。
+

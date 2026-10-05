@@ -61,20 +61,20 @@ static int parse_line(char *line, entry_t *e)
     char *p = line;
 
     while (n < 5) {
-        f[n++] = p;
+        f[n++]  = p;
         char *t = strchr(p, '\t');
         if (!t)
             break;
         *t = 0;
-        p = t + 1;
+        p  = t + 1;
     }
     if (n != 5)
         return 0;
 
-    snprintf(e->name,  sizeof e->name,  "%s", f[0]);
-    snprintf(e->cls,   sizeof e->cls,   "%s", f[1]);
+    snprintf(e->name, sizeof e->name, "%s", f[0]);
+    snprintf(e->cls, sizeof e->cls, "%s", f[1]);
     snprintf(e->state, sizeof e->state, "%s", f[2]);
-    snprintf(e->dev,   sizeof e->dev,   "%s", f[3]);
+    snprintf(e->dev, sizeof e->dev, "%s", f[3]);
     e->major = e->minor = -1;
     sscanf(f[4], "%d:%d", &e->major, &e->minor);
     return 1;
@@ -113,12 +113,12 @@ int main(void)
 
     int live = 0, nodes = 0;
     for (int i = 0; i < g_n; i++) {
-        entry_t *e = &g_ent[i];
-        int is_live = strcmp(e->state, "live") == 0;
-        int has_dev = strcmp(e->dev, "-") != 0;
+        entry_t *e       = &g_ent[i];
+        int      is_live = strcmp(e->state, "live") == 0;
+        int      has_dev = strcmp(e->dev, "-") != 0;
 
-        printf("coldplug:   %-10s %-8s %-10s %s",
-               e->name, e->cls, e->state, has_dev ? "/dev/" : "(no node)");
+        printf("coldplug:   %-10s %-8s %-10s %s", e->name, e->cls, e->state,
+               has_dev ? "/dev/" : "(no node)");
         if (has_dev)
             printf("%s %d:%d", e->dev, e->major, e->minor);
         printf("\n");
@@ -153,7 +153,7 @@ int main(void)
     /* The memory devices are the ones the rest of userland assumes without
      * checking, so name them explicitly rather than trusting the loop above
      * to have seen them. */
-    static const char *required[] = { "null", "zero", "urandom", "tty" };
+    static const char *required[] = {"null", "zero", "urandom", "tty"};
     for (unsigned i = 0; i < sizeof required / sizeof required[0]; i++) {
         char path[64];
         snprintf(path, sizeof path, "/dev/%s", required[i]);
@@ -166,11 +166,11 @@ int main(void)
     /* /dev/zero must actually read as zeroes, and /dev/urandom must not:
      * a stub that returns EOF for both would pass every open() above. */
     unsigned char buf[64];
-    int fd = open("/dev/zero", O_RDONLY);
+    int           fd = open("/dev/zero", O_RDONLY);
     if (fd >= 0) {
         memset(buf, 0xAA, sizeof buf);
-        ssize_t n = read(fd, buf, sizeof buf);
-        int all_zero = (n == (ssize_t)sizeof buf);
+        ssize_t n        = read(fd, buf, sizeof buf);
+        int     all_zero = (n == (ssize_t)sizeof buf);
         for (ssize_t j = 0; j < n; j++)
             if (buf[j])
                 all_zero = 0;
@@ -181,12 +181,11 @@ int main(void)
     fd = open("/dev/urandom", O_RDONLY);
     if (fd >= 0) {
         unsigned char a[32], b[32];
-        ssize_t n1 = read(fd, a, sizeof a);
-        ssize_t n2 = read(fd, b, sizeof b);
+        ssize_t       n1 = read(fd, a, sizeof a);
+        ssize_t       n2 = read(fd, b, sizeof b);
         ok("behaviour", "/dev/urandom fills the buffer",
            n1 == (ssize_t)sizeof a && n2 == (ssize_t)sizeof b);
-        ok("behaviour", "/dev/urandom does not repeat",
-           memcmp(a, b, sizeof a) != 0);
+        ok("behaviour", "/dev/urandom does not repeat", memcmp(a, b, sizeof a) != 0);
         close(fd);
     }
 

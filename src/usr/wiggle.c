@@ -10,12 +10,12 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#define EV_REL       0x02
-#define EV_SYN       0x00
-#define REL_X        0x00
-#define REL_Y        0x01
-#define SYN_REPORT   0x00
-#define INJECT       405        /* SYS_inputinject, see src/shared/sysnum.h */
+#define EV_REL     0x02
+#define EV_SYN     0x00
+#define REL_X      0x00
+#define REL_Y      0x01
+#define SYN_REPORT 0x00
+#define INJECT     405 /* SYS_inputinject, see src/shared/sysnum.h */
 
 static void rel(int code, int value)
 {

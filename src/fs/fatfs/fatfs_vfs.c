@@ -21,9 +21,9 @@
 
 #define FAT_MOUNT_PATH_MAX 256
 
-static FATFS  g_fat;
-static int    g_fat_ok;
-static char   g_fat_mnt[FAT_MOUNT_PATH_MAX];
+static FATFS g_fat;
+static int   g_fat_ok;
+static char  g_fat_mnt[FAT_MOUNT_PATH_MAX];
 
 /* ---- node payload ------------------------------------------------------
  * A resolved node remembers the path it was resolved from, relative to the
@@ -39,7 +39,7 @@ static void node_release(struct vfs_node *n)
 static int node_set_rel(struct vfs_node *n, const char *rel)
 {
     size_t len = strlen(rel) + 1;
-    char *p = kmalloc((uint32_t)len);
+    char  *p   = kmalloc((uint32_t)len);
     if (!p)
         return -1;
     memcpy(p, rel, len);
@@ -49,8 +49,7 @@ static int node_set_rel(struct vfs_node *n, const char *rel)
 
 /* ---- file operations --------------------------------------------------- */
 
-static int32_t fat_file_read(struct vfs_node *n, uint64_t off, void *buf,
-                             uint32_t len)
+static int32_t fat_file_read(struct vfs_node *n, uint64_t off, void *buf, uint32_t len)
 {
     const char *rel = n->priv;
     if (!rel)
@@ -65,16 +64,15 @@ static int32_t fat_file_read(struct vfs_node *n, uint64_t off, void *buf,
         f_close(&fp);
         return -E_INVAL;
     }
-    UINT got = 0;
-    FRESULT r = f_read(&fp, buf, len, &got);
+    UINT    got = 0;
+    FRESULT r   = f_read(&fp, buf, len, &got);
     f_close(&fp);
     if (r != FR_OK)
         return -E_IO;
-    return (int32_t)got;                 /* 0 at end of file */
+    return (int32_t)got; /* 0 at end of file */
 }
 
-static int32_t fat_file_write(struct vfs_node *n, uint64_t off,
-                              const void *buf, uint32_t len)
+static int32_t fat_file_write(struct vfs_node *n, uint64_t off, const void *buf, uint32_t len)
 {
     const char *rel = n->priv;
     if (!rel)
@@ -98,8 +96,8 @@ static int32_t fat_file_write(struct vfs_node *n, uint64_t off,
         f_close(&fp);
         return -E_INVAL;
     }
-    UINT wrote = 0;
-    FRESULT r = f_write(&fp, buf, len, &wrote);
+    UINT    wrote = 0;
+    FRESULT r     = f_write(&fp, buf, len, &wrote);
     f_close(&fp);
     if (r != FR_OK)
         return -E_IO;
@@ -108,10 +106,9 @@ static int32_t fat_file_write(struct vfs_node *n, uint64_t off,
 
 /* ---- directory operations ---------------------------------------------- */
 
-static int32_t fat_dir_read(struct vfs_node *n, uint64_t off, void *buf,
-                            uint32_t len)
+static int32_t fat_dir_read(struct vfs_node *n, uint64_t off, void *buf, uint32_t len)
 {
-    const char *rel = n->priv;
+    const char    *rel = n->priv;
     const uint32_t rec = (uint32_t)sizeof(gdirent_t);
     if (!rel || off % rec || len < rec)
         return -E_INVAL;
@@ -119,43 +116,49 @@ static int32_t fat_dir_read(struct vfs_node *n, uint64_t off, void *buf,
     uint32_t skip = (uint32_t)(off / rec);
     uint32_t room = len / rec;
 
-    DIR d;
+    DIR     d;
     FILINFO fno;
     if (f_opendir(&d, rel) != FR_OK)
         return -E_NOENT;
 
-    gdirent_t *out = (gdirent_t *)buf;
-    uint32_t seen = 0, got = 0;
+    gdirent_t *out  = (gdirent_t *)buf;
+    uint32_t   seen = 0, got = 0;
     while (got < room && f_readdir(&d, &fno) == FR_OK && fno.fname[0]) {
         if (seen++ < skip)
             continue;
         memset(&out[got], 0, rec);
         strncpy(out[got].name, fno.fname, GDIRENT_NAME - 1);
         out[got].name[GDIRENT_NAME - 1] = 0;
-        out[got].size = (uint32_t)fno.fsize;
-        out[got].kind = (fno.fattrib & AM_DIR) ? GK_DIR : GK_FILE;
+        out[got].size                   = (uint32_t)fno.fsize;
+        out[got].kind                   = (fno.fattrib & AM_DIR) ? GK_DIR : GK_FILE;
         got++;
     }
     f_closedir(&d);
     return (int32_t)(got * rec);
 }
 
-static int32_t fat_dir_write(struct vfs_node *n, uint64_t off,
-                             const void *buf, uint32_t len)
+static int32_t fat_dir_write(struct vfs_node *n, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
 static const vfs_ops_t g_fat_file_ops = {
-    .read = fat_file_read, .write = fat_file_write, .release = node_release
-};
+    .read = fat_file_read, .write = fat_file_write, .release = node_release};
 static const vfs_ops_t g_fat_dir_ops = {
-    .read = fat_dir_read, .write = fat_dir_write, .release = node_release
-};
+    .read = fat_dir_read, .write = fat_dir_write, .release = node_release};
 
-const vfs_ops_t *const fatfs_file_ops(void) { return &g_fat_file_ops; }
-const vfs_ops_t *const fatfs_dir_ops(void)  { return &g_fat_dir_ops; }
+const vfs_ops_t *const fatfs_file_ops(void)
+{
+    return &g_fat_file_ops;
+}
+const vfs_ops_t *const fatfs_dir_ops(void)
+{
+    return &g_fat_dir_ops;
+}
 
 /* ---- mounting ---------------------------------------------------------- */
 
@@ -170,7 +173,7 @@ int fatfs_mount_bdev(const char *path, struct vfs_node *dev, uint64_t sectors)
      * object reads as "sector 0 already cached", and check_fs would then
      * inspect a zero-filled window instead of the boot sector. */
     g_fat.winsect = (LBA_t)-1;
-    FRESULT r = f_mount(&g_fat, "", 1);   /* 1 = mount immediately */
+    FRESULT r     = f_mount(&g_fat, "", 1); /* 1 = mount immediately */
     if (r != FR_OK) {
         fatfs_detach();
         dbg_puts("VFS: not a FAT volume (fr=");
@@ -190,7 +193,7 @@ int fatfs_umount(const char *path)
         return -E_INVAL;
     f_unmount("");
     fatfs_detach();
-    g_fat_ok = 0;
+    g_fat_ok     = 0;
     g_fat_mnt[0] = 0;
     return 0;
 }
@@ -211,7 +214,7 @@ int fatfs_route(const char *abs, char *rel)
         return 1;
     }
     if (*rest != '/')
-        return 0;                        /* /mntx is not /mnt */
+        return 0; /* /mntx is not /mnt */
     size_t i = 0;
     for (; rest[i]; i++)
         rel[i] = rest[i];
@@ -262,12 +265,14 @@ int fatfs_statfs(uint64_t *total, uint64_t *free)
 {
     if (!g_fat_ok)
         return -E_NODEV;
-    FATFS *fs = &g_fat;
-    DWORD nclst = 0;
+    FATFS *fs    = &g_fat;
+    DWORD  nclst = 0;
     if (f_getfree("", &nclst, &fs) != FR_OK)
         return -E_IO;
     uint64_t per = (uint64_t)fs->csize * 512u;
-    if (total) *total = (uint64_t)(fs->n_fatent - 2) * per;
-    if (free)  *free  = (uint64_t)nclst * per;
+    if (total)
+        *total = (uint64_t)(fs->n_fatent - 2) * per;
+    if (free)
+        *free = (uint64_t)nclst * per;
     return 0;
 }

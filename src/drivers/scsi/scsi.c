@@ -20,13 +20,16 @@
 #include "debugcon.h"
 #include "vfs.h"
 
-#define SCSI_MAX_DEV   8
-#define SCSI_CHUNK     32u      /* blocks per READ(10)/WRITE(10) */
+#define SCSI_MAX_DEV 8
+#define SCSI_CHUNK   32u /* blocks per READ(10)/WRITE(10) */
 
 static scsi_device_t g_scsi_devs[SCSI_MAX_DEV];
 static int           g_scsi_count;
 
-int scsi_count(void) { return g_scsi_count; }
+int scsi_count(void)
+{
+    return g_scsi_count;
+}
 
 scsi_device_t *scsi_device_by_index(int i)
 {
@@ -35,13 +38,12 @@ scsi_device_t *scsi_device_by_index(int i)
     return &g_scsi_devs[i];
 }
 
-static int scsi_exec(scsi_device_t *d, uint8_t *cdb, uint8_t cdb_len,
-                     void *data, uint32_t data_len, int dir_in)
+static int scsi_exec(scsi_device_t *d, uint8_t *cdb, uint8_t cdb_len, void *data, uint32_t data_len,
+                     int dir_in)
 {
     if (!d || !d->xport.execute)
         return -1;
-    return d->xport.execute(d->xport.host, cdb, cdb_len, data, data_len,
-                            dir_in);
+    return d->xport.execute(d->xport.host, cdb, cdb_len, data, data_len, dir_in);
 }
 
 /* ---- TEST UNIT READY (00): no data, completes silently ------------------ */
@@ -50,7 +52,7 @@ int scsi_test_unit_ready(scsi_device_t *d)
 {
     if (!d || !d->live)
         return -E_NODEV;
-    uint8_t cdb[12] = { 0 };
+    uint8_t cdb[12] = {0};
     return scsi_exec(d, cdb, 12, NULL, 0, 0) < 0 ? -E_IO : 0;
 }
 
@@ -58,8 +60,8 @@ int scsi_test_unit_ready(scsi_device_t *d)
 
 static int scsi_inquiry(scsi_device_t *d)
 {
-    uint8_t cdb[12] = { 0x12, 0 };
-    cdb[4] = 36;                         /* standard INQUIRY data */
+    uint8_t cdb[12] = {0x12, 0};
+    cdb[4]          = 36; /* standard INQUIRY data */
     uint8_t r[36];
     memset(r, 0, sizeof r);
     if (scsi_exec(d, cdb, 12, r, sizeof r, 1) < 0)
@@ -76,19 +78,19 @@ static int scsi_inquiry(scsi_device_t *d)
 
 static int scsi_read_capacity(scsi_device_t *d)
 {
-    uint8_t cdb[12] = { 0x25, 0 };
+    uint8_t cdb[12] = {0x25, 0};
     uint8_t r[8];
     memset(r, 0, sizeof r);
     if (scsi_exec(d, cdb, 12, r, sizeof r, 1) < 0)
         return -1;
 
-    uint64_t last = ((uint64_t)r[0] << 24) | ((uint64_t)r[1] << 16) |
-                    ((uint64_t)r[2] << 8) | (uint64_t)r[3];
-    uint32_t bsize = ((uint32_t)r[4] << 24) | ((uint32_t)r[5] << 16) |
-                     ((uint32_t)r[6] << 8) | (uint32_t)r[7];
+    uint64_t last =
+        ((uint64_t)r[0] << 24) | ((uint64_t)r[1] << 16) | ((uint64_t)r[2] << 8) | (uint64_t)r[3];
+    uint32_t bsize =
+        ((uint32_t)r[4] << 24) | ((uint32_t)r[5] << 16) | ((uint32_t)r[6] << 8) | (uint32_t)r[7];
     if (!bsize)
         return -1;
-    d->nblocks = last + 1;
+    d->nblocks     = last + 1;
     d->sector_size = bsize;
     return 0;
 }
@@ -103,8 +105,8 @@ int scsi_device_add(scsi_device_t *d)
         return -E_NOMEM;
 
     scsi_device_t *slot = &g_scsi_devs[g_scsi_count];
-    *slot = *d;
-    slot->live = 1;
+    *slot               = *d;
+    slot->live          = 1;
 
     if (scsi_inquiry(slot) < 0 || scsi_read_capacity(slot) < 0) {
         memset(slot, 0, sizeof *slot);
@@ -127,21 +129,20 @@ int scsi_device_add(scsi_device_t *d)
 
 /* ---- READ(10) / WRITE(10) ----------------------------------------------- */
 
-int scsi_read_blocks(scsi_device_t *d, uint64_t lba, void *buf,
-                     uint32_t nblocks)
+int scsi_read_blocks(scsi_device_t *d, uint64_t lba, void *buf, uint32_t nblocks)
 {
     if (!d || !d->live || !nblocks)
         return -E_INVAL;
     uint8_t *out = buf;
     while (nblocks) {
-        uint32_t chunk = nblocks > SCSI_CHUNK ? SCSI_CHUNK : nblocks;
-        uint8_t cdb[12] = { 0x28, 0 };               /* READ(10) */
-        cdb[2] = (uint8_t)(lba >> 24);
-        cdb[3] = (uint8_t)(lba >> 16);
-        cdb[4] = (uint8_t)(lba >> 8);
-        cdb[5] = (uint8_t)lba;
-        cdb[7] = (uint8_t)(chunk >> 8);
-        cdb[8] = (uint8_t)chunk;
+        uint32_t chunk   = nblocks > SCSI_CHUNK ? SCSI_CHUNK : nblocks;
+        uint8_t  cdb[12] = {0x28, 0}; /* READ(10) */
+        cdb[2]           = (uint8_t)(lba >> 24);
+        cdb[3]           = (uint8_t)(lba >> 16);
+        cdb[4]           = (uint8_t)(lba >> 8);
+        cdb[5]           = (uint8_t)lba;
+        cdb[7]           = (uint8_t)(chunk >> 8);
+        cdb[8]           = (uint8_t)chunk;
         if (scsi_exec(d, cdb, 12, out, chunk * d->sector_size, 1) < 0)
             return -E_IO;
         out += chunk * d->sector_size;
@@ -151,21 +152,20 @@ int scsi_read_blocks(scsi_device_t *d, uint64_t lba, void *buf,
     return 0;
 }
 
-int scsi_write_blocks(scsi_device_t *d, uint64_t lba, const void *buf,
-                      uint32_t nblocks)
+int scsi_write_blocks(scsi_device_t *d, uint64_t lba, const void *buf, uint32_t nblocks)
 {
     if (!d || !d->live || !nblocks)
         return -E_INVAL;
     const uint8_t *in = buf;
     while (nblocks) {
-        uint32_t chunk = nblocks > SCSI_CHUNK ? SCSI_CHUNK : nblocks;
-        uint8_t cdb[12] = { 0x2A, 0 };               /* WRITE(10) */
-        cdb[2] = (uint8_t)(lba >> 24);
-        cdb[3] = (uint8_t)(lba >> 16);
-        cdb[4] = (uint8_t)(lba >> 8);
-        cdb[5] = (uint8_t)lba;
-        cdb[7] = (uint8_t)(chunk >> 8);
-        cdb[8] = (uint8_t)chunk;
+        uint32_t chunk   = nblocks > SCSI_CHUNK ? SCSI_CHUNK : nblocks;
+        uint8_t  cdb[12] = {0x2A, 0}; /* WRITE(10) */
+        cdb[2]           = (uint8_t)(lba >> 24);
+        cdb[3]           = (uint8_t)(lba >> 16);
+        cdb[4]           = (uint8_t)(lba >> 8);
+        cdb[5]           = (uint8_t)lba;
+        cdb[7]           = (uint8_t)(chunk >> 8);
+        cdb[8]           = (uint8_t)chunk;
         if (scsi_exec(d, cdb, 12, (void *)in, chunk * d->sector_size, 0) < 0)
             return -E_IO;
         in += chunk * d->sector_size;

@@ -1,0 +1,75 @@
+NOTICE
+======
+
+GNOS — 一个兼容 Linux ABI 的 x86_64 教学型操作系统。
+ Copyright (C) 2026 及更早的 GNOS 项目贡献者。
+
+除另行注明外，本项目的原创代码与文档均为自由软件，依据 GNU 通用公共许可证 2.0 版授权：
+  https://www.gnu.org/licenses/gpl-2.0.html
+
+项目引用了若干第三方组件，各自遵循其原始许可证；本文件是唯一对它们集中致谢的地方。
+各目录中随组件附带的上游许可证原文始终优先于下文的任何摘要。
+
+引导 / 固件链条（bootloader）
+----------------------------------
+  * Limine 引导协议引导器
+      https://github.com/Limine-Bootloader/Limine
+      二条款 BSD 许可证
+
+内核内 / 直接链接的第三方代码（src/vendor/）
+-----------------------------------------------------------
+  * 英特尔 ACPI 组件架构（ACPICA）
+      src/vendor/acpica/
+      双授权：BSD-3-Clause 或 GPL-2.0-only
+      （本项目取 GPL-2.0-only）
+
+  * Mbed TLS
+      src/vendor/mbedtls/
+      双授权：Apache-2.0 或 GPL-2.0-or-later
+      （本项目取 GPL-2.0-or-later）
+
+  * FatFs
+      src/vendor/fatfs/
+      ChaN 的「可用于任何目的」许可（详见 vendor 源码）
+
+  * LeonOS-4（参考 / 兼容部分）
+      src/vendor/LeonOS-4/
+      许可证文本见该 vendor 目录
+
+随启动镜像分发的用户态（build/alpine-rootfs，
+各自保留其许可证与著作权）
+--------------------------------------------------------
+  Alpine Linux 基础镜像与软件包集合：
+      https://alpinelinux.org/
+      多为上游各包维护者的 MIT/GPL 组合；
+      /etc/... 控制文件、etc/apk、/etc/os-release 归 Alpine 所有。
+
+  * musl libc              https://musl-libc.org/       MIT
+  * BusyBox                https://busybox.net/         GPL-2.0-only
+  * Bash                   https://www.gnu.org/software/bash/   GPL-3.0-or-later
+  * GNU coreutils          https://www.gnu.org/software/coreutils/  GPL-3.0-or-later
+  * GNU nano               https://www.nano-editor.org/          GPL-3.0-or-later
+  * Python                 https://www.python.org/      Python-2.0
+  * OpenRC                 https://github.com/OpenRC/openrc   BSD-2-Clause
+  * curl                   https://curl.se/             curl license
+  * fastfetch              https://github.com/fastfetch-cli/fastfetch  MIT
+  * X.Org / Xorg-server、Xlib、pixman 等
+                           https://www.x.org/           MIT/X11 及其他
+  * ncurses、readline、libffi、expat、libxml2、zlib、OpenSSL
+                           见各自上游项目页面
+
+不随镜像分发的工具链 / 相邻产物
+-------------------------------------------------------------------
+  * build/desk/ 下的交叉编译 clang/llvm（如存在）：Apache-2.0 WITH
+    LLVM-exception；仅用于编译本树，不作为 ISO 的一部分重新分发
+  * boot/limine/ 下的 Limine 阶段文件：BSD-2-Clause（见上文）
+
+源码获取说明
+-----------------------
+  initrd 直接夹带 build/alpine-rootfs（未改过装饰的 Alpine minirootfs
+  再经 tools/build-alpine-rootfs.sh 装入精简 apk 集合）。
+  镜像内没有任何来自未公开其许可证的发行版的东西；
+  可复现的构建产物放在 /build，版本控制按 Makefile 的说明刻意忽略。
+
+如发现本文件与任何上游许可证不一致，一律以该上游许可证原文为准。
+请通知维护者以便更正本文件。

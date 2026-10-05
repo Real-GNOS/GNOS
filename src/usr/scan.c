@@ -5,15 +5,21 @@
 #include <stdint.h>
 #include "ulib.h"
 
-#define O_RDWR 2
+#define O_RDWR       2
 #define BLKGETSIZE64 0x80081272
 
 int main(void)
 {
     for (int i = 0; i < 4; i++) {
         char name[16];
-        name[0] = '/'; name[1] = 'd'; name[2] = 'e'; name[3] = 'v';
-        name[4] = '/'; name[5] = 's'; name[6] = 'd'; name[7] = 'a' + i;
+        name[0] = '/';
+        name[1] = 'd';
+        name[2] = 'e';
+        name[3] = 'v';
+        name[4] = '/';
+        name[5] = 's';
+        name[6] = 'd';
+        name[7] = 'a' + i;
         name[8] = 0;
 
         print("open ");
@@ -25,7 +31,7 @@ int main(void)
             continue;
 
         uint64_t sz = 0;
-        long r = ioctl(fd, BLKGETSIZE64, &sz);
+        long     r  = ioctl(fd, BLKGETSIZE64, &sz);
         print("  ioctl -> ");
         printn(r);
         print("  bytes=");

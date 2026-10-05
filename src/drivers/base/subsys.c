@@ -33,8 +33,7 @@ static void copy_name(char *dst, const char *src)
     dst[SUBSYS_NAME_MAX - 1] = 0;
 }
 
-int subsys_register(const char *name, const char *dev, uint8_t cls,
-                    uint16_t major, uint16_t minor)
+int subsys_register(const char *name, const char *dev, uint8_t cls, uint16_t major, uint16_t minor)
 {
     if (!name || !name[0] || g_n >= SUBSYS_MAX)
         return -1;
@@ -83,23 +82,34 @@ const subsys_t *subsys_get(int slot)
 const char *subsys_class_name(uint8_t cls)
 {
     switch (cls) {
-    case SUBSYS_CLASS_GRAPHIC: return "graphic";
-    case SUBSYS_CLASS_INPUT:   return "input";
-    case SUBSYS_CLASS_BLOCK:   return "block";
-    case SUBSYS_CLASS_NET:     return "net";
-    case SUBSYS_CLASS_SOUND:   return "sound";
-    case SUBSYS_CLASS_TTY:     return "tty";
-    case SUBSYS_CLASS_MEM:     return "mem";
-    default:                   return "other";
+    case SUBSYS_CLASS_GRAPHIC:
+        return "graphic";
+    case SUBSYS_CLASS_INPUT:
+        return "input";
+    case SUBSYS_CLASS_BLOCK:
+        return "block";
+    case SUBSYS_CLASS_NET:
+        return "net";
+    case SUBSYS_CLASS_SOUND:
+        return "sound";
+    case SUBSYS_CLASS_TTY:
+        return "tty";
+    case SUBSYS_CLASS_MEM:
+        return "mem";
+    default:
+        return "other";
     }
 }
 
 static const char *state_name(uint8_t st)
 {
     switch (st) {
-    case SUBSYS_STATE_LIVE:   return "live";
-    case SUBSYS_STATE_FAILED: return "failed";
-    default:                  return "registered";
+    case SUBSYS_STATE_LIVE:
+        return "live";
+    case SUBSYS_STATE_FAILED:
+        return "failed";
+    default:
+        return "registered";
     }
 }
 

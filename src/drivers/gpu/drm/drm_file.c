@@ -15,7 +15,7 @@
  */
 
 #ifndef container_of
-#    define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
 #include <stdbool.h>
@@ -44,7 +44,9 @@ struct drm_file *drm_file_alloc(struct drm_device *dev)
     (void)dev;
 
     file = malloc(sizeof(*file));
-    if (file == NULL) { return NULL; }
+    if (file == NULL) {
+        return NULL;
+    }
     memset(file, 0, sizeof(*file));
 
     drm_idr_init(&file->object_idr);
@@ -74,7 +76,9 @@ void drm_file_free(struct drm_file *file)
 {
     struct drm_event_node *node;
 
-    if (file == NULL) { return; }
+    if (file == NULL) {
+        return;
+    }
 
     /* Refuse new events, then wait for the ones already armed to be
      * delivered: they hold a pointer to this file. */
@@ -109,12 +113,16 @@ static void drm_event_release_file_ref(struct drm_pending_vblank_event *e)
 {
     struct drm_file *file_priv;
 
-    if (e == NULL || !e->file_ref || e->file_priv == NULL) { return; }
+    if (e == NULL || !e->file_ref || e->file_priv == NULL) {
+        return;
+    }
 
     file_priv = e->file_priv;
 
     spin_lock(&file_priv->event_lock);
-    if (file_priv->event_refs != 0) { file_priv->event_refs--; }
+    if (file_priv->event_refs != 0) {
+        file_priv->event_refs--;
+    }
     e->file_ref = false;
     spin_unlock(&file_priv->event_lock);
 
@@ -131,7 +139,9 @@ int drm_send_event(struct drm_device *dev, struct drm_pending_vblank_event *e)
     struct drm_event_node *node;
     struct drm_file       *file_priv;
 
-    if (e == NULL) { return -EINVAL; }
+    if (e == NULL) {
+        return -EINVAL;
+    }
 
     file_priv = e->file_priv;
     if (file_priv == NULL) {
@@ -166,7 +176,9 @@ int drm_send_event(struct drm_device *dev, struct drm_pending_vblank_event *e)
     if (file_priv->event_closing) {
         /* The client is gone: drop the event rather than queue it for a
          * reader that will never come. */
-        if (e->file_ref && file_priv->event_refs != 0) { file_priv->event_refs--; }
+        if (e->file_ref && file_priv->event_refs != 0) {
+            file_priv->event_refs--;
+        }
         e->file_ref = false;
         spin_unlock(&file_priv->event_lock);
         wait_queue_wake_all(&file_priv->event_wait);
@@ -189,7 +201,9 @@ int drm_send_event(struct drm_device *dev, struct drm_pending_vblank_event *e)
     file_priv->event_list_tail = node;
     file_priv->event_space += (int)e->event.base.length;
 
-    if (e->file_ref && file_priv->event_refs != 0) { file_priv->event_refs--; }
+    if (e->file_ref && file_priv->event_refs != 0) {
+        file_priv->event_refs--;
+    }
     e->file_ref = false;
 
     spin_unlock(&file_priv->event_lock);
@@ -215,11 +229,15 @@ int drm_read(struct drm_file *file_priv, char *buf, size_t count, size_t *offset
 
     (void)offset;
 
-    if (file_priv == NULL || buf == NULL || count == 0) { return -EINVAL; }
+    if (file_priv == NULL || buf == NULL || count == 0) {
+        return -EINVAL;
+    }
 
     for (;;) {
         spin_lock(&file_priv->event_lock);
-        if (file_priv->event_list_head != NULL) { break; }
+        if (file_priv->event_list_head != NULL) {
+            break;
+        }
         if (file_priv->event_closing) {
             spin_unlock(&file_priv->event_lock);
             return 0; /* EOF once the file is being torn down */
@@ -236,7 +254,9 @@ int drm_read(struct drm_file *file_priv, char *buf, size_t count, size_t *offset
     }
 
     file_priv->event_list_head = node->next;
-    if (file_priv->event_list_head == NULL) { file_priv->event_list_tail = NULL; }
+    if (file_priv->event_list_head == NULL) {
+        file_priv->event_list_tail = NULL;
+    }
     file_priv->event_space -= (int)node->event->length;
 
     copy_size = node->event->length;
@@ -259,14 +279,22 @@ unsigned int drm_poll(struct drm_file *file_priv, unsigned int events)
 {
     unsigned int mask = 0;
 
-    if (file_priv == NULL) { return 0; }
+    if (file_priv == NULL) {
+        return 0;
+    }
 
     spin_lock(&file_priv->event_lock);
     if (file_priv->event_list_head != NULL) {
-        if ((events & DRM_POLLIN) != 0) { mask |= DRM_POLLIN; }
-        if ((events & DRM_POLLRDNORM) != 0) { mask |= DRM_POLLRDNORM; }
+        if ((events & DRM_POLLIN) != 0) {
+            mask |= DRM_POLLIN;
+        }
+        if ((events & DRM_POLLRDNORM) != 0) {
+            mask |= DRM_POLLRDNORM;
+        }
     }
-    if ((events & DRM_POLLOUT) != 0) { mask |= DRM_POLLOUT; }
+    if ((events & DRM_POLLOUT) != 0) {
+        mask |= DRM_POLLOUT;
+    }
     spin_unlock(&file_priv->event_lock);
 
     return mask;

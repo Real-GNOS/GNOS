@@ -43,7 +43,9 @@ struct drm_atomic_state *drm_atomic_state_alloc(struct drm_device *dev)
     struct drm_mode_config  *config = &dev->mode_config;
 
     state = malloc(sizeof(*state));
-    if (state == NULL) { return NULL; }
+    if (state == NULL) {
+        return NULL;
+    }
     memset(state, 0, sizeof(*state));
     state->dev = dev;
 
@@ -133,7 +135,9 @@ void drm_atomic_state_clear(struct drm_atomic_state *state)
 
 void drm_atomic_state_free(struct drm_atomic_state *state)
 {
-    if (state == NULL) { return; }
+    if (state == NULL) {
+        return;
+    }
 
     drm_atomic_state_default_clear(state);
     drm_modeset_acquire_fini(&state->acquire_ctx);
@@ -146,25 +150,33 @@ void drm_atomic_state_free(struct drm_atomic_state *state)
  * The proposed state for @crtc, created on first ask and seeded from its
  * current state so that a client only has to say what it wants changed.
  */
-struct drm_crtc_state *drm_atomic_get_crtc_state(struct drm_atomic_state *state, struct drm_crtc *crtc)
+struct drm_crtc_state *drm_atomic_get_crtc_state(struct drm_atomic_state *state,
+                                                 struct drm_crtc         *crtc)
 {
     struct __drm_crtcs_state *entry = &state->crtcs[crtc->index];
 
-    if (entry->state != NULL) { return entry->state; }
+    if (entry->state != NULL) {
+        return entry->state;
+    }
 
     entry->state = malloc(sizeof(*entry->state));
-    if (entry->state == NULL) { return NULL; }
+    if (entry->state == NULL) {
+        return NULL;
+    }
     memset(entry->state, 0, sizeof(*entry->state));
 
     entry->state->crtc = crtc;
     entry->ptr         = crtc;
 
-    if (crtc->state != NULL) { memcpy(entry->state, crtc->state, sizeof(*entry->state)); }
+    if (crtc->state != NULL) {
+        memcpy(entry->state, crtc->state, sizeof(*entry->state));
+    }
 
     return entry->state;
 }
 
-struct drm_plane_state *drm_atomic_get_plane_state(struct drm_atomic_state *state, struct drm_plane *plane)
+struct drm_plane_state *drm_atomic_get_plane_state(struct drm_atomic_state *state,
+                                                   struct drm_plane        *plane)
 {
     struct drm_mode_config    *config = &state->dev->mode_config;
     struct __drm_planes_state *entry;
@@ -180,25 +192,34 @@ struct drm_plane_state *drm_atomic_get_plane_state(struct drm_atomic_state *stat
         }
     }
 
-    if (idx < 0 || idx >= config->num_total_plane) { return NULL; }
+    if (idx < 0 || idx >= config->num_total_plane) {
+        return NULL;
+    }
 
     entry = &state->planes[idx];
 
-    if (entry->state != NULL) { return entry->state; }
+    if (entry->state != NULL) {
+        return entry->state;
+    }
 
     entry->state = malloc(sizeof(*entry->state));
-    if (entry->state == NULL) { return NULL; }
+    if (entry->state == NULL) {
+        return NULL;
+    }
     memset(entry->state, 0, sizeof(*entry->state));
 
     entry->state->plane = plane;
     entry->ptr          = plane;
 
-    if (plane->state != NULL) { memcpy(entry->state, plane->state, sizeof(*entry->state)); }
+    if (plane->state != NULL) {
+        memcpy(entry->state, plane->state, sizeof(*entry->state));
+    }
 
     return entry->state;
 }
 
-struct drm_connector_state *drm_atomic_get_connector_state(struct drm_atomic_state *state, struct drm_connector *connector)
+struct drm_connector_state *drm_atomic_get_connector_state(struct drm_atomic_state *state,
+                                                           struct drm_connector    *connector)
 {
     struct drm_connector       **connectors;
     struct drm_connector_state **states;
@@ -206,20 +227,25 @@ struct drm_connector_state *drm_atomic_get_connector_state(struct drm_atomic_sta
     int                          i;
 
     for (i = 0; i < state->num_connector; i++) {
-        if (state->connectors[i] == connector) { return state->connector_states[i]; }
+        if (state->connectors[i] == connector) {
+            return state->connector_states[i];
+        }
     }
 
     count = (size_t)state->num_connector + 1;
 
     connectors = realloc(state->connectors, sizeof(*connectors) * count);
-    if (connectors == NULL) { return NULL; }
+    if (connectors == NULL) {
+        return NULL;
+    }
     state->connectors = connectors;
 
     states = realloc(state->connector_states, sizeof(*states) * count);
     if (states == NULL) {
         /* Do not leave the connector array claiming a slot whose state does
          * not exist -- shrink it back to what is actually populated. */
-        state->connectors = realloc(state->connectors, sizeof(*connectors) * (size_t)state->num_connector);
+        state->connectors =
+            realloc(state->connectors, sizeof(*connectors) * (size_t)state->num_connector);
         return NULL;
     }
     state->connector_states = states;
@@ -227,12 +253,15 @@ struct drm_connector_state *drm_atomic_get_connector_state(struct drm_atomic_sta
     state->connectors[state->num_connector] = connector;
 
     state->connector_states[state->num_connector] = malloc(sizeof(*state->connector_states[0]));
-    if (state->connector_states[state->num_connector] == NULL) { return NULL; }
+    if (state->connector_states[state->num_connector] == NULL) {
+        return NULL;
+    }
     memset(state->connector_states[state->num_connector], 0, sizeof(*state->connector_states[0]));
     state->connector_states[state->num_connector]->connector = connector;
 
     if (connector->state != NULL) {
-        memcpy(state->connector_states[state->num_connector], connector->state, sizeof(*state->connector_states[0]));
+        memcpy(state->connector_states[state->num_connector], connector->state,
+               sizeof(*state->connector_states[0]));
     }
 
     state->num_connector++;
@@ -252,7 +281,8 @@ int drm_atomic_add_affected_planes(struct drm_atomic_state *state, struct drm_cr
     for (node = config->plane_list.next; node != &config->plane_list; node = node->next) {
         struct drm_plane *plane = container_of(node, struct drm_plane, head);
 
-        if ((plane->possible_crtcs & crtc_bit) != 0 && drm_atomic_get_plane_state(state, plane) == NULL) {
+        if ((plane->possible_crtcs & crtc_bit) != 0 &&
+            drm_atomic_get_plane_state(state, plane) == NULL) {
             return -ENOMEM;
         }
     }
@@ -270,7 +300,9 @@ int drm_atomic_add_affected_connectors(struct drm_atomic_state *state, struct dr
     for (node = config->connector_list.next; node != &config->connector_list; node = node->next) {
         struct drm_connector *connector = container_of(node, struct drm_connector, head);
 
-        if (drm_atomic_get_connector_state(state, connector) == NULL) { return -ENOMEM; }
+        if (drm_atomic_get_connector_state(state, connector) == NULL) {
+            return -ENOMEM;
+        }
     }
 
     return 0;
@@ -291,11 +323,15 @@ int drm_atomic_check_only(struct drm_atomic_state *state)
     for (i = 0; i < config->num_crtc; i++) {
         struct drm_crtc_state *crtc_state = state->crtcs[i].state;
 
-        if (crtc_state == NULL) { continue; }
+        if (crtc_state == NULL) {
+            continue;
+        }
 
         /* Changing a mode or the active flag is a modeset, and a client
          * that did not ask for one may not cause one. */
-        if (!state->allow_modeset && (crtc_state->mode_changed || crtc_state->active_changed)) { return -EINVAL; }
+        if (!state->allow_modeset && (crtc_state->mode_changed || crtc_state->active_changed)) {
+            return -EINVAL;
+        }
 
         if (crtc_state->active && crtc_state->mode.clock == 0 && crtc_state->mode.hdisplay == 0) {
             DRM_ERROR("CRTC %d: active but no mode set\n", i);
@@ -307,12 +343,15 @@ int drm_atomic_check_only(struct drm_atomic_state *state)
         for (i = 0; i < config->num_total_plane; i++) {
             struct drm_plane_state *plane_state = state->planes[i].state;
 
-            if (plane_state == NULL) { continue; }
+            if (plane_state == NULL) {
+                continue;
+            }
 
             if (plane_state->fb != NULL) {
                 bool format_ok = false;
 
-                if (plane_state->plane->format_types == NULL || plane_state->plane->format_count == 0) {
+                if (plane_state->plane->format_types == NULL ||
+                    plane_state->plane->format_count == 0) {
                     DRM_ERROR("Plane %d: fb set but no format list\n", i);
                     return -EINVAL;
                 }
@@ -330,7 +369,9 @@ int drm_atomic_check_only(struct drm_atomic_state *state)
             }
 
             /* A plane shows something somewhere, or nothing at all. */
-            if ((plane_state->fb != NULL) != (plane_state->crtc != NULL)) { return -EINVAL; }
+            if ((plane_state->fb != NULL) != (plane_state->crtc != NULL)) {
+                return -EINVAL;
+            }
 
             plane_state->visible = (plane_state->fb != NULL && plane_state->crtc != NULL);
 
@@ -340,15 +381,17 @@ int drm_atomic_check_only(struct drm_atomic_state *state)
 
                 /* Source is 16.16 fixed point and must lie inside the
                  * buffer; destination must have a positive area. */
-                if (plane_state->src.x1 < 0 || plane_state->src.y1 < 0
-                    || plane_state->src.x2 <= plane_state->src.x1 || plane_state->src.y2 <= plane_state->src.y1
-                    || plane_state->src.x2 > fb_w || plane_state->src.y2 > fb_h
-                    || plane_state->dst.x2 <= plane_state->dst.x1
-                    || plane_state->dst.y2 <= plane_state->dst.y1) {
+                if (plane_state->src.x1 < 0 || plane_state->src.y1 < 0 ||
+                    plane_state->src.x2 <= plane_state->src.x1 ||
+                    plane_state->src.y2 <= plane_state->src.y1 || plane_state->src.x2 > fb_w ||
+                    plane_state->src.y2 > fb_h || plane_state->dst.x2 <= plane_state->dst.x1 ||
+                    plane_state->dst.y2 <= plane_state->dst.y1) {
                     return -EINVAL;
                 }
 
-                if ((plane_state->plane->possible_crtcs & (1U << plane_state->crtc->index)) == 0) { return -EINVAL; }
+                if ((plane_state->plane->possible_crtcs & (1U << plane_state->crtc->index)) == 0) {
+                    return -EINVAL;
+                }
             }
 
             if (plane_state->crtc != NULL && plane_state->crtc->index >= config->num_crtc) {
@@ -361,7 +404,9 @@ int drm_atomic_check_only(struct drm_atomic_state *state)
     for (i = 0; i < state->num_connector; i++) {
         struct drm_connector_state *conn_state = state->connector_states[i];
 
-        if (conn_state == NULL) { continue; }
+        if (conn_state == NULL) {
+            continue;
+        }
 
         if (conn_state->crtc != NULL && conn_state->crtc->index >= config->num_crtc) {
             DRM_ERROR("Connector %d: invalid CRTC\n", i);
@@ -388,7 +433,9 @@ static int drm_atomic_commit_tail(struct drm_atomic_state *state)
     int                     i;
 
     ret = drm_atomic_check_only(state);
-    if (ret < 0) { return ret; }
+    if (ret < 0) {
+        return ret;
+    }
 
     if (state->page_flip_event) {
         int armed = 0;
@@ -397,12 +444,16 @@ static int drm_atomic_commit_tail(struct drm_atomic_state *state)
             struct drm_crtc_state *crtc_state = state->crtcs[i].state;
             struct drm_crtc       *crtc;
 
-            if (crtc_state == NULL) { continue; }
+            if (crtc_state == NULL) {
+                continue;
+            }
 
             crtc = state->crtcs[i].ptr;
 
             crtc_state->event = malloc(sizeof(*crtc_state->event));
-            if (crtc_state->event == NULL) { return -ENOMEM; }
+            if (crtc_state->event == NULL) {
+                return -ENOMEM;
+            }
             memset(crtc_state->event, 0, sizeof(*crtc_state->event));
 
             crtc_state->event->dev               = dev;
@@ -416,19 +467,23 @@ static int drm_atomic_commit_tail(struct drm_atomic_state *state)
             armed++;
         }
 
-        if (armed == 0) { return -EINVAL; }
+        if (armed == 0) {
+            return -EINVAL;
+        }
     }
 
     /* Scanout first: flip the primary plane if its framebuffer changed, and
      * give the driver the chance to switch a CRTC off. */
     for (i = 0; i < config->num_crtc; i++) {
-        struct drm_crtc            *crtc       = state->crtcs[i].ptr;
-        struct drm_crtc_state      *crtc_state = state->crtcs[i].state;
-        struct drm_plane_state     *primary_state = NULL;
+        struct drm_crtc              *crtc          = state->crtcs[i].ptr;
+        struct drm_crtc_state        *crtc_state    = state->crtcs[i].state;
+        struct drm_plane_state       *primary_state = NULL;
         struct drm_crtc_helper_funcs *helpers;
-        int                          p;
+        int                           p;
 
-        if (crtc == NULL || crtc_state == NULL) { continue; }
+        if (crtc == NULL || crtc_state == NULL) {
+            continue;
+        }
 
         for (p = 0; p < config->num_total_plane; p++) {
             if (state->planes[p].ptr == crtc->primary) {
@@ -436,30 +491,42 @@ static int drm_atomic_commit_tail(struct drm_atomic_state *state)
                 break;
             }
         }
-        if (primary_state == NULL && crtc->primary != NULL) { primary_state = crtc->primary->state; }
+        if (primary_state == NULL && crtc->primary != NULL) {
+            primary_state = crtc->primary->state;
+        }
 
-        if (crtc_state->active && primary_state != NULL
-            && (crtc->primary->state == NULL || primary_state->fb != crtc->primary->state->fb)) {
+        if (crtc_state->active && primary_state != NULL &&
+            (crtc->primary->state == NULL || primary_state->fb != crtc->primary->state->fb)) {
             helpers = (struct drm_crtc_helper_funcs *)crtc->helper_private;
-            if (helpers == NULL || helpers->page_flip == NULL) { return -ENOSYS; }
+            if (helpers == NULL || helpers->page_flip == NULL) {
+                return -ENOSYS;
+            }
             ret = helpers->page_flip(crtc, primary_state->fb, NULL, 0);
-            if (ret != 0) { return ret; }
+            if (ret != 0) {
+                return ret;
+            }
         }
 
         if (!crtc_state->active && crtc->enabled && crtc->helper_private != NULL) {
             helpers = (struct drm_crtc_helper_funcs *)crtc->helper_private;
-            if (helpers->atomic_disable != NULL) { helpers->atomic_disable(crtc, crtc->state); }
+            if (helpers->atomic_disable != NULL) {
+                helpers->atomic_disable(crtc, crtc->state);
+            }
         }
     }
 
     /* Publish: CRTCs first, then planes, then which connector goes where. */
     for (i = 0; i < config->num_crtc; i++) {
-        struct __drm_crtcs_state *entry       = &state->crtcs[i];
-        struct drm_crtc_state    *crtc_state  = entry->state;
+        struct __drm_crtcs_state *entry      = &state->crtcs[i];
+        struct drm_crtc_state    *crtc_state = entry->state;
 
-        if (crtc_state == NULL || entry->ptr == NULL) { continue; }
+        if (crtc_state == NULL || entry->ptr == NULL) {
+            continue;
+        }
 
-        if (crtc_state->active_changed) { entry->ptr->enabled = crtc_state->active; }
+        if (crtc_state->active_changed) {
+            entry->ptr->enabled = crtc_state->active;
+        }
 
         if (crtc_state->mode_changed && crtc_state->active) {
             memcpy(&entry->ptr->mode, &crtc_state->mode, sizeof(crtc_state->mode));
@@ -481,7 +548,9 @@ static int drm_atomic_commit_tail(struct drm_atomic_state *state)
             struct __drm_planes_state *entry       = &state->planes[i];
             struct drm_plane_state    *plane_state = entry->state;
 
-            if (plane_state == NULL || entry->ptr == NULL) { continue; }
+            if (plane_state == NULL || entry->ptr == NULL) {
+                continue;
+            }
 
             if (entry->ptr->state != NULL) {
                 entry->ptr->state->fb               = plane_state->fb;
@@ -504,9 +573,13 @@ static int drm_atomic_commit_tail(struct drm_atomic_state *state)
         struct drm_connector_state *conn_state = state->connector_states[i];
         struct drm_connector       *connector  = state->connectors[i];
 
-        if (conn_state == NULL || connector == NULL) { continue; }
+        if (conn_state == NULL || connector == NULL) {
+            continue;
+        }
 
-        if (conn_state->crtc_changed && connector->state != NULL) { connector->state->crtc = conn_state->crtc; }
+        if (conn_state->crtc_changed && connector->state != NULL) {
+            connector->state->crtc = conn_state->crtc;
+        }
     }
 
     /* Last: switch CRTCs on and hand out the completion events -- either
@@ -517,11 +590,15 @@ static int drm_atomic_commit_tail(struct drm_atomic_state *state)
         struct drm_crtc_state        *crtc_state = state->crtcs[i].state;
         struct drm_crtc_helper_funcs *helpers;
 
-        if (crtc == NULL || crtc_state == NULL) { continue; }
+        if (crtc == NULL || crtc_state == NULL) {
+            continue;
+        }
 
         if (crtc_state->active && crtc_state->active_changed && crtc->helper_private != NULL) {
             helpers = (struct drm_crtc_helper_funcs *)crtc->helper_private;
-            if (helpers->atomic_enable != NULL) { helpers->atomic_enable(crtc, crtc->state); }
+            if (helpers->atomic_enable != NULL) {
+                helpers->atomic_enable(crtc, crtc->state);
+            }
         }
 
         if (crtc_state->event != NULL) {
@@ -549,7 +626,9 @@ static void drm_atomic_commit_wait_turn(struct drm_atomic_state *state)
     struct drm_mode_config *config = &state->dev->mode_config;
 
     spin_lock(&config->commit_queue_lock);
-    if (state->commit_seq == 0) { state->commit_seq = ++config->commit_queue_next; }
+    if (state->commit_seq == 0) {
+        state->commit_seq = ++config->commit_queue_next;
+    }
     while (state->commit_seq != config->commit_queue_done + 1) {
         wait_queue_prepare(&config->commit_queue_wait);
         spin_unlock(&config->commit_queue_lock);
@@ -572,7 +651,9 @@ int drm_atomic_commit(struct drm_atomic_state *state)
     struct drm_device *dev;
     int                ret;
 
-    if (state == NULL || state->dev == NULL) { return -EINVAL; }
+    if (state == NULL || state->dev == NULL) {
+        return -EINVAL;
+    }
 
     dev = state->dev;
 
@@ -601,11 +682,15 @@ static void drm_atomic_nonblock_worker(void *arg)
     struct drm_file         *file_priv = state->file_priv;
     int                      ret       = drm_atomic_commit(state);
 
-    if (ret != 0) { drm_atomic_state_free(state); }
+    if (ret != 0) {
+        drm_atomic_state_free(state);
+    }
 
     if (file_priv != NULL) {
         spin_lock(&file_priv->event_lock);
-        if (file_priv->event_refs != 0) { file_priv->event_refs--; }
+        if (file_priv->event_refs != 0) {
+            file_priv->event_refs--;
+        }
         spin_unlock(&file_priv->event_lock);
         wait_queue_wake_all(&file_priv->event_wait);
     }
@@ -626,10 +711,14 @@ int drm_atomic_nonblocking_commit(struct drm_atomic_state *state)
     proc_t                 *worker;
     int                     ret;
 
-    if (state == NULL || state->dev == NULL) { return -EINVAL; }
+    if (state == NULL || state->dev == NULL) {
+        return -EINVAL;
+    }
 
     ret = drm_atomic_check_only(state);
-    if (ret != 0) { return ret; }
+    if (ret != 0) {
+        return ret;
+    }
 
     config    = &state->dev->mode_config;
     file_priv = state->file_priv;
@@ -668,7 +757,9 @@ int drm_atomic_nonblocking_commit(struct drm_atomic_state *state)
 
     state->commit_seq = ++config->commit_queue_next;
     worker            = kthread_create("drm-atomic", drm_atomic_nonblock_worker, state);
-    if (worker == NULL) { config->commit_queue_next--; }
+    if (worker == NULL) {
+        config->commit_queue_next--;
+    }
     spin_unlock(&config->commit_queue_lock);
 
     if (worker == NULL) {

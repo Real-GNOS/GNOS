@@ -46,7 +46,7 @@ typedef struct {
     int  used;
     int  pgid;
     int  npid;
-    int  pid[MAX_STAGES];       /* zeroed as each member is reaped */
+    int  pid[MAX_STAGES]; /* zeroed as each member is reaped */
     int  stopped;
     char cmd[CMD_LEN];
 } job_t;
@@ -57,7 +57,7 @@ typedef struct {
     char *in_file;
     char *out_file;
     int   append;
-    char  path[PATH_LEN];       /* the resolved program, for non-builtins */
+    char  path[PATH_LEN]; /* the resolved program, for non-builtins */
 } stage_t;
 
 static job_t   jobs[MAX_JOBS];
@@ -74,9 +74,9 @@ static int     shell_pgid;
  */
 #define MAX_ENV 64
 #define ENV_LEN 256
-static char   env_tab[MAX_ENV][ENV_LEN];
-static int    env_n;
-static char  *env_p[MAX_ENV + 1];
+static char  env_tab[MAX_ENV][ENV_LEN];
+static int   env_n;
+static char *env_p[MAX_ENV + 1];
 
 static void env_set(const char *kv)
 {
@@ -87,8 +87,7 @@ static void env_set(const char *kv)
     if (len >= ENV_LEN)
         return;
     for (int i = 0; i < env_n; i++)
-        if (strncmp(env_tab[i], kv, (size_t)(eq - kv)) == 0 &&
-            env_tab[i][eq - kv] == '=') {
+        if (strncmp(env_tab[i], kv, (size_t)(eq - kv)) == 0 && env_tab[i][eq - kv] == '=') {
             strcpy(env_tab[i], kv);
             return;
         }
@@ -104,20 +103,22 @@ static char *const *env_all(void)
     return env_p;
 }
 
-
 /*
  * A private descriptor for the terminal, duplicated from stdin at startup.
  * Script mode splices the script onto fd 0, and a redirected fd 0 is not the
  * tty any more -- so every tcsetpgrp() has to go through this one instead, or
  * handing the terminal to a job would quietly fail with ENOTTY.
  */
-static int     shell_tty;
+static int shell_tty;
 
 static int run_builtin(char **av);
 static int is_builtin(const char *name);
 
 /* ---- jobs ------------------------------------------------------------- */
-static int job_index(job_t *j) { return (int)(j - jobs); }
+static int job_index(job_t *j)
+{
+    return (int)(j - jobs);
+}
 
 static job_t *job_add(int *pids, int n, int pgid, const char *cmd)
 {
@@ -195,7 +196,7 @@ static void reap_jobs(void)
 {
     for (;;) {
         int status = 0;
-        int pid = waitpid(-1, &status, WNOHANG | WUNTRACED);
+        int pid    = waitpid(-1, &status, WNOHANG | WUNTRACED);
         if (pid <= 0)
             break;
 
@@ -220,7 +221,7 @@ static void wait_foreground(int *pids, int n, int pgid, const char *cmd)
 
     for (int i = 0; i < n; i++) {
         int status = 0;
-        int who = waitpid(pids[i], &status, WUNTRACED);
+        int who    = waitpid(pids[i], &status, WUNTRACED);
         if (who < 0)
             continue;
         if (WIFSTOPPED(status))
@@ -253,10 +254,9 @@ static void wait_foreground(int *pids, int n, int pgid, const char *cmd)
  * to the old "/<name>.elf" so the "no such program" message still reads
  * sensibly.
  */
-static const char *g_path[] = { "/bin", "/usr/bin", "/sbin",
-                                "/usr/sbin", "" };
+static const char *g_path[] = {"/bin", "/usr/bin", "/sbin", "/usr/sbin", ""};
 
-static int program_exists(const char *path);   /* defined just below */
+static int program_exists(const char *path); /* defined just below */
 
 static void resolve(const char *name, char *buf, int cap)
 {
@@ -272,7 +272,7 @@ static void resolve(const char *name, char *buf, int cap)
 
     /* A relative path with a slash ("bin/ls") is resolved against root. */
     if (strchr(name, '/')) {
-        int n = 0;
+        int n    = 0;
         buf[n++] = '/';
         for (const char *p = name; *p && n < cap - 1; p++)
             buf[n++] = *p;
@@ -286,14 +286,14 @@ static void resolve(const char *name, char *buf, int cap)
             has_dot = 1;
 
     char base[PATH_LEN];
-    int bn = 0;
+    int  bn = 0;
     for (const char *p = name; *p && bn < (int)sizeof(base) - 6; p++)
         base[bn++] = *p;
     base[bn] = 0;
 
     for (int d = 0; d < (int)(sizeof(g_path) / sizeof(g_path[0])); d++) {
         const char *dir = g_path[d];
-        int n = 0;
+        int         n   = 0;
         if (dir[0]) {
             for (const char *p = dir; *p && n < cap - 1; p++)
                 buf[n++] = *p;
@@ -315,7 +315,7 @@ static void resolve(const char *name, char *buf, int cap)
     }
 
     /* Not found on PATH: leave /<name>.elf for the error path. */
-    int n = 0;
+    int n    = 0;
     buf[n++] = '/';
     for (int i = 0; i < bn && n < cap - 1; i++)
         buf[n++] = base[i];
@@ -356,14 +356,11 @@ static int redirect(const char *name, int flags, int target, const char *what)
 
 static int apply_redirects(stage_t *s)
 {
-    if (s->in_file &&
-        !redirect(s->in_file, O_RDONLY, 0, ": cannot open for reading\n"))
+    if (s->in_file && !redirect(s->in_file, O_RDONLY, 0, ": cannot open for reading\n"))
         return 0;
 
-    if (s->out_file &&
-        !redirect(s->out_file, O_WRONLY | O_CREAT |
-                  (s->append ? O_APPEND : O_TRUNC), 1,
-                  ": cannot open for writing\n"))
+    if (s->out_file && !redirect(s->out_file, O_WRONLY | O_CREAT | (s->append ? O_APPEND : O_TRUNC),
+                                 1, ": cannot open for writing\n"))
         return 0;
 
     return 1;
@@ -372,7 +369,7 @@ static int apply_redirects(stage_t *s)
 /* ---- running a pipeline ----------------------------------------------- */
 static void child_setup(int pgid, int background)
 {
-    setpgid(0, pgid);                 /* pgid == 0: become the leader */
+    setpgid(0, pgid); /* pgid == 0: become the leader */
     if (!background && pgid == 0)
         tcsetpgrp(shell_tty, getpid());
 
@@ -383,7 +380,7 @@ static void child_setup(int pgid, int background)
      *
      * Inherited "ignore" dispositions would also make the job immune to
      * Ctrl-C, which is precisely what we do not want. */
-    signal(SIGINT,  SIG_DFL);
+    signal(SIGINT, SIG_DFL);
     signal(SIGQUIT, SIG_DFL);
     signal(SIGTSTP, SIG_DFL);
     signal(SIGTTIN, SIG_DFL);
@@ -394,8 +391,7 @@ static void run_pipeline(int n, int background, const char *cmd)
 {
     /* A lone builtin runs in the shell itself: `cd`-like commands would be
      * pointless in a child, and `exit` has to be. */
-    if (n == 1 && !stages[0].in_file && !stages[0].out_file &&
-        is_builtin(stages[0].av[0])) {
+    if (n == 1 && !stages[0].in_file && !stages[0].out_file && is_builtin(stages[0].av[0])) {
         run_builtin(stages[0].av);
         return;
     }
@@ -421,7 +417,7 @@ static void run_pipeline(int n, int background, const char *cmd)
     int in    = -1;
 
     for (int i = 0; i < n; i++) {
-        int pfd[2] = { -1, -1 };
+        int pfd[2] = {-1, -1};
 
         if (i + 1 < n && pipe(pfd) < 0) {
             print("shell: cannot create pipe\n");
@@ -567,7 +563,7 @@ static void builtin_fg(char **av)
     int  pgid = j->pgid;
     char cmd[CMD_LEN];
     strcpy(cmd, j->cmd);
-    j->used = 0;                    /* it is the foreground job now */
+    j->used = 0; /* it is the foreground job now */
 
     wait_foreground(pids, n, pgid, cmd);
 }
@@ -662,8 +658,8 @@ static void builtin_help(void)
 
 static int is_builtin(const char *name)
 {
-    static const char *names[] = { "help", "echo", "jobs", "fg", "bg",
-                                   "kill", "pid", "exit", "export", 0 };
+    static const char *names[] = {"help", "echo", "jobs", "fg",     "bg",
+                                  "kill", "pid",  "exit", "export", 0};
     for (int i = 0; names[i]; i++)
         if (strcmp(name, names[i]) == 0)
             return 1;
@@ -759,8 +755,8 @@ static int extract_redirects(stage_t *s)
             continue;
         }
 
-        int append = (c == '>' && av[r][1] == '>');
-        char *rest = av[r] + (append ? 2 : 1);
+        int   append = (c == '>' && av[r][1] == '>');
+        char *rest   = av[r] + (append ? 2 : 1);
 
         if (!*rest) {
             if (!av[r + 1]) {
@@ -828,9 +824,9 @@ static int parse_line(char *line)
  * the remainder for next time.  Returns the line length (without the '\n'),
  * or -1 at end of file.
  */
-static char  g_rdbuf[1024];
-static int   g_rdlo;          /* first unread byte */
-static int   g_rdlen;         /* bytes held in g_rdbuf */
+static char g_rdbuf[1024];
+static int  g_rdlo;  /* first unread byte */
+static int  g_rdlen; /* bytes held in g_rdbuf */
 
 static long read_line(char *line, int cap)
 {
@@ -840,7 +836,7 @@ static long read_line(char *line, int cap)
             g_rdlen = (int)sys_read(0, g_rdbuf, (long)sizeof(g_rdbuf));
             g_rdlo  = 0;
             if (g_rdlen <= 0)
-                return n ? n : -1;     /* flush a final partial line, else EOF */
+                return n ? n : -1; /* flush a final partial line, else EOF */
         }
         char c = g_rdbuf[g_rdlo++];
         if (c == '\n')
@@ -865,7 +861,7 @@ int main(int argc, char **argv)
     if (shell_tty < 0)
         shell_tty = 0;
 
-    signal(SIGINT,  SIG_IGN);
+    signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
     signal(SIGTSTP, SIG_IGN);
     signal(SIGTTOU, SIG_IGN);
@@ -906,7 +902,7 @@ int main(int argc, char **argv)
             print("gnos$ ");
 
         long n = read_line(line, (int)sizeof(line));
-        if (n < 0) {                        /* Ctrl-D / end of script */
+        if (n < 0) { /* Ctrl-D / end of script */
             if (interactive)
                 print("\n");
             exit(0);
@@ -933,7 +929,7 @@ int main(int argc, char **argv)
             line[--n] = 0;
         if (n > 0 && line[n - 1] == '&') {
             background = 1;
-            line[--n] = 0;
+            line[--n]  = 0;
         }
 
         int blank = 1;

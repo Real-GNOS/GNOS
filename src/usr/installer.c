@@ -47,12 +47,12 @@
 #include <sys/types.h>
 #include <time.h>
 
-#define BLKGETSIZE64 0x80081272       /* fstat helper: _IOR('B', 114, u64) */
-#define BLKRRPART    0x125F           /* re-read the partition table */
+#define BLKGETSIZE64 0x80081272 /* fstat helper: _IOR('B', 114, u64) */
+#define BLKRRPART    0x125F     /* re-read the partition table */
 
 #define ATA_SECTOR      512
-#define PART_START_SECT 2048          /* 1 MiB in; the limine gap stays free */
-#define BUF_SECTS       1024          /* copy/verify buffer: 512 KiB */
+#define PART_START_SECT 2048 /* 1 MiB in; the limine gap stays free */
+#define BUF_SECTS       1024 /* copy/verify buffer: 512 KiB */
 #define MAX_DISKS       6
 
 /* ---- screen ------------------------------------------------------------ */
@@ -121,7 +121,7 @@ static void menu_item(int y, int x, const char *label, int sel)
 
 /* ---- disks ------------------------------------------------------------- */
 struct disk {
-    char     name[8];                  /* "sda" etc. */
+    char     name[8]; /* "sda" etc. */
     uint64_t bytes;
     int      fd;
     int      present;
@@ -135,7 +135,7 @@ static void find_disks(struct disk *d, int *n)
         snprintf(di->name, sizeof di->name, "/dev/sd%c", 'a' + i);
         di->fd = open(di->name, O_RDWR);
         if (di->fd < 0)
-            return;                    /* sda exists => sdb might not: stop */
+            return; /* sda exists => sdb might not: stop */
         if (ioctl(di->fd, BLKGETSIZE64, &di->bytes) < 0 || !di->bytes) {
             close(di->fd);
             continue;
@@ -158,28 +158,31 @@ static off_t file_size(const char *path)
 /* Sector 0 of the target: limine's stage-1 boot code, our partition table,
  * and the 0xAA55 signature.  The partition entry (start LBA, count) arrives
  * per call. */
-static int write_mbr(int fd, const uint8_t *stage1,
-                     uint32_t part_start, uint32_t part_count)
+static int write_mbr(int fd, const uint8_t *stage1, uint32_t part_start, uint32_t part_count)
 {
     uint8_t mbr[ATA_SECTOR];
     memset(mbr, 0, sizeof mbr);
-    memcpy(mbr, stage1, 440);          /* boot code only; no table inside */
+    memcpy(mbr, stage1, 440); /* boot code only; no table inside */
 
-    uint8_t *e = mbr + 446;            /* entry 0, the classic layout */
-    e[0] = 0x80;                       /* bootable      */
-    e[1] = 0xFE; e[2] = 0xFF; e[3] = 0xFF;      /* CHS start: wildcard */
-    e[4] = 0x83;                       /* Linux         */
-    e[5] = 0xFE; e[6] = 0xFF; e[7] = 0xFF;      /* CHS end: wildcard */
-    e[8]  = part_start & 0xFF;         /* LBA start, LE */
-    e[9]  = (part_start >> 8) & 0xFF;
-    e[10] = (part_start >> 16) & 0xFF;
-    e[11] = (part_start >> 24) & 0xFF;
-    e[12] = part_count & 0xFF;         /* sector count, LE */
-    e[13] = (part_count >> 8) & 0xFF;
-    e[14] = (part_count >> 16) & 0xFF;
-    e[15] = (part_count >> 24) & 0xFF;
-    mbr[510] = 0x55;
-    mbr[511] = 0xAA;
+    uint8_t *e = mbr + 446; /* entry 0, the classic layout */
+    e[0]       = 0x80;      /* bootable      */
+    e[1]       = 0xFE;
+    e[2]       = 0xFF;
+    e[3]       = 0xFF; /* CHS start: wildcard */
+    e[4]       = 0x83; /* Linux         */
+    e[5]       = 0xFE;
+    e[6]       = 0xFF;
+    e[7]       = 0xFF;              /* CHS end: wildcard */
+    e[8]       = part_start & 0xFF; /* LBA start, LE */
+    e[9]       = (part_start >> 8) & 0xFF;
+    e[10]      = (part_start >> 16) & 0xFF;
+    e[11]      = (part_start >> 24) & 0xFF;
+    e[12]      = part_count & 0xFF; /* sector count, LE */
+    e[13]      = (part_count >> 8) & 0xFF;
+    e[14]      = (part_count >> 16) & 0xFF;
+    e[15]      = (part_count >> 24) & 0xFF;
+    mbr[510]   = 0x55;
+    mbr[511]   = 0xAA;
 
     if (pwrite(fd, mbr, ATA_SECTOR, 0) != ATA_SECTOR)
         return -1;
@@ -203,20 +206,18 @@ static int copy_root(int dst, int imgfd, uint64_t total, int y)
 
         ssize_t r = read(imgfd, buf, (size_t)chunk);
         if (r <= 0)
-            return r < 0 ? -1 : -2;    /* short image: -2 means "truncated" */
+            return r < 0 ? -1 : -2; /* short image: -2 means "truncated" */
         if (pwrite(dst, buf, (size_t)r, (off_t)done) != r)
             return -1;
         if (pread(dst, cmp, (size_t)r, (off_t)done) != r)
             return -1;
         if (memcmp(buf, cmp, (size_t)r) != 0)
-            return -3;                 /* read-back mismatch */
+            return -3; /* read-back mismatch */
 
         done += (uint64_t)r;
         mv(y, 0);
-        printf("\033[Kcopy: %llu / %llu KiB (%llu%%)\r",
-               (unsigned long long)(done / 1024),
-               (unsigned long long)(total / 1024),
-               (unsigned long long)(done * 100 / total));
+        printf("\033[Kcopy: %llu / %llu KiB (%llu%%)\r", (unsigned long long)(done / 1024),
+               (unsigned long long)(total / 1024), (unsigned long long)(done * 100 / total));
         fflush(stdout);
     }
     mv(y, 0);
@@ -257,7 +258,7 @@ static int confirm_screen(const char *dev)
         return 0;
     /* strip trailing newline */
     size_t l = strlen(line);
-    while (l && (line[l-1] == '\n' || line[l-1] == '\r'))
+    while (l && (line[l - 1] == '\n' || line[l - 1] == '\r'))
         line[--l] = 0;
     return strcmp(line, dev) == 0;
 }
@@ -275,7 +276,8 @@ static void done_screen(void)
     struct termios t;
     tcgetattr(0, &t);
     t.c_lflag &= ~(ICANON | ECHO);
-    t.c_cc[VMIN] = 1; t.c_cc[VTIME] = 0;
+    t.c_cc[VMIN]  = 1;
+    t.c_cc[VTIME] = 0;
     tcsetattr(0, TCSANOW, &t);
     (void)getchar();
     tcsetattr(0, TCSANOW, &t);
@@ -294,7 +296,7 @@ int main(void)
 
     /* ---- which disks are there --------------------------------------- */
     struct disk disks[MAX_DISKS];
-    int n = 0;
+    int         n = 0;
     find_disks(disks, &n);
     if (!n) {
         cls();
@@ -325,9 +327,7 @@ int main(void)
         hline(2);
         for (int i = 0; i < n; i++) {
             char line[80];
-            snprintf(line, sizeof line,
-                     "  %-8s %6llu MiB",
-                     disks[i].name,
+            snprintf(line, sizeof line, "  %-8s %6llu MiB", disks[i].name,
                      (unsigned long long)(disks[i].bytes / (1024 * 1024)));
             menu_item(4 + i, 0, line, i == sel);
         }
@@ -337,11 +337,17 @@ int main(void)
         int c = getchar();
         if (c == 'q')
             break;
-        if (c == '\033') {             /* escape sequences: ESC [ A / B */
+        if (c == '\033') { /* escape sequences: ESC [ A / B */
             getchar();
             switch (getchar()) {
-            case 'A': if (sel > 0) sel--; break;
-            case 'B': if (sel < n - 1) sel++; break;
+            case 'A':
+                if (sel > 0)
+                    sel--;
+                break;
+            case 'B':
+                if (sel < n - 1)
+                    sel++;
+                break;
             }
             continue;
         }
@@ -374,7 +380,7 @@ int main(void)
             if (!bsys)
                 die("open /boot/limine/limine.sys");
             static uint8_t biosys[BUF_SECTS * ATA_SECTOR];
-            long bsize = (long)fread(biosys, 1, sizeof biosys, bsys);
+            long           bsize = (long)fread(biosys, 1, sizeof biosys, bsys);
             fclose(bsys);
             if (bsize < ATA_SECTOR + ATA_SECTOR)
                 die("limine.sys is too small to be real");
@@ -395,8 +401,7 @@ int main(void)
                     if (chunk > ATA_SECTOR)
                         chunk = ATA_SECTOR;
                     memcpy(sec, biosys + pos, chunk);
-                    if (pwrite(d->fd, sec, ATA_SECTOR,
-                               (off_t)(lba * ATA_SECTOR)) != ATA_SECTOR)
+                    if (pwrite(d->fd, sec, ATA_SECTOR, (off_t)(lba * ATA_SECTOR)) != ATA_SECTOR)
                         die("write limine stage 2");
                     pos += chunk;
                     lba++;
@@ -431,11 +436,11 @@ int main(void)
             fputs("\033[Kok.", stdout);
             fflush(stdout);
 
-            (void)getchar();           /* pause, then the done screen */
+            (void)getchar(); /* pause, then the done screen */
             term_restore(0, &saved);
             done_screen();
             reboot(RB_POWER_OFF);
-            return 0;                  /* unreachable unless poweroff fails */
+            return 0; /* unreachable unless poweroff fails */
         }
     }
 

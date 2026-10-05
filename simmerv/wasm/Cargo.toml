@@ -1,0 +1,17 @@
+[package]
+edition = "2024"
+name = "simmerv_wasm"
+version = "0.1.0"
+authors = ["Takahiro", "Tommy Thorn <tommy-github2@thorn.ws>"]
+description = "RISC-V emulator written in Rust"
+license = "MIT"
+repository = "http://github.com/tommythorn/simmerv"
+
+[dependencies]
+simmerv = {path = "../"}
+wasm-bindgen = "0.2.126"
+
+[lib]
+name = "simmerv_wasm"
+path = "src/lib.rs"
+crate-type = ["cdylib"]

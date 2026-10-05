@@ -117,18 +117,22 @@ static void gen_subsystems(dsbuf_t *s)
         ds_char(s, ' ');
         /* Pad name to 19 chars */
         int len = 0;
-        for (const char *p = d->name; *p; p++) len++;
+        for (const char *p = d->name; *p; p++)
+            len++;
         ds_str(s, d->name);
-        for (int j = len; j < 19; j++) ds_char(s, ' ');
+        for (int j = len; j < 19; j++)
+            ds_char(s, ' ');
 
         ds_str(s, subsys_class_name(d->cls));
         int clen = 0;
-        for (const char *p = subsys_class_name(d->cls); *p; p++) clen++;
-        for (int j = clen; j < 12; j++) ds_char(s, ' ');
+        for (const char *p = subsys_class_name(d->cls); *p; p++)
+            clen++;
+        for (int j = clen; j < 12; j++)
+            ds_char(s, ' ');
 
-        ds_str(s, d->state == SUBSYS_STATE_LIVE   ? "live"
-                : d->state == SUBSYS_STATE_FAILED ? "failed"
-                                                  : "registered");
+        ds_str(s, d->state == SUBSYS_STATE_LIVE     ? "live"
+                  : d->state == SUBSYS_STATE_FAILED ? "failed"
+                                                    : "registered");
         ds_char(s, ' ');
         ds_str(s, d->dev[0] ? d->dev : "-");
         ds_char(s, '\n');
@@ -139,16 +143,13 @@ static void gen_subsystems(dsbuf_t *s)
 typedef debugfs_gen_t debugfs_gen_fn;
 
 typedef struct {
-    const char   *name;   /* basename only, e.g. "pmm" */
+    const char    *name; /* basename only, e.g. "pmm" */
     debugfs_gen_fn gen;
 } debugfs_file_t;
 
 static const debugfs_file_t g_files[] = {
-    { "version",      gen_version     },
-    { "pmm",          gen_pmm         },
-    { "timer",        gen_timer       },
-    { "smp",          gen_smp         },
-    { "subsystems",   gen_subsystems  },
+    {"version", gen_version},       {"pmm", gen_pmm}, {"timer", gen_timer}, {"smp", gen_smp},
+    {"subsystems", gen_subsystems},
 };
 #define NFILES ((int)(sizeof(g_files) / sizeof(g_files[0])))
 
@@ -156,9 +157,9 @@ static const debugfs_file_t g_files[] = {
 #define MAX_BLOBS 8
 
 typedef struct {
-    const char     *name;
-    const uint8_t  *data;
-    uint32_t        size;
+    const char    *name;
+    const uint8_t *data;
+    uint32_t       size;
 } debugfs_blob_t;
 
 static debugfs_blob_t g_blobs[MAX_BLOBS];
@@ -172,15 +173,15 @@ int debugfs_add_blob(const char *name, const void *data, uint32_t size)
         return -E_NOSPC;
 
     debugfs_blob_t *b = &g_blobs[g_nblobs];
-    b->name = name;
-    b->data = (const uint8_t *)data;
-    b->size = size;
+    b->name           = name;
+    b->data           = (const uint8_t *)data;
+    b->size           = size;
     g_nblobs++;
     return 0;
 }
 
 /* ---- dynamic files (registered at boot) -------------------------------- */
-#define MAX_FILES (NFILES + 8)   /* static table + room for driver additions */
+#define MAX_FILES (NFILES + 8) /* static table + room for driver additions */
 
 static debugfs_file_t g_dyn[MAX_FILES - NFILES];
 static int            g_ndyn;
@@ -213,7 +214,7 @@ static int32_t debugfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
     if (!f)
         return -E_INVAL;
 
-    dsbuf_t s = { scratch, DEBUGFS_BUF, 0 };
+    dsbuf_t s = {scratch, DEBUGFS_BUF, 0};
     f->gen(&s);
 
     uint32_t size = (s.pos < DEBUGFS_BUF) ? s.pos : DEBUGFS_BUF;
@@ -227,7 +228,7 @@ static int32_t debugfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
     return (int32_t)len;
 }
 
-static const vfs_ops_t g_debugfs_ops = { .read = debugfs_read, .write = NULL };
+static const vfs_ops_t g_debugfs_ops = {.read = debugfs_read, .write = NULL};
 
 /* ---- blob read --------------------------------------------------------- */
 static int32_t blob_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
@@ -244,16 +245,19 @@ static int32_t blob_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return (int32_t)len;
 }
 
-static const vfs_ops_t g_blob_ops = { .read = blob_read, .write = NULL };
+static const vfs_ops_t g_blob_ops = {.read = blob_read, .write = NULL};
 
 /* ---- directory ops (read returns EISDIR) -------------------------------- */
 static int32_t debugdir_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
-    (void)n; (void)off; (void)buf; (void)len;
+    (void)n;
+    (void)off;
+    (void)buf;
+    (void)len;
     return -E_ISDIR;
 }
 
-static const vfs_ops_t g_debugdir_ops = { .read = debugdir_read, .write = NULL };
+static const vfs_ops_t g_debugdir_ops = {.read = debugdir_read, .write = NULL};
 
 /* ---- basename ---------------------------------------------------------- */
 static const char *basename_of(const char *path)
@@ -284,7 +288,7 @@ int debugfs_resolve(const char *path, vfs_node_t *out)
 
     /* Only direct children: /debug/<name> */
     const char *base = basename_of(path);
-    if (base == path + 1)   /* no '/' before name */
+    if (base == path + 1) /* no '/' before name */
         return -E_NOENT;
 
     /* Must be exactly one component below /debug (no subdirs) */
@@ -333,8 +337,7 @@ int debugfs_resolve(const char *path, vfs_node_t *out)
 }
 
 /* ---- readdir ------------------------------------------------------------ */
-int debugfs_readdir(const char *dirpath, uint32_t index, char *name,
-                    uint8_t *type)
+int debugfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *type)
 {
     if (strcmp(dirpath, "/debug") != 0)
         return -E_NOTDIR;

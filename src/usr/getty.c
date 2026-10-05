@@ -30,8 +30,8 @@
 #include <termios.h>
 #include <unistd.h>
 
-#define ISSUE  "/etc/issue"
-#define LOGIN  "/bin/login"
+#define ISSUE "/etc/issue"
+#define LOGIN "/bin/login"
 
 /* Print /etc/issue, expanding the handful of escapes agetty defines that
  * mean anything here.  \l is the terminal name, \n the hostname. */
@@ -41,8 +41,8 @@ static void print_issue(const char *tty)
     if (!f)
         return;
 
-    char host[64] = "gnos";
-    FILE *h = fopen("/etc/hostname", "r");
+    char  host[64] = "gnos";
+    FILE *h        = fopen("/etc/hostname", "r");
     if (h) {
         if (fgets(host, sizeof host, h)) {
             char *nl = strchr(host, '\n');
@@ -60,10 +60,19 @@ static void print_issue(const char *tty)
         }
         int e = fgetc(f);
         switch (e) {
-        case 'l': fputs(tty, stdout);  break;
-        case 'n': fputs(host, stdout); break;
-        case EOF: fputc('\\', stdout); break;
-        default:  fputc('\\', stdout); fputc(e, stdout); break;
+        case 'l':
+            fputs(tty, stdout);
+            break;
+        case 'n':
+            fputs(host, stdout);
+            break;
+        case EOF:
+            fputc('\\', stdout);
+            break;
+        default:
+            fputc('\\', stdout);
+            fputc(e, stdout);
+            break;
         }
     }
     fclose(f);
@@ -72,8 +81,8 @@ static void print_issue(const char *tty)
 
 int main(int argc, char **argv)
 {
-    const char *name  = (argc > 1) ? argv[1] : "tty1";
-    const char *lgin  = (argc > 2) ? argv[2] : LOGIN;
+    const char *name = (argc > 1) ? argv[1] : "tty1";
+    const char *lgin = (argc > 2) ? argv[2] : LOGIN;
 
     char path[64];
     if (name[0] == '/')
@@ -98,8 +107,8 @@ int main(int argc, char **argv)
     }
 
     if (ioctl(fd, TIOCSCTTY, 0) != 0) {
-        fprintf(stderr, "getty: %s: cannot become controlling terminal: %s\n",
-                path, strerror(errno));
+        fprintf(stderr, "getty: %s: cannot become controlling terminal: %s\n", path,
+                strerror(errno));
         return 1;
     }
 
@@ -132,7 +141,7 @@ int main(int argc, char **argv)
      * fail with "Error opening terminal" if the vt220 entry were missing. */
     setenv("TERM", "linux", 1);
 
-    char *av[2] = { (char *)lgin, NULL };
+    char *av[2] = {(char *)lgin, NULL};
     execv(lgin, av);
 
     fprintf(stderr, "getty: cannot exec %s: %s\n", lgin, strerror(errno));

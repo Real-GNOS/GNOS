@@ -39,23 +39,23 @@
 
 /* ---- register map ------------------------------------------------------ */
 /* Offsets from the command-block base. */
-#define R_DATA      0
-#define R_ERROR     1      /* read  */
-#define R_FEATURES  1      /* write */
-#define R_SECCOUNT  2
-#define R_LBA0      3
-#define R_LBA1      4
-#define R_LBA2      5
-#define R_DRIVE     6
-#define R_STATUS    7      /* read  */
-#define R_COMMAND   7      /* write */
+#define R_DATA     0
+#define R_ERROR    1 /* read  */
+#define R_FEATURES 1 /* write */
+#define R_SECCOUNT 2
+#define R_LBA0     3
+#define R_LBA1     4
+#define R_LBA2     5
+#define R_DRIVE    6
+#define R_STATUS   7 /* read  */
+#define R_COMMAND  7 /* write */
 
 /* Status bits. */
-#define S_ERR   0x01
-#define S_DRQ   0x08
-#define S_DF    0x20
-#define S_RDY   0x40
-#define S_BSY   0x80
+#define S_ERR 0x01
+#define S_DRQ 0x08
+#define S_DF  0x20
+#define S_RDY 0x40
+#define S_BSY 0x80
 
 /* Commands. */
 #define C_READ_PIO      0x20
@@ -69,27 +69,27 @@
 #define C_PACKET        0xA0
 
 /* Device control register (the control block's only byte we write). */
-#define DCR_NIEN  0x02     /* stop the drive asserting its IRQ line */
+#define DCR_NIEN 0x02 /* stop the drive asserting its IRQ line */
 
 /*
  * How many status reads to spend waiting.  Each `inb` on a legacy ISA port
  * costs on the order of a microsecond, so this is seconds of patience -- far
  * more than a spin-up needs, and still bounded.
  */
-#define WAIT_SPINS  2000000
+#define WAIT_SPINS 2000000
 
 /* ---- devices ----------------------------------------------------------- */
-#define MAX_DISKS   4      /* two channels, master and slave on each */
-#define MAX_PARTS   16     /* MBR has four; GPT commonly has 128, we take the first sixteen */
+#define MAX_DISKS 4  /* two channels, master and slave on each */
+#define MAX_PARTS 16 /* MBR has four; GPT commonly has 128, we take the first sixteen */
 
 typedef struct {
-    uint16_t io;           /* command block base    */
-    uint16_t ctrl;         /* control block base    */
-    uint8_t  slave;        /* 0 = master, 1 = slave */
+    uint16_t io;    /* command block base    */
+    uint16_t ctrl;  /* control block base    */
+    uint8_t  slave; /* 0 = master, 1 = slave */
     uint8_t  lba48;
-    uint8_t  atapi;        /* PACKET-device (CD-ROM): scsi over ATA */
-    uint32_t secsize;      /* bytes per sector: 512 ATA, 2048 ATAPI */
-    uint64_t sectors;      /* capacity, in secsize-byte sectors     */
+    uint8_t  atapi;   /* PACKET-device (CD-ROM): scsi over ATA */
+    uint32_t secsize; /* bytes per sector: 512 ATA, 2048 ATAPI */
+    uint64_t sectors; /* capacity, in secsize-byte sectors     */
     char     model[41];
 } ata_disk_t;
 
@@ -102,9 +102,9 @@ typedef struct {
  */
 typedef struct {
     ata_disk_t *disk;
-    uint64_t    lba0;      /* first sector of the window   */
-    uint64_t    nsect;     /* window length, in sectors    */
-    char        name[8];   /* "sda", "sda1"                */
+    uint64_t    lba0;    /* first sector of the window   */
+    uint64_t    nsect;   /* window length, in sectors    */
+    char        name[8]; /* "sda", "sda1"                */
     uint8_t     is_part;
     uint8_t     used;
 } ata_bdev_t;
@@ -138,7 +138,7 @@ static int ata_wait_ready(const ata_disk_t *d)
 {
     for (uint32_t i = 0; i < WAIT_SPINS; i++) {
         uint8_t st = inb(d->io + R_STATUS);
-        if (st == 0xFF)                /* floating bus: nothing is there */
+        if (st == 0xFF) /* floating bus: nothing is there */
             return -1;
         if (!(st & S_BSY))
             return st;
@@ -180,8 +180,7 @@ static void ata_select(const ata_disk_t *d, uint8_t head_bits)
  *   word  83 b10  "supports 48-bit addressing"
  *   words 100..103 capacity in LBA48 sectors
  */
-static int atapi_packet_read(const ata_disk_t *d, uint8_t *pkt,
-                             uint16_t nbytes, uint8_t *buf);
+static int atapi_packet_read(const ata_disk_t *d, uint8_t *pkt, uint16_t nbytes, uint8_t *buf);
 
 static int ata_identify(ata_disk_t *d)
 {
@@ -210,12 +209,12 @@ static int ata_identify(ata_disk_t *d)
      * the LBA mid/high registers: 0x14/0xEB for ATAPI.  Send IDENTIFY
      * PACKET DEVICE instead and keep going -- the drive is worth having
      * (it is the boot media). */
-    uint8_t lba1 = inb(d->io + R_LBA1);
-    uint8_t lba2 = inb(d->io + R_LBA2);
+    uint8_t lba1      = inb(d->io + R_LBA1);
+    uint8_t lba2      = inb(d->io + R_LBA2);
     uint8_t is_packet = 0;
     if (lba1 == 0x14 && lba2 == 0xEB)
         is_packet = 1;
-    else if (lba1 || lba2)             /* some other non-ATA signature */
+    else if (lba1 || lba2) /* some other non-ATA signature */
         return 0;
 
     outb(d->io + R_COMMAND, is_packet ? C_ID_PACKET : C_IDENTIFY);
@@ -226,18 +225,18 @@ static int ata_identify(ata_disk_t *d)
     for (int i = 0; i < 256; i++)
         id[i] = inw(d->io + R_DATA);
 
-    d->atapi = is_packet;
+    d->atapi   = is_packet;
     d->secsize = is_packet ? 2048u : 512u;
-    d->lba48 = (id[83] & (1u << 10)) != 0;
+    d->lba48   = (id[83] & (1u << 10)) != 0;
 
     uint64_t lba28 = (uint64_t)id[60] | ((uint64_t)id[61] << 16);
-    uint64_t lba48 = (uint64_t)id[100]        | ((uint64_t)id[101] << 16) |
-                     ((uint64_t)id[102] << 32) | ((uint64_t)id[103] << 48);
+    uint64_t lba48 = (uint64_t)id[100] | ((uint64_t)id[101] << 16) | ((uint64_t)id[102] << 32) |
+                     ((uint64_t)id[103] << 48);
     d->sectors = (d->lba48 && lba48) ? lba48 : lba28;
     if (d->atapi && !d->sectors) {
         /* Removable media: IDENTIFY PACKET carries no capacity -- ask the
          * drive with READ CAPACITY (10). */
-        uint8_t cap[12] = { 0x25, 0 };
+        uint8_t cap[12] = {0x25, 0};
         uint8_t r[8];
         if (atapi_packet_read(d, cap, 8, r) == 0) {
             uint64_t last = ((uint64_t)r[0] << 24) | ((uint64_t)r[1] << 16) |
@@ -268,8 +267,7 @@ static int ata_identify(ata_disk_t *d)
  * only in that the 48-bit one writes the high bytes first, and picking a
  * single path removes a whole class of "works until the disk gets big" bug.
  */
-static int ata_cmd_one(const ata_disk_t *d, uint64_t lba, uint8_t cmd28,
-                       uint8_t cmd48)
+static int ata_cmd_one(const ata_disk_t *d, uint64_t lba, uint8_t cmd28, uint8_t cmd48)
 {
     if (ata_wait_ready(d) < 0)
         return -1;
@@ -277,11 +275,11 @@ static int ata_cmd_one(const ata_disk_t *d, uint64_t lba, uint8_t cmd28,
     if (d->lba48) {
         outb(d->io + R_DRIVE, (uint8_t)(0x40 | (d->slave << 4)));
         ata_delay400(d);
-        outb(d->io + R_SECCOUNT, 0);                       /* count high */
+        outb(d->io + R_SECCOUNT, 0); /* count high */
         outb(d->io + R_LBA0, (uint8_t)(lba >> 24));
         outb(d->io + R_LBA1, (uint8_t)(lba >> 32));
         outb(d->io + R_LBA2, (uint8_t)(lba >> 40));
-        outb(d->io + R_SECCOUNT, 1);                       /* count low  */
+        outb(d->io + R_SECCOUNT, 1); /* count low  */
         outb(d->io + R_LBA0, (uint8_t)(lba));
         outb(d->io + R_LBA1, (uint8_t)(lba >> 8));
         outb(d->io + R_LBA2, (uint8_t)(lba >> 16));
@@ -289,8 +287,7 @@ static int ata_cmd_one(const ata_disk_t *d, uint64_t lba, uint8_t cmd28,
     } else {
         /* In LBA28 the top four address bits live in the drive register,
          * which is also where the master/slave bit is. */
-        outb(d->io + R_DRIVE,
-             (uint8_t)(0xE0 | (d->slave << 4) | ((lba >> 24) & 0x0F)));
+        outb(d->io + R_DRIVE, (uint8_t)(0xE0 | (d->slave << 4) | ((lba >> 24) & 0x0F)));
         ata_delay400(d);
         outb(d->io + R_FEATURES, 0);
         outb(d->io + R_SECCOUNT, 1);
@@ -318,8 +315,7 @@ static int ata_read_sector(const ata_disk_t *d, uint64_t lba, uint8_t *buf)
     return 0;
 }
 
-static int ata_write_sector(const ata_disk_t *d, uint64_t lba,
-                            const uint8_t *buf)
+static int ata_write_sector(const ata_disk_t *d, uint64_t lba, const uint8_t *buf)
 {
     if (ata_cmd_one(d, lba, C_WRITE_PIO, C_WRITE_PIO_EXT) < 0)
         return -1;
@@ -356,12 +352,11 @@ static int ata_write_sector(const ata_disk_t *d, uint64_t lba,
  * write it back.  That read-modify-write is what makes `echo x > /dev/sda`
  * change one byte instead of destroying 511 of its neighbours.
  */
-static int32_t clamp(const ata_bdev_t *b, uint64_t off, uint32_t len,
-                     uint64_t *end)
+static int32_t clamp(const ata_bdev_t *b, uint64_t off, uint32_t len, uint64_t *end)
 {
     uint64_t cap = b->nsect * ATA_SECTOR;
     if (off >= cap)
-        return 0;                      /* past the end reads as EOF */
+        return 0; /* past the end reads as EOF */
     if (off + len > cap)
         len = (uint32_t)(cap - off);
     *end = off + len;
@@ -400,8 +395,7 @@ static int32_t bdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return want;
 }
 
-static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
-                          uint32_t len)
+static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     ata_bdev_t *b = (ata_bdev_t *)n->priv;
     if (!b || !b->used)
@@ -410,7 +404,7 @@ static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
     uint64_t end;
     int32_t  want = clamp(b, off, len, &end);
     if (want <= 0)
-        return want == 0 ? -E_NOSPC : want;   /* a write past the end is ENOSPC */
+        return want == 0 ? -E_NOSPC : want; /* a write past the end is ENOSPC */
 
     const uint8_t *in = (const uint8_t *)buf;
     uint8_t        sec[ATA_SECTOR];
@@ -424,7 +418,7 @@ static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
             chunk = (uint32_t)(end - pos);
 
         if (chunk == ATA_SECTOR) {
-            memcpy(sec, in, ATA_SECTOR);       /* whole sector: no read needed */
+            memcpy(sec, in, ATA_SECTOR); /* whole sector: no read needed */
         } else {
             if (ata_read_sector(b->disk, lba, sec) < 0)
                 return (pos > off) ? (int32_t)(pos - off) : -E_IO;
@@ -433,7 +427,7 @@ static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
         if (ata_write_sector(b->disk, lba, sec) < 0)
             return (pos > off) ? (int32_t)(pos - off) : -E_IO;
 
-        in  += chunk;
+        in += chunk;
         pos += chunk;
     }
     return want;
@@ -441,11 +435,11 @@ static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
 
 /* The block ioctls Linux defines; a partitioner or mkfs asks for these before
  * it will touch anything. */
-#define BLKRRPART     0x125F
-#define BLKGETSIZE    0x1260
-#define BLKFLSBUF     0x1261
-#define BLKSSZGET     0x1268
-#define BLKGETSIZE64  0x80081272
+#define BLKRRPART    0x125F
+#define BLKGETSIZE   0x1260
+#define BLKFLSBUF    0x1261
+#define BLKSSZGET    0x1268
+#define BLKGETSIZE64 0x80081272
 
 static int ata_scan_partitions(int disk);
 static int ata_scan_gpt(int disk);
@@ -463,7 +457,7 @@ static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         *(uint64_t *)(uintptr_t)arg = b->nsect * ATA_SECTOR;
         return 0;
 
-    case BLKGETSIZE:                   /* the old one: a count of sectors */
+    case BLKGETSIZE: /* the old one: a count of sectors */
         if (!arg)
             return -E_FAULT;
         *(unsigned long *)(uintptr_t)arg = (unsigned long)b->nsect;
@@ -476,7 +470,7 @@ static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         return 0;
 
     case BLKFLSBUF:
-        return 0;                      /* nothing is cached to flush */
+        return 0; /* nothing is cached to flush */
 
     case BLKRRPART:
         /* Re-reading the table of a partition makes no sense; only the whole
@@ -491,8 +485,7 @@ static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
 }
 
 /* ATAPI CD-ROM devices: one 2048-byte sector per LBA, read-only. */
-static int atapi_read(const ata_disk_t *d, uint64_t lba, uint32_t nsect,
-                      uint8_t *buf);
+static int atapi_read(const ata_disk_t *d, uint64_t lba, uint32_t nsect, uint8_t *buf);
 
 static int32_t sr_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
@@ -506,11 +499,11 @@ static int32_t sr_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     if (off >= end)
         return 0;
     if (off % 2048 || len % 2048)
-        return -E_INVAL;                 /* whole-sector access only */
+        return -E_INVAL; /* whole-sector access only */
 
-    return atapi_read(b->disk, off / 2048 + b->lba0,
-                      (uint32_t)((end - off) / 2048), buf) < 0
-               ? -E_IO : (int32_t)(end - off);
+    return atapi_read(b->disk, off / 2048 + b->lba0, (uint32_t)((end - off) / 2048), buf) < 0
+               ? -E_IO
+               : (int32_t)(end - off);
 }
 
 static const vfs_ops_t g_sr_ops = {
@@ -532,7 +525,7 @@ static const vfs_ops_t g_bdev_ops = {
  * for the data DRQ (a CD spin-up can take seconds on first access). */
 static void atapi_soft_reset(const ata_disk_t *d)
 {
-    outb(d->ctrl, 0x04);                 /* SRST */
+    outb(d->ctrl, 0x04); /* SRST */
     ata_delay400(d);
     ata_delay400(d);
     outb(d->ctrl, 0);
@@ -540,15 +533,14 @@ static void atapi_soft_reset(const ata_disk_t *d)
     ata_wait_ready(d);
 }
 
-static int atapi_packet_read(const ata_disk_t *d, uint8_t *pkt,
-                             uint16_t nbytes, uint8_t *buf)
+static int atapi_packet_read(const ata_disk_t *d, uint8_t *pkt, uint16_t nbytes, uint8_t *buf)
 {
     outb(d->io + R_DRIVE, (uint8_t)(0xA0 | (d->slave << 4)));
     ata_delay400(d);
     if (ata_wait_ready(d) < 0)
         return -1;
 
-    outb(d->io + R_FEATURES, 0);                 /* PIO, no overlap/DMA */
+    outb(d->io + R_FEATURES, 0); /* PIO, no overlap/DMA */
     outb(d->io + R_SECCOUNT, (uint8_t)(nbytes & 0xFF));
     outb(d->io + R_LBA0, (uint8_t)(nbytes >> 8));
     outb(d->io + R_COMMAND, C_PACKET);
@@ -569,7 +561,7 @@ static int atapi_packet_read(const ata_disk_t *d, uint8_t *pkt,
     if (!have_drq)
         goto timeout;
 
-    for (int i = 0; i < 6; i++)                  /* the packet, as words */
+    for (int i = 0; i < 6; i++) /* the packet, as words */
         outw(d->io, (uint16_t)(pkt[i * 2] | (pkt[i * 2 + 1] << 8)));
 
     /* Data phase */
@@ -599,11 +591,11 @@ abort:
     dbg_puts(" cmd=");
     dbg_puts_hexn(pkt[0], 2);
     dbg_puts("\r\n");
-    atapi_soft_reset(d);                 /* clear the stuck error state */
+    atapi_soft_reset(d); /* clear the stuck error state */
     {
         /* REQUEST SENSE: the ASC/ASCQ pair names the exact reason
          * (0x24 invalid field in CDB, 0x21 LBA out of range, ...) */
-        uint8_t spkt[12] = { 0x03, 0, 0, 0, 18, 0 };
+        uint8_t spkt[12] = {0x03, 0, 0, 0, 18, 0};
         uint8_t sense[18];
         memset(sense, 0, sizeof sense);
         if (atapi_packet_read(d, spkt, 18, sense) == 0) {
@@ -619,7 +611,7 @@ abort:
     return -1;
     {
         /* REQUEST SENSE: the ASC/ASCQ pair names the reason exactly */
-        uint8_t spkt[12] = { 0x03, 0, 0, 0, 18, 0 };
+        uint8_t spkt[12] = {0x03, 0, 0, 0, 18, 0};
         uint8_t sense[18];
         memset(sense, 0, sizeof sense);
         if (atapi_packet_read(d, spkt, 18, sense) == 0) {
@@ -641,19 +633,26 @@ timeout:
 }
 
 /* READ(12) over ATAPI: `nsect` 2048-byte sectors starting at `lba`. */
-static int atapi_read(const ata_disk_t *d, uint64_t lba, uint32_t nsect,
-                      uint8_t *buf)
+static int atapi_read(const ata_disk_t *d, uint64_t lba, uint32_t nsect, uint8_t *buf)
 {
     while (nsect) {
-        uint32_t now = nsect > 32u ? 32u : nsect;   /* one big transfer */
+        uint32_t now = nsect > 32u ? 32u : nsect; /* one big transfer */
         /* READ(10): LBA big-endian at bytes 2-5, transfer length (16-bit,
          * in blocks) at 7-8.  The old packet used a READ(12) length layout
          * with opcode 0x28 -- a zero transfer length, which the drive
          * correctly aborts. */
-        uint8_t pkt[12] = { 0x28, 0,
-                            (uint8_t)(lba >> 24), (uint8_t)(lba >> 16),
-                            (uint8_t)(lba >> 8),  (uint8_t)lba,
-                            0, (uint8_t)(now >> 8), (uint8_t)now, 0, 0, 0 };
+        uint8_t pkt[12] = {0x28,
+                           0,
+                           (uint8_t)(lba >> 24),
+                           (uint8_t)(lba >> 16),
+                           (uint8_t)(lba >> 8),
+                           (uint8_t)lba,
+                           0,
+                           (uint8_t)(now >> 8),
+                           (uint8_t)now,
+                           0,
+                           0,
+                           0};
         if (atapi_packet_read(d, pkt, now * (uint16_t)d->secsize, buf) < 0)
             return -1;
         buf += now * d->secsize;
@@ -680,22 +679,21 @@ static int atapi_read(const ata_disk_t *d, uint64_t lba, uint32_t nsect,
  * CRC32 checking is skipped, matching the "small and trusting" style of the
  * rest of this kernel.
  */
-#define MBR_SIG_OFF   510
-#define MBR_PART_OFF  446
-#define GPT_SIG_OFF   0       /* "EFI PART" at the top of the LBA-1 header */
-#define GPT_ENTRY_LBA 72      /* offset of the partition-entry array LBA */
-#define GPT_ENTRY_NUM 80      /* number of entries */
-#define GPT_ENTRY_SZ  84      /* size of one entry, always >= 128 */
-#define GPT_ENTRY_MIN 128
-#define GPT_TYPE_GUID 0       /* 16-byte type GUID at the top of an entry */
-#define GPT_ENTRY_FIRST 32    /* first LBA of the partition */
-#define GPT_ENTRY_LAST  40    /* last LBA of the partition */
-#define GPT_PROTECTIVE  0xEE  /* MBR type announcing a GPT disk */
+#define MBR_SIG_OFF     510
+#define MBR_PART_OFF    446
+#define GPT_SIG_OFF     0  /* "EFI PART" at the top of the LBA-1 header */
+#define GPT_ENTRY_LBA   72 /* offset of the partition-entry array LBA */
+#define GPT_ENTRY_NUM   80 /* number of entries */
+#define GPT_ENTRY_SZ    84 /* size of one entry, always >= 128 */
+#define GPT_ENTRY_MIN   128
+#define GPT_TYPE_GUID   0    /* 16-byte type GUID at the top of an entry */
+#define GPT_ENTRY_FIRST 32   /* first LBA of the partition */
+#define GPT_ENTRY_LAST  40   /* last LBA of the partition */
+#define GPT_PROTECTIVE  0xEE /* MBR type announcing a GPT disk */
 
 static uint32_t rd32(const uint8_t *p)
 {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static uint64_t rd64(const uint8_t *p)
@@ -744,7 +742,7 @@ static int ata_scan_partitions(int disk)
     if (ata_read_sector(whole->disk, whole->lba0, mbr) < 0)
         return -E_IO;
     if (mbr[MBR_SIG_OFF] != 0x55 || mbr[MBR_SIG_OFF + 1] != 0xAA)
-        return 0;                      /* unpartitioned; not an error */
+        return 0; /* unpartitioned; not an error */
 
     /* A protective MBR entry (type 0xEE) means the real table is GPT. */
     if (mbr[MBR_PART_OFF + 4] == GPT_PROTECTIVE)
@@ -766,15 +764,14 @@ static int ata_scan_partitions(int disk)
             continue;
 
         ata_bdev_t *p = part_slot(disk, i);
-        p->disk    = whole->disk;
-        p->lba0    = whole->lba0 + start;
-        p->nsect   = count;
-        p->is_part = 1;
-        p->used    = 1;
+        p->disk       = whole->disk;
+        p->lba0       = whole->lba0 + start;
+        p->nsect      = count;
+        p->is_part    = 1;
+        p->used       = 1;
         part_name(p->name, whole->name, i);
 
-        if (vfs_register_blkdev(p->name, &g_bdev_ops, p,
-                                p->nsect * ATA_SECTOR) != 0) {
+        if (vfs_register_blkdev(p->name, &g_bdev_ops, p, p->nsect * ATA_SECTOR) != 0) {
             p->used = 0;
             continue;
         }
@@ -808,7 +805,7 @@ static int ata_scan_gpt(int disk)
     if (ata_read_sector(whole->disk, whole->lba0 + 1, hdr) < 0)
         return -E_IO;
     if (memcmp(hdr + GPT_SIG_OFF, "EFI PART", 8) != 0)
-        return 0;                      /* protective MBR but no GPT: ignore */
+        return 0; /* protective MBR but no GPT: ignore */
 
     uint64_t entry_lba = rd64(hdr + GPT_ENTRY_LBA);
     uint32_t nentries  = rd32(hdr + GPT_ENTRY_NUM);
@@ -827,11 +824,14 @@ static int ata_scan_gpt(int disk)
         if (ata_read_sector(whole->disk, whole->lba0 + lba, ent) < 0)
             continue;
 
-        const uint8_t *e   = ent + off;
-        const uint8_t *guid = e + GPT_TYPE_GUID;
-        int empty = 1;
+        const uint8_t *e     = ent + off;
+        const uint8_t *guid  = e + GPT_TYPE_GUID;
+        int            empty = 1;
         for (int g = 0; g < 16; g++)
-            if (guid[g]) { empty = 0; break; }
+            if (guid[g]) {
+                empty = 0;
+                break;
+            }
         if (empty)
             continue;
 
@@ -842,17 +842,16 @@ static int ata_scan_gpt(int disk)
         if (first >= whole->nsect || last >= whole->nsect)
             continue;
 
-        uint64_t count = last - first + 1;
-        ata_bdev_t *p = part_slot(disk, i);
-        p->disk    = whole->disk;
-        p->lba0    = whole->lba0 + first;
-        p->nsect   = count;
-        p->is_part = 1;
-        p->used    = 1;
+        uint64_t    count = last - first + 1;
+        ata_bdev_t *p     = part_slot(disk, i);
+        p->disk           = whole->disk;
+        p->lba0           = whole->lba0 + first;
+        p->nsect          = count;
+        p->is_part        = 1;
+        p->used           = 1;
         part_name(p->name, whole->name, i);
 
-        if (vfs_register_blkdev(p->name, &g_bdev_ops, p,
-                                p->nsect * ATA_SECTOR) != 0) {
+        if (vfs_register_blkdev(p->name, &g_bdev_ops, p, p->nsect * ATA_SECTOR) != 0) {
             p->used = 0;
             continue;
         }
@@ -870,9 +869,11 @@ static int ata_scan_gpt(int disk)
 }
 
 /* ---- probe ------------------------------------------------------------- */
-static const struct { uint16_t io, ctrl; } g_channels[] = {
-    { 0x1F0, 0x3F6 },
-    { 0x170, 0x376 },
+static const struct {
+    uint16_t io, ctrl;
+} g_channels[] = {
+    {0x1F0, 0x3F6},
+    {0x170, 0x376},
 };
 
 /* ---- disk-root boot ----------------------------------------------------- */
@@ -937,24 +938,24 @@ int ata_init(void)
 
             int         idx = g_ndisks++;
             ata_disk_t *d   = &g_disks[idx];
-            *d = probe;
+            *d              = probe;
 
             ata_bdev_t *b = &g_bdevs[idx];
-            b->disk    = d;
-            b->lba0    = 0;
-            b->nsect   = d->sectors;
-            b->is_part = 0;
-            b->used    = 1;
+            b->disk       = d;
+            b->lba0       = 0;
+            b->nsect      = d->sectors;
+            b->is_part    = 0;
+            b->used       = 1;
 
             static int g_sr_count;
             if (d->atapi) {
                 /* A PACKET device: publish it as a read-only 2048-byte
                  * sector CD-ROM (sr0, sr1, ...) with no partition table. */
-                b->name[0] = 's'; b->name[1] = 'r';
+                b->name[0] = 's';
+                b->name[1] = 'r';
                 b->name[2] = (char)('0' + g_sr_count++);
                 b->name[3] = 0;
-                if (vfs_register_blkdev(b->name, &g_sr_ops, b,
-                                        b->nsect * 2048u) != 0) {
+                if (vfs_register_blkdev(b->name, &g_sr_ops, b, b->nsect * 2048u) != 0) {
                     b->used = 0;
                     g_ndisks--;
                     continue;
@@ -967,11 +968,12 @@ int ata_init(void)
                 continue;
             }
 
-            b->name[0] = 's'; b->name[1] = 'd';
-            b->name[2] = (char)('a' + idx); b->name[3] = 0;
+            b->name[0] = 's';
+            b->name[1] = 'd';
+            b->name[2] = (char)('a' + idx);
+            b->name[3] = 0;
 
-            if (vfs_register_blkdev(b->name, &g_bdev_ops, b,
-                                    b->nsect * ATA_SECTOR) != 0) {
+            if (vfs_register_blkdev(b->name, &g_bdev_ops, b, b->nsect * ATA_SECTOR) != 0) {
                 b->used = 0;
                 g_ndisks--;
                 continue;
@@ -980,10 +982,9 @@ int ata_init(void)
             /* Each disk after the first gets its own registry entry, so
              * coldplug can assert on every node and not just /dev/sda. */
             if (idx > 0)
-                subsys_set_state(subsys_register(b->name, b->name,
-                                                 SUBSYS_CLASS_BLOCK, 8,
-                                                 (uint16_t)(idx * 16)),
-                                 SUBSYS_STATE_LIVE);
+                subsys_set_state(
+                    subsys_register(b->name, b->name, SUBSYS_CLASS_BLOCK, 8, (uint16_t)(idx * 16)),
+                    SUBSYS_STATE_LIVE);
 
             dbg_puts("ATA: /dev/");
             dbg_puts(b->name);

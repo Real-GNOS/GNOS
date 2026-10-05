@@ -1,0 +1,36 @@
+.idea
+
+/node_modules/*
+/dist/
+*.log
+frontend/.nuxt/
+frontend/.output/
+frontend/node_modules/
+ftssearch/node_modules/
+nodffmpeg/node_modules/
+# Elasticsearch
+elasticsearch-7.11.1/
+# Temp files
+es.pid
+f.py
+# Local uploads (dev)
+frontend/public/videos/
+frontend/public/uploads/
+frontend/public/images/yg5ccl72_cover.jpg
+frontend/storage/videos/
+cocoforum/.nuxt/
+cocoforum/.output/
+cocoforum/node_modules/
+.npm-cache/
+elasticsearch-9.4.3/
+elasticsearch-9.4.3-windows-x86_64.zip
+# --- CoCoChinese 改名清理 ---
+frontend/storage/
+target/
+.gradle/
+build/
+*.env
+1.txt
+2-trap-errors*.txt
+# 构建产物/缓存（gitignore 不支持反斜杠路径，按目录名匹配）
+ftssearch/dist/

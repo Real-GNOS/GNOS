@@ -24,8 +24,8 @@
 #include "syscall.h"
 #include "sock.h"
 
-#define UNIX_MAX   16
-#define UNIX_RING  8192
+#define UNIX_MAX     16
+#define UNIX_RING    8192
 #define UNIX_BACKLOG 8
 
 #define UNIX_NAME_MAX 108
@@ -34,27 +34,27 @@
 #define UNIX_FDS_MAX 16
 
 typedef struct unix_sock {
-    int      used;
-    int      nonblock;
+    int used;
+    int nonblock;
 
-    uint8_t *rx;                     /* byte ring: incoming data */
+    uint8_t *rx; /* byte ring: incoming data */
     uint32_t head, tail, rused;
     uint32_t cap;
 
-    int      fds[UNIX_FDS_MAX];      /* handles awaiting recvmsg (SCM_RIGHTS) */
-    int      n_fds;
+    int fds[UNIX_FDS_MAX]; /* handles awaiting recvmsg (SCM_RIGHTS) */
+    int n_fds;
 
-    char     bound[UNIX_NAME_MAX];   /* pathname we are bound to */
-    int      has_path;               /* bound to a pathname (vs socketpair) */
-    int      abstract;               /* name lives in the abstract namespace */
+    char bound[UNIX_NAME_MAX]; /* pathname we are bound to */
+    int  has_path;             /* bound to a pathname (vs socketpair) */
+    int  abstract;             /* name lives in the abstract namespace */
 
-    int      listening;
-    struct unix_sock *peer;          /* connected stream peer */
+    int               listening;
+    struct unix_sock *peer; /* connected stream peer */
     struct unix_sock *backlog[UNIX_BACKLOG];
-    int      n_backlog;
+    int               n_backlog;
 
-    int      shut_rx, shut_tx;       /* shutdown() halves */
-    int      peer_closed;            /* the peer end went away / shut down */
+    int shut_rx, shut_tx; /* shutdown() halves */
+    int peer_closed;      /* the peer end went away / shut down */
 } unix_t;
 
 static unix_t g_unix[UNIX_MAX];
@@ -81,7 +81,7 @@ static void ring_put(unix_t *u, const void *data, uint32_t len)
     const uint8_t *p = (const uint8_t *)data;
     for (uint32_t i = 0; i < len; i++) {
         u->rx[u->head] = p[i];
-        u->head = (u->head + 1) % u->cap;
+        u->head        = (u->head + 1) % u->cap;
     }
     u->rused += len;
 }
@@ -90,7 +90,7 @@ static void ring_get(unix_t *u, void *out, uint32_t len)
 {
     uint8_t *p = (uint8_t *)out;
     for (uint32_t i = 0; i < len; i++) {
-        p[i] = u->rx[u->tail];
+        p[i]    = u->rx[u->tail];
         u->tail = (u->tail + 1) % u->cap;
     }
     u->rused -= len;
@@ -112,7 +112,7 @@ int unix_create(int type, int protocol)
             continue;
         unix_t *u = &g_unix[i];
         memset(u, 0, sizeof(*u));
-        u->rx       = kmalloc(UNIX_RING);
+        u->rx = kmalloc(UNIX_RING);
         if (!u->rx)
             return -E_NOMEM;
         u->cap      = UNIX_RING;
@@ -151,7 +151,7 @@ void unix_close(int u)
      * here balance them if nobody ever recvmsg'd them. */
     if (s->peer) {
         s->peer->peer_closed = 1;
-        s->peer->peer = NULL;
+        s->peer->peer        = NULL;
         ring_wake();
     }
     for (int i = 0; i < s->n_fds; i++)
@@ -173,15 +173,14 @@ static int unix_bind(int u, const char *path, uint32_t len, int abstract)
         return -E_NAMETOOLONG;
 
     for (int i = 0; i < UNIX_MAX; i++)
-        if (g_unix[i].used && g_unix[i].has_path &&
-            g_unix[i].abstract == abstract &&
+        if (g_unix[i].used && g_unix[i].has_path && g_unix[i].abstract == abstract &&
             !memcmp(g_unix[i].bound, path, len + 1) && i != u)
             return -E_ADDRINUSE;
 
     memcpy(s->bound, path, len);
     s->bound[len] = 0;
-    s->has_path = 1;
-    s->abstract = abstract;
+    s->has_path   = 1;
+    s->abstract   = abstract;
     return 0;
 }
 
@@ -190,8 +189,7 @@ static unix_t *unix_listener(const char *path, uint32_t len, int abstract)
 {
     for (int i = 0; i < UNIX_MAX; i++) {
         unix_t *s = &g_unix[i];
-        if (s->used && s->has_path && s->listening &&
-            s->abstract == abstract &&
+        if (s->used && s->has_path && s->listening && s->abstract == abstract &&
             !memcmp(s->bound, path, len + 1))
             return s;
     }
@@ -212,7 +210,7 @@ int unix_listen(int u, int backlog)
     if (backlog > UNIX_BACKLOG)
         backlog = UNIX_BACKLOG;
     s->listening = 1;
-    (void)backlog;                      /* one deep queue of fixed size */
+    (void)backlog; /* one deep queue of fixed size */
     return 0;
 }
 
@@ -240,10 +238,10 @@ int unix_connect(int u, const char *path, uint32_t len, int abstract)
     int ci = unix_create(SOCK_STREAM, 0);
     if (ci < 0)
         return ci;
-    unix_t *c = unix_at(ci);
-    c->peer          = s;
-    c->peer_closed   = 0;
-    s->peer          = c;
+    unix_t *c                  = unix_at(ci);
+    c->peer                    = s;
+    c->peer_closed             = 0;
+    s->peer                    = c;
     l->backlog[l->n_backlog++] = c;
     ring_wake();
     return 0;
@@ -261,7 +259,7 @@ int unix_accept(int u)
             sched_block_timeout(WAIT_PIPE, 0);
             if (s->n_backlog > 0)
                 break;
-            if (!s->used)               /* listener closed under us */
+            if (!s->used) /* listener closed under us */
                 return -E_BADF;
         }
     }
@@ -274,15 +272,14 @@ int unix_accept(int u)
     for (int i = 0; i < UNIX_MAX; i++)
         if (&g_unix[i] == c)
             return i;
-    return -E_IO;                       /* unreachable */
+    return -E_IO; /* unreachable */
 }
 
 /* ---- read / write -------------------------------------------------------- */
 
 /* Fill `len` bytes of `buf` from the socket.  Returns bytes copied (0 =
  * EOF when the peer is gone), or a negative errno. */
-static int unix_recv_data(unix_t *s, void *buf, uint32_t len, int peek,
-                          int nonblock)
+static int unix_recv_data(unix_t *s, void *buf, uint32_t len, int peek, int nonblock)
 {
     uint32_t got = 0;
     while (got < len) {
@@ -295,20 +292,20 @@ static int unix_recv_data(unix_t *s, void *buf, uint32_t len, int peek,
                 for (uint32_t i = 0; i < chunk; i++)
                     out[i] = s->rx[(s->tail + i) % s->cap];
                 got += chunk;
-                break;                  /* peek is a one-shot snapshot */
+                break; /* peek is a one-shot snapshot */
             }
             ring_get(s, (uint8_t *)buf + got, chunk);
             got += chunk;
-            ring_wake();                /* writers may be parked on full */
+            ring_wake(); /* writers may be parked on full */
             continue;
         }
         if (got > 0)
-            break;                      /* deliver the partial read */
+            break; /* deliver the partial read */
         if (s->peer_closed || s->shut_rx) {
 #ifdef SYSTRACE
             {
-                extern void dbg_puts(const char *);
-                extern void dbg_puts_dec(uint32_t);
+                extern void     dbg_puts(const char *);
+                extern void     dbg_puts_dec(uint32_t);
                 static unsigned ue;
                 if (++ue < 30) {
                     dbg_puts("UEOF u=");
@@ -323,7 +320,7 @@ static int unix_recv_data(unix_t *s, void *buf, uint32_t len, int peek,
                 }
             }
 #endif
-            return 0;                   /* EOF */
+            return 0; /* EOF */
         }
         if (nonblock || s->nonblock)
             return -E_AGAIN;
@@ -386,8 +383,8 @@ int unix_readable(int u)
     unix_t *s = unix_at(u);
     if (!s)
         return 0;
-    return s->rused > 0 || s->peer_closed || s->shut_rx ||
-           (s->listening && s->n_backlog > 0) || s->n_fds > 0;
+    return s->rused > 0 || s->peer_closed || s->shut_rx || (s->listening && s->n_backlog > 0) ||
+           s->n_fds > 0;
 }
 
 int unix_writable(int u)
@@ -424,7 +421,7 @@ int unix_shutdown(int u, int how)
         s->shut_tx = 1;
         if (s->peer) {
             s->peer->peer_closed = 1;
-            s->peer->peer = NULL;       /* and stop draining into it */
+            s->peer->peer        = NULL; /* and stop draining into it */
         }
     }
     ring_wake();
@@ -478,8 +475,8 @@ void unix_link(int a, int b)
     unix_t *ub = unix_at(b);
     if (!ua || !ub)
         return;
-    ua->peer = ub;
-    ub->peer = ua;
+    ua->peer        = ub;
+    ub->peer        = ua;
     ua->peer_closed = 0;
     ub->peer_closed = 0;
     ring_wake();
@@ -498,8 +495,7 @@ int32_t unix_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return unix_recv_data(s, buf, len, 0, 0);
 }
 
-int32_t unix_node_write(vfs_node_t *n, uint64_t off, const void *buf,
-                        uint32_t len)
+int32_t unix_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     (void)off;
     unix_t *s = unix_at(-2 - (int)(uintptr_t)n->priv);
@@ -547,6 +543,5 @@ int unix_recvmsg(int u, void *buf, uint32_t len, int *fds, int *nfds, int flags)
         *nfds = 0;
     }
 
-    return unix_recv_data(s, buf, len, (flags & MSG_PEEK) != 0,
-                          (flags & MSG_DONTWAIT) != 0);
+    return unix_recv_data(s, buf, len, (flags & MSG_PEEK) != 0, (flags & MSG_DONTWAIT) != 0);
 }
