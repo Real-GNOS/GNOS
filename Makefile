@@ -1864,6 +1864,20 @@ test: $(ISO) $(DISK)
 	  { echo "test: no PASS/FAIL lines in $(BUILD)/dbg.log"; exit 1; }
 	@grep 'FAIL' $(BUILD)/dbg.log && { echo "test: FAIL present"; exit 1; } || true
 	@echo "test: PASS lines present, no FAIL"
+	@# NOTICE: GNOS must boot the REAL Alpine init, not a stand-in.  Three
+	@# markers, all from the guest's own debug console:
+	@#   init is pid 1   busybox init got the first slot, not kthreadd
+	@#   name=inittab    pid 1 opened and read the real /etc/inittab
+	@#   NEW pid=3       init acted on it and forked its first child
+	@# (the openrc sysinit process).  The count is reported for the record.
+	@grep -q 'init is pid 1' $(BUILD)/dbg.log || \
+	  { echo "test: real init never became pid 1"; exit 1; }
+	@grep -q 'p=1 .*name=inittab' $(BUILD)/dbg.log || \
+	  { echo "test: pid 1 never read /etc/inittab"; exit 1; }
+	@grep -q 'NEW pid=3' $(BUILD)/dbg.log || \
+	  { echo "test: init never forked its first child"; exit 1; }
+	@n=$$(grep -cE 'init is pid 1|name=inittab|NEW pid=3' $(BUILD)/dbg.log); \
+	  echo "NOTICE: real Alpine init started correctly (pid 1 + inittab + child), $$n/3 markers"
 
 # The one-stop "is this commit acceptable?" gate used by CI and by hand.
 .PHONY: check

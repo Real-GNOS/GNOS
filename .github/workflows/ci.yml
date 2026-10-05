@@ -69,17 +69,25 @@ jobs:
             echo "boot test: no PASS markers/dbg.log"
             echo "outcome=fail" >> $GITHUB_OUTPUT
           fi
+          # The init NOTICE (pid 1 + inittab + first child) rides into the
+          # PR summary verbatim -- "the real Alpine init started" is the
+          # claim users of this repo actually care about.
+          init=$(grep -m1 '^NOTICE: real Alpine init' build/test.log || \
+                  echo 'NOTICE: real Alpine init NOT seen')
+          echo "init=$init" >> $GITHUB_OUTPUT
 
       - name: summary for pr bot
         id: gate
         run: |
           boot="${{ steps.boottest.outputs.outcome || 'fail' }}"
+          init="${{ steps.boottest.outputs.init || 'no boot log' }}"
           {
             echo "summary<<EOF"
             echo "- clang-format: ok"
             echo "- check-hdrs: ok"
             echo "- kernel build: ok"
             echo "- boot test: $boot"
+            echo "- $init"
             echo "EOF"
             echo "outcome=$boot"
           } >> $GITHUB_OUTPUT
