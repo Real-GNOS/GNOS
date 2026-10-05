@@ -838,10 +838,14 @@ $(MUSL_LIB)/libc.a $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $(MUSL_CRT)/crtn.o: | $
 	@[ -f $@ ] || tools/install-alpine.sh $(ALPINE_PKGS)
 	@test -f $@ || { echo "install-alpine.sh did not stage $@" >&2; exit 1; }
 else ifeq ($(USERLAND),minirootfs)
-# Alpine's musl-dev already sits in the minirootfs tree; it is produced by
-# tools/build-alpine-rootfs.sh, not install-alpine.sh, so there is nothing
-# to fall back to here -- only a clear error naming the producer.
-$(MUSL_LIB)/libc.a $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $(MUSL_CRT)/crtn.o:
+# Alpine's musl-dev already sits in the minirootfs tree, produced by
+# tools/build-alpine-rootfs.sh.  The initrd rule already orders itself after
+# the tree, but the MUSL_OBJS/MUSL_ELFS rules ask for libc.a long before the
+# initrd is reached, so the tree has to be their order-only prerequisite
+# too: on a fresh (or CI) checkout `make` populates it instead of dying with
+# a hint.  The test stays as the last resort in case the script returns 0
+# without staging what the build needs.
+$(MUSL_LIB)/libc.a $(MUSL_CRT)/crt1.o $(MUSL_CRT)/crti.o $(MUSL_CRT)/crtn.o: | $(ALPINE_ROOTFS)
 	@test -f $@ || { echo "$@ missing: run 'make alpine-base'" >&2; exit 1; }
 endif
 
