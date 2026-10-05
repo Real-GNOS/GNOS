@@ -1,8 +1,10 @@
 name: ci
 
 # Every push to main and every pull request goes through the same gate:
-# style first, then headers, then a real kernel build, and -- when the
-# ISO is reachable -- a 20-second boot self-test under QEMU.
+# style first, then headers, then a real kernel build, and -- once the ISO
+# is built -- a boot self-test under QEMU.  clang-format comes from pip at
+# the exact 18.1.7 the tree was formatted with: formatting decisions drift
+# between clang-format releases, and a runner-image default is not a pin.
 on:
   push:
     branches: [ main, master ]
@@ -26,12 +28,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-13 make nasm python3 qemu-system-x86 xorriso \
-            e2fsprogs clang-format-18 curl ca-certificates
-          sudo ln -sf clang-format-18 /usr/local/bin/clang-format || true
+            gcc-13 make nasm python3 qemu-system-x86 qemu-utils xorriso \
+            e2fsprogs curl ca-certificates xz-utils bzip2 unzip file
+          # Exact-format pin: same clang-format release on both sides.
+          python3 -m pip install --user --break-system-packages clang-format==18.1.7
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          "$HOME/.local/bin/clang-format" --version
 
       - name: clang-format gate
-        run: make check-format
+        run: make check-format CLANG_FORMAT="$HOME/.local/bin/clang-format"
 
       - name: header-name uniqueness
         run: make check-hdrs
@@ -41,10 +46,15 @@ jobs:
 
       - name: boot self-test (qemu headless)
         id: boottest
+        # The ISO build compiles the whole musl userland from scratch here,
+        # and the 1G ISO needs ~90s over the CD path before dbg.log says
+        # anything -- hence the generous step budget (make test itself
+        # gives qemu a 180s window).
+        timeout-minutes: 90
         run: |
           make build/gnos.iso CC=gcc-13
           set +e
-          timeout 120 make test CC=gcc-13 > build/test.log 2>&1
+          timeout 600 make test CC=gcc-13 > build/test.log 2>&1
           rc=$?
           set -e
           {

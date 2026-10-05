@@ -1836,20 +1836,26 @@ guistart: $(ISO) $(DISK)
 # clang-format gate: every first-party kernel/userland C+header obeys the
 # repo-level .clang-format (Google base, BreakBeforeBraces=Linux, 4-space
 # indent, 100 columns).  Vendor trees keep their upstream formatting.
+# CI pins CLANG_FORMAT to a pip-installed clang-format 18.1.7 so both sides
+# judge with the identical binary; locally the default is whatever
+# `clang-format` resolves to (formatting drift between releases is real --
+# upstream-verbatim headers such as limine.h are sensitive to it).
+CLANG_FORMAT ?= clang-format
 .PHONY: check-format
 check-format:
 	@find src -name '*.c' -o -name '*.h' | grep -v '/vendor/' | \
-	  xargs clang-format --dry-run -Werror --style=file
+	  xargs $(CLANG_FORMAT) --dry-run -Werror --style=file
 	@echo "check-format: clang-format clean"
 
-# `make test` — the headless self-test: run qemu for 20s, then hunt the
-# debug console's PASS/FAIL and fault markers for the binary that ran.
-# headless leaves the process on after its tests, so timeout kills it.
+# `make test` — the headless self-test: run qemu until the debug console has
+# had time to say anything (the 1G ISO over the CD path needs ~60-90s before
+# the first byte lands in dbg.log), then hunt PASS/FAIL and fault markers.
+# headless leaves qemu running after its tests, so timeout kills it.
 .PHONY: test
 test: $(ISO) $(DISK)
-	@echo "GNOS: headless self-test (20 s)..."
+	@echo "GNOS: headless self-test (180 s window)..."
 	@rm -f $(BUILD)/dbg.log
-	@timeout 20 $(MAKE) headless || true
+	@timeout 180 $(MAKE) headless || true
 	@grep -E 'PASS|FAIL' $(BUILD)/dbg.log >/dev/null || \
 	  { echo "test: no PASS/FAIL lines in $(BUILD)/dbg.log"; exit 1; }
 	@grep 'FAIL' $(BUILD)/dbg.log && { echo "test: FAIL present"; exit 1; } || true
