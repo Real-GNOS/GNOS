@@ -158,7 +158,8 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/hda.o $(BUILD)/ata.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
         $(BUILD)/cjkfont_data.o \
         $(BUILD)/input.o $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
-        $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
+        $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/inotify.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
+        $(BUILD)/mutex.o \
         $(BUILD)/pty.o $(BUILD)/calsa.o $(BUILD)/klog.o $(BUILD)/cpuid.o $(BUILD)/pagecache.o \
         $(BUILD)/pidfd.o $(BUILD)/process_vm_access.o $(BUILD)/quota.o $(BUILD)/ff.o $(BUILD)/diskio.o $(BUILD)/ffsystem.o $(BUILD)/fatfs_vfs.o \
         $(BUILD)/secretmem.o $(BUILD)/landlock.o \
@@ -1515,7 +1516,25 @@ endif
 	ln -sf libeconf.so.0.6.2 $(BUILD)/initrd-root/lib/libeconf.so.0
 	cp $(BUILD)/wiggle.elf $(BUILD)/initrd-root/sbin/wiggle
 	cp $(BUILD)/nep1.elf $(BUILD)/initrd-root/bin/nep1
-	cp $(BUILD)/login.elf $(BUILD)/initrd-root/bin/login
+	# login is the real util-linux one, from Alpine's util-linux-login
+	# package (see tools/build-alpine-rootfs.sh): it authenticates through
+	# PAM (linux-pam, with Alpine's /etc/pam.d config), writes utmp/wtmp,
+	# and drops privilege the way every other Linux does.  The hand-rolled
+	# src/usr/login.c stays in MUSLPROGS as a build smoke test but no longer
+	# ships as /bin/login.  libeconf/libsmartcols/libpam* land in /lib via
+	# the alpine-rootfs copy above; the PAM stack needs the same /lib soname
+	# treatment as libeconf, which the package's own layout already gives.
+	rm -f $(BUILD)/initrd-root/bin/login
+	cp $(ALPINE_ROOTFS)/bin/login $(BUILD)/initrd-root/bin/login
+	# PAM runtime files login writes into.  utmp/wtmp need no setup beyond
+	# existing: musl routes its utmpx database at /dev/null/utmp, so the
+	# real writers here are lastlog and the wtmp append, both plain files.
+	mkdir -p $(BUILD)/initrd-root/var/log
+	touch $(BUILD)/initrd-root/var/log/wtmp $(BUILD)/initrd-root/var/log/btmp \
+	      $(BUILD)/initrd-root/var/log/lastlog
+	chmod 664 $(BUILD)/initrd-root/var/log/wtmp
+	chmod 600 $(BUILD)/initrd-root/var/log/btmp
+	chmod 644 $(BUILD)/initrd-root/var/log/lastlog
 	cp $(BUILD)/bgidm.elf $(BUILD)/initrd-root/bin/bgidm
 	cp $(BUILD)/chvt.elf  $(BUILD)/initrd-root/usr/bin/chvt
 	# ---- loadable kernel modules: /lib/modules, like every Linux ---------

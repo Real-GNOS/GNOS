@@ -37,6 +37,7 @@
 #include "unix.h"
 #include "kstring.h"
 #include "debugcon.h"
+#include "inotify.h"
 #include "subsys.h"
 #include "syscall.h"
 
@@ -1381,6 +1382,32 @@ static int may_mutate_dir(const char *path, const char *victim)
     return 0;
 }
 
+/* Parent directory of an absolute path, in a caller-supplied buffer: the
+ * path up to (not including) the last '/', or "/" when there is no deeper
+ * component.  Static-buffered rather than allocated: the fire path runs on
+ * every namespace mutation, where a kmalloc failure must not change what
+ * the caller observes. */
+static const char *dirname_of(const char *path)
+{
+    static char buf[GNUOS_PATH_MAX];
+    if (!path || path[0] != '/')
+        return "/";
+    /* Manual last-'/' scan: kstring.h does not declare strrchr and an
+     * implicit int return would truncate the pointer on x86-64. */
+    const char *slash = NULL;
+    for (const char *p = path; *p; p++)
+        if (*p == '/')
+            slash = p;
+    if (!slash || slash == path)
+        return "/";
+    size_t n = (size_t)(slash - path);
+    if (n >= sizeof buf)
+        n = sizeof buf - 1;
+    memcpy(buf, path, n);
+    buf[n] = 0;
+    return buf;
+}
+
 int vfs_unlink(const char *path)
 {
     /* /dev/shm holds real tmpfs files; shm_unlink() must be able to remove
@@ -1401,7 +1428,15 @@ int vfs_unlink(const char *path)
         return tmpfs_unlink(fs, rel);
     if (!g_fs_ok)
         return -E_NOENT;
-    return fs_errno(ext2_unlink(&g_fs, path));
+    int r = fs_errno(ext2_unlink(&g_fs, path));
+    if (r == 0) {
+        inotify_event_fire(path, IN_DELETE, 0);
+        /* The parent directory changed too: fire IN_DELETE on every parent
+         * prefix that ends at a '/' boundary, which is what directory
+         * watches match against. */
+        inotify_event_fire(dirname_of(path), IN_DELETE, 0);
+    }
+    return r;
 }
 
 /*
@@ -1431,7 +1466,13 @@ int vfs_rmdir(const char *path)
         return r;
     if (n.kind != GK_DIR)
         return -E_NOTDIR;
-    return fs_errno(ext2_unlink(&g_fs, path));
+    r = fs_errno(ext2_unlink(&g_fs, path));
+    if (r == 0) {
+        uint32_t mask = IN_DELETE | IN_ISDIR;
+        inotify_event_fire(path, mask, 0);
+        inotify_event_fire(dirname_of(path), mask, 0);
+    }
+    return r;
 }
 
 int vfs_mkdir(const char *path)
@@ -1451,7 +1492,12 @@ int vfs_mkdir(const char *path)
     if (!g_fs_ok)
         return -E_NOENT;
     creator_from_caller();
-    return fs_errno(ext2_create(&g_fs, path, 1, NULL));
+    int r = fs_errno(ext2_create(&g_fs, path, 1, NULL));
+    if (r == 0) {
+        inotify_event_fire(path, IN_CREATE | IN_ISDIR, 0);
+        inotify_event_fire(dirname_of(path), IN_CREATE | IN_ISDIR, 0);
+    }
+    return r;
 }
 
 int vfs_symlink(const char *target, const char *path)
@@ -1466,10 +1512,21 @@ int vfs_symlink(const char *target, const char *path)
         return -E_PERM; /* cgroupfs has no symlinks */
     char     rel[GNUOS_PATH_MAX];
     tmpfs_t *fs = vfs_route_tmpfs(path, rel);
-    if (fs)
-        return tmpfs_symlink(fs, target, rel);
+    if (fs) {
+        int r = tmpfs_symlink(fs, target, rel);
+        if (r == 0) {
+            inotify_event_fire(path, IN_CREATE, 0);
+            inotify_event_fire(dirname_of(path), IN_CREATE, 0);
+        }
+        return r;
+    }
     creator_from_caller();
-    return fs_errno(ext2_symlink(&g_fs, target, path));
+    int r = fs_errno(ext2_symlink(&g_fs, target, path));
+    if (r == 0) {
+        inotify_event_fire(path, IN_CREATE, 0);
+        inotify_event_fire(dirname_of(path), IN_CREATE, 0);
+    }
+    return r;
 }
 
 int vfs_link(const char *oldpath, const char *newpath)
@@ -1486,7 +1543,12 @@ int vfs_link(const char *oldpath, const char *newpath)
     tmpfs_t *fs = vfs_route_tmpfs(newpath, rel);
     if (fs)
         return -E_OPNOTSUPP; /* tmpfs has no inode sharing */
-    return fs_errno(ext2_link(&g_fs, oldpath, newpath));
+    int r = fs_errno(ext2_link(&g_fs, oldpath, newpath));
+    if (r == 0) {
+        inotify_event_fire(newpath, IN_CREATE, 0);
+        inotify_event_fire(dirname_of(newpath), IN_CREATE, 0);
+    }
+    return r;
 }
 
 /* statfs(2)/fstatfs(2).  GNOS has one real filesystem (the ext2 root) plus
@@ -1577,10 +1639,30 @@ int vfs_rename(const char *src, const char *dst)
     tmpfs_t *dfs = vfs_route_tmpfs(dst, drel);
     if (sfs != dfs)
         return -E_XDEV;
-    if (sfs)
-        return tmpfs_rename(sfs, srel, drel);
+    if (sfs) {
+        int r = tmpfs_rename(sfs, srel, drel);
+        if (r == 0) {
+            /* One atomic op, two observations: MOVED_FROM on the old name
+             * and MOVED_TO on the new, sharing a cookie the way Linux
+             * watchers correlate a rename pair. */
+            uint32_t cookie = 0;
+            inotify_event_fire(src, IN_MOVED_FROM, cookie);
+            inotify_event_fire(dst, IN_MOVED_TO, cookie);
+            inotify_event_fire(dirname_of(src), IN_MOVED_FROM, cookie);
+            inotify_event_fire(dirname_of(dst), IN_MOVED_TO, cookie);
+        }
+        return r;
+    }
 
-    return fs_errno(ext2_rename(&g_fs, src, dst));
+    int r = fs_errno(ext2_rename(&g_fs, src, dst));
+    if (r == 0) {
+        uint32_t cookie = 0;
+        inotify_event_fire(src, IN_MOVED_FROM, cookie);
+        inotify_event_fire(dst, IN_MOVED_TO, cookie);
+        inotify_event_fire(dirname_of(src), IN_MOVED_FROM, cookie);
+        inotify_event_fire(dirname_of(dst), IN_MOVED_TO, cookie);
+    }
+    return r;
 }
 
 /*
@@ -1653,12 +1735,16 @@ int vfs_file_open(const char *path, int flags)
             int c = tmpfs_create_file(fs, rel, 0644);
             if (c < 0)
                 return c;
+            inotify_event_fire(path, IN_CREATE, 0);
+            inotify_event_fire(dirname_of(path), IN_CREATE, 0);
             r = resolve(path, &node, 1);
         } else if (g_fs_ok) {
             creator_from_caller();
             int c = ext2_create(&g_fs, path, 0, NULL);
             if (c != EXT2_OK)
                 return fs_errno(c);
+            inotify_event_fire(path, IN_CREATE, 0);
+            inotify_event_fire(dirname_of(path), IN_CREATE, 0);
             r = resolve(path, &node, 1);
         }
     }
@@ -2077,6 +2163,12 @@ int32_t vfs_file_write(int h, const void *buf, uint32_t len)
         f->pos += (uint32_t)n;
         if (f->pos > f->node.size)
             f->node.size = f->pos;
+        /* IN_MODIFY goes to watches on the file's path and its parent
+         * directory, with the byte count riding the mask's low bits --
+         * Linux does not overload the mask that way, but the name-only
+         * event is what watchers actually match on. */
+        inotify_event_fire(f->path, IN_MODIFY, 0);
+        inotify_event_fire(dirname_of(f->path), IN_MODIFY, 0);
     } else if (n > 0 && f->node.kind == VFS_BLOCKDEV) {
         /* A disk advances but never grows: its size is the hardware's. */
         f->pos += (uint32_t)n;

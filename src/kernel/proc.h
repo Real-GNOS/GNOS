@@ -64,6 +64,7 @@ typedef enum {
     WAIT_IPC,    /* System V IPC (semop/msg send/recv) */
     WAIT_VFORK,  /* CLONE_VFORK: parent parked until the
                   * child execs or exits */
+    WAIT_MUTEX,  /* kernel mutex: parked on a mutex_t's owner queue */
 } wait_reason_t;
 
 /* Signal numbers, wait() flags and the rest of the user-visible constants
@@ -125,6 +126,13 @@ typedef struct proc {
     uint64_t futex_addr;
     uint64_t futex_key;    /* phys address when futex_shared */
     int      futex_shared; /* word sits on a shared page */
+    /*
+     * Kernel-mutex wait state (WAIT_MUTEX): wait_mutex is the mutex this
+     * process is parked on, mutex_next its link in that mutex's FIFO.
+     * Zeroed like the futex fields, so an idle process is "not waiting".
+     */
+    struct proc *mutex_next;
+    struct mutex *wait_mutex;
     int      pgid;         /* process group: the unit of job control */
     /*
      * Session id.  A session is a collection of process groups that share a

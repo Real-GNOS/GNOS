@@ -39,6 +39,7 @@
 #include "anonfd.h"
 #include "timerfd.h"
 #include "signalfd.h"
+#include "inotify.h"
 #include "pty.h"
 #include "klog.h"
 #include "cpuid.h"
@@ -5943,6 +5944,18 @@ void syscall_handler(regs_t *r)
         break;
     case SYS_epoll_create1:
         ret = sys_epoll_create1(a1);
+        break;
+    case SYS_inotify_init:
+        ret = sys_inotify_init();
+        break;
+    case SYS_inotify_init1:
+        ret = sys_inotify_init1(a1);
+        break;
+    case SYS_inotify_add_watch:
+        ret = sys_inotify_add_watch((int)a1, a2, (uint32_t)a3);
+        break;
+    case SYS_inotify_rm_watch:
+        ret = sys_inotify_rm_watch((int)a1, (uint32_t)a2);
         break;
     case SYS_epoll_ctl:
         ret = sys_epoll_ctl((int)a1, (int)a2, (int)a3, r->r10);
