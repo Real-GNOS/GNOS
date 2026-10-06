@@ -362,7 +362,7 @@ MUSL_INC  := $(MUSL_PREFIX)/include
 MUSL_GCC  := $(MUSL_PREFIX)/bin/musl-gcc
 
 # Programs built against musl rather than ulib.
-MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest
+MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest bufoktest
 MUSL_OBJS := $(addprefix $(BUILD)/user/,$(addsuffix .o,$(MUSLPROGS)))
 MUSL_ELFS := $(addprefix $(BUILD)/,$(addsuffix .elf,$(MUSLPROGS)))
 
@@ -1854,12 +1854,14 @@ check-format:
 # `make test` — the headless self-test: run qemu until the debug console has
 # had time to say anything (the 1G ISO over the CD path needs ~60-90s before
 # the first byte lands in dbg.log), then hunt PASS/FAIL and fault markers.
+# The window is 400 s: cold boot to agetty across three runlevels takes
+# ~4 min on a loaded machine, and the assertions below run after qemu dies.
 # headless leaves qemu running after its tests, so timeout kills it.
 .PHONY: test
 test: $(ISO) $(DISK)
-	@echo "GNOS: headless self-test (180 s window)..."
+	@echo "GNOS: headless self-test (400 s window)..."
 	@rm -f $(BUILD)/dbg.log
-	@timeout 180 $(MAKE) headless || true
+	@timeout 400 $(MAKE) headless || true
 	@grep -E 'PASS|FAIL' $(BUILD)/dbg.log >/dev/null || \
 	  { echo "test: no PASS/FAIL lines in $(BUILD)/dbg.log"; exit 1; }
 	@grep 'FAIL' $(BUILD)/dbg.log && { echo "test: FAIL present"; exit 1; } || true
@@ -1878,6 +1880,19 @@ test: $(ISO) $(DISK)
 	  { echo "test: init never forked its first child"; exit 1; }
 	@n=$$(grep -cE 'init is pid 1|name=inittab|NEW pid=3' $(BUILD)/dbg.log); \
 	  echo "NOTICE: real Alpine init started correctly (pid 1 + inittab + child), $$n/3 markers"
+	@# NOTICE: the two markers that make the boot *real* rather than merely
+	@# alive.  Busybox init runs inittab's blocking actions sequentially, so
+	@# three `path=/sbin/openrc` execs mean sysinit and boot completed and
+	@# default started; the getty lines are ::wait: behind `openrc default`,
+	@# so a single `path=/sbin/agetty` exec means the whole runlevel chain
+	@# finished.  Both come from the kernel's exec trace (the framebuffer
+	@# console never reaches dbg.log).
+	@o=$$(grep -c '^EXEC p=[0-9]* path=/sbin/openrc' $(BUILD)/dbg.log); \
+	  a=$$(grep -c '^EXEC p=[0-9]* path=/sbin/agetty' $(BUILD)/dbg.log); \
+	  { [ $$o -ge 3 ] && [ $$a -ge 1 ]; } || \
+	  { echo "test: boot incomplete: openrc runlevels $$o/3, agetty spawns $$a (need 3 and 1)"; \
+	    exit 1; }; \
+	  echo "NOTICE: OpenRC + real AGeTTy started correctly, openrc=$$o/3 runlevels, agetty=$$a gettys"
 
 # The one-stop "is this commit acceptable?" gate used by CI and by hand.
 .PHONY: check

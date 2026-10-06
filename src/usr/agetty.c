@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -517,8 +518,40 @@ static void shell_loop(void)
 
 int main(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    /*
+     * Turn the bare device into a session before touching it, exactly the
+     * way getty.c does -- agetty runs as busybox init's respawn child, a
+     * session leader whose group is *not* the terminal's foreground until
+     * TIOCSCTTY says so, and a read from a background group earns a SIGTTIN
+     * that stops us dead.  The tty argument is optional (default tty1) so
+     * that a bare `agetty` on an inherited console still works.
+     */
+    const char *name = (argc > 1) ? argv[1] : "tty1";
+    char        path[64];
+    if (name[0] == '/')
+        snprintf(path, sizeof path, "%s", name);
+    else
+        snprintf(path, sizeof path, "/dev/%s", name);
+
+    setsid(); /* EPERM when init already made us a leader: fine, see getty.c */
+
+    /* O_NOCTTY: acquisition is TIOCSCTTY's job, with a checkable result. */
+    int fd = open(path, O_RDWR | O_NOCTTY);
+    if (fd < 0) {
+        /* Fall back to whatever the caller handed us (busybox init opens
+         * the inittab tty field itself); a display-less open is not fatal
+         * here the way it would be for getty. */
+        fprintf(stderr, "agetty: %s: %s (using inherited stdio)\n", path, strerror(errno));
+    } else {
+        if (ioctl(fd, TIOCSCTTY, 0) != 0)
+            fprintf(stderr, "agetty: TIOCSCTTY %s: %s\n", path, strerror(errno));
+        if (dup2(fd, 0) < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0)
+            return 1;
+        if (fd > 2)
+            close(fd);
+        /* Foreground job = us, and after our execs, the shell. */
+        tcsetpgrp(0, getpgrp());
+    }
 
     /* configure terminal */
     struct termios t;

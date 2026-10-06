@@ -140,6 +140,13 @@ typedef struct addrspace {
     uint32_t nshared;
 } addrspace_t;
 
+/* True if every page of [p, p+len) can take the kernel copy the caller is
+ * about to make: already present with the right permissions, or covered by
+ * an mmap record fault_back_lazy() could honour on the spot.  `writing' says
+ * the kernel is the destination (a read(2) buffer) rather than the source.
+ * Defined in vmm.c; call through buf_ok() in syscall.c. */
+int user_buf_ok(addrspace_t *as, uint64_t p, uint64_t len, int writing);
+
 /* Record the kernel's own PML4 so new address spaces can inherit its upper
  * half.  Call once, before any process is created. */
 void vmm_init(void);

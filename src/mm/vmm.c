@@ -890,6 +890,51 @@ int user_ptr_ok(uint64_t p, uint64_t len)
     return p + len <= USER_LIMIT;
 }
 
+/*
+ * user_buf_ok() -- the data-buffer counterpart to user_ptr_ok().  A range
+ * check alone is not enough before a kernel copy: syscalls such as write(2)
+ * memcpy straight out of the caller's buffer, and a buffer (or a garbage
+ * length) that runs past the end of the process image has neither a
+ * page-table entry nor an mmap record behind it.  fault_back_lazy() can back
+ * the second case on the spot but not the first, and a ring-0 fault on it is
+ * fatal -- fault_halt() freezes the machine (a mount(8) stdio flush whose
+ * iovec ran off the image end took a whole boot down exactly that way).
+ * So before copying, every page of the range must be either already present
+ * with the permissions the copy needs, or covered by a record the fault
+ * handler could honour.  The record rule mirrors fault_back_lazy(): last
+ * matching record wins, a store needs VM_WRITE, and a page that is present
+ * but read-only needs the record -- or the COW bit -- to upgrade it.
+ */
+int user_buf_ok(addrspace_t *as, uint64_t p, uint64_t len, int writing)
+{
+    if (!user_ptr_ok(p, len))
+        return 0;
+    if (!len || !as)
+        return 1;
+
+    uint64_t lo = p & ~0xFFFULL;
+    uint64_t hi = (p + len - 1) & ~0xFFFULL;
+
+    for (uint64_t va = lo; va <= hi; va += PAGE_SIZE) {
+        uint64_t *pte = walk(as, va, 0, 0);
+        if (pte && (*pte & PTE_P) && (!writing || (*pte & (PTE_RW | PTE_COW))))
+            continue;
+        /* Absent, or present read-only with a store on the way: the fault
+         * handler must be able to fix the page up, which takes a record --
+         * the same lookup fault_back_lazy() does, last match winning. */
+        int hit = -1;
+        for (int i = 0; i < as->nmmaps; i++) {
+            if (va >= as->mmaps[i].base && va < as->mmaps[i].base + as->mmaps[i].size)
+                hit = i;
+        }
+        if (hit < 0)
+            return 0;
+        if (writing && !(as->mmaps[hit].flags & VM_WRITE))
+            return 0;
+    }
+    return 1;
+}
+
 /* Recursively release the lower half of a page-table tree. */
 static void free_level(uint64_t table_phys, int level)
 {

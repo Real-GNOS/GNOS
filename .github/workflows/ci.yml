@@ -49,7 +49,8 @@ jobs:
         # The ISO build compiles the whole musl userland from scratch here,
         # and the 1G ISO needs ~90s over the CD path before dbg.log says
         # anything -- hence the generous step budget (make test itself
-        # gives qemu a 180s window).
+        # gives qemu a 400 s window; the ISO is pre-built above, so 600 s
+        # covers the window plus the assertions with room to spare).
         timeout-minutes: 90
         run: |
           make build/gnos.iso CC=gcc-13
@@ -62,25 +63,30 @@ jobs:
             tail -40 build/test.log || true
             echo '```'
           } > build/test.tail
-          if [ $rc -eq 0 ] || grep -qiE 'PASS' build/dbg.log; then
-            echo "boot test: usable boot reached (rc=$rc)"
+          if [ $rc -eq 0 ]; then
+            echo "boot test: all assertions green (rc=$rc)"
             echo "outcome=pass" >> $GITHUB_OUTPUT
           else
-            echo "boot test: no PASS markers/dbg.log"
+            echo "boot test: make test failed (rc=$rc)"
             echo "outcome=fail" >> $GITHUB_OUTPUT
           fi
-          # The init NOTICE (pid 1 + inittab + first child) rides into the
-          # PR summary verbatim -- "the real Alpine init started" is the
-          # claim users of this repo actually care about.
+          # The init NOTICE (pid 1 + inittab + first child) and the
+          # OpenRC/agetty NOTICE both ride into the PR summary verbatim --
+          # "the real Alpine init started" and "openrc + agetty ran" are the
+          # claims users of this repo actually care about.
           init=$(grep -m1 '^NOTICE: real Alpine init' build/test.log || \
                   echo 'NOTICE: real Alpine init NOT seen')
           echo "init=$init" >> $GITHUB_OUTPUT
+          oarc=$(grep -m1 '^NOTICE: OpenRC' build/test.log || \
+                  echo 'NOTICE: OpenRC + real AGeTTy NOT seen')
+          echo "openrc=$oarc" >> $GITHUB_OUTPUT
 
       - name: summary for pr bot
         id: gate
         run: |
           boot="${{ steps.boottest.outputs.outcome || 'fail' }}"
           init="${{ steps.boottest.outputs.init || 'no boot log' }}"
+          openrc="${{ steps.boottest.outputs.openrc || 'no boot log' }}"
           {
             echo "summary<<EOF"
             echo "- clang-format: ok"
@@ -88,6 +94,7 @@ jobs:
             echo "- kernel build: ok"
             echo "- boot test: $boot"
             echo "- $init"
+            echo "- $openrc"
             echo "EOF"
             echo "outcome=$boot"
           } >> $GITHUB_OUTPUT

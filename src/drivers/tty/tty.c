@@ -967,8 +967,16 @@ static int32_t tty_node_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     case TCSETSF:
         if (!user_ptr_ok(arg, sizeof(termios_t)))
             return -E_FAULT;
-        if (vt_check_ttou(v))
-            return -E_INTR;
+        /* No job-control check here, and that is deliberate: Linux applies
+         * none either (POSIX only says tcsetattr "may" send SIGTTOU, and the
+         * kernel doesn't).  Measured on a real Linux pty: a background group
+         * calling tcsetattr() survives untouched.  Checking here stalled the
+         * whole boot -- busybox init's sysinit child sets up its own group
+         * before exec'ing /sbin/openrc, found itself behind init's fg group,
+         * earned a SIGTTOU on its very first tcsetattr() and stopped dead,
+         * taking every runlevel (and every getty) with it.  TIOCSPGRP below
+         * still carries the check: handing over the terminal is the one call
+         * where the stop is the point. */
         vt_set_termios(v, (const termios_t *)(uintptr_t)arg, cmd == TCSETSF);
         return 0;
 

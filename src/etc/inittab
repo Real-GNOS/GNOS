@@ -5,13 +5,17 @@
 ::sysinit:/sbin/openrc sysinit
 ::sysinit:/sbin/openrc boot
 ::wait:/sbin/openrc default
+# The user-buffer probe regression test: a writev whose iovec runs off the
+# image end must come back as an error, never a frozen machine (the shape
+# that took a mount(8) stdio flush down; src/usr/bufoktest.c).
+::wait:/bin/bufoktest.elf
 
-tty1::respawn:/sbin/getty tty1
-tty2::respawn:/sbin/getty tty2
-tty3::respawn:/sbin/getty tty3
-tty4::respawn:/sbin/getty tty4
-tty5::respawn:/sbin/getty tty5
-tty6::respawn:/sbin/getty tty6
+tty1::respawn:/sbin/agetty tty1
+tty2::respawn:/sbin/agetty tty2
+tty3::respawn:/sbin/agetty tty3
+tty4::respawn:/sbin/agetty tty4
+tty5::respawn:/sbin/agetty tty5
+tty6::respawn:/sbin/agetty tty6
 
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/sbin/openrc shutdown

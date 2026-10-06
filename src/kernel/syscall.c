@@ -76,6 +76,16 @@ static void wrmsr(uint32_t msr, uint64_t val)
 /* user_ptr_ok() now lives in vmm.c (the network ioctl path needs it too);
  * it is declared in vmm.h, which this file includes. */
 
+/* Probe a user buffer before the kernel copies to or from it.  The range
+ * check alone cannot see a buffer (or a garbage length) that runs past the
+ * end of the process image: copying that would trap on a page nobody owns,
+ * and a ring-0 fault there is fatal.  See user_buf_ok() in vmm.c. */
+static int buf_ok(uint64_t p, uint64_t len, int writing)
+{
+    proc_t *pr = proc_current();
+    return user_buf_ok(pr ? pr->as : NULL, p, len, writing);
+}
+
 /* ---- path resolution --------------------------------------------------
  *
  * Every path a program hands us is turned into a normalised absolute path
@@ -991,7 +1001,7 @@ typedef struct {
 static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off, uint64_t flags,
                            int writing)
 {
-    if (cnt > 1024 || !user_ptr_ok(uiov, cnt * sizeof(vec2_t)))
+    if (cnt > 1024 || !buf_ok(uiov, cnt * sizeof(vec2_t), 0))
         return -E_INVAL;
     if (flags & ~(uint64_t)(RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND))
         return -E_OPNOTSUPP;
@@ -1018,7 +1028,9 @@ static int64_t sys_rw_vec2(int fd, uint64_t uiov, uint64_t cnt, int64_t off, uin
         uint32_t len = (uint32_t)iov[i].v_len;
         if (!len)
             continue;
-        if (!user_ptr_ok(iov[i].v_base, len))
+        /* `writing' is the write-shaped direction (data leaves the buffer),
+         * so the kernel is the READER here: probe the source view. */
+        if (!buf_ok(iov[i].v_base, len, !writing))
             return total ? total : -E_INVAL;
 
         int64_t n;
@@ -1278,11 +1290,14 @@ static int64_t sys_gethostname(uint64_t ubuf, uint64_t sz)
 {
     if (sz < 1)
         return -E_INVAL;
-    if (!user_ptr_ok(ubuf, 1))
-        return -E_FAULT;
     size_t n    = strlen(g_hostname);
     size_t copy = (n < (size_t)sz) ? n : (size_t)sz - 1;
-    char  *u    = (char *)(uintptr_t)ubuf;
+    /* The copy writes copy bytes plus the terminator -- probe exactly that,
+     * not the caller's whole sz, so a large buflen over a small buffer at the
+     * end of the image is not rejected for space it will never touch. */
+    if (!buf_ok(ubuf, copy + 1, 1))
+        return -E_FAULT;
+    char *u = (char *)(uintptr_t)ubuf;
     memcpy(u, g_hostname, copy);
     if (copy < (size_t)sz)
         u[copy] = '\0';
@@ -1339,7 +1354,7 @@ static int64_t sys_getrandom(uint64_t ubuf, uint64_t usize, uint64_t uflags)
      * range-checked at the start.  64 MB is far above anything reasonable. */
     if (usize > 64u * 1024 * 1024)
         usize = 64u * 1024 * 1024;
-    if (!user_ptr_ok(ubuf, 1))
+    if (!buf_ok(ubuf, usize, 1))
         return -E_FAULT;
     if (g_rng_state == 0)
         g_rng_state = rdtsc() ^ 0x9E3779B97F4A7C15ULL;
@@ -1905,7 +1920,7 @@ static int64_t sys_setgroups(int size, uint64_t ulist)
         return -E_PERM;
     if (size < 0 || size > PROC_NGROUPS)
         return -E_INVAL;
-    if (size && !user_ptr_ok(ulist, (uint64_t)size * 4))
+    if (size && !buf_ok(ulist, (uint64_t)size * 4, 0))
         return -E_FAULT;
 
     const uint32_t *in = (const uint32_t *)(uintptr_t)ulist;
@@ -1918,7 +1933,7 @@ static int64_t sys_setgroups(int size, uint64_t ulist)
 /* getdents64(217): fill a musl struct dirent buffer from a directory fd. */
 static int64_t sys_getdents64(int fd, uint64_t ubuf, uint64_t len)
 {
-    if (!user_ptr_ok(ubuf, len))
+    if (!buf_ok(ubuf, len, 1))
         return -E_INVAL;
     return vfs_dir_getdents64(fd_handle(fd), (void *)(uintptr_t)ubuf, (uint32_t)len);
 }
@@ -2291,7 +2306,7 @@ static int64_t sys_sendto(int fd, uint64_t ubuf, uint64_t len, int flags, uint64
     int s = fd_sock(fd);
     if (s == -1)
         return -E_NOTSOCK;
-    if (len && !user_ptr_ok(ubuf, len))
+    if (len && !buf_ok(ubuf, len, 0))
         return -E_FAULT;
 
     if (s >= 0) {
@@ -2315,7 +2330,7 @@ static int64_t sys_recvfrom(int fd, uint64_t ubuf, uint64_t len, int flags, uint
     int s = fd_sock(fd);
     if (s == -1)
         return -E_NOTSOCK;
-    if (len && !user_ptr_ok(ubuf, len))
+    if (len && !buf_ok(ubuf, len, 1))
         return -E_FAULT;
 
     if (s >= 0) {
@@ -2496,7 +2511,7 @@ static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
     memcpy(&m, (const void *)(uintptr_t)umsg, sizeof(m));
     if (m.msg_iovlen > MSG_IOV_MAX)
         return -E_MSGSIZE;
-    if (m.msg_iovlen && !user_ptr_ok(m.msg_iov, m.msg_iovlen * 16))
+    if (m.msg_iovlen && !buf_ok(m.msg_iov, m.msg_iovlen * 16, 0))
         return -E_FAULT;
 
     k_iovec_t iov[MSG_IOV_MAX];
@@ -2517,7 +2532,7 @@ static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
     if (m.msg_control) {
         if (m.msg_controllen > 4096)
             return -E_MSGSIZE;
-        if (!user_ptr_ok(m.msg_control, m.msg_controllen))
+        if (!buf_ok(m.msg_control, m.msg_controllen, 0))
             return -E_FAULT;
         uint64_t off = 0;
         while (off + 16 <= m.msg_controllen) {
@@ -2530,7 +2545,7 @@ static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
                 uint64_t n = (len - 16) / 4;
                 if (n > (uint64_t)(MSG_FD_MAX - nfds))
                     return -E_MSGSIZE;
-                if (!user_ptr_ok(m.msg_control + off + 16, n * 4))
+                if (!buf_ok(m.msg_control + off + 16, n * 4, 0))
                     return -E_FAULT;
                 uint32_t ufds[MSG_FD_MAX];
                 memcpy(ufds, (const void *)(uintptr_t)(m.msg_control + off + 16), n * 4);
@@ -2570,7 +2585,7 @@ static int64_t sys_sendmsg(int fd, uint64_t umsg, int flags)
         for (uint64_t i = 0; i < m.msg_iovlen; i++) {
             if (iov[i].iov_len == 0)
                 continue;
-            if (!user_ptr_ok(iov[i].iov_base, iov[i].iov_len)) {
+            if (!buf_ok(iov[i].iov_base, iov[i].iov_len, 0)) {
                 kfree(buf);
                 while (nfds > 0)
                     vfs_file_unref(fds[--nfds]);
@@ -2597,7 +2612,7 @@ static int64_t sys_recvmsg(int fd, uint64_t umsg, int flags)
     memcpy(&m, (const void *)(uintptr_t)umsg, sizeof(m));
     if (m.msg_iovlen > MSG_IOV_MAX)
         return -E_MSGSIZE;
-    if (m.msg_iovlen && !user_ptr_ok(m.msg_iov, m.msg_iovlen * 16))
+    if (m.msg_iovlen && !buf_ok(m.msg_iov, m.msg_iovlen * 16, 0))
         return -E_FAULT;
 
     k_iovec_t iov[MSG_IOV_MAX];
@@ -2662,7 +2677,7 @@ static int64_t sys_recvmsg(int fd, uint64_t umsg, int flags)
         uint64_t chunk = iov[i].iov_len;
         if (chunk > (uint64_t)n - got)
             chunk = (uint64_t)n - got;
-        if (!user_ptr_ok(iov[i].iov_base, chunk)) {
+        if (!buf_ok(iov[i].iov_base, chunk, 1)) {
             while (froom > 0)
                 vfs_file_unref(fds[--froom]);
             kfree(buf);
@@ -2675,7 +2690,8 @@ static int64_t sys_recvmsg(int fd, uint64_t umsg, int flags)
 
     /* Install received fds into our table and build the SCM_RIGHTS cmsg.
      * A control buffer too small for them drops the excess, like Linux. */
-    if (froom > 0 && m.msg_control && m.msg_controllen >= CMSG_SPACE(4)) {
+    if (froom > 0 && m.msg_control && m.msg_controllen >= CMSG_SPACE(4) &&
+        buf_ok(m.msg_control, m.msg_controllen, 1)) {
         proc_t  *p = proc_current();
         uint32_t ufds[MSG_FD_MAX];
         int      kept = 0;
@@ -3362,14 +3378,14 @@ static int64_t sys_ioctl(int fd, uint64_t cmd, uint64_t arg)
 
     /* TCSETS / TCSETSW / TCSETSF differ only in what happens to traffic
      * still in flight.  Output is never queued here, so "drain" is a no-op
-     * and only TCSAFLUSH's discard of unread input has any effect. */
+     * and only TCSAFLUSH's discard of unread input has any effect.
+     * Like Linux (see tty_node_ioctl), no job-control stop: a background
+     * group's tcsetattr() always applies. */
     case TCSETS:
     case TCSETSW:
     case TCSETSF: {
         if (!user_ptr_ok(arg, sizeof(termios_t)))
             return -E_INVAL;
-        if (tty_check_ttou())
-            return -E_INTR;
         tty_set_termios((const termios_t *)(uintptr_t)arg, cmd == TCSETSF);
         return 0;
     }
@@ -3426,7 +3442,7 @@ static int64_t sys_ttyinject(uint64_t ubuf, uint64_t len)
         return 0;
     if (len > TTYINJECT_MAX)
         len = TTYINJECT_MAX;
-    if (!user_ptr_ok(ubuf, len))
+    if (!buf_ok(ubuf, len, 0))
         return -E_FAULT;
 
     char scratch[TTYINJECT_MAX];
@@ -3473,7 +3489,7 @@ static int64_t sys_init_module(uint64_t uimage, uint64_t usize, uint64_t uargs)
         return -E_PERM;
     if (usize == 0 || usize > MODULE_MAX_SIZE)
         return -E_2BIG;
-    if (!user_ptr_ok(uimage, usize))
+    if (!buf_ok(uimage, usize, 0))
         return -E_FAULT;
     if (uargs && !user_ptr_ok(uargs, 1))
         return -E_FAULT;
@@ -4891,7 +4907,7 @@ typedef struct {
 
 static int64_t sys_rw_vec(int fd, uint64_t uiov, uint64_t cnt, int writing)
 {
-    if (cnt > 1024 || !user_ptr_ok(uiov, cnt * sizeof(iovec_t)))
+    if (cnt > 1024 || !buf_ok(uiov, cnt * sizeof(iovec_t), 0))
         return -E_INVAL;
 
     const iovec_t *iov   = (const iovec_t *)(uintptr_t)uiov;
@@ -4902,7 +4918,9 @@ static int64_t sys_rw_vec(int fd, uint64_t uiov, uint64_t cnt, int writing)
         uint32_t len = (uint32_t)iov[i].len;
         if (!len)
             continue;
-        if (!user_ptr_ok(iov[i].base, len))
+        /* `writing' is write-shaped (data leaves the buffer): the kernel
+         * reads these bytes, so the probe takes the source view. */
+        if (!buf_ok(iov[i].base, len, !writing))
             return total ? total : -E_INVAL;
 
         int64_t n = writing ? vfs_file_write(h, (const void *)(uintptr_t)iov[i].base, len)
@@ -5017,7 +5035,8 @@ void syscall_handler(regs_t *r)
 
     switch (nr) {
     case SYS_read:
-        if (!user_ptr_ok(a2, a3)) {
+        /* the buffer is the destination: the kernel writes into it */
+        if (!buf_ok(a2, a3, 1)) {
             ret = -E_INVAL;
             break;
         }
@@ -5045,7 +5064,8 @@ void syscall_handler(regs_t *r)
         break;
 
     case SYS_write:
-        if (!user_ptr_ok(a2, a3)) {
+        /* the buffer is the source: the kernel reads out of it */
+        if (!buf_ok(a2, a3, 0)) {
             ret = -E_INVAL;
             break;
         }
@@ -5056,7 +5076,8 @@ void syscall_handler(regs_t *r)
      * that does random access without an lseek dance -- an ELF loader, a
      * framebuffer client, sqlite -- reaches for first. */
     case SYS_pread64:
-        if (!user_ptr_ok(a2, a3)) {
+        /* destination buffer: probed as a write target */
+        if (!buf_ok(a2, a3, 1)) {
             ret = -E_INVAL;
             break;
         }
@@ -5068,7 +5089,8 @@ void syscall_handler(regs_t *r)
         break;
 
     case SYS_pwrite64:
-        if (!user_ptr_ok(a2, a3)) {
+        /* source buffer: probed as a read source */
+        if (!buf_ok(a2, a3, 0)) {
             ret = -E_INVAL;
             break;
         }
@@ -5912,6 +5934,18 @@ void syscall_handler(regs_t *r)
         }
         ret = proc_execve(abs, g_argv, g_envp, r);
 #ifdef SYSTRACE
+        /* One line per successful image swap, naming what actually ran.
+         * The generic SY trace prints a bare number for nr=59; the boot
+         * self-test asserts on these instead -- "openrc started" and
+         * "agetty started" are only observable from the kernel side,
+         * since the framebuffer console never reaches dbg.log. */
+        if (ret >= 0 && proc_current()) {
+            dbg_puts("EXEC p=");
+            dbg_puts_dec((uint32_t)proc_current()->pid);
+            dbg_puts(" path=");
+            dbg_puts(abs);
+            dbg_puts("\r\n");
+        }
         if (ret == -E_NOENT) {
             static unsigned en;
             if (++en < 30 || (en % 500) == 0) {
@@ -6212,11 +6246,11 @@ void syscall_handler(regs_t *r)
 
 #ifdef SYSTRACE
     if (nr == 9 || nr == 10 || nr == 12 || nr == 158 || nr == 218 || nr == 0 || nr == 1 ||
-        nr == 7 || nr == 29 || nr == 43 || nr == 202 || nr == 232 || nr == 257 || nr == 57 ||
-        nr == 217 || nr == 16 || nr == 8 || nr == 59 || nr == 61 || nr == 270 || nr == 23 ||
-        nr == 281 || nr == 35 || nr == 230 || nr == 2 || nr == 3 || nr == 5 || nr == 11 ||
-        nr == 13 || nr == 14 || nr == 6 || nr == 4 || nr == 89 || nr == 90 || nr == 41 ||
-        nr == 42 || nr == 45 || nr == 46 || nr == 47) {
+        nr == 19 || nr == 20 || nr == 7 || nr == 29 || nr == 43 || nr == 202 || nr == 232 ||
+        nr == 257 || nr == 57 || nr == 217 || nr == 16 || nr == 8 || nr == 59 || nr == 61 ||
+        nr == 270 || nr == 23 || nr == 281 || nr == 35 || nr == 230 || nr == 2 || nr == 3 ||
+        nr == 5 || nr == 11 || nr == 13 || nr == 14 || nr == 6 || nr == 4 || nr == 89 || nr == 90 ||
+        nr == 41 || nr == 42 || nr == 45 || nr == 46 || nr == 47) {
         dbg_puts("SY p=");
         dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
         dbg_puts(" nr=");
