@@ -557,8 +557,90 @@ static const procfile_t g_files[] = {
 };
 #define NFILES ((int)(sizeof(g_files) / sizeof(g_files[0])))
 
+/* ---- /proc/sys: writable sysctl keys ---------------------------------- */
+/* Linux exposes kernel tunables as writable files under /proc/sys, and the
+ * sysctl service applies /lib/sysctl.d/<star>.conf by writing each key.  GNOS
+ * has no networking stack, no bpf, and no protected-link enforcement, so
+ * these keys are stored values rather than live controls -- but they are
+ * real files: a read returns the current value, a write replaces it, and
+ * the defaults match what /lib/sysctl.d/00-alpine.conf sets so that
+ * applying that config at boot is a no-op that succeeds. */
+typedef struct {
+    const char *path;  /* absolute, always beginning "/proc/sys" */
+    char        val[64];
+} sysctl_t;
+
+static sysctl_t g_sysctls[] = {
+    {"/proc/sys/net/ipv4/tcp_syncookies",            "1"},
+    {"/proc/sys/net/ipv4/conf/default/rp_filter",     "1"},
+    {"/proc/sys/net/ipv4/conf/all/rp_filter",        "1"},
+    {"/proc/sys/net/ipv4/ping_group_range",           "999 59999"},
+    {"/proc/sys/net/ipv4/conf/all/accept_redirects",  "0"},
+    {"/proc/sys/net/ipv4/conf/all/secure_redirects", "1"},
+    {"/proc/sys/net/ipv6/conf/all/accept_redirects",  "0"},
+    {"/proc/sys/net/ipv4/conf/all/accept_source_route", "0"},
+    {"/proc/sys/net/ipv6/conf/all/accept_source_route", "0"},
+    {"/proc/sys/net/ipv4/tcp_rfc1337",                "1"},
+    {"/proc/sys/net/ipv6/conf/default/use_tempaddr",  "2"},
+    {"/proc/sys/net/ipv6/conf/all/use_tempaddr",      "2"},
+    {"/proc/sys/kernel/panic",                        "120"},
+    {"/proc/sys/fs/protected_hardlinks",             "1"},
+    {"/proc/sys/fs/protected_symlinks",              "1"},
+    {"/proc/sys/kernel/unprivileged_bpf_disabled",    "1"},
+};
+#define NSYSCTLS ((int)(sizeof(g_sysctls) / sizeof(g_sysctls[0])))
+
+static sysctl_t *sysctl_find(const char *path)
+{
+    for (int i = 0; i < NSYSCTLS; i++)
+        if (strcmp(g_sysctls[i].path, path) == 0)
+            return &g_sysctls[i];
+    return NULL;
+}
+
+static int32_t sysctl_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
+{
+    sysctl_t *k = (sysctl_t *)n->priv;
+    if (!k)
+        return -E_INVAL;
+    uint32_t size = (uint32_t)strlen(k->val) + 1; /* include the newline */
+    if (off >= size)
+        return 0;
+    uint32_t avail = size - (uint32_t)off;
+    if (len > avail)
+        len = avail;
+    memcpy(buf, k->val + off, len);
+    return (int32_t)len;
+}
+
+static int32_t sysctl_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
+{
+    (void)off; /* sysctl writes always target the whole value */
+    sysctl_t *k = (sysctl_t *)n->priv;
+    if (!k)
+        return -E_INVAL;
+    /* sysctl(8) writes the value followed by a newline; keep the bytes as
+     * given but drop a trailing newline so the stored value stays clean. */
+    if (len >= sizeof(k->val))
+        return -E_INVAL;
+    memcpy(k->val, buf, len);
+    k->val[len] = '\0';
+    while (len > 0 && (k->val[len - 1] == '\n' || k->val[len - 1] == '\r'))
+        k->val[--len] = '\0';
+    return (int32_t)len;
+}
+
+static const vfs_ops_t g_sysctl_ops = {.read = sysctl_read, .write = sysctl_write};
+
 /* The directories.  There are few enough to list rather than derive. */
-static const char *g_dirs[] = {"/proc", "/proc/net", "/proc/self", "/proc/self/fd", "/proc/boot"};
+static const char *g_dirs[] = {
+    "/proc", "/proc/net", "/proc/self", "/proc/self/fd", "/proc/boot",
+    "/proc/sys", "/proc/sys/kernel", "/proc/sys/fs", "/proc/sys/net",
+    "/proc/sys/net/ipv4", "/proc/sys/net/ipv4/conf",
+    "/proc/sys/net/ipv4/conf/all", "/proc/sys/net/ipv4/conf/default",
+    "/proc/sys/net/ipv6", "/proc/sys/net/ipv6/conf",
+    "/proc/sys/net/ipv6/conf/all", "/proc/sys/net/ipv6/conf/default",
+};
 #define NDIRS ((int)(sizeof(g_dirs) / sizeof(g_dirs[0])))
 
 /* ---- blobs -------------------------------------------------------------- */
@@ -873,6 +955,21 @@ int procfs_resolve(const char *path, vfs_node_t *out)
         return 0;
     }
 
+    /* Sysctl keys are writable files; they resolve like the generated ones
+     * but carry a stored value and a write handler. */
+    {
+        sysctl_t *k = sysctl_find(path);
+        if (k) {
+            memset(out, 0, sizeof(*out));
+            strncpy(out->name, basename_of(path), VFS_NAME_MAX - 1);
+            out->kind = VFS_FILE;
+            out->ops  = &g_sysctl_ops;
+            out->priv = (void *)k;
+            out->size = 0;
+            return 0;
+        }
+    }
+
     /* Blobs are the one kind of procfs node that knows its size; it is a
      * stored byte count, not a rendered one. */
     for (int i = 0; i < g_nblobs; i++) {
@@ -951,6 +1048,16 @@ int procfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *typ
             continue;
         if (index == n++) {
             strncpy(name, basename_of(g_files[i].path), VFS_NAME_MAX - 1);
+            *type = DT_REG;
+            return 0;
+        }
+    }
+
+    for (int i = 0; i < NSYSCTLS; i++) {
+        if (!is_child_of(dirpath, g_sysctls[i].path))
+            continue;
+        if (index == n++) {
+            strncpy(name, basename_of(g_sysctls[i].path), VFS_NAME_MAX - 1);
             *type = DT_REG;
             return 0;
         }

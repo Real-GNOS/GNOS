@@ -6,3 +6,4 @@ wheel:x:10:elaina
 users:x:100:elaina
 nogroup:x:65534:
 elaina:x:1000:
+uucp:x:14:uucp

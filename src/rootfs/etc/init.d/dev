@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+# dev -- the `dev` virtual service. (GPLv2)
+#
+# The Alpine init scripts (hwdrivers, machine-id, fsck) carry `need dev`,
+# which on a normal Linux box is satisfied by udev or mdev enumerating
+# /dev.  GNOS has neither: the kernel registers a fixed set of device
+# nodes (dri/card0, input/event0, fb0, tty, ...) at boot and /dev is
+# always fully populated.  This script exists only to provide the `dev`
+# virtual so those dependencies resolve; it starts and stops instantly
+# because there is genuinely nothing to do.
+
+description="Device node provider (no-op: the kernel registers /dev statically)"
+
+depend() {
+	provide dev
+}
+
+start() {
+	return 0
+}
+
+stop() {
+	return 0
+}

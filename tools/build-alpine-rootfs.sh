@@ -53,7 +53,8 @@ CACHE=$BUILD/apkcache
 PKGS=${ALPINE_PKGS:-"musl-dev openrc bash coreutils curl nano python3 \
                      fastfetch ncurses-terminfo \
                      xorg-server xf86-input-evdev xkbcomp xkeyboard-config \
-                     twm xterm xeyes xsetroot mkfontscale"}
+                     twm xterm xeyes xsetroot mkfontscale \
+                     agetty"}
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT

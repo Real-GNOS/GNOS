@@ -362,7 +362,7 @@ MUSL_INC  := $(MUSL_PREFIX)/include
 MUSL_GCC  := $(MUSL_PREFIX)/bin/musl-gcc
 
 # Programs built against musl rather than ulib.
-MUSLPROGS := hello mount coldplug chvt getty login agetty bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest bufoktest
+MUSLPROGS := hello mount coldplug chvt getty login bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest bufoktest
 MUSL_OBJS := $(addprefix $(BUILD)/user/,$(addsuffix .o,$(MUSLPROGS)))
 MUSL_ELFS := $(addprefix $(BUILD)/,$(addsuffix .elf,$(MUSLPROGS)))
 
@@ -1505,7 +1505,14 @@ endif
 	# every other Unix uses, and `login` in particular is what getty execs by
 	# a compiled-in absolute path.
 	cp $(BUILD)/getty.elf $(BUILD)/initrd-root/sbin/getty
-	cp $(BUILD)/agetty.elf $(BUILD)/initrd-root/sbin/agetty
+	# agetty is the real util-linux one from Alpine's agetty package (see
+	# tools/build-alpine-rootfs.sh), not a hand-rolled stand-in: it speaks
+	# the standard getty protocol, honours /etc/issue, and execs login(1).
+	# libeconf is agetty's only non-musl dependency; the loader searches /lib
+	# so the real file and its soname symlink both land there.
+	cp $(ALPINE_ROOTFS)/sbin/agetty $(BUILD)/initrd-root/sbin/agetty
+	cp -L $(ALPINE_ROOTFS)/usr/lib/libeconf.so.0 $(BUILD)/initrd-root/lib/libeconf.so.0.6.2
+	ln -sf libeconf.so.0.6.2 $(BUILD)/initrd-root/lib/libeconf.so.0
 	cp $(BUILD)/wiggle.elf $(BUILD)/initrd-root/sbin/wiggle
 	cp $(BUILD)/nep1.elf $(BUILD)/initrd-root/bin/nep1
 	cp $(BUILD)/login.elf $(BUILD)/initrd-root/bin/login

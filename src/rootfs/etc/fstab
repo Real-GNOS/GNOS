@@ -20,7 +20,12 @@
 # lines cost nothing.
 #
 # <fs>       <mountpoint>   <type>   <opts>              <dump/pass>
-/dev/root    /              ext2     rw,noatime           0 1
+# Passno 0 on the root line: the kernel mounts the ext2 initrd read-only
+# before user space runs and there is no fsck.ext2 helper in the image, so
+# a passno of 1 would make busybox fsck hunt for a checker that does not
+# exist and fail the whole boot.  0 means "never check at boot", which is
+# the honest description of a root filesystem the kernel itself mounted.
+/dev/root    /              ext2     rw,noatime           0 0
 proc         /proc          proc     defaults             0 0
 sysfs        /sys           sysfs    defaults             0 0
 tmpfs        /run           tmpfs    rw,nosuid,nodev,mode=755   0 0
