@@ -91,6 +91,9 @@ typedef struct {
     uint64_t mask;     /* extra signals blocked during the handler */
 } sigact_t;
 
+/* stack_t.ss_flags when no alternate stack is registered (Linux value). */
+#define SS_DISABLE 2
+
 typedef struct proc {
     int pid;
     int ppid;
@@ -204,6 +207,17 @@ typedef struct proc {
      */
     uint64_t sig_saved_mask;
     int      sig_restore_mask;
+
+    /*
+     * Alternate signal stack from sigaltstack(131).  signal_deliver() carves
+     * SA_ONSTACK frames from this region instead of below RSP -- what the
+     * JVM's crash/SEGV handler and any guard-page-protected thread rely on.
+     * A zeroed task reads as "stack disabled", which is also what a fresh
+     * Linux thread gets.
+     */
+    uint64_t alt_ss_sp;
+    uint64_t alt_ss_size;
+    int      alt_ss_flags;
 
     /* The syscall number the current trap came in with, or -1 when the trap
      * is not a restartable syscall.  syscall_handler() overwrites RAX with

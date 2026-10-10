@@ -4093,16 +4093,6 @@ static int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot)
     if (prot & PROT_EXEC)
         vflags |= VM_EXEC;
     mmap_update_flags(p, addr, size, vflags);
-    /* TEMPORARY Xorg debugging */
-    dbg_puts("MPROT: addr=");
-    dbg_puts_hex(addr);
-    dbg_puts(" size=");
-    dbg_puts_hex(size);
-    dbg_puts(" prot=");
-    dbg_puts_hex(prot);
-    dbg_puts(" vflags=");
-    dbg_puts_hex(vflags);
-    dbg_puts("\r\n");
 
     return vmm_protect(p->as, addr, size, (unsigned)prot) ? 0 : -E_NOMEM;
 }
@@ -4261,6 +4251,152 @@ static int64_t sys_brk(uint64_t addr)
     }
     p->brk = addr;
     return (int64_t)p->brk;
+}
+
+/*
+ * madvise(28): behaviour advice for a range.  GNOS mappings are lazy, so
+ * the one advice with teeth is MADV_DONTNEED -- "these pages must read back
+ * as zeros" -- which drops the PTEs and lets the #PF handler restock them
+ * from the zeroed allocator.  GC runtimes lean on exactly that contract;
+ * the old accepted-and-ignored stub silently preserved stale contents,
+ * which is worse than no advice at all.  Every other advice is intent GNOS
+ * has no policy for and is taken as a successful no-op so callers keep
+ * their fast paths.
+ */
+static int64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice)
+{
+    proc_t *p = proc_current();
+    if (!p || !p->as)
+        return -E_INVAL;
+    if (addr & 0xFFF)
+        return -E_INVAL;
+
+    switch (advice) {
+    case 4:  /* MADV_DONTNEED       */
+    case 24: /* MADV_DONTNEED_LOCKED */
+        break;
+    case 0:  /* MADV_NORMAL         */
+    case 1:  /* MADV_RANDOM         */
+    case 2:  /* MADV_SEQUENTIAL     */
+    case 3:  /* MADV_WILLNEED       */
+    case 8:  /* MADV_FREE           */
+    case 10: /* MADV_DONTFORK       */
+    case 11: /* MADV_DOFORK         */
+    case 12: /* MADV_MERGEABLE      */
+    case 13: /* MADV_UNMERGEABLE    */
+    case 14: /* MADV_HUGEPAGE       */
+    case 15: /* MADV_NOHUGEPAGE     */
+    case 16: /* MADV_DONTDUMP       */
+    case 17: /* MADV_DODUMP         */
+    case 18: /* MADV_WIPEONFORK     */
+    case 19: /* MADV_KEEPONFORK     */
+    case 20: /* MADV_COLD           */
+    case 21: /* MADV_PAGEOUT        */
+    case 22: /* MADV_POPULATE_READ  */
+    case 23: /* MADV_POPULATE_WRITE */
+        return 0;
+    default:
+        return -E_INVAL;
+    }
+
+    uint64_t size = (len + 0xFFF) & ~0xFFFULL;
+    if (!size)
+        return 0;
+    if (addr + size < addr || addr + size > USER_LIMIT)
+        return -E_INVAL;
+
+    uint64_t base, span;
+    if (mmap_find(p, addr, &base, &span) < 0)
+        return -E_INVAL;
+    if (addr < base || addr + size > base + span)
+        return -E_INVAL; /* straddles two mappings */
+
+    /* A shared file mapping keeps its page-cache contents: no-op. */
+    for (uint32_t i = 0; i < p->as->nshared; i++)
+        if (p->as->shared[i].base == base)
+            return 0;
+
+    vmm_unmap(p->as, addr, size);
+    return 0;
+}
+
+/*
+ * sysinfo(99): one-shot snapshot of memory and uptime.  musl's
+ * sysconf(_SC_PHYS_PAGES) goes through /proc/meminfo, but the JVM's
+ * os::Linux::available_memory() (and various allocators) call sysinfo()
+ * directly -- an ENOSYS there reads back as "no RAM" and skews every
+ * heap-sizing decision the runtime makes.
+ */
+static int64_t sys_sysinfo(uint64_t uinfo)
+{
+    if (!user_ptr_ok(uinfo, sizeof(ksysinfo_t)))
+        return -E_INVAL;
+
+    ksysinfo_t si;
+    memset(&si, 0, sizeof(si));
+    si.uptime   = (int64_t)(timer_ticks() / 100); /* 100 Hz tick */
+    si.totalram = pmm_total_frames() * 4096ull;
+    si.freeram  = pmm_free_frames() * 4096ull;
+    si.mem_unit = 1;
+    memcpy((void *)(uintptr_t)uinfo, &si, sizeof(si));
+    return 0;
+}
+
+/* User-facing stack_t, the shape sigaltstack(131) passes. */
+typedef struct {
+    uint64_t ss_sp;
+    int32_t  ss_flags;
+    int32_t  __pad;
+    uint64_t ss_size;
+} kstack_t;
+
+/*
+ * sigaltstack(131): register the alternate signal stack.
+ * signal_deliver() carves SA_ONSTACK frames from this region; the JVM
+ * installs its crash and SEGV handlers with SA_ONSTACK, and while a failed
+ * registration only earns it a warning, living without the alt stack is
+ * what turns a stack-overflow crash into an unrecoverable one.
+ */
+static int64_t sys_sigaltstack(uint64_t ustack, uint64_t uold)
+{
+    proc_t *p = proc_current();
+    if (!p)
+        return -E_INVAL;
+    int active = (p->alt_ss_sp && p->alt_ss_size &&
+                  !(p->alt_ss_flags & SS_DISABLE));
+
+    if (uold) {
+        if (!user_ptr_ok(uold, sizeof(kstack_t)))
+            return -E_INVAL;
+        kstack_t *o = (kstack_t *)(uintptr_t)uold;
+        o->ss_sp     = active ? p->alt_ss_sp : 0;
+        o->ss_size   = active ? p->alt_ss_size : 0;
+        o->ss_flags  = active ? 0 : SS_DISABLE;
+        o->__pad     = 0;
+    }
+
+    if (!ustack)
+        return 0;
+    if (!user_ptr_ok(ustack, sizeof(kstack_t)))
+        return -E_INVAL;
+
+    const kstack_t *a = (const kstack_t *)(uintptr_t)ustack;
+    if (a->ss_flags & ~SS_DISABLE)
+        return -E_INVAL;
+    if (!(a->ss_flags & SS_DISABLE)) {
+        if (a->ss_size < 2048) /* MINSIGSTKSZ */
+            return -E_INVAL;
+        if (!user_ptr_ok(a->ss_sp, 1))
+            return -E_INVAL;
+        p->alt_ss_sp    = a->ss_sp;
+        p->alt_ss_size  = a->ss_size;
+        p->alt_ss_flags = 0;
+    } else {
+        p->alt_ss_sp    = 0;
+        p->alt_ss_size  = 0;
+        p->alt_ss_flags = SS_DISABLE;
+    }
+    return 0;
 }
 
 /* ---- signals (sigaction / sigprocmask / sigreturn) --------------------- */
@@ -6047,7 +6183,15 @@ void syscall_handler(regs_t *r)
         break;
 
     case SYS_madvise:
-        ret = 0; /* accepted and ignored */
+        ret = sys_madvise(a1, a2, a3);
+        break;
+
+    case SYS_sysinfo:
+        ret = sys_sysinfo(a1);
+        break;
+
+    case SYS_sigaltstack:
+        ret = sys_sigaltstack(a1, a2);
         break;
 
     case SYS_rt_sigaction:

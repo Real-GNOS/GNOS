@@ -23,6 +23,7 @@
 #include "kstring.h"
 #include "net.h"
 #include "pmm.h"
+#include "vmm.h" /* addrspace_t / VM_* / USER_STACK_TOP for /proc/self/maps */
 #include "timer.h"
 #include "vfs.h"
 #include "proc.h"
@@ -534,6 +535,65 @@ typedef struct {
     proc_gen_t  gen;
 } procfile_t;
 
+/*
+ * /proc/self/maps: the address-space census.  A JVM prints it in every crash
+ * report and a few allocators parse it at startup; a missing file costs
+ * diagnostics, not boot, but filling it turns "no clue" crashes into
+ * readable ones.  Offsets and device numbers are zero -- every record is an
+ * anonymous or lazily-backed mapping as far as this kernel tracks them.
+ */
+static void gen_maps(sbuf_t *s)
+{
+    proc_t *p = proc_current();
+    if (!p || !p->as)
+        return;
+    addrspace_t *as = p->as;
+    for (int i = 0; i < as->nmmaps; i++) {
+        uint64_t lo = as->mmaps[i].base;
+        uint64_t hi = lo + as->mmaps[i].size;
+        sb_hex(s, lo, 12, 0);
+        sb_char(s, '-');
+        sb_hex(s, hi, 12, 0);
+        /* Read is unconditional in this kernel's PTE model. */
+        sb_str(s, " r");
+        sb_char(s, (as->mmaps[i].flags & VM_WRITE) ? 'w' : '-');
+        sb_char(s, (as->mmaps[i].flags & VM_EXEC) ? 'x' : '-');
+        sb_str(s, "p 00:00 0");
+        if (hi == USER_STACK_TOP)
+            sb_str(s, " [stack]");
+        sb_char(s, '\n');
+    }
+}
+
+/*
+ * /proc/cpuinfo: per-CPU report.  The JVM cross-checks it while sizing
+ * worker pools (its JIT queries CPUID directly, so this only has to be
+ * honest, not exhaustive); Xorg's modesetting paths read it too.
+ */
+static void gen_cpuinfo(sbuf_t *s)
+{
+    extern int g_ncpus;
+    int n = (g_ncpus > 0) ? g_ncpus : 1;
+    for (int i = 0; i < n; i++) {
+        sb_str(s, "processor       : ");
+        sb_dec(s, (uint64_t)i, 0);
+        sb_str(s, "\nvendor_id       : GNOS\ncpu family      : 64\n"
+                  "model           : 1\nmodel name      : GNOS x86-64\n"
+                  "stepping        : 0\ncpu cores       : ");
+        sb_dec(s, (uint64_t)n, 0);
+        sb_str(s, "\nsiblings        : ");
+        sb_dec(s, (uint64_t)n, 0);
+        sb_str(s,
+               "\nflags           : fpu vme de pse tsc msr pae mce cx8 apic "
+               "sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 "
+               "syscall nx lm rep_good nopl cpuid extd_apicid pni "
+               "pclmulqdq ssse3 fma cx16 sse4_1 sse4_2 x2apic popcnt avx "
+               "avx2 f16c rdrand hypervisor lahf_lm cmp_legacy abm sse4a "
+               "3dnowprefetch ibrs ibpb stibp vmmcall fsgsbase bmi1 bmi2 "
+               "erms invpcid rdt_a smap clflushopt\n\n");
+    }
+}
+
 static const procfile_t g_files[] = {
     {"/proc/net/dev", gen_net_dev},
     {"/proc/net/route", gen_net_route},
@@ -542,6 +602,8 @@ static const procfile_t g_files[] = {
     {"/proc/net/arp", gen_net_arp},
     {"/proc/uptime", gen_uptime},
     {"/proc/meminfo", gen_meminfo},
+    {"/proc/cpuinfo", gen_cpuinfo},
+    {"/proc/self/maps", gen_maps},
     {"/proc/interrupts", gen_interrupts},
     {"/proc/slabinfo", gen_slabinfo},
     {"/proc/version", gen_version},

@@ -188,7 +188,32 @@ int signal_deliver(proc_t *p, int sig, regs_t *r)
     uint64_t fp   = ((r->rsp - 128) - FPSTATE_SIZE) & ~63ull;
     uint64_t base = ((fp - sizeof(rt_sigframe_t)) & ~15ull) - 8;
 
-    if (!on_user_stack(base, sizeof(rt_sigframe_t)) || !on_user_stack(fp, FPSTATE_SIZE))
+    /*
+     * SA_ONSTACK: carve from the process's alternate stack instead.  The
+     * candidate frame is validated with user_buf_ok() rather than
+     * on_user_stack() because the alt stack is an ordinary mapping
+     * somewhere else in the address space -- that is the entire point of
+     * having one, and what a JVM's SEGV handler needs when the thread's own
+     * stack has already blown its guard page.  A failed carve falls back to
+     * the main-stack frame below, which fails its own check and rejects the
+     * delivery exactly as before.
+     */
+    int on_alt = 0;
+    if ((act->flags & SA_ONSTACK) && p->alt_ss_sp && p->alt_ss_size &&
+        !(p->alt_ss_flags & SS_DISABLE)) {
+        uint64_t atop = p->alt_ss_sp + p->alt_ss_size;
+        uint64_t afp   = ((atop - 128) - FPSTATE_SIZE) & ~63ull;
+        uint64_t abase = ((afp - sizeof(rt_sigframe_t)) & ~15ull) - 8;
+        if (user_buf_ok(p->as, abase, sizeof(rt_sigframe_t), 1) &&
+            user_buf_ok(p->as, afp, FPSTATE_SIZE, 1)) {
+            fp     = afp;
+            base   = abase;
+            on_alt = 1;
+        }
+    }
+
+    if (!on_alt &&
+        (!on_user_stack(base, sizeof(rt_sigframe_t)) || !on_user_stack(fp, FPSTATE_SIZE)))
         return -1;
 
     rt_sigframe_t *f = (rt_sigframe_t *)(uintptr_t)base;
@@ -231,7 +256,15 @@ int signal_deliver(proc_t *p, int sig, regs_t *r)
     sc->oldmask = retmask;
     sc->fpstate = fp;
 
-    f->uc.uc_stack.ss_flags = SS_DISABLE; /* no sigaltstack support */
+    if (on_alt) {
+        f->uc.uc_stack.ss_sp    = p->alt_ss_sp;
+        f->uc.uc_stack.ss_size  = p->alt_ss_size;
+        f->uc.uc_stack.ss_flags = 0;
+    } else {
+        f->uc.uc_stack.ss_sp    = 0;
+        f->uc.uc_stack.ss_size  = 0;
+        f->uc.uc_stack.ss_flags = SS_DISABLE;
+    }
     f->uc.uc_sigmask        = retmask;
 
     /* We do not track who sent a signal, so every one of them looks like it
