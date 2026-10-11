@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * alsa.c — the ALSA kernel ABI over the AC97 engine: /dev/snd/*. (GPLv2)
+ * calsa.c — calsa, the compat ALSA layer: /dev/snd/* over audiodev. (GPLv2)
  *
- * Implements enough of the ALSA UAPI for libasound's "hw" device path:
+ * "calsa" = compat ALSA.  Implements enough of the ALSA UAPI for libasound's
+ * "hw" device path:
  *
  *   /dev/snd/controlC0   card info + PCM info (enumeration)
  *   /dev/snd/pcmC0D0p    playback: HW_REFINE, HW_PARAMS, SW_PARAMS,
@@ -11,15 +12,20 @@
  *   /dev/snd/pcmC0D0c    capture stub (returns no data)
  *   /dev/snd/timer       stub
  *
- * The hardware is fixed: S16_LE, 2 channels, 48 kHz, 1024-frame periods,
- * 16 periods.  HW_REFINE converges every mask/interval onto exactly that
- * setup, which is all libasound needs to drive the hw plugin (its plug
- * layer converts anything else in user space).
+ * Every engine call below goes through the audiodev_* hooks, never through
+ * a card's own headers: the frontend does not know the word "ac97".  The
+ * hardware it converges onto is whatever the default card reports -- today
+ * that is still S16_LE, 2 channels, 48 kHz, 1024-frame periods, 16 periods
+ * because the AC'97 engine is the only one filling the hooks.  HW_REFINE
+ * converges every mask/interval onto that setup, which is all libasound
+ * needs to drive the hw plugin (its plug layer converts anything else in
+ * user space).  A card that wants different numbers puts them here through
+ * audiodev when it lands.
  */
 #include <stdint.h>
 
-#include "audio.h"
-#include "alsa.h"
+#include "audiodev.h"
+#include "calsa.h"
 #include "kstring.h"
 #include "vfs.h"
 #include "sound/asound.h"
@@ -50,6 +56,17 @@ typedef struct {
 } pcm_stream_t;
 
 /* ============================ helpers ==================================== */
+
+/* "gnos-" + card name, into a bounded buffer. */
+static void make_str(char *dst, unsigned cap, const char *a, const char *b)
+{
+    unsigned i = 0;
+    for (; a[i] && i + 1 < cap; i++)
+        dst[i] = a[i];
+    for (unsigned j = 0; b[j] && i + 1 < cap; j++)
+        dst[i++] = b[j];
+    dst[i] = 0;
+}
 
 static void mask_one(struct snd_mask *m, unsigned bit)
 {
@@ -127,6 +144,7 @@ static int32_t ctl_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         if (!user_ptr_ok(arg, sizeof(struct snd_ctl_card_info)))
             return -E_FAULT;
         struct snd_ctl_card_info *info = (void *)(uintptr_t)arg;
+        const char               *card = audiodev_default_name();
         memset(info, 0, sizeof *info);
         info->card  = ALSA_CARD;
         info->pad   = 0;
@@ -135,10 +153,10 @@ static int32_t ctl_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         info->id[2] = 'O';
         info->id[3] = 'S';
         info->id[4] = 0;
-        strncpy(info->driver, "gnos-ac97", sizeof info->driver - 1);
-        strncpy(info->name, "GNOS AC97", sizeof info->name - 1);
-        strncpy(info->longname, "GNOS Intel 82801AA AC97", sizeof info->longname - 1);
-        strncpy(info->mixername, "GNOS AC97", sizeof info->mixername - 1);
+        make_str(info->driver, sizeof info->driver, "gnos-", card);
+        make_str(info->name, sizeof info->name, "GNOS ", card);
+        make_str(info->longname, sizeof info->longname, "GNOS ", card);
+        make_str(info->mixername, sizeof info->mixername, "GNOS ", card);
         info->components[0] = 0;
         return 0;
     }
@@ -153,9 +171,9 @@ static int32_t ctl_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         info->stream    = info->stream; /* caller preset: 0 play, 1 capture */
         info->card      = ALSA_CARD;
         if (info->stream == 0)
-            strncpy(info->name, "GNOS AC97 PCM out", sizeof info->name - 1);
+            make_str(info->name, sizeof info->name, "GNOS ", "PCM out");
         else
-            strncpy(info->name, "GNOS AC97 PCM in", sizeof info->name - 1);
+            make_str(info->name, sizeof info->name, "GNOS ", "PCM in");
         info->subdevices_count = 1;
         return 0;
     }
@@ -205,14 +223,6 @@ static void pcm_sync_status(void)
     g_status_k->hw_ptr = g_play.hw;
 }
 
-static uint32_t pcm_hw_frames(void)
-{
-    uint32_t hw = audio_frames_total() - audio_in_flight_frames();
-    /* the ALSA ring wraps at period*periods frames */
-    uint32_t boundary = ALSA_PERIOD_FRAMES * ALSA_PERIODS;
-    return hw % boundary;
-}
-
 static int32_t alsa_pcm_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
 {
     (void)n;
@@ -224,7 +234,7 @@ static int32_t alsa_pcm_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         memset(info, 0, sizeof *info);
         info->stream           = 0;
         info->subdevices_count = 1;
-        strncpy(info->name, "GNOS AC97 PCM out", sizeof info->name - 1);
+        make_str(info->name, sizeof info->name, "GNOS ", "PCM out");
         return 0;
     }
     case SNDRV_PCM_IOCTL_HW_REFINE:
@@ -312,14 +322,14 @@ static int32_t alsa_pcm_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         return 0;
     }
     case SNDRV_PCM_IOCTL_PREPARE:
-        audio_reset_ring();
+        audiodev_pcm_reset();
         g_play.appl  = 0;
         g_play.hw    = 0;
         g_play.state = SNDRV_PCM_STATE_PREPARED;
         pcm_sync_status();
         return 0;
     case SNDRV_PCM_IOCTL_RESET:
-        audio_reset_ring();
+        audiodev_pcm_reset();
         g_play.appl  = 0;
         g_play.hw    = 0;
         g_play.state = SNDRV_PCM_STATE_SETUP;
@@ -328,18 +338,18 @@ static int32_t alsa_pcm_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     case SNDRV_PCM_IOCTL_START:
         if (g_play.state != SNDRV_PCM_STATE_PREPARED)
             return -E_BADF;
-        audio_begin();
+        audiodev_pcm_begin();
         g_play.state = SNDRV_PCM_STATE_RUNNING;
         pcm_sync_status();
         return 0;
     case SNDRV_PCM_IOCTL_DROP:
-        audio_stop();
+        audiodev_pcm_stop();
         g_play.state = SNDRV_PCM_STATE_SETUP;
         pcm_sync_status();
         return 0;
     case SNDRV_PCM_IOCTL_DRAIN:
         if (g_play.state == SNDRV_PCM_STATE_RUNNING) {
-            audio_drain();
+            audiodev_drain();
         }
         g_play.state = SNDRV_PCM_STATE_SETUP;
         pcm_sync_status();
@@ -347,9 +357,9 @@ static int32_t alsa_pcm_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     case SNDRV_PCM_IOCTL_PAUSE: {
         int32_t on = (int32_t)arg;
         if (on)
-            audio_stop();
+            audiodev_pcm_stop();
         else if (g_play.state == SNDRV_PCM_STATE_PAUSED || g_play.state == SNDRV_PCM_STATE_RUNNING)
-            audio_begin();
+            audiodev_pcm_begin();
         g_play.state = on ? SNDRV_PCM_STATE_PAUSED : SNDRV_PCM_STATE_RUNNING;
         pcm_sync_status();
         return 0;
@@ -360,15 +370,15 @@ static int32_t alsa_pcm_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         struct snd_xferi *x = (void *)(uintptr_t)arg;
         if (!user_ptr_ok((uint64_t)(uintptr_t)x->buf, (uint32_t)x->frames * ALSA_CHANNELS * 2))
             return -E_FAULT;
-        int fed = audio_write((const int16_t *)(uintptr_t)x->buf, (uint32_t)x->frames);
+        int fed = audiodev_play((const int16_t *)(uintptr_t)x->buf, (uint32_t)x->frames);
         if (fed < 0)
             return -E_IO;
         g_play.appl += (uint32_t)fed;
         if (g_play.state == SNDRV_PCM_STATE_PREPARED && g_play.appl >= g_play.start_threshold) {
-            audio_begin();
+            audiodev_pcm_begin();
             g_play.state = SNDRV_PCM_STATE_RUNNING;
         }
-        if (audio_engine_halted() && g_play.state == SNDRV_PCM_STATE_RUNNING)
+        if (audiodev_pcm_halted() && g_play.state == SNDRV_PCM_STATE_RUNNING)
             g_play.state = SNDRV_PCM_STATE_XRUN;
         x->result = fed;
         pcm_sync_status();
@@ -380,7 +390,7 @@ static int32_t alsa_pcm_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
         struct snd_pcm_sync_ptr *sp = (void *)(uintptr_t)arg;
         if (sp->flags & SNDRV_PCM_SYNC_PTR_APPL)
             g_play.appl = (uint32_t)sp->c.control.appl_ptr;
-        if (audio_engine_halted() && g_play.state == SNDRV_PCM_STATE_RUNNING)
+        if (audiodev_pcm_halted() && g_play.state == SNDRV_PCM_STATE_RUNNING)
             g_play.state = SNDRV_PCM_STATE_XRUN;
         sp->s.status.state      = g_play.state;
         sp->s.status.hw_ptr     = g_play.hw;
@@ -438,7 +448,7 @@ static int pcm_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
     (void)n;
     int16_t r = 0;
-    if ((events & POLLOUT) && audio_free_frames() > 0)
+    if ((events & POLLOUT) && audiodev_pcm_free_frames() > 0)
         r |= POLLOUT;
     if (events & POLLIN)
         r |= 0;
@@ -490,7 +500,7 @@ static const vfs_ops_t g_pcm_ops = {
     .mmap  = pcm_mmap,
 };
 
-int alsa_vfs_register(void)
+int calsa_vfs_register(void)
 {
     g_status_phys  = pmm_alloc_zeroed();
     g_control_phys = pmm_alloc_zeroed();

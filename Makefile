@@ -154,12 +154,12 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/smp.o $(BUILD)/ap_trampoline.o \
         $(BUILD)/lapic.o \
         $(BUILD)/net.o $(BUILD)/tcp.o $(BUILD)/sock.o \
-         $(BUILD)/pci.o $(BUILD)/e1000.o $(BUILD)/audio.o \
+         $(BUILD)/pci.o $(BUILD)/e1000.o $(BUILD)/audio.o $(BUILD)/audiodev.o \
         $(BUILD)/hda.o $(BUILD)/ata.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
         $(BUILD)/cjkfont_data.o \
         $(BUILD)/input.o $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
         $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
-        $(BUILD)/pty.o $(BUILD)/alsa.o $(BUILD)/klog.o $(BUILD)/cpuid.o $(BUILD)/pagecache.o \
+        $(BUILD)/pty.o $(BUILD)/calsa.o $(BUILD)/klog.o $(BUILD)/cpuid.o $(BUILD)/pagecache.o \
         $(BUILD)/pidfd.o $(BUILD)/process_vm_access.o $(BUILD)/quota.o $(BUILD)/ff.o $(BUILD)/diskio.o $(BUILD)/ffsystem.o $(BUILD)/fatfs_vfs.o \
         $(BUILD)/secretmem.o $(BUILD)/landlock.o \
         $(BUILD)/unix.o \

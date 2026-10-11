@@ -47,10 +47,9 @@
 #include "subsys.h"
 #include "sysfs.h"
 #include "pty.h"
-#include "audio.h"
+#include "audiodev.h"
 #include "klog.h"
 #include "cpuid.h"
-#include "alsa.h"
 #include "pagecache.h"
 #include "slab.h"
 #include "module.h"
@@ -74,8 +73,6 @@ typedef unsigned int ACPI_STATUS_K;
 #include "pci.h"
 #include "e1000.h"
 #include "net.h"
-#include "ac97.h"
-#include "hda.h"
 #include "ata.h"
 #include "nvme.h"
 #include "drm.h"
@@ -302,21 +299,11 @@ void kernel_main(void)
         subsys_set_state(slot_nic, SUBSYS_STATE_FAILED);
     }
 
-    int slot_ac97 = subsys_register("ac97", NULL, SUBSYS_CLASS_SOUND, 14, 3);
-    if (ac97_init()) {
-        subsys_set_state(slot_ac97, SUBSYS_STATE_LIVE);
-        ac97_selftest();
-    } else {
-        subsys_set_state(slot_ac97, SUBSYS_STATE_FAILED);
-    }
-
-    int slot_hda = subsys_register("hda", NULL, SUBSYS_CLASS_SOUND, 116, 0);
-    if (hda_init()) {
-        subsys_set_state(slot_hda, SUBSYS_STATE_LIVE);
-        hda_selftest();
-    } else {
-        subsys_set_state(slot_hda, SUBSYS_STATE_FAILED);
-    }
+    /* Sound: one call.  audiodev_init() registers and probes every built-in
+     * card (ac97, hda) into the subsys registry with self-tests, and picks
+     * the default playback device.  Adding the next codec touches
+     * src/sound/audiodev.c's table, not this file. */
+    audiodev_init();
 
     /* USB 3.0 (xHCI) comes up after PCI so the controller can be found,
      * but before the input/block drivers that sit on its transfer
@@ -369,9 +356,7 @@ void kernel_main(void)
      * exists: vfs_init() starts the device table from scratch, and
      * anything registered before it is forgotten. */
     pty_init();
-    audio_vfs_register(); /* /dev/dsp (AC97 PCM out) */
-    alsa_vfs_register();  /* /dev/snd/controlC0 + pcmC0D0p */
-
+    audiodev_vfs_register(); /* /dev/dsp + /dev/snd pair, one call */
     tty_init();
 
     /* The evdev driver publishes /dev/input/event0 (keyboard) and event1

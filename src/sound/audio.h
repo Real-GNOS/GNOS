@@ -14,7 +14,7 @@ int  audio_start(void);
 int  audio_write(const int16_t *src, uint32_t frames);
 void audio_drain(void);
 int  audio_vfs_register(void);
-/* ALSA PCM primitives (alsa.c). */
+/* PCM primitives (audio.c); reached from calsa through audiodev. */
 void     audio_reset_ring(void);
 void     audio_begin(void);
 void     audio_stop(void);

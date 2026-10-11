@@ -272,7 +272,7 @@ void audio_drain(void)
     g_started = 0;
 }
 
-/* ---- ALSA PCM primitives (alsa.c drives these) -------------------------- */
+/* ---- PCM primitives (calsa drives these via audiodev) ----------------- */
 
 void audio_reset_ring(void)
 {
