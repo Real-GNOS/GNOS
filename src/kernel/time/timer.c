@@ -225,9 +225,6 @@ static void rtc_read_boot_epoch(void)
         regb = cmos_read(0x0B);
     }
 
-    if (!mo || mo > 12 || !d || d > 31)
-        return; /* no usable clock; stay at the epoch */
-
     uint32_t hour24 = h;
     /* Bit 2 of register B: set means the values are already binary. */
     if (!(regb & 0x04)) {
@@ -248,6 +245,12 @@ static void rtc_read_boot_epoch(void)
         if (h & 0x80)
             hour24 += 12;
     }
+
+    /* Validate only AFTER BCD->binary decoding.  The raw CMOS bytes are BCD,
+     * so e.g. October reads 0x10 (=16) and would wrongly trip "mo > 12" here,
+     * pinning the clock at the 1970 epoch for all of Oct-Dec and days 20-31. */
+    if (!mo || mo > 12 || !d || d > 31)
+        return; /* no usable clock; stay at the epoch */
 
     /* The century register is optional and reads as garbage on plenty of
      * machines; only trust something plausible. */

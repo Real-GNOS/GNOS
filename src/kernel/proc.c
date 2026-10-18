@@ -683,8 +683,20 @@ static int build_image(const char *path, char *const argv[], int argc, char *con
                        addrspace_t **out_as, uint64_t *out_entry, uint64_t *out_sp)
 {
     uint32_t size = 0;
-    if (!vfs_read_all(path, g_image, sizeof(g_image), &size))
+    if (!vfs_read_all(path, g_image, sizeof(g_image), &size)) {
+        /* Transient deep-path ENOENT trap.  Only interesting when the file
+         * really is there (a re-probe finds it): that means the failure was
+         * a one-off (fd-table pressure, race), not a genuine miss -- the
+         * latter is a normal error the caller already handles. */
+        uint32_t ru, rg, rm;
+        int      rd2;
+        if (vfs_owner(path, &ru, &rg, &rm, &rd2, 1) == 0) {
+            dbg_puts("EXEC-READ-FAIL(transient) path=");
+            dbg_puts(path);
+            dbg_puts("\r\n");
+        }
         return -E_NOENT;
+    }
 
     addrspace_t *as = vmm_create();
     if (!as)
@@ -1586,8 +1598,19 @@ int proc_execve(const char *path, char *const argv[], char *const envp[], regs_t
     int      f_dir = 0;
     {
         int r2 = vfs_owner(pathbuf, &f_uid, &f_gid, &f_mode, &f_dir, 1);
-        if (r2 < 0)
+        if (r2 < 0) {
+            /* Transient deep-path ENOENT trap: log only when a re-probe finds
+             * the file (it exists, the first lookup transiently failed), not
+             * for genuine misses such as OpenRC's normal PATH probing. */
+            uint32_t ru, rg, rm;
+            int      rd2;
+            if (vfs_owner(pathbuf, &ru, &rg, &rm, &rd2, 1) == 0) {
+                dbg_puts("EXEC-OWNER-FAIL(transient) path=");
+                dbg_puts(pathbuf);
+                dbg_puts("\r\n");
+            }
             return r2;
+        }
         if (f_dir)
             return -E_ACCES;
         if (!proc_permitted(f_mode, f_uid, f_gid, 1, 0))

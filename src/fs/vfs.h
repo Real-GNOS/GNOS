@@ -18,8 +18,14 @@
 #include "sysnum.h" /* O_* flags and the user-visible record types */
 
 /* The open-file table is shared by every process, so it has to cover the
- * worst case across all of them at once, not per process. */
-#define VFS_MAX_FILES 64
+ * worst case across all of them at once, not per process.  A graphical boot
+ * (OpenRC + dbus + seatd + polkit + udev + a compositor and its clients)
+ * holds a few hundred descriptors system-wide at the dependency-wait peaks;
+ * the old ceiling of 64 filled up there and slot_alloc() handed back
+ * -EMFILE, which build_image() then mislabelled as -ENOENT -- surfacing as
+ * a bogus "No such file or directory" on a deep exec path (e.g. OpenRC's
+ * /usr/libexec/rc/sh/openrc-run.sh) that exists and resolves fine. */
+#define VFS_MAX_FILES 1024
 /* Six virtual terminals, /dev/tty, /dev/console, five memory devices and the
  * framebuffer already come to fourteen, and the old ceiling of sixteen left
  * no room for anything else to register at boot. */
@@ -49,6 +55,12 @@
  * it -- but a partitioner reading a partition table, or an installer writing
  * a filesystem, does nothing but seek. */
 #define VFS_BLOCKDEV 7
+/* An AF_NETLINK socket.  It is its own kind rather than another sign band on
+ * VFS_SOCKET because that encoding is already spoken for: AF_INET sockets
+ * are non-negative and AF_UNIX sockets are negative (priv = -2 - u), so a
+ * third family would have needed a third magic offset.  Kind 9 is free --
+ * 7 is the block device above, 8 is the anonymous node. */
+#define VFS_NETLINK 9
 
 /* errno values the syscall layer hands back to user space */
 #define E_PERM  1
@@ -242,6 +254,11 @@ int vfs_umount(const char *path);
 int         vfs_mount_count(void);
 const char *vfs_mount_path(int i);
 
+/* The filesystem name of that mount ("tmpfs", "cgroup2", ...), so /proc/mounts
+ * can report what each entry actually is instead of calling everything tmpfs.
+ * Returns NULL for an index outside the table. */
+const char *vfs_mount_fstype(int i);
+
 /* The absolute path a descriptor names (for fchdir / relative openat).
  * Returns NULL if the handle is not open.  The pointer is into the open-file
  * table and only valid until the next VFS call. */
@@ -326,10 +343,16 @@ int vfs_pipe(int *read_handle, int *write_handle);
  */
 int vfs_socket(int sock_index);
 
+/* The same pair for an AF_NETLINK socket, which is its own node kind. */
+int vfs_socket_nl(int nl_index);
+
 /* The socket index behind a handle, or -1 if the handle is not a socket.
  * This is how the syscall layer tells socket calls from file calls without
  * keeping a second table of which fd is which. */
 int vfs_file_sock(int h);
+
+/* The netlink index behind a handle, or -1 if the handle is not one. */
+int vfs_file_netlink(int h);
 
 /* The access-mode / status flags (O_* bits) of a handle.  fcntl(F_GETFL)
  * needs this; for sockets it carries O_NONBLOCK in step with sock_set_nonblock
