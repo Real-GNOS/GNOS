@@ -140,7 +140,8 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/drm_mode_object.o $(BUILD)/drm_modes.o $(BUILD)/drm_blend.o \
          $(BUILD)/drm_atomic.o $(BUILD)/drm_atomic_helper.o \
          $(BUILD)/drm_atomic_uapi.o $(BUILD)/drm_vblank.o \
-         $(BUILD)/drm_gem.o $(BUILD)/drm_framebuffer.o \
+         $(BUILD)/drm_gem.o $(BUILD)/drm_gem_dumb.o $(BUILD)/drm_prime.o \
+         $(BUILD)/drm_framebuffer.o \
          $(BUILD)/drm_property.o $(BUILD)/drm_libc.o \
          $(BUILD)/drm_vbe.o $(BUILD)/drm_svga.o \
     $(BUILD)/kaslr.o \

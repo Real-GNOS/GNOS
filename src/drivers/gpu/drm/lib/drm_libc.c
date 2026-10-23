@@ -40,28 +40,16 @@ extern uint64_t g_hhdm;
 /* ---- user-memory copy (same style as the rest of GNOS drivers) -------- */
 int copy_from_user(void *k, uint64_t u, uint64_t n)
 {
-    if (!user_ptr_ok(u, n)) {
-        dbg_puts("DRMCFU: FAIL u=0x");
-        dbg_puts_hex(u);
-        dbg_puts(" n=");
-        dbg_puts_dec((uint32_t)n);
-        dbg_puts("\r\n");
+    if (!user_ptr_ok(u, n))
         return -E_FAULT;
-    }
     memcpy(k, (const void *)(uintptr_t)u, n);
     return 0;
 }
 
 int copy_to_user(uint64_t u, const void *k, uint64_t n)
 {
-    if (!user_ptr_ok(u, n)) {
-        dbg_puts("DRMCTU: FAIL u=0x");
-        dbg_puts_hex(u);
-        dbg_puts(" n=");
-        dbg_puts_dec((uint32_t)n);
-        dbg_puts("\r\n");
+    if (!user_ptr_ok(u, n))
         return -E_FAULT;
-    }
     memcpy((void *)(uintptr_t)u, k, n);
     return 0;
 }

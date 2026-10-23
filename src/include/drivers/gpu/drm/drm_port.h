@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * drm_port.h — porting shim for the Uinxed DRM core files under ported/.
+ * drm_port.h — porting shim for the Uinxed-derived parts of the DRM core.
  * (GPLv2)
  *
- * The Uinxed DRM code was written against that kernel's facilities; this
- * header maps them onto GNOS equivalents so the files under ported/ compile
- * and behave unchanged:
+ * The DRM core was written against Uinxed's kernel facilities; this header
+ * maps them onto GNOS equivalents so the module directories (
+ * core/, gem/, kms/, lib/, simpledrm/, svga/) compile and behave the same:
  *
  *   Uinxed                          GNOS
  *   -------                         ----
@@ -17,7 +17,7 @@
  *   "smp.h"              "smp.h"      spinlock_t/spin_lock/unlock
  *   "vfs.h"                "vfs.h"      E_* (mapped below)
  *   "debugcon.h"  plogk        "debugcon.h" dbg_puts (see drm_print.c)
- *   <proc/uaccess.h>                drm_internal.h copy_from_user/to_user
+ *   <proc/uaccess.h>                lib/drm_libc.c copy_from_user/to_user
  *
  * errno: Uinxed uses Linux-style ENOENT/ENOMEM/...; GNOS spells them
  * E_NOENT/E_NOMEM/...  Map the Linux names to the GNOS values so the ported
@@ -43,8 +43,8 @@
  * copy_to_user(void *dst, src, size), both returning non-zero on failure;
  * GNOS spells them copy_from_user(k, uint64_t u, n) with 0 / -errno.  The
  * semantics line up (non-zero means failure), so wrap GNOS's helpers under
- * the Uinxed names for the ported code.  uaccess.h is not a GNOS header;
- * the declarations below come from drm_internal.h (GNOS DRM). */
+ * the Uinxed names for the core code.  uaccess.h is not a GNOS header; the
+ * definitions live in lib/drm_libc.c. */
 extern int copy_from_user(void *k, uint64_t u, uint64_t n);
 extern int copy_to_user(uint64_t u, const void *k, uint64_t n);
 

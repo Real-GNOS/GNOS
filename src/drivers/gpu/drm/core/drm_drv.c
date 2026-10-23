@@ -27,6 +27,7 @@
 #include "drm_devtmpfs.h" /* devtmpfs shim -> GNOS VFS */
 #include "drm_hashtab.h"
 #include "drm_init.h"
+#include "drm_prime.h"
 #include "drm_print.h"
 #include "heap.h"
 #include "intrusive_list.h"
@@ -163,8 +164,6 @@ static void drm_register_node(struct drm_device *dev, struct drm_minor *minor, u
     int                ret;
 
     memset(&ops, 0, sizeof(ops));
-    ops.open       = (tmpfs_dev_open_t)drm_dev_open;
-    ops.release    = (tmpfs_dev_release_t)drm_dev_release;
     ops.mmap       = drm_dev_file_mmap;
     ops.file_read  = drm_dev_file_read;
     ops.file_write = drm_dev_file_write;
@@ -269,6 +268,9 @@ int drm_dev_register(struct drm_device *dev, uint64_t flags)
     if (dev == NULL) {
         return -EINVAL;
     }
+
+    /* Make dma-buf descriptors available before user space can call PRIME. */
+    drm_prime_init();
 
     dev->mode_config.min_width  = 0;
     dev->mode_config.min_height = 0;

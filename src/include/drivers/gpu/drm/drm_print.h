@@ -16,7 +16,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "debugcon.h"
 #include "drm_vsnprintf.h" /* vsnprintf/snprintf/plogk for GNOS */
 
 struct drm_device;

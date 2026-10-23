@@ -12,8 +12,8 @@
 #include <stdint.h>
 
 #include "drm.h"
-#include "drm_internal.h"
 #include "drm_mode.h"
+#include "drm_vbe.h"
 #include "debugcon.h"
 #include "io.h"
 #include "pci.h"

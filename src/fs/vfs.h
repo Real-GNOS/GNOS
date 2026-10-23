@@ -201,6 +201,11 @@ int vfs_register_devnum(const char *name, const vfs_ops_t *ops, void *priv, uint
  * handle, or a negative errno. */
 int vfs_anon_open(int kind, const vfs_ops_t *ops, void *priv, int flags);
 
+/* Set the size an anonymous node reports through fstat(2)/lseek(SEEK_END).
+ * Its owner knows the object's real length; the open handle has no other
+ * way to tell the VFS. */
+int vfs_anon_set_size(int h, uint64_t size);
+
 /* Publish a block device as "/dev/<name>".  `size` is the capacity in bytes;
  * it is what lseek(SEEK_END) and stat() report, so a partition registers its
  * own length here rather than the whole disk's. */

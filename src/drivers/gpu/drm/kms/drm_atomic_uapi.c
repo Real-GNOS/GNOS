@@ -18,8 +18,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "debugcon.h" /* TEMPORARY: cursor ioctl trace */
-
 #include "drm_device.h"
 #include "drm_idr.h"
 #include "drm_mode.h"
@@ -793,17 +791,6 @@ static int drm_mode_cursor_common(struct drm_device *dev, struct drm_file *file_
 
     crtc    = container_of(base, struct drm_crtc, base);
     helpers = (struct drm_crtc_helper_funcs *)crtc->helper_private;
-
-    /* TEMPORARY: why does the Xorg sprite never reach cursor_set? */
-    dbg_puts("CURSOR: flags=");
-    dbg_puts_hex(cursor->flags);
-    dbg_puts(" handle=");
-    dbg_puts_hex(cursor->handle);
-    dbg_puts(" w=");
-    dbg_puts_dec(cursor->width);
-    dbg_puts(" h=");
-    dbg_puts_dec(cursor->height);
-    dbg_puts("\r\n");
 
     if ((cursor->flags & DRM_MODE_CURSOR_BO) != 0) {
         if (helpers == NULL || helpers->cursor_set == NULL) {

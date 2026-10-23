@@ -34,6 +34,7 @@
 #include "pci.h"
 #include "pmm.h"
 #include "proc.h"
+#include "simpledrm.h"
 #include "vmm.h"
 
 /* The guest buffer we accelerate out of lives in the direct map, so its

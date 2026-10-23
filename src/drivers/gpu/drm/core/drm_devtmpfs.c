@@ -63,14 +63,6 @@ static int32_t drm_bridge_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     tmpfs_device_ops_t *ops = (tmpfs_device_ops_t *)n->priv;
     struct drm_file    *fp  = drm_get_file();
 
-    dbg_puts("DRMIOC: cmd=0x");
-    dbg_puts_hex(cmd);
-    dbg_puts(" ops=");
-    dbg_puts_hex((uint64_t)(uintptr_t)ops);
-    dbg_puts(" fp=");
-    dbg_puts_hex((uint64_t)(uintptr_t)fp);
-    dbg_puts("\r\n");
-
     if (!ops || !ops->file_ioctl)
         return -E_NOTTY;
     if (!fp)
@@ -85,20 +77,6 @@ static int drm_bridge_mmap(vfs_node_t *n, uint64_t offset, uint64_t *phys, uint6
     struct vm_area      fake_vma = {0}; /* GNOS has no VMAs; Uinxed's
                                            mmap callback wants one anyway */
     void *p;
-
-    dbg_puts("DRMBRIDGE: n=");
-    dbg_puts_hex((uint64_t)(uintptr_t)n);
-    dbg_puts(" off=");
-    dbg_puts_hex(offset);
-    dbg_puts(" ops=");
-    dbg_puts_hex((uint64_t)(uintptr_t)ops);
-    dbg_puts(" mmapfn=");
-    dbg_puts_hex((uint64_t)(uintptr_t)(ops ? ops->mmap : 0));
-    dbg_puts(" ctx=");
-    dbg_puts_hex((uint64_t)(uintptr_t)(ops ? ops->ctx : 0));
-    dbg_puts(" readfn=");
-    dbg_puts_hex((uint64_t)(uintptr_t)(ops ? ops->read : 0));
-    dbg_puts("\r\n");
 
     if (!ops || !ops->mmap)
         return -E_INVAL;

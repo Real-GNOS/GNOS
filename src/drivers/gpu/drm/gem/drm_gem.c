@@ -25,6 +25,7 @@
 #include "drm_idr.h"
 #include "drm_mode.h"
 #include "drm_modeset_lock.h"
+#include "drm_prime.h"
 #include "drm_print.h"
 #include "heap.h"
 #include "kstring.h"
@@ -374,12 +375,24 @@ void drm_gem_object_put(struct drm_gem_object *obj)
         return;
     }
 
-    if (obj->prime_fd > 0) {
-        drm_gem_prime_fd_free(obj->prime_fd);
-        obj->prime_fd = -1;
-    }
+    drm_gem_free_mmap_offset(obj);
 
-    dumb_offset_free(obj->mmap_offset, obj->size);
+    /*
+     * A generic import wrapper borrows the exporter's backing and owns a
+     * dma-buf reference; it must never reach the driver's free hook, which
+     * would free memory it does not own.
+     */
+    if (obj->imported) {
+        struct dma_buf *dma_buf = obj->import_dma_buf;
+
+        obj->import_dma_buf = NULL;
+        obj->backing        = NULL;
+        free(obj);
+        if (dma_buf != NULL) {
+            dma_buf_put(dma_buf);
+        }
+        return;
+    }
 
     if (obj->dev != NULL && obj->dev->driver != NULL && obj->dev->driver->gem_free_object != NULL) {
         obj->dev->driver->gem_free_object(obj);
@@ -514,112 +527,6 @@ struct drm_gem_object *drm_gem_object_lookup_by_offset(struct drm_file *file_pri
     return obj;
 }
 
-/* ------------------------------------------------------------ dumb buffers */
-
-/*
- * DRM_IOCTL_MODE_CREATE_DUMB: make a buffer of a given width, height and
- * depth.  Pitch is whatever the bytes-per-pixel arithmetic gives, rounded
- * up by the caller's own width, and the backing memory is page-aligned
- * because it gets mapped straight into user space.
- */
-int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,
-                        struct drm_mode_create_dumb *args)
-{
-    struct drm_gem_object *obj;
-    uint32_t               handle;
-    size_t                 size;
-    int                    ret;
-
-    if (file_priv == NULL || dev == NULL || args == NULL) {
-        return -EINVAL;
-    }
-    if (args->width == 0 || args->height == 0 || args->bpp == 0) {
-        return -EINVAL;
-    }
-    if (args->bpp % 8 != 0) {
-        return -EINVAL;
-    }
-
-    args->pitch = args->width * (args->bpp / 8);
-    size        = (size_t)args->pitch * args->height;
-    args->size  = (uint64_t)size;
-
-    obj = malloc(sizeof(*obj));
-    if (obj == NULL) {
-        return -ENOMEM;
-    }
-    memset(obj, 0, sizeof(*obj));
-
-    drm_gem_object_init(dev, obj, size);
-    obj->size = (uint32_t)size;
-
-    /* Assigned here rather than at mmap time so the offset is stable for
-     * the life of the buffer: a client may ask for it more than once. */
-    obj->mmap_offset = dumb_offset_alloc(size);
-
-    if (size > 0) {
-        obj->backing = aligned_alloc(4096, size);
-        if (obj->backing == NULL) {
-            free(obj);
-            return -ENOMEM;
-        }
-        memset(obj->backing, 0, size);
-    }
-
-    obj->prime_fd = -1;
-
-    ret = drm_gem_handle_create(file_priv, obj, &handle);
-    if (ret < 0) {
-        aligned_free(obj->backing);
-        free(obj);
-        return ret;
-    }
-
-    args->handle = handle;
-
-    /* The handle owns the object from here on. */
-    drm_gem_object_put(obj);
-
-    return 0;
-}
-
-/* DRM_IOCTL_MODE_MAP_DUMB: hand back the offset the client should mmap. */
-int drm_gem_dumb_map_offset(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle,
-                            uint64_t *offset)
-{
-    struct drm_gem_object *obj;
-
-    (void)dev;
-
-    obj = drm_gem_object_lookup(file_priv, handle);
-
-    dbg_puts("DRMMAPDUMB: handle=");
-    dbg_puts_dec(handle);
-    dbg_puts(" obj=");
-    dbg_puts_hex((uint64_t)(uintptr_t)obj);
-    dbg_puts(" mmap_offset=");
-    dbg_puts_hex((obj != NULL) ? obj->mmap_offset : 0);
-    dbg_puts("\r\n");
-
-    if (obj == NULL) {
-        return -ENOENT;
-    }
-
-    *offset = obj->mmap_offset;
-
-    drm_gem_object_put(obj);
-    return 0;
-}
-
-/* DRM_IOCTL_MODE_DESTROY_DUMB: a dumb buffer is an ordinary GEM object,
- * so dropping its handle is the whole of it. */
-int drm_gem_dumb_destroy(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle)
-{
-    (void)dev;
-
-    return drm_gem_handle_delete(file_priv, handle);
-}
-
 /* ------------------------------------------------------------- GEM ioctls */
 
 /* DRM_IOCTL_GEM_OPEN: import a buffer by its global name. */
@@ -695,135 +602,6 @@ int drm_gem_flink_ioctl(struct drm_device *dev, void *data, struct drm_file *fil
     return 0;
 }
 
-/* ------------------------------------------- PRIME: sharing through an fd */
-
-#define PRIME_FD_MAX 1024
-
-static struct {
-    struct drm_gem_object *obj;
-    int                    in_use;
-} prime_fd_table[PRIME_FD_MAX];
-
-static spinlock_t prime_fd_lock = {0};
-
-static int prime_fd_alloc(struct drm_gem_object *obj, int *fd_out)
-{
-    int i;
-
-    spin_lock(&prime_fd_lock);
-
-    for (i = 0; i < PRIME_FD_MAX; i++) {
-        if (!prime_fd_table[i].in_use) {
-            prime_fd_table[i].obj    = obj;
-            prime_fd_table[i].in_use = 1;
-            *fd_out                  = i + 1; /* fds count from 1 */
-            obj->prime_fd            = *fd_out;
-            drm_gem_object_get(obj);
-            spin_unlock(&prime_fd_lock);
-            return 0;
-        }
-    }
-
-    spin_unlock(&prime_fd_lock);
-    return -ENOMEM;
-}
-
-static struct drm_gem_object *prime_fd_lookup(int fd)
-{
-    struct drm_gem_object *obj = NULL;
-    int                    idx = fd - 1;
-
-    if (idx < 0 || idx >= PRIME_FD_MAX) {
-        return NULL;
-    }
-
-    spin_lock(&prime_fd_lock);
-    if (prime_fd_table[idx].in_use) {
-        obj = prime_fd_table[idx].obj;
-        if (obj != NULL) {
-            drm_gem_object_get(obj);
-        }
-    }
-    spin_unlock(&prime_fd_lock);
-
-    return obj;
-}
-
-void drm_gem_prime_fd_free(int fd)
-{
-    int idx = fd - 1;
-
-    if (idx < 0 || idx >= PRIME_FD_MAX) {
-        return;
-    }
-
-    spin_lock(&prime_fd_lock);
-    if (prime_fd_table[idx].in_use) {
-        prime_fd_table[idx].obj    = NULL;
-        prime_fd_table[idx].in_use = 0;
-    }
-    spin_unlock(&prime_fd_lock);
-}
-
-int drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle,
-                               uint32_t flags, int *prime_fd)
-{
-    struct drm_gem_object *obj;
-    int                    fd;
-    int                    ret;
-
-    (void)dev;
-    (void)flags;
-
-    obj = drm_gem_object_lookup(file_priv, handle);
-    if (obj == NULL) {
-        return -ENOENT;
-    }
-
-    /* Exporting twice gives the same fd: two different numbers for one
-     * buffer would only confuse the importer. */
-    if (obj->prime_fd > 0) {
-        *prime_fd = obj->prime_fd;
-        drm_gem_object_put(obj);
-        return 0;
-    }
-
-    ret = prime_fd_alloc(obj, &fd);
-    if (ret < 0) {
-        drm_gem_object_put(obj);
-        return ret;
-    }
-
-    *prime_fd = fd;
-    drm_gem_object_put(obj);
-    return 0;
-}
-
-int drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv, int prime_fd,
-                               uint32_t *handle)
-{
-    struct drm_gem_object *obj;
-    uint32_t               new_handle;
-    int                    ret;
-
-    (void)dev;
-
-    obj = prime_fd_lookup(prime_fd);
-    if (obj == NULL) {
-        return -ENOENT;
-    }
-
-    ret = drm_gem_handle_create(file_priv, obj, &new_handle);
-    if (ret < 0) {
-        drm_gem_object_put(obj);
-        return ret;
-    }
-
-    *handle = new_handle;
-    drm_gem_object_put(obj);
-    return 0;
-}
-
 /* Ensure @obj has an offset a client can mmap; idempotent. */
 int drm_gem_create_mmap_offset(struct drm_gem_object *obj)
 {
@@ -836,4 +614,16 @@ int drm_gem_create_mmap_offset(struct drm_gem_object *obj)
 
     obj->mmap_offset = dumb_offset_alloc(obj->size);
     return (obj->mmap_offset != 0) ? 0 : -ENOSPC;
+}
+
+/* Give an mmap offset back.  Called from drm_gem_object_put(), and by the
+ * dumb-buffer allocator when it has to unwind a half-built object. */
+void drm_gem_free_mmap_offset(struct drm_gem_object *obj)
+{
+    if (obj == NULL || obj->mmap_offset == 0) {
+        return;
+    }
+
+    dumb_offset_free(obj->mmap_offset, obj->size);
+    obj->mmap_offset = 0;
 }

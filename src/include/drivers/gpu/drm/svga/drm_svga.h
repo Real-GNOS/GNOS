@@ -6,7 +6,7 @@
  * VBE one: VMware SVGA II (15ad:0405).  Where drm_vbe.c only changes the
  * geometry of the framebuffer the bootloader already set up, this one owns
  * its own VRAM and hands the DRM core a real scanout target to copy into —
- * see drm_scanout_set() in drm_init.h.
+ * see drm_scanout_set() in simpledrm.h.
  *
  * The driver is deliberately small: probe, mode set, and the FIFO UPDATE
  * notification.  No 2D acceleration, no hardware cursor.

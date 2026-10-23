@@ -132,17 +132,8 @@ int drm_mode_getcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
         return -EINVAL;
     }
 
-    dbg_puts("PSETCRTC id=");
-    dbg_puts_dec((uint32_t)req->crtc_id);
-    dbg_puts(" fb=");
-    dbg_puts_dec((uint32_t)req->fb_id);
-    dbg_puts(" mv=");
-    dbg_puts_dec((uint32_t)req->mode_valid);
-    dbg_puts("\n");
-
     obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
     if (obj == NULL) {
-        dbg_puts("PSETCRTC: object_find miss\n");
         return -ENOENT;
     }
     crtc = container_of(obj, struct drm_crtc, base);
@@ -199,17 +190,8 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
         return -EINVAL;
     }
 
-    dbg_puts("PSETCRTC id=");
-    dbg_puts_dec((uint32_t)req->crtc_id);
-    dbg_puts(" fb=");
-    dbg_puts_dec((uint32_t)req->fb_id);
-    dbg_puts(" mv=");
-    dbg_puts_dec((uint32_t)req->mode_valid);
-    dbg_puts("\n");
-
     obj = drm_mode_object_find(dev, file_priv, req->crtc_id, DRM_MODE_OBJECT_CRTC);
     if (obj == NULL) {
-        dbg_puts("PSETCRTC: object_find miss\n");
         return -ENOENT;
     }
     crtc = container_of(obj, struct drm_crtc, base);
@@ -217,7 +199,6 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data, struct drm_file *file_p
     if (req->fb_id != 0) {
         fb = drm_framebuffer_lookup(dev, file_priv, req->fb_id);
         if (fb == NULL) {
-            dbg_puts("PSETCRTC: fb lookup miss\n");
             drm_mode_object_put(obj);
             return -ENOENT;
         }
@@ -461,6 +442,8 @@ static spinlock_t  g_gamma_lock;
 static gamma_lut_t *gamma_lut_for(struct drm_device *dev, uint32_t crtc_id)
 {
     gamma_lut_t *slot = NULL;
+
+    (void)dev; /* the LUT slots are global; one device today */
 
     for (int i = 0; i < 4; i++) {
         if (g_gamma_luts[i].id == crtc_id)

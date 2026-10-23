@@ -54,6 +54,7 @@ struct drm_plane;
 struct drm_plane_state;
 struct drm_framebuffer;
 struct drm_gem_object;
+struct dma_buf;
 struct drm_atomic_state;
 struct drm_pending_vblank_event;
 struct drm_master;
@@ -544,7 +545,6 @@ struct drm_atomic_state {
 /* --------------------------------------------------------------- GEM buffers */
 
 struct drm_gem_object {
-    struct drm_file   *filp_owner_default_unused;
     struct drm_device *dev;
     int                refcount;
     spinlock_t         ref_lock;
@@ -552,14 +552,16 @@ struct drm_gem_object {
     uint32_t           size;
     void              *backing;     /* allocated backing memory for dumb/prime buffers */
     uint64_t           mmap_offset; /* offset returned by dumb_map_offset for mmap lookup */
-    struct drm_mm_node vma_node_placeholder;
     ilist_node_t       handle_list_node; /* legacy, per-file entries are separate */
-    void              *import_attach;    /* attached dma-buf attachment (for PRIME import) */
-    void              *dma_buf;          /* dma-buf (for PRIME export) */
-    int                prime_fd;         /* assigned PRIME fd, -1 if none */
-    struct drm_gem_object_funcs_placeholder {
-        int dummy;
-    } funcs_placeholder;
+
+    /* PRIME.  An exported object owns no dma-buf reference: the buffer is
+     * cached here weakly and cleared when its last reference goes away.  A
+     * generic import wrapper holds its dma-buf strongly and borrows the
+     * exporter's backing memory, so it must never reach the driver's free
+     * hook. */
+    bool            imported;
+    struct dma_buf *import_dma_buf;
+    struct dma_buf *export_dma_buf;
 };
 
 /* ---------------------------------------------------------------- mode_config */
@@ -690,7 +692,7 @@ struct drm_driver {
     /* GEM helpers. */
     int (*gem_create_ioctl)(struct drm_device *dev, void *data, struct drm_file *file_priv);
     void (*gem_free_object)(struct drm_gem_object *obj);
-    struct drm_gem_object *(*gem_prime_import)(struct drm_device *dev, void *dma_buf);
+    struct drm_gem_object *(*gem_prime_import)(struct drm_device *dev, struct dma_buf *dma_buf);
 
     /* PRIME export/import hooks. */
     int (*prime_handle_to_fd)(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle,
@@ -893,11 +895,11 @@ int  drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_pr
                                 uint32_t flags, int *prime_fd);
 int  drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv, int prime_fd,
                                 uint32_t *handle);
-void drm_gem_prime_fd_free(int fd);
 
 /* GEM object lifecycle. */
 int  drm_gem_object_init(struct drm_device *dev, struct drm_gem_object *obj, size_t size);
 int  drm_gem_create_mmap_offset(struct drm_gem_object *obj);
+void drm_gem_free_mmap_offset(struct drm_gem_object *obj);
 void drm_gem_object_get(struct drm_gem_object *obj);
 void drm_gem_object_put(struct drm_gem_object *obj);
 int  drm_gem_handle_create(struct drm_file *file_priv, struct drm_gem_object *obj,

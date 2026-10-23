@@ -1979,6 +1979,18 @@ int vfs_anon_open(int kind, const vfs_ops_t *ops, void *priv, int flags)
     return h;
 }
 
+/* Give an anonymous node a size.  Its owner knows how large the object is
+ * (a dma-buf, say) and fstat(2) has to report it; the node starts at zero
+ * because vfs_anon_open() has no way to know. */
+int vfs_anon_set_size(int h, uint64_t size)
+{
+    vfs_file_t *f = get(h);
+    if (!f)
+        return -E_BADF;
+    f->node.size = size;
+    return 0;
+}
+
 int vfs_pipe(int *read_handle, int *write_handle)
 {
     pipe_t *p = NULL;

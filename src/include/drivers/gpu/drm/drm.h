@@ -491,6 +491,12 @@ struct drm_gem_open {
 #define DRM_PRIME_CAP_EXPORT 1
 #define DRM_PRIME_CAP_IMPORT 2
 
+/* DRM_IOCTL_PRIME_HANDLE_TO_FD descriptor flags.  The values are the Linux
+ * ABI (O_CLOEXEC / O_RDWR), repeated here so this UAPI header does not pull
+ * the kernel's internal open-flag header into user-space builds. */
+#define DRM_CLOEXEC 0x80000
+#define DRM_RDWR    0x2
+
 /* DRM_IOCTL_GET_CAP: "can you do this?" */
 #define DRM_CAP_DUMB_BUFFER            0x1
 #define DRM_CAP_VBLANK_HIGH_CRTC       0x2

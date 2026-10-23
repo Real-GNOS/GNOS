@@ -500,13 +500,6 @@ int drm_ioctl(struct drm_device *dev, unsigned int cmd, void *user_data, struct 
     int                          ret;
 
     if (dev == NULL || dev->driver == NULL || file_priv == NULL) {
-        dbg_puts("DRMI: early EINVAL dev=");
-        dbg_puts_hex((uint64_t)(uintptr_t)dev);
-        dbg_puts(" drv=");
-        dbg_puts_hex((dev != NULL) ? (uint64_t)(uintptr_t)dev->driver : 0);
-        dbg_puts(" fp=");
-        dbg_puts_hex((uint64_t)(uintptr_t)file_priv);
-        dbg_puts("\r\n");
         return -EINVAL;
     }
 
@@ -602,14 +595,6 @@ copy_out:
     }
 
 out:
-    dbg_puts("DRMI: cmd=0x");
-    dbg_puts_hex(cmd);
-    dbg_puts(" ret=");
-    dbg_puts_dec((uint32_t)ret);
-    dbg_puts(" auth=");
-    dbg_puts_dec((file_priv != NULL) ? file_priv->authenticated : 9);
-    dbg_puts("\r\n");
-
     free(kdata);
     return ret;
 }
