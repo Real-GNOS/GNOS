@@ -131,6 +131,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/fbdev.o \
          $(BUILD)/drm_drv.o $(BUILD)/drm_file.o $(BUILD)/drm_auth.o \
          $(BUILD)/drm_ioctl.o $(BUILD)/drm_init.o $(BUILD)/drm_devtmpfs.o \
+         $(BUILD)/drm_vfs.o \
          $(BUILD)/intrusive_list.o $(BUILD)/rbtree.o \
          $(BUILD)/drm_idr.o $(BUILD)/drm_hashtab.o $(BUILD)/drm_rect.o \
          $(BUILD)/drm_mm.o $(BUILD)/drm_vsnprintf.o $(BUILD)/drm_print.o \
@@ -143,7 +144,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/drm_gem.o $(BUILD)/drm_gem_dumb.o $(BUILD)/drm_prime.o \
          $(BUILD)/drm_framebuffer.o \
          $(BUILD)/drm_property.o $(BUILD)/drm_libc.o \
-         $(BUILD)/drm_vbe.o $(BUILD)/drm_svga.o \
+         $(BUILD)/drm_vbe.o $(BUILD)/drm_svga.o $(BUILD)/simpledrm.o \
     $(BUILD)/kaslr.o \
                   $(BUILD)/subsys.o $(BUILD)/acpi.o $(BUILD)/sysfs.o \
          $(BUILD)/debugcon.o $(BUILD)/ext2.o $(BUILD)/panic.o \
