@@ -488,7 +488,7 @@ static int vt_hotkey(uint8_t code)
 static void kbd_feed(uint8_t sc)
 {
     /* The evdev decoder runs first: it wants every byte, prefix included,
-     * and keeps its own 0xE0 state -- see input.c. */
+     * and keeps its own 0xE0 state -- see drivers/input/ps2/keyboard.c. */
     input_kbd_scancode(sc);
 
     /* 0xE0 begins an extended sequence: remember it and wait for the real

@@ -60,9 +60,6 @@
  * regs_t frame and calls syscall_handler(), exactly like the int 0x80 path. */
 extern uint8_t syscall_entry[];
 
-/* Forward declaration for inputinject (defined in driver/input.c). */
-extern int64_t sys_inputinject(uint64_t type, uint64_t code, uint64_t value);
-
 static void wrmsr(uint32_t msr, uint64_t val)
 {
     uint32_t lo = (uint32_t)val;

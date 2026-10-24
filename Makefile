@@ -159,7 +159,9 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/pci.o $(BUILD)/e1000.o $(BUILD)/audio.o $(BUILD)/audiodev.o \
         $(BUILD)/hda.o $(BUILD)/ata.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
         $(BUILD)/cjkfont_data.o \
-        $(BUILD)/input.o $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
+        $(BUILD)/input_core.o $(BUILD)/evdev.o $(BUILD)/evdev_queue.o \
+        $(BUILD)/ps2.o $(BUILD)/keyboard.o $(BUILD)/mouse.o \
+        $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
         $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/inotify.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
         $(BUILD)/mutex.o \
         $(BUILD)/pty.o $(BUILD)/calsa.o $(BUILD)/klog.o $(BUILD)/cpuid.o $(BUILD)/pagecache.o \

@@ -5,7 +5,16 @@
  * Two hooks escape this driver into the rest of the kernel: the scancode
  * tap tty.c feeds for every PS/2 keyboard byte, and the O_NONBLOCK mirror
  * syscall.c applies through fcntl(F_SETFL).  Everything else -- the evdev
- * queues, the EVIOC* ioctls, the PS/2 mouse -- stays behind input.c.
+ * queues, the EVIOC* ioctls, the PS/2 mouse -- stays behind this API.
+ *
+ * The implementation is split the same way Uinxed's input stack is:
+ *
+ *   evdev/evdev.c        device state, read/poll/ioctl, node registration
+ *   evdev/evdev_queue.c  the per-device event ring
+ *   ps2/ps2.c            i8042 controller and IRQ 12
+ *   ps2/keyboard.c       scancode-set-1 decoder
+ *   ps2/mouse.c          three-byte mouse packet decoder
+ *   input_core.c         binding, capability setup, injection APIs
  */
 #ifndef GNUCOS_INPUT_H
 #define GNUCOS_INPUT_H
@@ -27,18 +36,21 @@ void input_kbd_scancode(uint8_t sc);
  * this driver does not own. */
 void input_set_nonblock(vfs_node_t *n, int nb);
 
-/* Feed decoded USB HID keyboard/mouse events into the evdev queues.  The
- * USB HID driver (usb_hid.c) turns boot-protocol reports into these
- * *results* -- a key code + pressed flag, or mouse deltas + button mask --
- * exactly the shape the PS/2 decoder produces, so libinput sees one
- * coherent device no matter which wire the event came over. */
 /* Non-blocking pop of one decoded event (kernel-internal consumers, e.g.
  * the NEP shim's get_event).  mouse selects the device: 0 keyboard,
  * 1 mouse.  Returns 1 and fills the out params, or 0 when the queue is
  * empty. */
 int input_pull(int mouse, uint16_t *type, uint16_t *code, int32_t *value);
 
+/* Feed decoded USB HID keyboard/mouse events into the evdev queues.  The
+ * USB HID driver (usb_hid.c) turns boot-protocol reports into these
+ * results -- a key code + pressed flag, or mouse deltas + button mask --
+ * exactly the shape the PS/2 decoder produces, so libinput sees one
+ * coherent device no matter which wire the event came over. */
 void input_usb_kbd(uint16_t key, int pressed);
 void input_usb_mouse(uint16_t btn_mask, int dx, int dy);
+
+/* inputinject(405): push one synthetic evdev event for headless tests. */
+int64_t sys_inputinject(uint64_t type, uint64_t code, uint64_t value);
 
 #endif
