@@ -149,7 +149,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
                   $(BUILD)/subsys.o $(BUILD)/acpi.o $(BUILD)/sysfs.o \
          $(BUILD)/debugcon.o $(BUILD)/ext2.o $(BUILD)/panic.o \
          $(BUILD)/gdt.o $(BUILD)/idt.o $(BUILD)/isr.o \
-         $(BUILD)/kstring.o $(BUILD)/vfs.o $(BUILD)/procfs.o $(BUILD)/debugfs.o $(BUILD)/tmpfs.o $(BUILD)/tty_core.o $(BUILD)/tty_io.o $(BUILD)/console.o $(BUILD)/tty_kbd.o $(BUILD)/vt.o $(BUILD)/heap.o \
+         $(BUILD)/kstring.o $(BUILD)/vfs.o $(BUILD)/procfs.o $(BUILD)/debugfs.o $(BUILD)/tmpfs.o $(BUILD)/tty_core.o $(BUILD)/tty_io.o $(BUILD)/console.o $(BUILD)/tty_kbd.o $(BUILD)/vt.o $(BUILD)/vt_ansi.o $(BUILD)/heap.o \
          $(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/slab.o $(BUILD)/proc.o $(BUILD)/cgroup.o $(BUILD)/ptrace.o \
         $(BUILD)/signal.o $(BUILD)/switch.o $(BUILD)/timer.o \
         $(BUILD)/syscall.o \
