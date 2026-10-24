@@ -41,6 +41,7 @@ dbg.log
 oneOS-new/target/
 rustix-vkernel/$PLUGINSDIR/
 build/
+fakeroot/
 neorunst/
 *.swp
 *.md
