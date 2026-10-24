@@ -157,7 +157,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/lapic.o \
         $(BUILD)/net.o $(BUILD)/tcp.o $(BUILD)/sock.o \
          $(BUILD)/pci.o $(BUILD)/e1000.o $(BUILD)/audio.o $(BUILD)/audiodev.o \
-        $(BUILD)/hda.o $(BUILD)/ata.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
+        $(BUILD)/hda.o $(BUILD)/ide.o $(BUILD)/atapi.o $(BUILD)/ata_block.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
         $(BUILD)/cjkfont_data.o \
         $(BUILD)/input_core.o $(BUILD)/evdev.o $(BUILD)/evdev_queue.o \
         $(BUILD)/ps2.o $(BUILD)/keyboard.o $(BUILD)/mouse.o \
