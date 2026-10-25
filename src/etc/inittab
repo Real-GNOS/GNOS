@@ -2,14 +2,17 @@
 # This is Alpine's standard shape: openrc runs the three runlevels, one
 # respawning getty per virtual terminal.  Indentation and the colon format
 # are busybox's.
-# openrc wedges in dependency generation on this kernel (gendepends blocks
-# a syscall that never returns), so skip dependency calculation via the
-# RC_NODEPS environment variable -- this image's runlevels are static and
-# execute fine straight from the runlevel lists.  (--nodeps as a CLI flag
-# is not supported by openrc 0.54; it prints usage and exits.)
-::sysinit:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc sysinit
-::sysinit:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc boot
-::wait:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc default
+# openrc is disabled for now, two kernel bugs deep:
+#   1. dependency generation (gendepends) blocks a syscall that never
+#      returns, wedging the boot (RC_NODEPS=1 skips that stage);
+#   2. with services actually running, executing them trips a triple fault
+#      (QEMU -no-reboot exits 0) partway through the boot runlevel.
+# Neither matters for the desktop: proc/sysfs/devtmpfs are kernel-mounted
+# and the session scripts set up everything else.  Re-enable once both are
+# fixed in the kernel.
+#::sysinit:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc sysinit
+#::sysinit:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc boot
+#::wait:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc default
 # The user-buffer probe regression test: a writev whose iovec runs off the
 # image end must come back as an error, never a frozen machine (the shape
 # that took a mount(8) stdio flush down; src/usr/bufoktest.c).

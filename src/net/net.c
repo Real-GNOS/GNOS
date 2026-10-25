@@ -9,7 +9,7 @@
 #include "tcp.h"  /* tcp_tick(); the transport layers fill the upcalls */
 #include "sock.h" /* sock_init() */
 #include "ipv6/ipv6.h"
-#include "e1000.h"
+#include "nic.h"
 #include "vfs.h" /* errno numbers */
 #include "vmm.h" /* user_ptr_ok() */
 #include "kstring.h"
@@ -382,7 +382,7 @@ static int eth_output(const uint8_t *dmac, uint16_t ethertype, const void *paylo
     uint16_t total = (uint16_t)(ETH_HDR_LEN + len);
     /* The card pads to the 60-byte minimum itself (TCTL.PSP), so a 28-byte
      * ARP does not need padding here. */
-    if (!e1000_send(frame, total)) {
+    if (!nic_send(frame, total)) {
         nif->tx_dropped++;
         return -E_IO;
     }
@@ -960,7 +960,7 @@ void net_poll(void)
 
     /* Bounded so that a flood cannot hold an interrupt handler forever. */
     for (int n = 0; n < 32; n++) {
-        uint16_t len = e1000_recv(frame, sizeof(frame));
+        uint16_t len = nic_recv(frame, sizeof(frame));
         if (!len)
             break;
         eth_input(frame, len);
@@ -1019,8 +1019,8 @@ void net_init(void)
 
     netif_t *eth = &g_ifs[NET_IF_ETH];
     strncpy(eth->name, "eth0", sizeof(eth->name) - 1);
-    if (e1000_present()) {
-        memcpy(eth->mac, e1000_mac(), ETH_ALEN);
+    if (nic_present()) {
+        memcpy(eth->mac, nic_mac(), ETH_ALEN);
         eth->ip      = IPV4(10, 0, 2, 15);
         eth->netmask = IPV4(255, 255, 255, 0);
         eth->gateway = IPV4(10, 0, 2, 2);

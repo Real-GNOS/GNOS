@@ -74,6 +74,8 @@ typedef unsigned int ACPI_STATUS_K;
 #include "syscall.h"
 #include "pci.h"
 #include "e1000.h"
+#include "rtl8139.h"
+#include "nic.h"
 #include "net.h"
 #include "ata.h"
 #include "nvme.h"
@@ -339,11 +341,16 @@ void kernel_main(void)
     }
 
     /* Each probe reports into the registry so that "was there a NIC?" is a
-     * lookup later on instead of a line of boot text nobody kept. */
-    int slot_nic = subsys_register("e1000", NULL, SUBSYS_CLASS_NET, 0, 0);
-    if (e1000_init()) {
+     * lookup later on instead of a line of boot text nobody kept.  e1000 is
+     * QEMU's default card and rtl8139 is the other classic; whichever binds
+     * first owns the nic_* slot the IP stack talks to (see drivers/net/nic.h). */
+    int nic_ok = e1000_init();
+    if (!nic_ok)
+        nic_ok = rtl8139_init();
+    int slot_nic = subsys_register(nic_ok ? nic_name() : "net", NULL, SUBSYS_CLASS_NET, 0, 0);
+    if (nic_ok) {
         subsys_set_state(slot_nic, SUBSYS_STATE_LIVE);
-        e1000_selftest();
+        nic_selftest();
     } else {
         subsys_set_state(slot_nic, SUBSYS_STATE_FAILED);
     }

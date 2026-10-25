@@ -22,6 +22,10 @@ while [ $i -lt 15 ] && [ ! -S /tmp/.X11-unix/X0 ]; do
     sleep 1
     i=$((i + 1))
 done
+# Diagnostics: if the server never came up, its stdout and log say why.
+/bin/dbgcat.elf /tmp/xorg.out
+/usr/bin/tail -c 1500 /var/log/Xorg.0.log > /tmp/xorglog.txt 2>/dev/null
+/bin/dbgcat.elf /tmp/xorglog.txt
 
 # Paint the root window before any client so a client-free screen is
 # visibly the desktop's, not a dead pipeline.

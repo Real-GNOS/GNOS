@@ -25,6 +25,7 @@
  * the card to set Descriptor Done", and receiving is the mirror image.
  */
 #include "e1000.h"
+#include "nic.h"
 #include "pci.h"
 #include "io.h"
 #include "idt.h"
@@ -164,6 +165,16 @@ static unsigned            g_tx_tail;
 static unsigned            g_rx_head;
 
 static uint64_t g_tx_frames, g_rx_frames, g_irqs;
+
+/* The IP stack talks to this driver through nic.h; see nic.c. */
+static const nic_ops_t e1000_nic = {
+    .name     = "e1000",
+    .mac      = e1000_mac,
+    .link_up  = e1000_link_up,
+    .send     = e1000_send,
+    .recv     = e1000_recv,
+    .selftest = e1000_selftest,
+};
 
 static inline uint32_t reg_read(uint32_t off)
 {
@@ -425,6 +436,7 @@ int e1000_init(void)
     }
 
     g_ok = 1;
+    (void)nic_register(&e1000_nic);
     dbg_puts("E1000: 8086:100E up, mac ");
     for (int i = 0; i < 6; i++) {
         dbg_puts_hexn(g_mac[i], 2);

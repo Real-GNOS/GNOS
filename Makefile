@@ -163,7 +163,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/smp.o $(BUILD)/ap_trampoline.o \
         $(BUILD)/lapic.o \
         $(BUILD)/net.o $(BUILD)/tcp.o $(BUILD)/sock.o \
-         $(BUILD)/pci.o $(BUILD)/e1000.o $(BUILD)/audio.o $(BUILD)/audiodev.o \
+         $(BUILD)/pci.o $(BUILD)/e1000.o $(BUILD)/nic.o $(BUILD)/rtl8139.o $(BUILD)/audio.o $(BUILD)/audiodev.o \
         $(BUILD)/hda.o $(BUILD)/ide.o $(BUILD)/atapi.o $(BUILD)/ahci.o $(BUILD)/satapi.o $(BUILD)/ata_block.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
         $(BUILD)/cjkfont_data.o \
         $(BUILD)/input_core.o $(BUILD)/evdev.o $(BUILD)/evdev_queue.o \
