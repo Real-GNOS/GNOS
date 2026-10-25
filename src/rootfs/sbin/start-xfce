@@ -39,6 +39,10 @@ sleep 1
 # autostart directories (/etc/xdg/autostart, ~/.config/autostart) -- the
 # manual component launch this script used to do bypassed that machinery,
 # so nothing in autostart ever ran.
+# Probe the fork+pipe handshake every spawn path relies on, before the
+# session manager exercises it for real.
+/usr/bin/spawntest >/tmp/spawn.out 2>&1
+/bin/dbgcat.elf /tmp/spawn.out
 # Diagnostics first: a session manager that dies at startup must say why
 # on the debugcon, or every respawn cycle fails silently.  The session
 # manager may also HANG without ever exiting (each respawn cycle then

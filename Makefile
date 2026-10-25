@@ -375,7 +375,7 @@ MUSL_INC  := $(MUSL_PREFIX)/include
 MUSL_GCC  := $(MUSL_PREFIX)/bin/musl-gcc
 
 # Programs built against musl rather than ulib.
-MUSLPROGS := hello mount coldplug chvt getty login bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest bufoktest memtest nettest asmtest
+MUSLPROGS := hello mount coldplug chvt getty login bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest bufoktest memtest nettest asmtest spawntest
 MUSL_OBJS := $(addprefix $(BUILD)/user/,$(addsuffix .o,$(MUSLPROGS)))
 MUSL_ELFS := $(addprefix $(BUILD)/,$(addsuffix .elf,$(MUSLPROGS)))
 
