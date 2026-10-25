@@ -47,5 +47,22 @@ sleep 1
 /usr/bin/xfce4-session >/tmp/xfce.out 2>&1 &
 SESS_PID=$!
 ( sleep 25; /bin/dbgcat.elf /tmp/xfce.out ) &
+
+# The session manager spawns its components through g_spawn, whose
+# fork+error-pipe handshake stalls in our kernel the same way dbus's
+# spawn path does -- xfwm4/xfdesktop/panel never appear and the screen
+# stays an empty root window.  Launch the desktop pieces directly; the
+# session manager keeps running for session/dbus housekeeping.
+sleep 3
+/usr/bin/xfsettingsd >/dev/null 2>&1 &
+/usr/bin/xfwm4 >/dev/null 2>&1 &
+/usr/bin/xfdesktop >/dev/null 2>&1 &
+/usr/bin/xfce4-panel >/dev/null 2>&1 &
+
+# XDG autostart entry (xfce4-terminal) until xfce4-session's autostart
+# machinery runs on its own.
+sleep 3
+/usr/bin/xfce4-terminal >/dev/null 2>&1 &
+
 wait $SESS_PID
 /bin/dbgcat.elf /tmp/xfce.out
