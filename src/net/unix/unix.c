@@ -55,6 +55,12 @@ typedef struct unix_sock {
 
     int shut_rx, shut_tx; /* shutdown() halves */
     int peer_closed;      /* the peer end went away / shut down */
+
+    /* Credentials of the remote end as of connect time -- what
+     * getsockopt(SO_PEERCRED) reports.  dbus's EXTERNAL authentication
+     * hinges on this: without it the daemon cannot verify the client's
+     * claimed uid and every session connection is refused. */
+    uint32_t peer_pid, peer_uid, peer_gid;
 } unix_t;
 
 static unix_t g_unix[UNIX_MAX];
@@ -243,6 +249,23 @@ int unix_connect(int u, const char *path, uint32_t len, int abstract)
     c->peer_closed             = 0;
     s->peer                    = c;
     l->backlog[l->n_backlog++] = c;
+
+    /* Snapshot the connector's credentials onto the child: the daemon's
+     * getsockopt(SO_PEERCRED) on the accepted socket must answer with the
+     * client's uid, which is how dbus's EXTERNAL mechanism authenticates.
+     * The client's own view of its peer records the same values (the
+     * listener's owner is normally the very daemon that forked us). */
+    {
+        proc_t *p = proc_current();
+        if (p) {
+            c->peer_pid = (uint32_t)p->pid;
+            c->peer_uid = p->euid;
+            c->peer_gid = p->egid;
+            s->peer_pid = c->peer_pid;
+            s->peer_uid = c->peer_uid;
+            s->peer_gid = c->peer_gid;
+        }
+    }
     ring_wake();
     return 0;
 }
@@ -479,7 +502,46 @@ void unix_link(int a, int b)
     ub->peer        = ua;
     ua->peer_closed = 0;
     ub->peer_closed = 0;
+    /* socketpair is created by one process: both ends' remote end is that
+     * process (Linux reports exactly this for SO_PEERCRED on a pair). */
+    {
+        proc_t *p = proc_current();
+        if (p) {
+            ua->peer_pid = ub->peer_pid = (uint32_t)p->pid;
+            ua->peer_uid = ub->peer_uid = p->euid;
+            ua->peer_gid = ub->peer_gid = p->egid;
+        }
+    }
     ring_wake();
+}
+
+/* SO_PEERCRED: the remote end's credentials as of connect time. */
+void unix_peer_creds(int u, int32_t *pid, uint32_t *uid, uint32_t *gid)
+{
+    unix_t *s = unix_at(u);
+    if (s) {
+        *pid = (int32_t)s->peer_pid;
+        *uid = s->peer_uid;
+        *gid = s->peer_gid;
+    }
+}
+
+/* TEMPORARY xfce debugging: expose the readiness inputs so the poll path
+ * can print which of them fired for an idle X11/dbus socket. */
+void unix_readable_detail(int u, uint32_t *rused, int *peer_closed, int *n_fds,
+                          int *listening, int *has_peer)
+{
+    unix_t *s = unix_at(u);
+    if (!s) {
+        *rused = 0;
+        *peer_closed = *n_fds = *listening = *has_peer = -1;
+        return;
+    }
+    *rused       = s->rused;
+    *peer_closed = s->peer_closed;
+    *n_fds       = s->n_fds;
+    *listening   = s->listening;
+    *has_peer    = s->peer != 0;
 }
 
 /* read(2) on a socket node.  Pending fds are consumed and dropped, the way

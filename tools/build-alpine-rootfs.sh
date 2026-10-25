@@ -140,6 +140,19 @@ if [ -d "$ROOTFS/usr/share/fonts" ]; then
     done
 fi
 
+# gdk-pixbuf 2.42 picks a loader by mime type BEFORE magic sniffing, and
+# without shared-mime-info's database every decode fails ("Unrecognized
+# image file format"), which aborts xfce4-session at startup.  The package
+# lives on the same CDN; unpack it directly when apk's trigger did not run.
+if [ ! -f "$ROOTFS/usr/share/mime/globs" ] && [ -x "$ROOTFS/usr/bin/gdk-pixbuf-query-loaders" ]; then
+    if [ -f "$ROOTFS/tmp/APKINDEX-main.txt" ]; then
+        V=$(grep -A2 '^P:shared-mime-info$' "$ROOTFS/tmp/APKINDEX-main.txt" | grep '^V:' | cut -d: -f2)
+        curl -s "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/shared-mime-info-$V.apk" \
+            | tar xz -C "$ROOTFS" usr 2>/dev/null
+        chroot "$ROOTFS" /usr/bin/update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+    fi
+fi
+
 # gdk-pixbuf reads a loaders.cache index; apk --root cannot run the package
 # trigger that generates it, and without the index PNG decoding fails
 # ("Unrecognized image file format") and xfce4-session aborts at startup.
@@ -147,6 +160,11 @@ fi
 if [ -x "$ROOTFS/usr/bin/gdk-pixbuf-query-loaders" ] && [ ! -f "$ROOTFS/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" ]; then
     chroot "$ROOTFS" /usr/bin/gdk-pixbuf-query-loaders --update-cache 2>/dev/null \
         || echo "=== warning: loaders.cache not generated (no root?); xfce will abort on icons" >&2
+fi
+
+# GTK reads compiled GSettings schemas; apk --root skips the compile trigger.
+if [ -d "$ROOTFS/usr/share/glib-2.0/schemas" ] && [ ! -f "$ROOTFS/usr/share/glib-2.0/schemas/gschemas.compiled" ]; then
+    chroot "$ROOTFS" /usr/bin/glib-compile-schemas /usr/share/glib-2.0/schemas/ >/dev/null 2>&1 || true
 fi
 
 echo "=== Alpine rootfs ready at $ROOTFS ==="

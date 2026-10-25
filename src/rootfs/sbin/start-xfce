@@ -24,6 +24,15 @@ fi
 DBUS_SESSION_BUS_ADDRESS=$(cat $X11RUN/session-bus)
 export DBUS_SESSION_BUS_ADDRESS
 
+# xfconfd pre-launch: xfce4-session blocks on Xfconf the moment it starts,
+# which normally goes through dbus-daemon's automatic service activation.
+# That spawn path (fork + config-over-pipe + exec) stalls in our kernel,
+# so start the daemon directly -- it registers org.xfce.Xfconf on the bus
+# and xfce4-session talks to it without ever asking dbus to spawn.  A
+# second instance would simply fail to own the name and exit.
+/usr/lib/xfce4/xfconf/xfconfd >/dev/null 2>&1 &
+sleep 1
+
 # XFCE itself.  startxfce4 re-runs Xinit looking for an X server; with the
 # server already up we run the session manager directly.  xfce4-session
 # brings up xfwm4/panel/xfdesktop from xfconf AND processes the XDG
@@ -31,6 +40,12 @@ export DBUS_SESSION_BUS_ADDRESS
 # manual component launch this script used to do bypassed that machinery,
 # so nothing in autostart ever ran.
 # Diagnostics first: a session manager that dies at startup must say why
-# on the debugcon, or every respawn cycle fails silently.
-/usr/bin/xfce4-session >/tmp/xfce.out 2>&1
+# on the debugcon, or every respawn cycle fails silently.  The session
+# manager may also HANG without ever exiting (each respawn cycle then
+# fails silently forever), so dump its output once, 25 seconds in, even
+# while it is still running.
+/usr/bin/xfce4-session >/tmp/xfce.out 2>&1 &
+SESS_PID=$!
+( sleep 25; /bin/dbgcat.elf /tmp/xfce.out ) &
+wait $SESS_PID
 /bin/dbgcat.elf /tmp/xfce.out

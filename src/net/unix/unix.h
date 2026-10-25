@@ -39,4 +39,11 @@ int unix_shutdown(int u, int how);
 /* getname(sockaddr_un path out); `len` is in/out. */
 int unix_getname(int u, char *path, uint32_t *len, int peer);
 
+/* SO_PEERCRED: the remote end's credentials as of connect time. */
+void unix_peer_creds(int u, int32_t *pid, uint32_t *uid, uint32_t *gid);
+
+/* TEMPORARY xfce debugging: the readiness inputs behind unix_readable. */
+void unix_readable_detail(int u, uint32_t *rused, int *peer_closed, int *n_fds,
+                          int *listening, int *has_peer);
+
 #endif

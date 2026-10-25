@@ -2509,10 +2509,29 @@ static int64_t sys_getsockopt(int fd, int level, int name, uint64_t uval, uint64
         return -E_FAULT;
 
     if (s < 0) {
-        /* SO_TYPE is the one question anybody asks a unix socket. */
+        /* Unix socket: the table index rides in the negative encoding
+         * (priv = -2 - u).  SO_TYPE is the one question anybody asks a
+         * unix socket -- except dbus, which needs SO_PEERCRED to verify
+         * the client's uid for its EXTERNAL authentication. */
         int32_t v = 0;
         if (level == 1 /* SOL_SOCKET */ && name == 3 /* SO_TYPE */)
             v = 1 /* SOCK_STREAM */;
+        if (level == 1 && name == 17 /* SO_PEERCRED (21 is SO_SNDTIMEO!) */) {
+            int      u    = -2 - s;
+            int32_t  pid  = 0;
+            uint32_t uid = 0, gid = 0;
+            unix_peer_creds(u, &pid, &uid, &gid);
+            struct {
+                int32_t  pid;
+                uint32_t uid, gid;
+            } creds = {pid, uid, gid};
+            uint32_t out = (uint32_t)sizeof(creds);
+            if (room < out)
+                out = room;
+            memcpy((void *)(uintptr_t)uval, &creds, out);
+            memcpy((void *)(uintptr_t)ulen, &out, sizeof(out));
+            return 0;
+        }
         if (room >= 4) {
             memcpy((void *)(uintptr_t)uval, &v, 4);
             room = 4;
@@ -3077,8 +3096,28 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
                             wait_net = 1;
                         } else if (s < -1) {
                             int u = -2 - s;
-                            if ((ev & POLLIN) && unix_readable(u))
+                            if ((ev & POLLIN) && unix_readable(u)) {
                                 r |= POLLIN;
+                                /* TEMPORARY xfce debugging: which condition
+                                 * makes an idle X11/dbus socket report
+                                 * readable while recvmsg returns EAGAIN? */
+                                uint32_t rused;
+                                int pc, nf, lst, hp;
+                                unix_readable_detail(u, &rused, &pc, &nf, &lst, &hp);
+                                dbg_puts("POLL-U u=");
+                                dbg_puts_dec((uint32_t)u);
+                                dbg_puts(" rused=");
+                                dbg_puts_dec(rused);
+                                dbg_puts(" pc=");
+                                dbg_puts_dec((uint32_t)pc);
+                                dbg_puts(" nf=");
+                                dbg_puts_dec((uint32_t)nf);
+                                dbg_puts(" lst=");
+                                dbg_puts_dec((uint32_t)lst);
+                                dbg_puts(" peer=");
+                                dbg_puts_dec((uint32_t)hp);
+                                dbg_puts("\r\n");
+                            }
                             if ((ev & POLLOUT) && unix_writable(u))
                                 r |= POLLOUT;
                             wait_pipe = 1;
