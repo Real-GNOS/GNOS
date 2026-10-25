@@ -24,7 +24,7 @@
 #include "syscall.h"
 #include "sock.h"
 
-#define UNIX_MAX     16
+#define UNIX_MAX     128
 #define UNIX_RING    8192
 #define UNIX_BACKLOG 8
 
