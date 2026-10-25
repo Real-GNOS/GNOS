@@ -140,5 +140,14 @@ if [ -d "$ROOTFS/usr/share/fonts" ]; then
     done
 fi
 
+# gdk-pixbuf reads a loaders.cache index; apk --root cannot run the package
+# trigger that generates it, and without the index PNG decoding fails
+# ("Unrecognized image file format") and xfce4-session aborts at startup.
+# Generate it inside the finished tree when the host can chroot.
+if [ -x "$ROOTFS/usr/bin/gdk-pixbuf-query-loaders" ] && [ ! -f "$ROOTFS/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" ]; then
+    chroot "$ROOTFS" /usr/bin/gdk-pixbuf-query-loaders --update-cache 2>/dev/null \
+        || echo "=== warning: loaders.cache not generated (no root?); xfce will abort on icons" >&2
+fi
+
 echo "=== Alpine rootfs ready at $ROOTFS ==="
 du -sh "$ROOTFS"
