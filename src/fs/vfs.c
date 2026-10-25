@@ -34,6 +34,7 @@
 #include "sysfs.h"
 #include "tmpfs.h"
 #include "sock.h"
+#include "netlink/netlink.h"
 #include "unix.h"
 #include "kstring.h"
 #include "debugcon.h"
@@ -903,18 +904,20 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     if (dr != -E_INVAL)
         return dr;
 
-    /* /sys is the kernel's object hierarchy, same family as /proc and
-     * /debug: attributes render on read, dirs materialise from the paths
-     * of registered attributes. */
-    int sr = sysfs_resolve(path, out);
-    if (sr != -E_INVAL)
-        return sr;
-
     /* A cgroup mount (the shared v2 hierarchy) is resolved against its own
-     * tree, the same way a tmpfs mount shadows the ext2 image at its root. */
+     * tree, the same way a tmpfs mount shadows the ext2 image at its root.
+     * Checked before /sys so a hierarchy mounted at /sys/fs/cgroup shadows
+     * the kernel's own tree there, like any mounted filesystem would. */
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
         return cgfs_resolve(crel, out);
+
+    /* /sys is the kernel's object hierarchy, same family as /proc and
+     * /debug: the tree is the live kobject hierarchy (device model), and
+     * `follow` chases class/subsystem symlinks for stat()/open(). */
+    int sr = sysfs_resolve(path, out, follow);
+    if (sr != -E_INVAL)
+        return sr;
 
     /* A mounted tmpfs shadows the ext2 image at its mount point, exactly as
      * /proc shadows the empty /proc directory the image carries. */
@@ -1593,6 +1596,11 @@ int vfs_readlink(const char *path, char *buf, uint32_t cap)
     if (strncmp(path, "/proc", 5) == 0 && (path[5] == '\0' || path[5] == '/'))
         return procfs_readlink(path, buf, cap);
 
+    /* /sys links (subsystem, device, class, /sys/dev/char/<maj:min>) answer
+     * with the tree-relative target the kobject layer computes. */
+    if (strncmp(path, "/sys", 4) == 0 && (path[4] == '\0' || path[4] == '/'))
+        return sysfs_readlink(path, buf, cap);
+
     /* tmpfs first: vfs_symlink() has always been willing to create a link on
      * a tmpfs, so reading one back has to work too -- otherwise `ln -s`
      * succeeds and `readlink` comes back empty. */
@@ -2094,7 +2102,9 @@ void vfs_file_unref(int h)
         if (--f->refs <= 0) {
             f->refs = 0;
             int s   = (int)(uintptr_t)f->node.priv;
-            if (s < 0)
+            if (s <= -1000)
+                nl_close(-1000 - s); /* AF_NETLINK: net/netlink */
+            else if (s < 0)
                 unix_close(-2 - s);
             else
                 sock_close(s);

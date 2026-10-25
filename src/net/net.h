@@ -114,7 +114,7 @@ static inline void net_put32(uint8_t *p, uint32_t v)
 /* An interface.  There are exactly two and they are never created or
  * destroyed, which is why this is a plain struct and not a refcounted
  * object: "lo" is synthetic and "eth0" is the e1000 or nothing. */
-typedef struct {
+typedef struct netif {
     char     name[8];
     uint8_t  mac[ETH_ALEN];
     uint32_t ip, netmask, gateway;
@@ -122,6 +122,8 @@ typedef struct {
     int      loopback;
     uint64_t rx_packets, tx_packets, rx_bytes, tx_bytes;
     uint64_t rx_dropped, tx_dropped;
+    /* IPv6: the EUI-64 link-local address (ipv6/ipv6.c derives it at init). */
+    uint8_t ipv6_link_local[16];
 } netif_t;
 
 #define NET_IF_LO  0
@@ -237,6 +239,12 @@ uint16_t net_checksum_pseudo(uint32_t src, uint32_t dst, uint8_t proto, const vo
  * is queued behind an ARP request and leaves when the reply arrives.
  */
 int net_ip_output(uint32_t dst, uint8_t proto, const void *payload, uint16_t len);
+
+/* IPv6 transmit (ipv6/ipv6.c): send an already-built frame to a resolved
+ * MAC, and park an outgoing packet on an unresolved neighbor. */
+struct ipv6_address;
+int net_eth_output6(const uint8_t *dmac, const void *payload, uint16_t len);
+int net_ip6_queuedown(const struct ipv6_address *destination, const void *frame, uint16_t len);
 
 uint16_t net_next_ip_id(void);
 

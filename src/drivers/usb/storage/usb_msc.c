@@ -2,13 +2,15 @@
 /*
  * usb_msc.c — USB mass-storage class over Bulk-Only Transport. (GPLv2)
  *
- * Sits on the xHCI bulk transfer primitives.  A device whose interface is
- * class 8 / subclass 6 / protocol 0x50 (BOT) is driven through the
- * standard CBW/CSW packet exchange: a 31-byte Command Block Wrapper holds
+ * A class driver on the USB core: usb_add_device() dispatches to
+ * usb_storage_probe() for every interface of class 8 / subclass 6 /
+ * protocol 0x50 (BOT) after the device model has registered it.  The
+ * standard CBW/CSW packet exchange moves SCSI commands over the bulk
+ * endpoints through usb_bulk_msg(): a 31-byte Command Block Wrapper holds
  * the SCSI command, and a 13-byte Command Status Wrapper reports its
  * outcome.  On top of that we speak the three SCSI commands a read-only
  * installer or a partitioner needs -- TEST UNIT READY, READ CAPACITY(10)
- * and READ(10) -- and publish the device as /dev/sdb through the same
+ * and READ(10) -- and publish the device as /dev/sdb... through the same
  * block-device layer ATA uses.
  *
  * Write support is deliberately omitted: this kernel's boot story never
@@ -17,14 +19,12 @@
  */
 #include <stdint.h>
 
-#include "xhci.h"
+#include "usb.h"
 #include "../../scsi/scsi.h"
 #include "vfs.h"
 #include "kstring.h"
-#include "heap.h"
 #include "timer.h"
 #include "debugcon.h"
-#include "subsys.h"
 
 #define MSC_MAX_DEVICES 4
 #define MSC_SECTOR      512
@@ -56,28 +56,14 @@ typedef struct {
 } __attribute__((packed)) msc_csw_t;
 
 typedef struct {
-    int      slot;
-    int      ep_in;  /* bulk IN  endpoint address */
-    int      ep_out; /* bulk OUT endpoint address */
-    uint16_t ep_in_packet;
-    uint16_t ep_out_packet;
-    uint32_t nblocks; /* from READ CAPACITY */
-    uint8_t  active;
+    usb_endpoint_t *ep_in;  /* bulk IN  endpoint */
+    usb_endpoint_t *ep_out; /* bulk OUT endpoint */
+    uint32_t        nblocks; /* from READ CAPACITY */
+    uint8_t         active;
 } msc_dev_t;
 
 static msc_dev_t g_msc[MSC_MAX_DEVICES];
 static int       g_msc_count;
-static int       g_msc_ready;
-
-static uint16_t rd16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint32_t rd32be(const uint8_t *p)
-{
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-}
 
 /* ---- the CBW/CSW exchange ------------------------------------------------- */
 
@@ -97,20 +83,20 @@ static int msc_command(msc_dev_t *dev, const uint8_t *cdb, uint8_t cdb_len, void
     cbw.bCBWCBLength           = cdb_len;
     memcpy(cbw.CBWCB, cdb, cdb_len);
 
-    if (xhci_bulk_transfer(dev->slot, dev->ep_out, &cbw, MSC_CBW_LENGTH) != MSC_CBW_LENGTH)
+    size_t actual = 0;
+    if (usb_bulk_msg(dev->ep_out, &cbw, MSC_CBW_LENGTH, &actual, USB_IO_TIMEOUT_MS) != 0 || actual != MSC_CBW_LENGTH)
         return -1;
 
     uint32_t transferred = 0;
     if (data && data_len > 0) {
-        int ret = dir_in ? xhci_bulk_transfer(dev->slot, dev->ep_in, data, data_len)
-                         : xhci_bulk_transfer(dev->slot, dev->ep_out, data, data_len);
-        if (ret < 0 || (uint32_t)ret > data_len)
+        usb_endpoint_t *ep = dir_in ? dev->ep_in : dev->ep_out;
+        if (usb_bulk_msg(ep, data, data_len, &actual, USB_IO_TIMEOUT_MS) != 0 || actual > data_len)
             return -1;
-        transferred = (uint32_t)ret;
+        transferred = (uint32_t)actual;
     }
 
     msc_csw_t csw;
-    if (xhci_bulk_transfer(dev->slot, dev->ep_in, &csw, MSC_CSW_LENGTH) != MSC_CSW_LENGTH)
+    if (usb_bulk_msg(dev->ep_in, &csw, MSC_CSW_LENGTH, &actual, USB_IO_TIMEOUT_MS) != 0 || actual != MSC_CSW_LENGTH)
         return -1;
     if (csw.dCSWSignature != MSC_CSW_SIGNATURE || csw.dCSWTag != cbw.dCBWTag)
         return -1;
@@ -194,64 +180,27 @@ static const vfs_ops_t g_msc_bdev_ops = {
 
 /* ---- probe ---------------------------------------------------------------------- */
 
-static int msc_probe_config(msc_dev_t *dev)
+/* Probe a BOT-class interface the USB core has registered. */
+int usb_storage_probe(usb_interface_t *interface)
 {
-    int slot = dev->slot;
+    if (!interface || !interface->device)
+        return -E_INVAL;
+    if (interface->descriptor.interface_class != 0x08 || /* mass storage   */
+        interface->descriptor.interface_subclass != 0x06 || /* transparent */
+        interface->descriptor.interface_protocol != 0x50)   /* BOT         */
+        return -E_OPNOTSUPP;
 
-    uint8_t header[9];
-    if (xhci_control_transfer(slot, 0x80, 6, 0x0200, 0, header, sizeof(header)) < 0)
-        return -1;
-    uint16_t total = rd16(header + 2);
-    if (total < sizeof(header) || total > 4096)
-        return -1;
-
-    uint8_t *cfg = kmalloc(total);
-    if (!cfg)
-        return -1;
-    int ret = xhci_control_transfer(slot, 0x80, 6, 0x0200, 0, cfg, total);
-    if (ret < (int)sizeof(header)) {
-        kfree(cfg);
-        return -1;
-    }
-    uint16_t got = ret < total ? (uint16_t)ret : total;
-
-    int      current_msc = 0;
-    int      ep_in = 0, ep_out = 0;
-    uint16_t ep_in_packet = 0, ep_out_packet = 0;
-
-    for (uint16_t off = 0; off + 2 <= got;) {
-        uint8_t len  = cfg[off];
-        uint8_t type = cfg[off + 1];
-        if (len < 2 || off + len > got)
-            break;
-
-        if (type == 4 && len >= 9) {
-            current_msc = cfg[off + 5] == 0x08 && /* class 8  */
-                          cfg[off + 6] == 0x06 && /* subclass */
-                          cfg[off + 7] == 0x50;   /* BOT      */
-        } else if (type == 5 && len >= 7 && current_msc &&
-                   (cfg[off + 3] & 0x03) == 0x02) { /* bulk EP */
-            uint8_t  addr   = cfg[off + 2];
-            uint16_t packet = rd16(cfg + off + 4) & 0x07FFu;
-            if (addr & 0x80) {
-                ep_in        = addr;
-                ep_in_packet = packet;
-            } else {
-                ep_out        = addr;
-                ep_out_packet = packet;
-            }
-        }
-        off += len;
-    }
-    kfree(cfg);
-
+    usb_endpoint_t *ep_in  = usb_find_endpoint(interface, USB_ENDPOINT_XFER_BULK, true);
+    usb_endpoint_t *ep_out = usb_find_endpoint(interface, USB_ENDPOINT_XFER_BULK, false);
     if (!ep_in || !ep_out)
-        return -1;
+        return -E_OPNOTSUPP;
+    if (g_msc_count >= MSC_MAX_DEVICES)
+        return -E_NOSPC;
 
-    dev->ep_in         = ep_in;
-    dev->ep_out        = ep_out;
-    dev->ep_in_packet  = ep_in_packet ? ep_in_packet : 512;
-    dev->ep_out_packet = ep_out_packet ? ep_out_packet : 512;
+    msc_dev_t *dev = &g_msc[g_msc_count];
+    memset(dev, 0, sizeof(*dev));
+    dev->ep_in  = ep_in;
+    dev->ep_out = ep_out;
 
     /* The bus layer does the rest: INQUIRY, TEST UNIT READY (with retries
      * while the stick spins up), READ CAPACITY. */
@@ -261,52 +210,51 @@ static int msc_probe_config(msc_dev_t *dev)
     sd.xport.host = dev;
     sd.lun        = 0;
     if (scsi_device_add(&sd) < 0)
-        return -1;
+        return -E_IO;
     for (int i = 0; i < 10 && !sd.ready; i++) {
         timer_delay_ms(100);
         sd.ready = (scsi_test_unit_ready(&sd) == 0);
     }
     if (!sd.nblocks)
-        return -1;
+        return -E_IO;
     dev->nblocks = sd.nblocks;
     g_scsi       = scsi_device_by_index(scsi_count() - 1);
+
+    dev->active = 1;
+    msc_bdev_t *b = &g_msc_bdevs[g_msc_count];
+    b->dev        = dev;
+    b->sd         = g_scsi;
+
+    /* ATA owns sda; USB disks come next: sdb, sdc, ... */
+    char name[8];
+    name[0] = 's';
+    name[1] = 'd';
+    name[2] = (char)('b' + g_msc_count);
+    name[3] = '\0';
+    if (vfs_register_blkdev(name, &g_msc_bdev_ops, b, dev->nblocks * MSC_SECTOR) != 0) {
+        dev->active = 0;
+        return -E_IO;
+    }
+
+    dbg_puts("USBMS: /dev/");
+    dbg_puts(name);
+    dbg_puts(", ");
+    dbg_puts_dec(dev->nblocks);
+    dbg_puts(" sectors, ");
+    dbg_puts(interface->device->path);
+    dbg_puts("\r\n");
+    g_msc_count++;
     return 0;
 }
 
-void usb_msc_init(void)
+/* Disconnect the class driver from every storage interface of this device. */
+void usb_storage_disconnect(usb_interface_t *interface)
 {
-    int count = xhci_device_count();
-    for (int i = 0; i < count && g_msc_count < MSC_MAX_DEVICES; i++) {
-        int slot = xhci_device_slot(i);
-        if (slot < 0)
-            continue;
-
-        msc_dev_t *dev = &g_msc[g_msc_count];
-        memset(dev, 0, sizeof(*dev));
-        dev->slot = slot;
-        if (msc_probe_config(dev) < 0)
-            continue;
-
-        dev->active   = 1;
-        msc_bdev_t *b = &g_msc_bdevs[g_msc_count];
-        b->dev        = dev;
-        b->sd         = g_scsi;
-
-        char name[8];
-        memcpy(name, "sdb", 4); /* ATA owns sda; USB disks come next */
-        if (vfs_register_blkdev(name, &g_msc_bdev_ops, b, dev->nblocks * MSC_SECTOR) != 0) {
-            dev->active = 0;
-            continue;
-        }
-
-        dbg_puts("USBMS: /dev/");
-        dbg_puts(name);
-        dbg_puts(", ");
-        dbg_puts_dec(dev->nblocks);
-        dbg_puts(" sectors, slot ");
-        dbg_puts_dec(slot);
-        dbg_puts("\r\n");
-        g_msc_count++;
+    if (!interface || !interface->device)
+        return;
+    for (int i = 0; i < g_msc_count; i++) {
+        msc_dev_t *dev = &g_msc[i];
+        if (dev->active && dev->ep_in && dev->ep_in->interface && dev->ep_in->interface->device == interface->device)
+            dev->active = 0; /* the bdev reads start failing through sd->live */
     }
-    g_msc_ready = 1;
 }

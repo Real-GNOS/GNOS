@@ -3,6 +3,7 @@
  * kstring.c — freestanding string/memory primitives. (GPLv2)
  */
 #include "kstring.h"
+#include "heap.h"
 
 void *memcpy(void *dst, const void *src, size_t n)
 {
@@ -130,4 +131,21 @@ char *strncat(char *dst, const char *src, size_t n)
         *d++ = *src++;
     *d = 0;
     return dst;
+}
+
+int streq(const char *a, const char *b)
+{
+    return a && b && strcmp(a, b) == 0;
+}
+
+char *kstrdup(const char *s)
+{
+    if (!s)
+        return 0;
+    size_t n = strlen(s) + 1;
+    char  *p = kmalloc(n);
+    if (!p)
+        return 0;
+    memcpy(p, s, n);
+    return p;
 }

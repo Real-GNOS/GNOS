@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=Autostarted terminal on the Xfce session
+Exec=xfce4-terminal
+Terminal=false
+X-XFCE-Source=autostart

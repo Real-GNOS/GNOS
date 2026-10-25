@@ -46,6 +46,8 @@
 #include "input.h"
 #include "subsys.h"
 #include "sysfs.h"
+#include "device.h"
+#include "namespace.h"
 #include "pty.h"
 #include "audiodev.h"
 #include "klog.h"
@@ -80,8 +82,10 @@ typedef unsigned int ACPI_STATUS_K;
 #include "drm_svga.h"
 #include "procfs.h"
 #include "xhci.h"
+#include "usb.h"
+#include "netlink/netlink.h"
+#include "gzip.h"
 #include "usb_hid.h"
-#include "usb_msc.h"
 
 extern volatile struct limine_framebuffer_request        framebuffer_request;
 extern volatile struct limine_module_request             module_request;
@@ -168,17 +172,25 @@ void kernel_main(void)
      * the 48 MiB a whole filesystem costs. */
     uint8_t *root_img  = NULL;
     uint32_t root_size = 0;
+    int      initrd_gz = 0;
     if (module_request.response && module_request.response->module_count > 0) {
         struct limine_file *mod = module_request.response->modules[0];
-        g_bi.initrd_addr        = (uint64_t)(uintptr_t)mod->address;
-        g_bi.initrd_size        = mod->size;
         root_img                = (uint8_t *)(uintptr_t)mod->address;
         root_size               = (uint32_t)mod->size;
+        /*
+         * The initrd ships gzip-compressed (Makefile: initrd.img.gz on the
+         * ISO), and Limine hands the module over verbatim.  Only sniff the
+         * 1f 8b magic here: the inflate itself needs the PMM, which is not
+         * up yet, so it runs after pmm_init() further down.
+         */
+        initrd_gz = root_size > 18 && root_img[0] == 0x1f && root_img[1] == 0x8b;
+        g_bi.initrd_addr = (uint64_t)(uintptr_t)mod->address;
+        g_bi.initrd_size = mod->size;
         dbg_puts("GNOS: initrd = ");
         dbg_puts_hex(g_bi.initrd_addr);
         dbg_puts(" size=");
         dbg_puts_dec((uint32_t)g_bi.initrd_size);
-        dbg_puts("\r\n");
+        dbg_puts(initrd_gz ? " (gzip)\r\n" : "\r\n");
     } else {
         dbg_puts("GNOS: no initrd module; disk-root boot\r\n");
     }
@@ -203,6 +215,43 @@ void kernel_main(void)
     vmm_map_kernel_bss(); /* bootloader may leave BSS unmapped */
     kheap_init();         /* kernel heap on top of the PMM */
     module_subsys_init(); /* loadable-module registry */
+
+    /* Inflate the gzipped initrd now that the PMM is up: the decompressed
+     * image is a contiguous run of frames -- far past the 16 MiB kernel
+     * heap -- and it stays resident as the initrd the VFS mounts. */
+    if (initrd_gz) {
+        uint8_t *inflated      = NULL;
+        size_t   inflated_size = 0;
+        if (gzip_decompress(root_img, root_size, &inflated, &inflated_size) == 0) {
+            root_img         = inflated;
+            root_size        = (uint32_t)inflated_size;
+            g_bi.initrd_addr = (uint64_t)(uintptr_t)inflated;
+            g_bi.initrd_size = inflated_size;
+            dbg_puts("GNOS: initrd inflated to ");
+            dbg_puts_dec((uint32_t)g_bi.initrd_size);
+            dbg_puts(" bytes\r\n");
+        } else {
+            dbg_puts("GNOS: initrd gzip decompress FAILED\r\n");
+            g_bi.initrd_addr = 0;
+            g_bi.initrd_size = 0;
+            root_img         = NULL;
+            root_size        = 0;
+        }
+    }
+
+    /* ---- device model ---------------------------------------------------
+     * kobject/sysfs tree plus the bus/driver/device registry.  Needs the
+     * kernel heap (kcalloc for kobjects, kstrdup for names), hence after
+     * kheap_init() and before any driver that registers devices. */
+    device_model_init();
+
+    /* The USB bus joins the model at boot so /sys/bus/usb exists before
+     * the controller enumerates devices into it. */
+    usb_sysfs_init();
+
+    /* The seven namespaces (uts/ipc/mount/pid/net/user/cgroup) come up as
+     * a set: init_nsproxy is static, so this only wires the bundle. */
+    namespace_init();
 
     /* ---- firmware description ------------------------------------------
      * After the direct map is trustworthy (every ACPI pointer is physical and
@@ -305,21 +354,11 @@ void kernel_main(void)
      * src/sound/audiodev.c's table, not this file. */
     audiodev_init();
 
-    /* USB 3.0 (xHCI) comes up after PCI so the controller can be found,
-     * but before the input/block drivers that sit on its transfer
-     * primitives.  Devices are addressed here; the HID keyboard/mouse and
-     * mass-storage drivers probe them below. */
-    int slot_xhci = subsys_register("xhci", NULL, SUBSYS_CLASS_OTHER, 0, 0);
-    if (xhci_init()) {
-        subsys_set_state(slot_xhci, SUBSYS_STATE_FAILED);
-    } else {
-        subsys_set_state(slot_xhci, SUBSYS_STATE_LIVE);
-    }
-
     /* The IP stack sits on top of whatever the NIC probe found, so it is
      * configured here and not in e1000_init(): with no card it still comes up
      * with a working loopback, which is all `ping 127.0.0.1` needs. */
     net_init();
+    netlink_init(); /* AF_NETLINK: uevent delivery to udev */
 
     /* ---- filesystem and drivers --------------------------------------- */
     /* Resolve the root the allocator had no hand in earlier: a disk install
@@ -364,10 +403,17 @@ void kernel_main(void)
      * come after the VFS for the same /dev-table reason as fbdev. */
     input_init();
 
-    /* USB HID keyboard/mouse (when the xHCI controller is present and a
-     * device is on a port) feed the same evdev queues the PS/2 side uses,
-     * so /dev/input/event0/1 are the same two devices either way. */
-    usb_hid_init();
+    /* USB 3.0 (xHCI) comes up after the VFS and the input core, because
+     * enumeration now runs through the USB core: HID probes feed the evdev
+     * queues immediately and mass-storage probes publish /dev nodes.  The
+     * HID class driver needs no further bring-up -- its reports are reaped
+     * by usb_hid_poll() from the timer tick. */
+    int slot_xhci = subsys_register("xhci", NULL, SUBSYS_CLASS_OTHER, 0, 0);
+    if (xhci_init()) {
+        subsys_set_state(slot_xhci, SUBSYS_STATE_FAILED);
+    } else {
+        subsys_set_state(slot_xhci, SUBSYS_STATE_LIVE);
+    }
 
     /* /dev/fb0 goes in after the VFS (it needs the /dev table) but shares the
      * framebuffer with fbcon: the boot log stays on screen until a user-space
@@ -392,11 +438,9 @@ void kernel_main(void)
      * because it discovers how many entries it needs while probing. */
     ata_init();
 
-    /* USB mass storage (when the xHCI controller has a flash drive on a
-     * port) publishes /dev/sdb through the same block-device layer ATA
-     * uses.  Read-only by design: enough to mount a FAT32 or ext2 drive,
-     * not enough to lose data to a driver bug. */
-    usb_msc_init();
+    /* USB mass storage no longer needs its own bring-up call: the USB core
+     * probes BOT interfaces during xHCI enumeration (above) and publishes
+     * /dev/sdb through the same block-device layer ATA uses. */
 
     /* NVMe controllers (class 01/08 on the PCI bus) publish /dev/nvme*N
      * through the same block-device layer.  Like ATA, it is not on the

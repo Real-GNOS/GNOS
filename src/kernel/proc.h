@@ -95,6 +95,8 @@ typedef struct {
 /* stack_t.ss_flags when no alternate stack is registered (Linux value). */
 #define SS_DISABLE 2
 
+struct nsproxy;
+
 typedef struct proc {
     int pid;
     int ppid;
@@ -134,6 +136,11 @@ typedef struct proc {
     struct proc *mutex_next;
     struct mutex *wait_mutex;
     int      pgid;         /* process group: the unit of job control */
+    /* Namespace bundle (namespace.h): which uts/ipc/mount/pid/net/user/
+     * cgroup namespaces this process views the world through.  Fresh
+     * processes start on init_nsproxy; fork refcounts the parent's bundle
+     * and unshare(2) builds a private one. */
+    struct nsproxy *nsproxy;
     /*
      * Session id.  A session is a collection of process groups that share a
      * controlling terminal; setsid() starts a new one.  We track it mainly so

@@ -7,26 +7,31 @@
  * RAM, which meant "writable until you switch the machine off".  A disk is
  * what makes an installer possible at all.
  *
- * The driver deliberately uses the oldest interface the PC has: the fixed
- * legacy port pairs at 0x1F0/0x3F6 and 0x170/0x376, programmed I/O, no DMA,
- * no interrupts, polling for completion.  That costs throughput -- every
- * sector crosses the bus 16 bits at a time through the CPU -- and buys three
- * things worth more here:
+ * Two backends sit behind this header.  The legacy PATA side deliberately
+ * uses the oldest interface the PC has: the fixed legacy port pairs at
+ * 0x1F0/0x3F6 and 0x170/0x376, programmed I/O, no DMA, no interrupts,
+ * polling for completion.  That costs throughput -- every sector crosses the
+ * bus 16 bits at a time through the CPU -- and buys three things worth more
+ * here:
  *
  *   - no PCI enumeration, no bus-mastering setup, no scatter/gather lists;
  *   - no interrupt handler, so nothing to get wrong about IRQ 14/15 routing
  *     through the legacy PIC or the IOAPIC;
  *   - it works on the plainest QEMU invocation, with no -device at all.
  *
- * The disks appear as /dev/sda, /dev/sdb, ... and their MBR/GPT partitions
- * as /dev/sda1 .. /dev/sdaN.  A partition node is a *window*: the same
- * driver, the same disk, with an offset added and the length clamped, which
- * is all a partition has ever been.  ATAPI CD-ROMs are published as /dev/sr0
- * and are read-only.
+ * When the chipset carries an AHCI controller, the SATA disks and CD-ROMs
+ * behind it are probed by drivers/block/ata/sata/ and land in the same
+ * namespace: /dev/sda, /dev/sdb, ... and their MBR/GPT partitions as
+ * /dev/sda1 .. /dev/sdaN, the letters continuing across backends.  A
+ * partition node is a *window*: the same disk, with an offset added and the
+ * length clamped, which is all a partition has ever been.  ATAPI CD-ROMs are
+ * published as /dev/sr0, /dev/sr1, ... and are read-only.
  *
- * The implementation follows Uinxed's drivers/block/ata/pata/ layout:
- * ide.c owns the ATA register protocol, atapi.c the SCSI packets tunnelled
- * over it, and ata_block.c the GNOS-specific /dev nodes and partition scan.
+ * The implementation follows Uinxed's drivers/block/ata/ layout: pata/ide.c
+ * owns the legacy ATA register protocol, pata/atapi.c the SCSI packets
+ * tunnelled over it, sata/ahci.c the AHCI controller and sata/satapi.c the
+ * SCSI packets over it, and ata_block.c the GNOS-specific /dev nodes and
+ * partition scan.
  */
 #ifndef GNOS_ATA_H
 #define GNOS_ATA_H

@@ -2,27 +2,37 @@
 /*
  * ata_block.c — /dev nodes, partition tables and the probe loop. (GPLv2)
  *
- * ide.c knows how to move a sector and atapi.c knows how to talk SCSI to a
- * CD-ROM; neither should know that GNOS exposes disks as files.  This file
- * is the glue: it probes the two legacy channels, publishes the whole disks
- * and their MBR/GPT partitions, and provides the installer's early boot
- * read.  Uinxed has no counterpart because it has no /dev block nodes, so
- * this stays a GNOS-specific third file rather than being squeezed into the
- * PATA driver.
+ * ide.c knows how to move a sector over the legacy PIO channels, atapi.c
+ * how to talk SCSI to a CD-ROM on one of them, ahci.c how to do the same
+ * over a SATA (AHCI) controller, and satapi.c the SCSI half of that.  None
+ * of them should know that GNOS exposes disks as files.  This file is the
+ * glue: it probes both backends, publishes the whole disks and their
+ * MBR/GPT partitions, and provides the installer's early boot read.
+ * Uinxed has no counterpart because it has no /dev block nodes, so this
+ * stays a GNOS-specific file rather than being squeezed into a driver.
+ *
+ * The one difference the read/write path has to absorb: the PIO side moves
+ * one 512-byte sector per call, while the AHCI side moves runs of sectors
+ * through a per-port bounce buffer.  bdev_read_sectors and
+ * bdev_write_sectors hide that behind one sector-oriented API.
  */
+#include <stddef.h>
 #include <stdint.h>
 
 #include "ata.h"
 #include "ide.h"
 #include "atapi.h"
+#include "ahci.h"
+#include "satapi.h"
 #include "vfs.h"
 #include "subsys.h"
 #include "kstring.h"
 #include "debugcon.h"
 
 /* ---- devices ----------------------------------------------------------- */
-#define MAX_DISKS 4  /* two channels, master and slave on each */
-#define MAX_PARTS 16 /* MBR has four; GPT commonly has 128, we take the first sixteen */
+#define MAX_PATA_DISKS 4 /* two channels, master and slave on each */
+#define MAX_DISKS      (MAX_PATA_DISKS + AHCI_MAX_DEVICES)
+#define MAX_PARTS      16 /* MBR has four; GPT commonly has 128, we take the first sixteen */
 
 /*
  * What a /dev node points at.  The whole disk and each of its partitions use
@@ -30,17 +40,24 @@
  * with a non-zero start and a shorter length.  Doing it this way means the
  * read/write path has no idea partitions exist, which is exactly the amount
  * it needs to know.
+ *
+ * The backend is one of two: a PIO channel (pata set) or an entry of the
+ * AHCI device table (ahci_idx), which covers both the SATA disks and the
+ * CD-ROMs satapi.c drives.
  */
 typedef struct {
-    ata_disk_t *disk;
-    uint64_t    lba0;    /* first sector of the window   */
-    uint64_t    nsect;   /* window length, in sectors    */
-    char        name[8]; /* "sda", "sda1"                */
-    uint8_t     is_part;
-    uint8_t     used;
+    const ata_disk_t *pata; /* PIO channel state, NULL when AHCI */
+    int               ahci_idx; /* index into ahci_devices[], -1 when PATA */
+    uint64_t          lba0;    /* first sector of the window   */
+    uint64_t          nsect;   /* window length, in sectors    */
+    uint32_t          secsize; /* bytes per sector: 512 ATA, 2048 ATAPI */
+    char              name[8]; /* "sda", "sda1"                */
+    char              model[41];
+    uint8_t           is_part;
+    uint8_t           used;
 } ata_bdev_t;
 
-static ata_disk_t g_disks[MAX_DISKS];
+static ata_disk_t g_pata_disks[MAX_PATA_DISKS];
 static int        g_ndisks;
 
 /* Slot 0..MAX_DISKS-1 are the whole disks; the rest are partition windows,
@@ -63,7 +80,7 @@ static ata_bdev_t *part_slot(int disk, int idx)
 static int32_t clamp(const ata_bdev_t *b, uint64_t off, uint32_t len,
                      uint64_t *end)
 {
-    uint64_t cap = b->nsect * ATA_SECTOR;
+    uint64_t cap = b->nsect * b->secsize;
     if (off >= cap)
         return 0; /* past the end reads as EOF */
     if (off + len > cap)
@@ -72,10 +89,83 @@ static int32_t clamp(const ata_bdev_t *b, uint64_t off, uint32_t len,
     return (int32_t)len;
 }
 
+/*
+ * Move nsect sectors to or from the disk, whatever backend owns it.  The
+ * PIO side takes one 512-byte sector per call (a legacy interface) or a
+ * packet run for a CD; the AHCI side takes runs of up to 255 per call, its
+ * sector count field being a byte.  Returns 0, or a negative errno.
+ */
+static int bdev_read_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect,
+                             uint8_t *out)
+{
+    if (!nsect)
+        return 0;
+
+    if (b->pata) {
+        if (b->secsize == ATA_SECTOR) {
+            for (uint32_t i = 0; i < nsect; i++)
+                if (ata_read_sector(b->pata, lba + i,
+                                    out + (size_t)i * ATA_SECTOR) < 0)
+                    return -E_IO;
+            return 0;
+        }
+        return atapi_read(b->pata, lba, nsect, out) < 0 ? -E_IO : 0;
+    }
+
+    uint32_t left = nsect;
+    while (left) {
+        uint8_t now = left > 255 ? 255 : (uint8_t)left;
+        int     ret = (b->secsize == ATA_SECTOR)
+                          ? ahci_read_sectors((uint8_t)b->ahci_idx, now, lba, out)
+                          : ahci_satapi_read_sectors((uint8_t)b->ahci_idx, now,
+                                                     lba, out);
+        if (ret < 0)
+            return ret;
+        out  += (size_t)now * b->secsize;
+        lba  += now;
+        left -= now;
+    }
+    return 0;
+}
+
+static int bdev_write_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect,
+                              const uint8_t *in)
+{
+    if (!nsect)
+        return 0;
+
+    if (b->pata) {
+        for (uint32_t i = 0; i < nsect; i++)
+            if (ata_write_sector(b->pata, lba + i,
+                                 in + (size_t)i * ATA_SECTOR) < 0)
+                return -E_IO;
+        return 0;
+    }
+
+    if (b->secsize != ATA_SECTOR)
+        return -E_NOSYS; /* ATAPI publishes read-only */
+
+    uint32_t left = nsect;
+    while (left) {
+        uint8_t now = left > 255 ? 255 : (uint8_t)left;
+        int     ret = ahci_write_sectors((uint8_t)b->ahci_idx, now, lba, in);
+        if (ret < 0)
+            return ret;
+        in   += (size_t)now * ATA_SECTOR;
+        lba  += now;
+        left -= now;
+    }
+
+    /* The data sits in the drive's cache until flushed; the PIO path flushes
+     * after every sector, so do the same to keep the durability story
+     * identical on both backends. */
+    return ahci_flush_cache((uint8_t)b->ahci_idx);
+}
+
 static int32_t bdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     ata_bdev_t *b = (ata_bdev_t *)n->priv;
-    if (!b || !b->used)
+    if (!b || !b->used || !b->secsize)
         return -E_IO;
 
     uint64_t end;
@@ -83,61 +173,73 @@ static int32_t bdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     if (want <= 0)
         return want;
 
-    uint8_t *out = (uint8_t *)buf;
-    uint8_t  sec[ATA_SECTOR];
-    uint64_t pos = off;
+    uint8_t *out   = (uint8_t *)buf;
+    uint64_t pos   = off;
+    uint8_t  sec[2048]; /* one sector of either kind */
 
     while (pos < end) {
-        uint64_t lba   = b->lba0 + pos / ATA_SECTOR;
-        uint32_t skip  = (uint32_t)(pos % ATA_SECTOR);
-        uint32_t chunk = ATA_SECTOR - skip;
+        uint64_t lba   = b->lba0 + pos / b->secsize;
+        uint32_t skip  = (uint32_t)(pos % b->secsize);
+        uint32_t chunk = b->secsize - skip;
         if (chunk > end - pos)
             chunk = (uint32_t)(end - pos);
 
-        if (ata_read_sector(b->disk, lba, sec) < 0)
+        if (skip == 0 && chunk == b->secsize) {
+            /* Whole sector(s): let the backend use its multi-sector path,
+             * capped at what one packet or command carries comfortably. */
+            uint32_t ns = (uint32_t)((end - pos) / b->secsize);
+            if (ns > 32)
+                ns = 32;
+            if (bdev_read_sectors(b, lba, ns, out) < 0)
+                return (pos > off) ? (int32_t)(pos - off) : -E_IO;
+            out += ns * b->secsize;
+            pos += ns * b->secsize;
+            continue;
+        }
+
+        if (bdev_read_sectors(b, lba, 1, sec) < 0)
             return (pos > off) ? (int32_t)(pos - off) : -E_IO;
         memcpy(out, sec + skip, chunk);
-
         out += chunk;
         pos += chunk;
     }
-    return want;
+    return (int32_t)(end - off);
 }
 
 static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
                           uint32_t len)
 {
     ata_bdev_t *b = (ata_bdev_t *)n->priv;
-    if (!b || !b->used)
+    if (!b || !b->used || !b->secsize)
         return -E_IO;
 
     uint64_t end;
     int32_t  want = clamp(b, off, len, &end);
     if (want <= 0)
-        return want == 0 ? -E_NOSPC : want; /* a write past the end is ENOSPC */
+        return -E_NOSPC; /* a write past the end is ENOSPC */
 
-    const uint8_t *in = (const uint8_t *)buf;
-    uint8_t        sec[ATA_SECTOR];
+    const uint8_t *in  = (const uint8_t *)buf;
     uint64_t       pos = off;
+    uint8_t        sec[2048];
 
     while (pos < end) {
-        uint64_t lba   = b->lba0 + pos / ATA_SECTOR;
-        uint32_t skip  = (uint32_t)(pos % ATA_SECTOR);
-        uint32_t chunk = ATA_SECTOR - skip;
+        uint64_t lba   = b->lba0 + pos / b->secsize;
+        uint32_t skip  = (uint32_t)(pos % b->secsize);
+        uint32_t chunk = b->secsize - skip;
         if (chunk > end - pos)
             chunk = (uint32_t)(end - pos);
 
-        if (chunk == ATA_SECTOR) {
-            memcpy(sec, in, ATA_SECTOR); /* whole sector: no read needed */
+        if (chunk == b->secsize) {
+            if (bdev_write_sectors(b, lba, 1, in) < 0)
+                return (pos > off) ? (int32_t)(pos - off) : -E_IO;
         } else {
-            if (ata_read_sector(b->disk, lba, sec) < 0)
+            if (bdev_read_sectors(b, lba, 1, sec) < 0)
                 return (pos > off) ? (int32_t)(pos - off) : -E_IO;
             memcpy(sec + skip, in, chunk);
+            if (bdev_write_sectors(b, lba, 1, sec) < 0)
+                return (pos > off) ? (int32_t)(pos - off) : -E_IO;
         }
-        if (ata_write_sector(b->disk, lba, sec) < 0)
-            return (pos > off) ? (int32_t)(pos - off) : -E_IO;
-
-        in += chunk;
+        in  += chunk;
         pos += chunk;
     }
     return want;
@@ -164,7 +266,7 @@ static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     case BLKGETSIZE64:
         if (!arg)
             return -E_FAULT;
-        *(uint64_t *)(uintptr_t)arg = b->nsect * ATA_SECTOR;
+        *(uint64_t *)(uintptr_t)arg = b->nsect * b->secsize;
         return 0;
 
     case BLKGETSIZE: /* the old one: a count of sectors */
@@ -176,7 +278,7 @@ static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     case BLKSSZGET:
         if (!arg)
             return -E_FAULT;
-        *(int *)(uintptr_t)arg = ATA_SECTOR;
+        *(int *)(uintptr_t)arg = b->secsize;
         return 0;
 
     case BLKFLSBUF:
@@ -194,58 +296,11 @@ static int32_t bdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
     }
 }
 
-/* ATAPI CD-ROM devices: read-only, 2048-byte sectors, no partition table.
- * Byte addressing is implemented the same way as for disks so a caller that
- * reads 512-byte blocks (dd, a bootloader) gets data instead of EINVAL. */
-static int32_t sr_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
-{
-    ata_bdev_t *b = (ata_bdev_t *)n->priv;
-    if (!b || !b->used || !b->disk->secsize)
-        return -E_IO;
-
-    uint32_t secsize = b->disk->secsize;
-    uint64_t cap     = b->nsect * secsize;
-    uint64_t end     = off + len;
-
-    if (off >= cap)
-        return 0;
-    if (end > cap)
-        end = cap;
-
-    uint8_t *out = (uint8_t *)buf;
-    uint64_t pos = off;
-
-    while (pos < end) {
-        uint64_t lba   = b->lba0 + pos / secsize;
-        uint32_t skip  = (uint32_t)(pos % secsize);
-        uint32_t chunk = secsize - skip;
-        if (chunk > end - pos)
-            chunk = (uint32_t)(end - pos);
-
-        if (chunk == secsize) {
-            /* Whole sector(s): let atapi_read use its multi-sector path,
-             * capped at the 32-sector packet limit. */
-            uint32_t ns = (uint32_t)((end - pos) / secsize);
-            if (ns > 32)
-                ns = 32;
-            if (atapi_read(b->disk, lba, ns, out) < 0)
-                return (pos > off) ? (int32_t)(pos - off) : -E_IO;
-            out += ns * secsize;
-            pos += ns * secsize;
-        } else {
-            uint8_t sec[2048];
-            if (atapi_read(b->disk, lba, 1, sec) < 0)
-                return (pos > off) ? (int32_t)(pos - off) : -E_IO;
-            memcpy(out, sec + skip, chunk);
-            out += chunk;
-            pos += chunk;
-        }
-    }
-    return (int32_t)(end - off);
-}
-
+/* ATAPI CD-ROMs publish read-only: the same byte-addressed read, with the
+ * write and ioctl paths left out of the ops so a stray write gets the
+ * kernel's default refusal instead of a driver bug. */
 static const vfs_ops_t g_sr_ops = {
-    .read = sr_read,
+    .read = bdev_read,
 };
 
 static const vfs_ops_t g_bdev_ops = {
@@ -270,7 +325,8 @@ static const vfs_ops_t g_bdev_ops = {
  * the real table then lives in the GPT header at LBA 1 and the entry array
  * it points to.  Only the type GUID is inspected (all-zero = empty slot);
  * CRC32 checking is skipped, matching the "small and trusting" style of the
- * rest of this kernel.
+ * rest of this kernel.  Both table kinds are defined in 512-byte sectors,
+ * so this whole section only ever runs on ATA disks, never on CD-ROMs.
  */
 #define MBR_SIG_OFF     510
 #define MBR_PART_OFF    446
@@ -317,22 +373,20 @@ static void part_name(char *dst, const char *disk, int idx)
  * straddle a sector boundary; read the second sector only when it does
  * instead of assuming 128-byte entries line up with 512-byte sectors.
  */
-static int gpt_read_entry(const ata_disk_t *d, uint64_t disk_lba0,
-                          uint64_t entry_lba, uint32_t entry_sz, uint32_t i,
+static int gpt_read_entry(const ata_bdev_t *b, uint64_t entry_lba,
+                          uint32_t entry_sz, uint32_t i,
                           uint8_t *out, uint32_t want)
 {
     uint64_t byte = entry_lba * ATA_SECTOR + (uint64_t)i * entry_sz;
-    uint64_t lba  = disk_lba0 + byte / ATA_SECTOR;
+    uint64_t lba  = b->lba0 + byte / ATA_SECTOR;
     uint32_t off  = (uint32_t)(byte % ATA_SECTOR);
     uint8_t  sec[ATA_SECTOR];
     uint32_t first;
 
-    if (off >= ATA_SECTOR)
-        return -1;
     if (want > ATA_SECTOR * 2)
         return -1;
 
-    if (ata_read_sector(d, lba, sec) < 0)
+    if (bdev_read_sectors(b, lba, 1, sec) < 0)
         return -1;
 
     first = want;
@@ -341,7 +395,7 @@ static int gpt_read_entry(const ata_disk_t *d, uint64_t disk_lba0,
     memcpy(out, sec + off, first);
 
     if (first < want) {
-        if (ata_read_sector(d, lba + 1, sec) < 0)
+        if (bdev_read_sectors(b, lba + 1, 1, sec) < 0)
             return -1;
         memcpy(out + first, sec, want - first);
     }
@@ -370,7 +424,7 @@ static int ata_scan_partitions(int disk)
     }
 
     uint8_t mbr[ATA_SECTOR];
-    if (ata_read_sector(whole->disk, whole->lba0, mbr) < 0)
+    if (bdev_read_sectors(whole, whole->lba0, 1, mbr) < 0)
         return -E_IO;
     if (mbr[MBR_SIG_OFF] != 0x55 || mbr[MBR_SIG_OFF + 1] != 0xAA)
         return 0; /* unpartitioned; not an error */
@@ -399,15 +453,18 @@ static int ata_scan_partitions(int disk)
             continue;
 
         ata_bdev_t *p = part_slot(disk, i);
-        p->disk       = whole->disk;
+        p->pata       = whole->pata; /* a partition inherits its disk's
+                                       * backend, with a window on it */
+        p->ahci_idx   = whole->ahci_idx;
         p->lba0       = whole->lba0 + start;
         p->nsect      = count;
+        p->secsize    = whole->secsize;
         p->is_part    = 1;
         p->used       = 1;
         part_name(p->name, whole->name, i);
 
         if (vfs_register_blkdev(p->name, &g_bdev_ops, p,
-                                p->nsect * ATA_SECTOR) != 0) {
+                                p->nsect * p->secsize) != 0) {
             p->used = 0;
             continue;
         }
@@ -437,7 +494,7 @@ static int ata_scan_gpt(int disk)
     ata_bdev_t *whole = &g_bdevs[disk];
 
     uint8_t hdr[ATA_SECTOR];
-    if (ata_read_sector(whole->disk, whole->lba0 + 1, hdr) < 0)
+    if (bdev_read_sectors(whole, whole->lba0 + 1, 1, hdr) < 0)
         return -E_IO;
     if (memcmp(hdr + GPT_SIG_OFF, "EFI PART", 8) != 0)
         return 0; /* protective MBR but no GPT: ignore */
@@ -454,8 +511,8 @@ static int ata_scan_gpt(int disk)
     for (uint32_t i = 0; i < nentries; i++) {
         /* 48 bytes cover the type GUID and the first/last LBA fields. */
         uint8_t ent[48];
-        if (gpt_read_entry(whole->disk, whole->lba0, entry_lba, entry_sz, i,
-                           ent, sizeof ent) < 0)
+        if (gpt_read_entry(whole, entry_lba, entry_sz, i, ent,
+                           sizeof ent) < 0)
             continue;
 
         const uint8_t *guid  = ent + GPT_TYPE_GUID;
@@ -477,15 +534,19 @@ static int ata_scan_gpt(int disk)
 
         uint64_t    count = last - first + 1;
         ata_bdev_t *p     = part_slot(disk, i);
-        p->disk           = whole->disk;
+        p->pata           = whole->pata; /* a partition inherits its
+                                           * disk's backend, with a
+                                           * window on it */
+        p->ahci_idx       = whole->ahci_idx;
         p->lba0           = whole->lba0 + first;
         p->nsect          = count;
+        p->secsize        = whole->secsize;
         p->is_part        = 1;
         p->used           = 1;
         part_name(p->name, whole->name, i);
 
         if (vfs_register_blkdev(p->name, &g_bdev_ops, p,
-                                p->nsect * ATA_SECTOR) != 0) {
+                                p->nsect * p->secsize) != 0) {
             p->used = 0;
             continue;
         }
@@ -524,17 +585,31 @@ int ata_read_boot_partition(uint8_t *dst, uint32_t cap)
     if (!p)
         return 0;
 
-    uint64_t total = p->nsect * ATA_SECTOR;
+    uint64_t total = p->nsect * p->secsize;
     if (total > cap)
         return 0;
 
-    for (uint64_t i = 0; i < p->nsect; i++)
-        if (ata_read_sector(p->disk, p->lba0 + i, dst + i * ATA_SECTOR) < 0)
+    for (uint64_t i = 0; i < p->nsect;) {
+        uint32_t now = (uint32_t)(p->nsect - i);
+        if (now > 255)
+            now = 255;
+        if (bdev_read_sectors(p, p->lba0 + i, now,
+                              dst + (size_t)i * p->secsize) < 0)
             return 0;
+        i += now;
+    }
     return (int)total;
 }
 
 /* ---- probe ------------------------------------------------------------- */
+/*
+ * The PIO channels are fixed ports, present on every x86 machine whether or
+ * not anything is plugged in.  The AHCI controller, when the chipset has
+ * one, comes from PCI and can carry several ports of its own.  Both backends
+ * land in the same g_bdevs table, in probe order, so the publish pass below
+ * can name the disks sda, sdb, ... and the CD-ROMs sr0, sr1, ... without
+ * knowing which backend they came from.
+ */
 static const struct {
     uint16_t io, ctrl;
 } g_channels[] = {
@@ -542,22 +617,11 @@ static const struct {
     {0x170, 0x376},
 };
 
-int ata_init(void)
+static void probe_pata(void)
 {
-    /* Once is enough: the disks are there at boot or they never are, and a
-     * second pass would re-identify live drives behind the nodes already
-     * published -- and, in the disk-root build, smash the very sectors the
-     * root filesystem was just copied out of. */
-    static int g_ata_inited;
-    if (g_ata_inited)
-        return g_ndisks;
-    g_ata_inited = 1;
-
-    int slot = subsys_register("ata", "sda", SUBSYS_CLASS_BLOCK, 8, 0);
-
     for (unsigned c = 0; c < sizeof g_channels / sizeof g_channels[0]; c++) {
         for (int s = 0; s < 2; s++) {
-            if (g_ndisks >= MAX_DISKS)
+            if (g_ndisks >= MAX_PATA_DISKS)
                 break;
 
             ata_disk_t probe;
@@ -570,71 +634,136 @@ int ata_init(void)
                 continue;
 
             int         idx = g_ndisks++;
-            ata_disk_t *d   = &g_disks[idx];
+            ata_disk_t *d   = &g_pata_disks[idx];
             *d              = probe;
 
             ata_bdev_t *b = &g_bdevs[idx];
-            b->disk       = d;
+            b->pata       = d;
+            b->ahci_idx   = -1;
             b->lba0       = 0;
             b->nsect      = d->sectors;
+            b->secsize    = d->secsize;
             b->is_part    = 0;
             b->used       = 1;
+            memcpy(b->model, d->model, sizeof b->model);
+        }
+    }
+}
 
-            static int g_sr_count;
-            if (d->atapi) {
-                /* A PACKET device: publish it as a read-only 2048-byte
-                 * sector CD-ROM (sr0, sr1, ...) with no partition table. */
-                b->name[0] = 's';
-                b->name[1] = 'r';
-                b->name[2] = (char)('0' + g_sr_count++);
-                b->name[3] = 0;
-                if (vfs_register_blkdev(b->name, &g_sr_ops, b,
-                                        b->nsect * d->secsize) != 0) {
-                    b->used = 0;
-                    g_ndisks--;
-                    continue;
-                }
-                dbg_puts("ATA: /dev/");
-                dbg_puts(b->name);
-                dbg_puts(" CD-ROM \"");
-                dbg_puts(d->model);
-                dbg_puts("\"\n");
-                continue;
-            }
+static void probe_ahci(void)
+{
+    ahci_init();
 
+    for (int i = 0; i < ahci_device_count && g_ndisks < MAX_DISKS; i++) {
+        ahci_device_t *a = &ahci_devices[i];
+
+        int idx = g_ndisks++;
+        ata_bdev_t *b = &g_bdevs[idx];
+        b->pata      = NULL;
+        b->ahci_idx  = i;
+        b->lba0      = 0;
+        b->nsect     = a->size;
+        b->secsize   = a->sector_size;
+        b->is_part   = 0;
+        b->used      = 1;
+        memcpy(b->model, a->model, sizeof b->model);
+    }
+}
+
+/* ---- publish ----------------------------------------------------------- */
+/*
+ * (Re-)publish the whole disks and their partitions.  Running it twice
+ * against the same VFS table is harmless (the scan withdraws and re-registers
+ * its partition nodes, and a /dev name registered twice is a duplicate the
+ * table would keep the first of); running it after vfs_init() is what the
+ * disk-root boot needs, because the table it filled in before the VFS
+ * existed was wiped.
+ */
+static void publish_disks(void)
+{
+    int sr = 0;
+
+    for (int idx = 0; idx < g_ndisks; idx++) {
+        ata_bdev_t *b = &g_bdevs[idx];
+        if (!b->used)
+            continue;
+
+        /* Whole-disk name: sd for ATA disks, sr for CD-ROMs.  The letters
+         * continue across backends, so a machine with one IDE disk and one
+         * SATA disk sees sda and sdb. */
+        if (b->secsize != ATA_SECTOR) {
+            b->name[0] = 's';
+            b->name[1] = 'r';
+            b->name[2] = (char)('0' + sr++);
+            b->name[3] = 0;
+        } else {
             b->name[0] = 's';
             b->name[1] = 'd';
             b->name[2] = (char)('a' + idx);
             b->name[3] = 0;
+        }
 
-            if (vfs_register_blkdev(b->name, &g_bdev_ops, b,
-                                    b->nsect * ATA_SECTOR) != 0) {
-                b->used = 0;
-                g_ndisks--;
-                continue;
-            }
+        const vfs_ops_t *ops = (b->secsize == ATA_SECTOR) ? &g_bdev_ops : &g_sr_ops;
+        if (vfs_register_blkdev(b->name, ops, b, b->nsect * b->secsize) != 0) {
+            b->used = 0;
+            g_ndisks--;
+            continue;
+        }
 
-            /* Each disk after the first gets its own registry entry, so
-             * coldplug can assert on every node and not just /dev/sda. */
-            if (idx > 0)
-                subsys_set_state(
-                    subsys_register(b->name, b->name, SUBSYS_CLASS_BLOCK, 8,
-                                    (uint16_t)(idx * 16)),
-                    SUBSYS_STATE_LIVE);
+        /* Each disk after the first gets its own registry entry, so
+         * coldplug can assert on every node and not just /dev/sda.  The
+         * find-first keeps a re-publish from registering the name twice. */
+        if (idx > 0 && subsys_find(b->name) < 0)
+            subsys_set_state(
+                subsys_register(b->name, b->name, SUBSYS_CLASS_BLOCK, 8,
+                                (uint16_t)(idx * 16)),
+                SUBSYS_STATE_LIVE);
 
+        if (b->secsize != ATA_SECTOR) {
             dbg_puts("ATA: /dev/");
             dbg_puts(b->name);
-            dbg_puts(" ");
-            dbg_puts_dec((uint32_t)(d->sectors / 2048));
-            dbg_puts(" MiB, lba");
-            dbg_puts(d->lba48 ? "48" : "28");
-            dbg_puts(", \"");
-            dbg_puts(d->model);
+            dbg_puts(" CD-ROM \"");
+            dbg_puts(b->model);
             dbg_puts("\"\n");
-
-            ata_scan_partitions(idx);
+            continue;
         }
+
+        dbg_puts("ATA: /dev/");
+        dbg_puts(b->name);
+        dbg_puts(" ");
+        dbg_puts_dec((uint32_t)(b->nsect * b->secsize / 1048576));
+        dbg_puts(" MiB, \"");
+        dbg_puts(b->model);
+        dbg_puts("\"\n");
+
+        ata_scan_partitions(idx);
     }
+}
+
+int ata_init(void)
+{
+    /*
+     * Probe once, publish every time.  The disks are there at boot or they
+     * never are, and a second probe would re-identify live drives behind the
+     * nodes already published -- and, in the disk-root build, smash the very
+     * sectors the root filesystem was just copied out of.  The publish pass
+     * has to run on every call, though: the disk-root boot calls this before
+     * the VFS exists, and vfs_init() wipes the /dev table it filled in
+     * there, so without it a disk-root system would come up with no
+     * /dev/sda at all.
+     */
+    static int g_ata_inited;
+    if (!g_ata_inited) {
+        g_ata_inited = 1;
+        probe_pata();
+        probe_ahci();
+    }
+
+    int slot = subsys_find("ata");
+    if (slot < 0)
+        slot = subsys_register("ata", "sda", SUBSYS_CLASS_BLOCK, 8, 0);
+
+    publish_disks();
 
     if (!g_ndisks) {
         dbg_puts("ATA: no disks\n");

@@ -13,6 +13,8 @@
 #include <stdint.h>
 
 #include "xhci.h"
+#include "usb.h"
+#include "host.h"
 #include "pci.h"
 #include "kstring.h"
 #include "pmm.h"
@@ -22,6 +24,8 @@
 #include "timer.h"
 #include "proc.h"
 #include "debugcon.h"
+
+#include "drm_vsnprintf.h" /* snprintf */
 
 #define XHCI_MMIO_MAP_SIZE      0x10000U
 #define XHCI_CONTROLLER_TIMEOUT 1000000U /* io_delay() spins, worst case */
@@ -34,6 +38,12 @@
 #define XHCI_STATE_FAILED        2U
 
 static xhci_t xhci;
+
+/* ---- USB core integration: forward declarations (defined below) ---------- */
+static const usb_hcd_ops_t xhci_hcd_ops;
+static int                 xhci_usb_enumerate(uint32_t port, usb_device_t **out);
+static uint8_t             g_xhci_bus;
+static usb_host_t          g_xhci_host;
 
 /* ---- register access ---------------------------------------------------- */
 
@@ -780,35 +790,33 @@ int xhci_init(void)
 
     timer_delay_ms(100); /* let ports settle */
 
+    /* Claim a USB bus number first: enumerated devices record it in their
+     * sysfs path, and the controller registers itself on the same bus. */
+    int bus = usb_host_allocate_bus_number();
+    if (bus < 0) {
+        dbg_puts("XHCI: no USB bus number available\r\n");
+        return 0;
+    }
+    g_xhci_bus = (uint8_t)bus;
+
     for (uint32_t port = 1; port <= xhci.max_ports; port++) {
         uint32_t portsc = portsc_read(port);
         if (!(portsc & XHCI_PORTSC_CCS))
             continue;
         dbg_puts("XHCI: port ");
         dbg_puts_dec(port);
-        dbg_puts(" connected, resetting...\r\n");
-
-        if (reset_port(port) < 0) {
-            dbg_puts("XHCI: port reset failed\r\n");
-            continue;
-        }
-        uint32_t slot;
-        if (enable_slot(&slot) < 0) {
-            dbg_puts("XHCI: enable slot failed\r\n");
-            continue;
-        }
-        uint32_t speed = (portsc_read(port) >> 10) & 0xF;
-        if (address_device(slot, port, speed) < 0) {
-            dbg_puts("XHCI: address device failed\r\n");
-            send_cmd(TRB_DISABLE_SLOT, 0, slot << 24);
-            xhci.slot_enabled[slot] = 0;
-            continue;
-        }
-        dbg_puts("XHCI: slot ");
-        dbg_puts_dec(slot);
-        dbg_puts(" addressed\r\n");
-        timer_delay_ms(10);
+        dbg_puts(" connected\r\n");
+        if (xhci_usb_enumerate(port, NULL) != 0)
+            dbg_puts("XHCI: enumeration failed\r\n");
     }
+
+    g_xhci_host.type       = USB_HOST_XHCI;
+    g_xhci_host.bus_number = g_xhci_bus;
+    g_xhci_host.max_ports  = (uint8_t)xhci.max_ports;
+    g_xhci_host.hcd_ops    = &xhci_hcd_ops;
+    g_xhci_host.hc_private = &xhci;
+    memcpy(g_xhci_host.name, "xhci", 5);
+    usb_host_register(&g_xhci_host);
     return 0;
 }
 
@@ -832,3 +840,229 @@ int xhci_device_slot(int idx)
     }
     return -1;
 }
+
+/* ---- USB core integration (usb_hcd_ops shim) ------------------------------- */
+/*
+ * The Uinxed-style USB core (src/drivers/usb/core) drives devices through
+ * usb_hcd_ops_t; this shim maps that interface onto the slot-based
+ * primitives above.  usb_device_t.hc_private carries the xHCI slot, so the
+ * core's control/bulk/interrupt requests land on the right endpoint rings.
+ * Transfers stay poll-driven like everything else here: timeout_ms is
+ * advisory, and interrupt-IN completions are dispatched by xhci_usb_reap()
+ * from the timer tick.
+ */
+
+static usb_device_t *xhci_usb_dev[XHCI_MAX_SLOTS + 1]; /* slot -> registered device */
+
+typedef struct {
+    usb_endpoint_t          *ep;
+    usb_interrupt_complete_t complete;
+    void                    *context;
+    uint8_t                 *buf;
+    uint64_t                 buf_phys;
+    uint32_t                 len;
+    int                      active;
+} xhci_int_armed_t;
+
+/* Armed interrupt-IN endpoints; buffers are PMM frames that live as long as
+ * the device does, matching how the ring/context pages are managed. */
+static xhci_int_armed_t g_int_armed[8];
+
+static int slot_of(const usb_device_t *dev)
+{
+    return dev ? (int)(uintptr_t)dev->hc_private : 0;
+}
+
+static int xhci_hcd_control(struct usb_device *device, const usb_setup_packet_t *setup, void *buffer, size_t length, uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    if (!setup) return -E_INVAL;
+    int r = xhci_control_transfer(slot_of(device), setup->request_type, setup->request, setup->value, setup->index, buffer, (uint16_t)length);
+    return r < 0 ? r : 0;
+}
+
+static int xhci_hcd_transfer(struct usb_endpoint *endpoint, void *buffer, size_t length, size_t *actual, uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    if (actual) *actual = 0;
+    if (!endpoint || !endpoint->interface || !endpoint->interface->device) return -E_INVAL;
+    int r = xhci_bulk_transfer(slot_of(endpoint->interface->device), endpoint->descriptor.endpoint_address, buffer, length);
+    if (actual && r > 0) *actual = (size_t)r;
+    return r < 0 ? r : 0;
+}
+
+static int xhci_hcd_configure_endpoint(struct usb_endpoint *endpoint)
+{
+    if (!endpoint || !endpoint->interface || !endpoint->interface->device) return -E_INVAL;
+
+    uint8_t xfer = endpoint->descriptor.attributes & USB_ENDPOINT_XFERTYPE_MASK;
+    if (xfer == USB_ENDPOINT_XFER_CONTROL) return 0; /* EP0 was set up by address_device() */
+    if (xfer == USB_ENDPOINT_XFER_ISOC) return -E_OPNOTSUPP;
+
+    int      slot  = slot_of(endpoint->interface->device);
+    int      addr  = endpoint->descriptor.endpoint_address;
+    int      is_in = (addr & USB_ENDPOINT_DIR_MASK) != 0;
+    uint32_t ep_type;
+    if (xfer == USB_ENDPOINT_XFER_BULK)
+        ep_type = is_in ? EP_CTX_BULK_IN : 2;
+    else
+        ep_type = is_in ? EP_CTX_INTERRUPT_IN : 3;
+    uint32_t ep_id = (uint32_t)(addr & USB_ENDPOINT_NUMBER_MASK) * 2 + (uint32_t)is_in;
+    if (!get_or_create_ep_ring((uint32_t)slot, ep_id, ep_type, endpoint->descriptor.max_packet_size, endpoint->descriptor.interval, NULL))
+        return -E_IO;
+    return 0;
+}
+
+static int xhci_hcd_interrupt_start(struct usb_endpoint *endpoint, size_t length, usb_interrupt_complete_t complete, void *context)
+{
+    if (!endpoint || !endpoint->interface || !endpoint->interface->device || !complete || !length) return -E_INVAL;
+
+    xhci_int_armed_t *armed = NULL;
+    for (int i = 0; i < 8; i++) {
+        if (!g_int_armed[i].active) {
+            armed = &g_int_armed[i];
+            break;
+        }
+    }
+    if (!armed) return -E_NOMEM;
+
+    uint64_t phys = 0;
+    uint8_t *buf  = (uint8_t *)xhci_alloc_page(&phys);
+    if (!buf) return -E_NOMEM;
+    if (xhci_setup_interrupt_in(slot_of(endpoint->interface->device), endpoint->descriptor.endpoint_address, endpoint->descriptor.max_packet_size, endpoint->descriptor.interval, buf, phys) != 0)
+        return -E_IO;
+
+    armed->ep       = endpoint;
+    armed->complete = complete;
+    armed->context  = context;
+    armed->buf      = buf;
+    armed->buf_phys = phys;
+    armed->len      = (uint32_t)length < 64 ? (uint32_t)length : 64;
+    armed->active   = 1;
+    return 0;
+}
+
+static void xhci_hcd_interrupt_stop(struct usb_endpoint *endpoint)
+{
+    if (!endpoint) return;
+    for (int i = 0; i < 8; i++) {
+        if (g_int_armed[i].active && g_int_armed[i].ep == endpoint) {
+            g_int_armed[i].active = 0;
+            g_int_armed[i].ep     = NULL;
+        }
+    }
+}
+
+static void xhci_hcd_disable_endpoint(struct usb_endpoint *endpoint)
+{
+    if (!endpoint) return;
+    xhci_hcd_interrupt_stop(endpoint);
+    endpoint->hc_private = NULL;
+}
+
+static int xhci_hcd_clear_halt(struct usb_endpoint *endpoint)
+{
+    (void)endpoint;
+    return -E_OPNOTSUPP; /* the TRB_RESET_EP path is not implemented yet */
+}
+
+static void xhci_hcd_disable_device(struct usb_device *device)
+{
+    int slot = slot_of(device);
+    if (slot > 0 && slot <= (int)xhci.max_slots) xhci_usb_dev[slot] = NULL;
+}
+
+/* Reap armed interrupt-IN endpoints; completion callbacks run here, in the
+ * caller's context (the timer tick via usb_hid_poll()). */
+void xhci_usb_reap(void)
+{
+    if (xhci.initialized != XHCI_STATE_READY) return;
+    for (int i = 0; i < 8; i++) {
+        xhci_int_armed_t *armed = &g_int_armed[i];
+        if (!armed->active || !armed->complete || !armed->ep || !armed->ep->interface) continue;
+        uint8_t tmp[64];
+        int     r = xhci_read_interrupt_report(slot_of(armed->ep->interface->device), armed->ep->descriptor.endpoint_address, tmp, armed->len);
+        if (r < 0) continue;
+        armed->complete(armed->ep, tmp, (size_t)r, 0, armed->context);
+    }
+}
+
+/* Enumerate one root-hub port: reset, slot, address, descriptors, usb core. */
+static int xhci_usb_enumerate(uint32_t port, usb_device_t **out)
+{
+    if (reset_port(port) < 0) return -E_IO;
+    uint32_t slot;
+    if (enable_slot(&slot) < 0) return -E_IO;
+
+    /* PORTSC speed encoding (1=full, 2=low, 3=high, 4=super) -> usb_speed_t. */
+    static const usb_speed_t speed_map[] = {USB_SPEED_FULL, USB_SPEED_FULL, USB_SPEED_LOW, USB_SPEED_HIGH, USB_SPEED_SUPER};
+    uint32_t    speed_xhci = (portsc_read(port) >> 10) & 0xF;
+    usb_speed_t speed      = speed_xhci <= 4 ? speed_map[speed_xhci] : USB_SPEED_FULL;
+
+    if (address_device(slot, port, speed_xhci) < 0) {
+        send_cmd(TRB_DISABLE_SLOT, 0, slot << 24);
+        xhci.slot_enabled[slot] = 0;
+        return -E_IO;
+    }
+    timer_delay_ms(10);
+
+    usb_device_t *dev = kcalloc(1, sizeof(usb_device_t));
+    if (!dev) return -E_NOMEM;
+    dev->connected   = true;
+    dev->speed       = speed;
+    dev->bus_number  = g_xhci_bus;
+    dev->port_number = (uint8_t)port;
+    dev->hcd_ops     = &xhci_hcd_ops;
+    dev->hc_private  = (void *)(uintptr_t)slot;
+    snprintf(dev->path, sizeof(dev->path), "%u-%u", g_xhci_bus, port);
+
+    int r = usb_control_msg(dev, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0, &dev->descriptor, sizeof(dev->descriptor), USB_CTRL_TIMEOUT_MS);
+    if (r != 0 || dev->descriptor.length < sizeof(dev->descriptor)) {
+        if (r == 0) r = -E_IO; /* short descriptor */
+        goto fail;
+    }
+    uint16_t lang      = 0x0409;
+    uint8_t  lang_desc[4];
+    if (usb_control_msg(dev, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_GET_DESCRIPTOR, USB_DT_STRING << 8, 0, lang_desc, sizeof(lang_desc), USB_CTRL_TIMEOUT_MS) == 0
+        && lang_desc[0] >= 4) {
+        lang = (uint16_t)(lang_desc[2] | ((uint16_t)lang_desc[3] << 8));
+    }
+    usb_get_string_descriptor(dev, dev->descriptor.manufacturer, lang, dev->manufacturer, sizeof(dev->manufacturer));
+    usb_get_string_descriptor(dev, dev->descriptor.product, lang, dev->product, sizeof(dev->product));
+    usb_get_string_descriptor(dev, dev->descriptor.serial_number, lang, dev->serial, sizeof(dev->serial));
+
+    uint8_t *config     = NULL;
+    uint16_t config_len = 0;
+    r                   = usb_read_config_descriptor(dev, &config, &config_len);
+    if (r != 0) goto fail;
+    r = usb_add_device(dev, config, config_len);
+    kfree(config);
+    if (r != 0) goto fail;
+
+    xhci_usb_dev[slot] = dev;
+    if (out) *out = dev;
+    return 0;
+fail:
+    kfree(dev);
+    return r;
+}
+
+/* Enumerate hook for usb_enumerate_device(); root-hub ports only until a
+ * hub class driver exists. */
+static int xhci_hcd_enumerate(struct usb_device *hub, uint8_t port, struct usb_device **out)
+{
+    (void)hub;
+    return xhci_usb_enumerate(port, out);
+}
+
+static const usb_hcd_ops_t xhci_hcd_ops = {
+    .control            = xhci_hcd_control,
+    .transfer           = xhci_hcd_transfer,
+    .interrupt_start    = xhci_hcd_interrupt_start,
+    .interrupt_stop     = xhci_hcd_interrupt_stop,
+    .configure_endpoint = xhci_hcd_configure_endpoint,
+    .disable_endpoint   = xhci_hcd_disable_endpoint,
+    .clear_halt         = xhci_hcd_clear_halt,
+    .disable_device     = xhci_hcd_disable_device,
+    .enumerate          = xhci_hcd_enumerate,
+};

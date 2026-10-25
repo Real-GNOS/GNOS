@@ -1,11 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * panic.c — kernel panic implementation. (GPLv2)
+ *
+ * Prints the message, the full register file, the faulting process and an
+ * rbp-chain stack backtrace, paints the framebuffer red and halts.  The
+ * backtrace is only as honest as the frame pointers, so the kernel is
+ * built -fno-omit-frame-pointer (Makefile BASEFLAGS): at -O2 gcc would
+ * otherwise drop rbp chains and the walk below would find nothing.
  */
 #include <stddef.h>
 #include <stdint.h>
 
 #include "panic.h"
+#include "proc.h"
 #include "debugcon.h"
 #include "fbcon.h"
 
@@ -72,6 +79,20 @@ void panic_from_frame(const char *msg, const regs_t *r)
     dbg_puts("\r\n!!! KERNEL PANIC !!!\r\n");
     dbg_puts(msg);
     dbg_puts("\r\n");
+
+    /* Which task was running when the kernel died.  proc_current() can be
+     * nothing during early boot; say so rather than guess. */
+    proc_t *p = proc_current();
+    if (p) {
+        dbg_puts("pid=");
+        dbg_puts_dec((uint32_t)p->pid);
+        dbg_puts(" tgid=");
+        dbg_puts_dec((uint32_t)p->tgid);
+        dbg_puts("\r\n");
+    } else {
+        dbg_puts("pid=none (early boot or idle)\r\n");
+    }
+
     if (r) {
         dbg_puts("vector: ");
         if (r->vector < 32)
@@ -124,6 +145,41 @@ void panic_from_frame(const char *msg, const regs_t *r)
         dbg_puts(" r8 =");
         put_hex(r->r8);
         dbg_puts("\r\n");
+        dbg_puts("r9 =");
+        put_hex(r->r9);
+        dbg_puts(" r10=");
+        put_hex(r->r10);
+        dbg_puts("\r\n");
+        dbg_puts("r11=");
+        put_hex(r->r11);
+        dbg_puts(" r12=");
+        put_hex(r->r12);
+        dbg_puts("\r\n");
+        dbg_puts("r13=");
+        put_hex(r->r13);
+        dbg_puts(" r14=");
+        put_hex(r->r14);
+        dbg_puts("\r\n");
+        dbg_puts("r15=");
+        put_hex(r->r15);
+        dbg_puts("\r\n");
+    }
+
+    /* rbp-chain backtrace.  Frames live on the kernel stack and grow down,
+     * so each caller frame sits strictly above its callee; anything that
+     * breaks that (or a zero return address) ends the walk. */
+    dbg_puts("backtrace:\r\n");
+    const uint64_t *fp = r ? (const uint64_t *)r->rbp : NULL;
+    for (int depth = 0; depth < 16 && fp; depth++) {
+        const uint64_t *next = (const uint64_t *)fp[0];
+        uint64_t        rip  = fp[1];
+        if ((uintptr_t)next <= (uintptr_t)fp || ((uintptr_t)next & 7) || !rip) break;
+        dbg_puts("  #");
+        dbg_puts_dec((uint32_t)depth);
+        dbg_puts(" rip=");
+        put_hex(rip);
+        dbg_puts("\r\n");
+        fp = next;
     }
 
     fbcon_puts("\n*** KERNEL PANIC ***\n");

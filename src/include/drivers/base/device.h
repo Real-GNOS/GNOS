@@ -1,0 +1,188 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * device.h — device model: bus, device, driver, class. (GPLv2)
+ *
+ * Ported from the Uinxed driver-model base (include/drivers/base/device.h).
+ * A struct device is the driver-model view of a piece of hardware: it lives
+ * under /sys/devices (unless parented), optionally sits on a bus_type that
+ * matches it against device_drivers, and can additionally belong to a
+ * class for the functional /sys/class view.  dev_t carries the Linux
+ * major:minor number (kdev_t.h); sysfs attributes ride on the embedded
+ * kobject (kobject.h).
+ */
+#ifndef GNUCOS_DEVICE_H
+#define GNUCOS_DEVICE_H
+
+#include <stddef.h>
+
+#include "circular_list.h"
+#include "kdev_t.h"
+#include "kobject.h"
+#include "sysfs.h"
+
+/* Forward declarations */
+struct device;
+struct device_driver;
+struct bus_type;
+struct class;
+
+/* Device attribute type (attribute + device-specific show/store) */
+struct device_attribute {
+    struct attribute attr;
+    ssize_t (*show)(struct device *dev, struct device_attribute *attr, char *buf);
+    ssize_t (*store)(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
+};
+
+/* Bus attribute type */
+struct bus_attribute {
+    struct attribute attr;
+    ssize_t (*show)(struct bus_type *bus, struct bus_attribute *attr, char *buf);
+    ssize_t (*store)(struct bus_type *bus, struct bus_attribute *attr, const char *buf, size_t count);
+};
+
+/* Driver attribute type */
+struct driver_attribute {
+    struct attribute attr;
+    ssize_t (*show)(struct device_driver *drv, struct driver_attribute *attr, char *buf);
+    ssize_t (*store)(struct device_driver *drv, struct driver_attribute *attr, const char *buf, size_t count);
+};
+
+/* Class attribute type */
+struct class_attribute {
+    struct attribute attr;
+    ssize_t (*show)(struct class *cls, struct class_attribute *attr, char *buf);
+    ssize_t (*store)(struct class *cls, struct class_attribute *attr, const char *buf, size_t count);
+};
+
+/* bus_type - a communication channel between CPUs and devices */
+struct bus_type {
+    const char  *name;
+    const char  *dev_name;
+    struct kset  subsys;       /* kset for this bus */
+    struct kset *devices_kset; /* kset containing all devices */
+    struct kset *drivers_kset; /* kset containing all drivers */
+
+    int (*match)(struct device *dev, struct device_driver *drv);
+    int (*uevent)(struct device *dev, struct kobj_uevent_env *env);
+    int (*probe)(struct device *dev);
+    int (*remove)(struct device *dev);
+    void (*shutdown)(struct device *dev);
+
+    int (*suspend)(struct device *dev);
+    int (*resume)(struct device *dev);
+
+    const struct attribute_group **dev_groups;
+    const struct attribute_group **drv_groups;
+};
+
+/* device_driver - binds to a bus and handles a class of devices */
+struct device_driver {
+    const char      *name;
+    struct bus_type *bus;
+    struct kobject   kobj; /* appears under /sys/bus/<bus>/drivers/ */
+
+    int (*probe)(struct device *dev);
+    int (*remove)(struct device *dev);
+    void (*shutdown)(struct device *dev);
+    int (*suspend)(struct device *dev);
+    int (*resume)(struct device *dev);
+
+    const struct attribute_group **groups;
+};
+
+/* device - represents a physical or virtual device in the system */
+struct device {
+    struct kobject        kobj;   /* appears under /sys/devices/ */
+    struct device        *parent; /* parent device (NULL = root) */
+    struct bus_type      *bus;    /* bus the device sits on */
+    struct device_driver *driver; /* driver bound to this device */
+    struct class         *class;  /* optional class grouping */
+
+    void       *driver_data; /* private driver data */
+    dev_t       devt;        /* major:minor device number */
+    uint64_t    devid;       /* bus-specific device ID */
+    const char *devnode;     /* optional /dev-relative node name */
+
+    void (*release)(struct device *dev);
+
+    const struct attribute_group **groups;
+
+    /* hotplug */
+    int (*uevent)(struct device *dev, struct kobj_uevent_env *env);
+};
+
+/* class - groups devices by functional type (e.g. "net", "tty") */
+struct class {
+    const char *name;
+    struct kset subsys; /* kset under /sys/class/ */
+
+    clist_t    devices;      /* devices registered against this class */
+    spinlock_t devices_lock; /* protects devices */
+
+    int (*dev_uevent)(struct device *dev, struct kobj_uevent_env *env);
+    void (*dev_release)(struct device *dev);
+
+    const struct attribute_group **class_groups;
+    const struct attribute_group **dev_groups;
+};
+
+/* Register/unregister a bus with the device model */
+int  bus_register(struct bus_type *bus);
+void bus_unregister(struct bus_type *bus);
+
+/* Create/remove an attribute file on a bus */
+int  bus_create_file(struct bus_type *bus, struct bus_attribute *attr);
+void bus_remove_file(struct bus_type *bus, struct bus_attribute *attr);
+
+/* Register/unregister a device */
+int  device_register(struct device *dev);
+void device_unregister(struct device *dev);
+
+/* Take/drop a reference on a device */
+struct device *get_device(struct device *dev);
+void           put_device(struct device *dev);
+
+/* Create and register a device with a formatted name, or NULL on failure */
+__attribute__((format(printf, 5, 6))) struct device *device_create(struct class *cls, struct device *parent, dev_t devt, void *drvdata, const char *fmt, ...);
+
+/* Unregister and destroy a device created by device_create */
+void device_destroy(struct class *cls, dev_t devt);
+
+/* Create/remove an attribute file on a device */
+int  device_create_file(struct device *dev, const struct device_attribute *attr);
+void device_remove_file(struct device *dev, const struct device_attribute *attr);
+
+/* Add/remove attribute groups on a device */
+int  device_add_groups(struct device *dev, const struct attribute_group **groups);
+void device_remove_groups(struct device *dev, const struct attribute_group **groups);
+
+/* Register/unregister a driver */
+int  driver_register(struct device_driver *drv);
+void driver_unregister(struct device_driver *drv);
+
+/* Create/remove an attribute file on a driver */
+int  driver_create_file(struct device_driver *drv, const struct driver_attribute *attr);
+void driver_remove_file(struct device_driver *drv, const struct driver_attribute *attr);
+
+/* Register/unregister a device class */
+int  class_register(struct class *cls);
+void class_unregister(struct class *cls);
+
+/* Find a device in a class by a caller-supplied match function */
+struct device *class_find_device(struct class *cls, struct device *start, const void *data, int (*match)(struct device *, const void *));
+
+/* Create/remove an attribute file on a class */
+int  class_create_file(struct class *cls, const struct class_attribute *attr);
+void class_remove_file(struct class *cls, const struct class_attribute *attr);
+
+/* Initialize/teardown the device model */
+int  device_model_init(void);
+void device_model_exit(void);
+
+/* Helper: get a device's sysfs name (kobject name) */
+const char *dev_name(const struct device *dev);
+
+/* Find a device driver by name on a bus */
+struct device_driver *bus_find_driver_by_name(struct bus_type *bus, const char *name);
+
+#endif /* GNUCOS_DEVICE_H */

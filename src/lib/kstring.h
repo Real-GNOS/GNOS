@@ -24,4 +24,13 @@ char  *strcpy(char *dst, const char *src);
 char  *strncat(char *dst, const char *src, size_t n);
 char  *strncpy(char *dst, const char *src, size_t n);
 
+/* Case-sensitive equality test: 1 when the strings are identical.  The
+ * driver model (kobject, sysfs) is ported from a tree that spells this
+ * streq(), so the ported code keeps the name. */
+int streq(const char *a, const char *b);
+
+/* Heap-allocated copy of a NUL-terminated string (kmalloc-backed).  NULL on
+ * allocation failure; the caller owns the result and frees it with kfree(). */
+char *kstrdup(const char *s);
+
 #endif

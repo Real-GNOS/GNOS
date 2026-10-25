@@ -1,0 +1,30 @@
+#!/bin/sh
+# xfce-desktop -- bring up the Xfce desktop on Xorg :0, then run the
+# session in the foreground. (GPLv2)
+#
+# Spawned by /etc/inittab with ::respawn:, so a crashed session comes back
+# the way a display manager would.  All the environment work Xfce needs
+# (runtime dirs, dbus, machine-id) lives in /usr/bin/startxfce's sibling
+# /sbin/start-xfce; this wrapper only owns the X server lifecycle.
+
+export HOME=/root
+export PATH=/usr/bin:/bin:/sbin:/usr/sbin
+export DISPLAY=:0
+
+# Xorg takes a free VT on its own; the config drives the in-kernel KMS
+# device.  Backgrounded here, watched for readiness below.
+/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset \
+    -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
+
+# Wait for the server socket (bounded: a wedged Xorg must not hang boot).
+i=0
+while [ $i -lt 15 ] && [ ! -S /tmp/.X11-unix/X0 ]; do
+    sleep 1
+    i=$((i + 1))
+done
+
+# Paint the root window before any client so a client-free screen is
+# visibly the desktop's, not a dead pipeline.
+/usr/bin/xsetroot -solid gray40 -cursor_name left_ptr >/tmp/xsetroot.out 2>&1
+
+exec /sbin/start-xfce >/tmp/xfce.out 2>&1

@@ -25,10 +25,12 @@ DBUS_SESSION_BUS_ADDRESS=$(cat $X11RUN/session-bus)
 export DBUS_SESSION_BUS_ADDRESS
 
 # XFCE itself.  startxfce4 re-runs Xinit looking for an X server; with the
-# server already up we start the pieces by hand instead.
-xfwm4 --replace &
-xfce4-panel &
-xfdesktop &
-
-echo "start-xfce: session bus $DBUS_SESSION_BUS_ADDRESS"
-echo "start-xfce: xfwm4/panel/desktop started on $DISPLAY"
+# server already up we run the session manager directly.  xfce4-session
+# brings up xfwm4/panel/xfdesktop from xfconf AND processes the XDG
+# autostart directories (/etc/xdg/autostart, ~/.config/autostart) -- the
+# manual component launch this script used to do bypassed that machinery,
+# so nothing in autostart ever ran.
+# Diagnostics first: a session manager that dies at startup must say why
+# on the debugcon, or every respawn cycle fails silently.
+/usr/bin/xfce4-session >/tmp/xfce.out 2>&1
+/bin/dbgcat.elf /tmp/xfce.out

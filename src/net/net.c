@@ -8,6 +8,7 @@
 #include "net.h"
 #include "tcp.h"  /* tcp_tick(); the transport layers fill the upcalls */
 #include "sock.h" /* sock_init() */
+#include "ipv6/ipv6.h"
 #include "e1000.h"
 #include "vfs.h" /* errno numbers */
 #include "vmm.h" /* user_ptr_ok() */
@@ -898,11 +899,17 @@ static void ip_reassemble(uint32_t src, uint32_t dst, const uint8_t *packet, uin
     kfree(whole);
 }
 
+/* IPv6 transmit (ipv6/ipv6.c): eth_output is the stack's private L2 path,
+ * so the IPv6 layer goes through this wrapper with its own ethertype. */
+int net_eth_output6(const uint8_t *dmac, const void *payload, uint16_t len)
+{
+    return eth_output(dmac, 0x86DD, payload, len);
+}
+
 static void eth_input(const uint8_t *frame, uint16_t len)
 {
     if (len < ETH_HDR_LEN)
         return;
-
     uint16_t       ethertype = net_get16(frame + 12);
     const uint8_t *payload   = frame + ETH_HDR_LEN;
     uint16_t       plen      = (uint16_t)(len - ETH_HDR_LEN);
@@ -914,6 +921,21 @@ static void eth_input(const uint8_t *frame, uint16_t len)
     case ETH_P_IP:
         ip_input(&g_ifs[NET_IF_ETH], payload, plen);
         break;
+    case 0x86DD: {
+        /* IPv6 (ipv6/ipv6.c): copy into an owned frame, the input side frees it. */
+        ipv6_pbuf_t *pb = kmalloc(sizeof(*pb));
+        if (pb) {
+            pb->data   = kmalloc(plen ? plen : 1);
+            if (pb->data) {
+                memcpy(pb->data, payload, plen);
+                pb->length = plen;
+                ipv6_input(&g_ifs[NET_IF_ETH], pb);
+            } else {
+                kfree(pb);
+            }
+        }
+        break;
+    }
     default:
         break;
     }
@@ -1007,6 +1029,10 @@ void net_init(void)
 
     sock_init();
 
+    /* IPv6 comes up with the stack: neighbor cache, then the EUI-64
+     * link-local address on the physical interface. */
+    ipv6_init();
+    ipv6_if_up(&g_ifs[NET_IF_ETH]);
     dbg_puts("NET: lo 127.0.0.1/8");
     if (eth->up) {
         dbg_puts(", eth0 10.0.2.15/24 via 10.0.2.2");

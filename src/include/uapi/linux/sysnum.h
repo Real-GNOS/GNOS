@@ -1104,3 +1104,7 @@ struct sock_filter {
 #define SYS_process_mrelease 448
 
 #define SYS_sync 162
+
+/* Namespace isolation (Linux numbers, wired to namespace.h). */
+#define SYS_unshare 272
+#define SYS_setns   308

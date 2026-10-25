@@ -255,4 +255,9 @@ int xhci_setup_interrupt_in(int slot, int ep_addr, uint32_t max_packet, uint32_t
  * re-armed automatically by xhci_poll() after each completion. */
 int xhci_read_interrupt_report(int slot, int ep_addr, void *buf, uint32_t len);
 
+/* Reap every interrupt-IN endpoint armed through the usb_hcd_ops shim,
+ * dispatching completion callbacks in the caller's context (the timer
+ * tick, via usb_hid_poll()). */
+void xhci_usb_reap(void);
+
 #endif /* GNUCOS_XHCI_H */

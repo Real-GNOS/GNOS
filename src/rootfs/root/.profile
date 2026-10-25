@@ -8,8 +8,9 @@ if [ -r "$HOME/.bashrc" ]; then
     . "$HOME/.bashrc"
 fi
 
-# After a console login, bring up the desktop.  startxfce runs in the
-# foreground: when the session ends the shell underneath is still there.
-if [ -x /usr/bin/startxfce ]; then
-    /usr/bin/startxfce
+# After a console login, bring up the desktop.  /usr/rc normally starts the
+# whole session at boot (its X section runs /sbin/start-xfce); this is the
+# fallback for a boot where Xorg is up but the session never came up.
+if [ -x /sbin/start-xfce ] && [ ! -f /tmp/run/session-bus ]; then
+    DISPLAY=:0 /sbin/start-xfce
 fi

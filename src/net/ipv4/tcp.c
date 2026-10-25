@@ -47,10 +47,11 @@
 #define TCP_MAX_PCB  8
 #define TCP_BACKLOG  4
 
-/* All timers in 100 Hz ticks.  The RTO is fixed (tcp.h explains why); one
- * second is a defensible value on a LAN or a slirp link, and five retries
- * is where we concede. */
+/* All timers in 100 Hz ticks.  The RTO starts at one second and backs off
+ * exponentially per retransmission (capped at 60 s, RFC 6298 style); five
+ * retries is where we concede. */
 #define TCP_RTO_TICKS   100
+#define TCP_RTO_MAX     6000
 #define TCP_MAX_RETRIES 5
 #define TCP_TIME_WAIT   200 /* 2 s standing in for 2*MSL */
 #define TCP_CONN_TICKS  500 /* connect() gives up after 5 s */
@@ -81,6 +82,13 @@ struct tcp_pcb {
 
     uint64_t rto_at; /* retransmission deadline, 0 = disarmed */
     int      retries;
+    /* Congestion control, RFC 5681 via the Uinxed reference: cwnd grows in
+     * slow start / congestion avoidance, collapses on loss (RTO or three
+     * duplicate ACKs), and bounds the send window alongside snd_wnd. */
+    uint32_t cwnd;      /* congestion window, bytes */
+    uint32_t ssthresh;  /* slow-start threshold */
+    uint32_t dupacks;   /* duplicate-ACK count for fast retransmit */
+    uint32_t rto_ticks; /* current RTO; doubles per retry, resets on progress */
     uint64_t tw_at;   /* TIME_WAIT expiry, 0 = not in TIME_WAIT */
     uint64_t conn_at; /* connect() deadline, 0 = none */
 
@@ -305,9 +313,25 @@ static void tcp_send_rst(uint32_t src, uint32_t dst, const uint8_t *seg, uint32_
     }
 }
 
+static void rto_arm(tcp_pcb_t *p);
+
+/* Fast retransmit (three duplicate ACKs) reuses the RTO retransmitter. */
+static void tcp_retransmit(tcp_pcb_t *p);
+
+/* (Re)initialise the congestion window: slow start from one MSS, the
+ * threshold effectively open until the first loss says otherwise. */
+static void cwnd_init(tcp_pcb_t *p)
+{
+    uint32_t mss  = p->snd_mss ? p->snd_mss : TCP_MSS;
+    p->cwnd       = mss;
+    p->ssthresh   = 0xFFFFu;
+    p->dupacks    = 0;
+    p->rto_ticks  = TCP_RTO_TICKS;
+}
+
 static void rto_arm(tcp_pcb_t *p)
 {
-    p->rto_at = timer_ticks() + TCP_RTO_TICKS;
+    p->rto_at = timer_ticks() + p->rto_ticks;
 }
 
 /* ---- the send path --------------------------------------------------------- */
@@ -325,7 +349,8 @@ static void tcp_output(tcp_pcb_t *p)
         return;
 
     uint32_t in_flight = p->snd_nxt - p->snd_una;
-    uint32_t wnd_left  = p->snd_wnd > in_flight ? p->snd_wnd - in_flight : 0;
+    uint32_t send_wnd  = p->snd_wnd < p->cwnd ? p->snd_wnd : p->cwnd;
+    uint32_t wnd_left  = send_wnd > in_flight ? send_wnd - in_flight : 0;
     uint32_t unsent    = p->snd_end - p->snd_nxt;
     uint32_t n         = min3(unsent, wnd_left, p->snd_mss);
 
@@ -519,6 +544,7 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
             p->conn_at  = 0;
             p->state    = TCPS_ESTABLISHED;
             mss_from_options(p, seg, hdrlen);
+            cwnd_init(p); /* fresh congestion window on the negotiated MSS */
             tcp_send_ack(p);
         }
         return; /* anything else: wait for retransmit */
@@ -534,6 +560,7 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
             p->snd_una     = sack;
             p->rto_at      = 0;
             p->state       = TCPS_ESTABLISHED;
+            cwnd_init(p); /* the child starts its own slow start */
             tcp_pcb_t *par = p->parent;
             /* par->used: a closed listener's pcb may already be recycled. */
             if (par && par->used && par->state == TCPS_LISTEN && par->accept_n < TCP_BACKLOG)
@@ -542,13 +569,35 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
              * backlog is the application's problem to drain, the connection
              * itself is fine. */
         } else if (seq_lt(p->snd_una, sack) && seq_leq(sack, p->snd_nxt)) {
-            p->snd_una = sack;
-            p->retries = 0;
+            p->snd_una   = sack;
+            p->retries   = 0;
+            p->dupacks   = 0;
+            p->rto_ticks = TCP_RTO_TICKS; /* progress: RTO estimate resets */
+            /* RFC 5681: slow start (one MSS per ACK) below the threshold,
+             * congestion avoidance (+1 MSS per RTT) above it. */
+            uint32_t mss = p->snd_mss ? p->snd_mss : TCP_MSS;
+            if (p->cwnd < p->ssthresh)
+                p->cwnd += mss;
+            else
+                p->cwnd += mss * mss / p->cwnd;
             if (p->snd_una == p->snd_nxt)
                 p->rto_at = 0; /* everything acknowledged */
             else
                 rto_arm(p); /* partial progress: fresh timer */
             tcp_output(p);  /* the window may have opened */
+        } else if (seq_lt(p->snd_una, p->snd_nxt)) {
+            /* A duplicate ACK for still-outstanding data: three in a row is
+             * the fast-retransmit signal (RFC 5681 §3.2) -- resend from
+             * snd_una and collapse the window without waiting for the RTO. */
+            if (++p->dupacks == 3) {
+                uint32_t mss = p->snd_mss ? p->snd_mss : TCP_MSS;
+                p->ssthresh = p->cwnd / 2;
+                if (p->ssthresh < 2 * TCP_MSS)
+                    p->ssthresh = 2 * TCP_MSS;
+                p->cwnd      = p->ssthresh + 3 * mss;
+                p->retries   = 0; /* ACKs prove the peer is alive */
+                tcp_retransmit(p);
+            }
         }
 
         /* FIN-acknowledged transitions.  fin_sent means the FIN owns
@@ -648,6 +697,13 @@ static void tcp_retransmit(tcp_pcb_t *p)
             tcp_emit(p, p->snd_una, flags, NULL, 0);
         }
     }
+    /* Loss signal (RFC 6298 + 5681 §3.1): double the RTO (capped at 60 s)
+     * and collapse the window back to one MSS with a halved threshold. */
+    p->rto_ticks = p->rto_ticks * 2 < TCP_RTO_MAX ? p->rto_ticks * 2 : TCP_RTO_MAX;
+    p->ssthresh  = p->cwnd / 2;
+    if (p->ssthresh < 2 * TCP_MSS)
+        p->ssthresh = 2 * TCP_MSS;
+    p->cwnd = p->snd_mss ? p->snd_mss : TCP_MSS;
     rto_arm(p);
 }
 

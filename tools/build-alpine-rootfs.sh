@@ -55,7 +55,7 @@ PKGS=${ALPINE_PKGS:-"musl-dev openrc bash coreutils curl nano python3 \
                      file util-linux-login linux-pam \
                      xorg-server xf86-input-evdev xkbcomp xkeyboard-config \
                      twm xterm xeyes xsetroot mkfontscale \
-                     agetty"}
+                     agetty dbus xfce4 xfce4-terminal"}
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT

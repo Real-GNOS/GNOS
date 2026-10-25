@@ -2,13 +2,14 @@
 /*
  * usb_hid.c — USB HID boot-protocol keyboard and mouse. (GPLv2)
  *
- * Sits on the xHCI transfer primitives: after the controller has addressed
- * a device, this driver reads its configuration descriptor, finds a HID
- * interface (class 3) with a boot-protocol keyboard (protocol 1) or mouse
- * (protocol 2), switches it to boot protocol, and arms its interrupt IN
- * endpoint.  Reports are reaped by usb_hid_poll(), which is called from the
- * timer tick like net_tick(); the decoded results go into the evdev queues
- * through input_usb_kbd()/input_usb_mouse().
+ * A class driver on the USB core: usb_add_device() dispatches to
+ * usb_hid_probe() for every HID-class interface after the device model has
+ * registered it.  The probe requires the boot-protocol subclass, switches
+ * the device to boot protocol, and arms its interrupt IN endpoint through
+ * usb_interrupt_start(); reports are reaped by usb_hid_poll(), which is
+ * called from the timer tick like net_tick() and drives the hcd completion
+ * callbacks.  The decoded results go into the evdev queues through
+ * input_usb_kbd()/input_usb_mouse().
  *
  * The keyboard report is the standard boot format: modifier byte, reserved,
  * then six current key usages (0 = empty).  Releases are detected by
@@ -19,12 +20,11 @@
  */
 #include <stdint.h>
 
-#include "xhci.h"
+#include "usb.h"
+#include "xhci.h" /* xhci_usb_reap() */
 #include "input.h"
 #include "kstring.h"
-#include "heap.h"
 #include "debugcon.h"
-#include "subsys.h"
 
 #define HID_REQ_GET_REPORT   0x01
 #define HID_REQ_SET_REPORT   0x09
@@ -84,112 +84,18 @@ static const uint16_t hid_modifier_keys[8] = {
 };
 
 typedef struct {
-    int     slot;
-    int     type;      /* HID_PROTOCOL_KEYBOARD / HID_PROTOCOL_MOUSE */
-    int     ep_addr;   /* interrupt IN endpoint address (0x81) */
-    uint8_t ep_packet; /* endpoint max packet size */
-    uint8_t report[8];
-    uint8_t last_report[8];
-    uint8_t last_mod;
-    uint8_t active;
+    usb_device_t   *udev;     /* owning device (core-registered) */
+    usb_endpoint_t *ep;       /* interrupt IN endpoint */
+    int             type;     /* HID_PROTOCOL_KEYBOARD / HID_PROTOCOL_MOUSE */
+    uint8_t         ep_packet; /* endpoint max packet size */
+    uint8_t         report[8];
+    uint8_t         last_report[8];
+    uint8_t         last_mod;
+    uint8_t         active;
 } hid_dev_t;
 
 static hid_dev_t g_hid[HID_MAX_DEVICES];
 static int       g_hid_count;
-static int       g_hid_ready;
-
-static uint16_t rd16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static int hid_set_protocol(int slot, int iface, uint8_t protocol)
-{
-    return xhci_control_transfer(slot, USB_RT_HID, HID_REQ_SET_PROTOCOL, protocol, (uint16_t)iface,
-                                 NULL, 0);
-}
-
-static int hid_set_idle(int slot, int iface)
-{
-    return xhci_control_transfer(slot, USB_RT_HID, HID_REQ_SET_IDLE, 0, (uint16_t)iface, NULL, 0);
-}
-
-/* Find the first HID interface in the configuration descriptor and arm its
- * interrupt IN endpoint.  Returns the endpoint address or 0. */
-static int hid_probe_config(hid_dev_t *dev)
-{
-    int slot = dev->slot;
-
-    uint8_t header[9];
-    if (xhci_control_transfer(slot, 0x80, 6, 0x0200, 0, header, sizeof(header)) < 0)
-        return 0;
-    uint16_t total = rd16(header + 2);
-    if (total < sizeof(header) || total > 4096)
-        return 0;
-
-    uint8_t *cfg = kmalloc(total);
-    if (!cfg)
-        return 0;
-    int ret = xhci_control_transfer(slot, 0x80, 6, 0x0200, 0, cfg, total);
-    if (ret < (int)sizeof(header)) {
-        kfree(cfg);
-        return 0;
-    }
-    uint16_t got = ret < total ? (uint16_t)ret : total;
-
-    int     current_hid   = 0;
-    int     interface_num = 0;
-    int     ep_addr       = 0;
-    uint8_t ep_packet     = 0;
-
-    for (uint16_t off = 0; off + 2 <= got;) {
-        uint8_t len  = cfg[off];
-        uint8_t type = cfg[off + 1];
-        if (len < 2 || off + len > got)
-            break;
-
-        if (type == 4 && len >= 9) { /* interface descriptor */
-            current_hid = cfg[off + 5] == HID_CLASS && cfg[off + 7] == dev->type;
-            if (current_hid)
-                interface_num = cfg[off + 2];
-        } else if (type == 5 && len >= 7 && current_hid &&
-                   (cfg[off + 3] & 0x03) == 0x03) { /* interrupt EP */
-            uint8_t addr = cfg[off + 2];
-            if (addr & 0x80) { /* IN endpoint */
-                ep_addr   = addr;
-                ep_packet = (uint8_t)(rd16(cfg + off + 4) & 0x07FFu);
-                break;
-            }
-        }
-        off += len;
-    }
-    kfree(cfg);
-
-    if (!ep_addr)
-        return 0;
-
-    /* Switch to boot protocol and stop the idle rate so reports only
-     * arrive on change -- the two things real firmware does. */
-    hid_set_protocol(slot, interface_num, (uint8_t)dev->type);
-    hid_set_idle(slot, interface_num);
-
-    uint64_t buf_phys = 0;
-    uint8_t *buf      = (uint8_t *)xhci_alloc_page(&buf_phys);
-    if (!buf)
-        return 0;
-
-    dev->ep_addr   = ep_addr;
-    dev->ep_packet = ep_packet ? ep_packet : 8;
-
-    /* The xHCI core owns the persistent report buffer. */
-    if (xhci_setup_interrupt_in((uint32_t)slot, ep_addr, dev->ep_packet, 10, buf, buf_phys) < 0)
-        return 0;
-
-    memset(dev->last_report, 0xFF, sizeof(dev->last_report));
-    dev->last_mod = 0xFF;
-    dev->active   = 1;
-    return ep_addr;
-}
 
 static void hid_emit_kbd(hid_dev_t *dev)
 {
@@ -248,71 +154,99 @@ static void hid_emit_mouse(hid_dev_t *dev)
     input_usb_mouse(buttons, dx, dy);
 }
 
+/* Completion callback, run by xhci_usb_reap() from the timer tick: latch the
+ * fresh report and decode it through the same path the old poll loop used. */
+static void hid_complete(usb_endpoint_t *endpoint, const void *data, size_t length, int status, void *context)
+{
+    (void)endpoint;
+    (void)status;
+    hid_dev_t *dev = (hid_dev_t *)context;
+    if (!dev || !dev->active || !data || length < 1)
+        return;
+
+    memcpy(dev->last_report, dev->report, sizeof(dev->report));
+    memcpy(dev->report, data, length > 8 ? 8 : length);
+
+    if (dev->type == HID_PROTOCOL_KEYBOARD)
+        hid_emit_kbd(dev);
+    else
+        hid_emit_mouse(dev);
+}
+
+/* Probe a HID-class interface the USB core has registered.  Only the boot
+ * protocol subclass (1) with protocol keyboard (1) or mouse (2) is driven. */
+int usb_hid_probe(usb_interface_t *interface)
+{
+    if (!interface || !interface->device)
+        return -E_INVAL;
+    if (interface->descriptor.interface_subclass != 1)
+        return -E_OPNOTSUPP;
+    int proto = interface->descriptor.interface_protocol;
+    if (proto != HID_PROTOCOL_KEYBOARD && proto != HID_PROTOCOL_MOUSE)
+        return -E_OPNOTSUPP;
+
+    usb_endpoint_t *ep = usb_find_endpoint(interface, USB_ENDPOINT_XFER_INT, true);
+    if (!ep)
+        return -E_OPNOTSUPP;
+    if (g_hid_count >= HID_MAX_DEVICES)
+        return -E_NOSPC;
+
+    hid_dev_t *dev = &g_hid[g_hid_count];
+    memset(dev, 0, sizeof(*dev));
+    dev->udev      = interface->device;
+    dev->ep        = ep;
+    dev->type      = proto;
+    dev->ep_packet = ep->descriptor.max_packet_size ? ep->descriptor.max_packet_size : 8;
+
+    /* Switch to boot protocol and stop the idle rate so reports only
+     * arrive on change -- the two things real firmware does. */
+    if (usb_control_msg(dev->udev, USB_RT_HID, HID_REQ_SET_PROTOCOL, (uint16_t)proto, interface->descriptor.interface_number, NULL, 0, USB_CTRL_TIMEOUT_MS) != 0)
+        return -E_IO;
+    (void)usb_control_msg(dev->udev, USB_RT_HID, HID_REQ_SET_IDLE, 0, interface->descriptor.interface_number, NULL, 0, USB_CTRL_TIMEOUT_MS);
+
+    if (usb_interrupt_start(dev->ep, dev->ep_packet, hid_complete, dev) != 0)
+        return -E_IO;
+
+    memset(dev->last_report, 0xFF, sizeof(dev->last_report));
+    dev->last_mod = 0xFF;
+    dev->active   = 1;
+    g_hid_count++;
+
+    dbg_puts(proto == HID_PROTOCOL_KEYBOARD ? "USBHID: keyboard on " : "USBHID: mouse on ");
+    dbg_puts(dev->udev->path);
+    dbg_puts("\r\n");
+    return 0;
+}
+
+/* Disconnect the class driver from every HID interface of this device. */
+void usb_hid_disconnect(usb_interface_t *interface)
+{
+    if (!interface || !interface->device)
+        return;
+    for (int i = 0; i < g_hid_count; i++) {
+        hid_dev_t *dev = &g_hid[i];
+        if (!dev->active || dev->udev != interface->device)
+            continue;
+        usb_interrupt_stop(dev->ep);
+        dev->active = 0;
+    }
+    /* Compact the table so the slot can be reused by the next device. */
+    int kept = 0;
+    for (int i = 0; i < g_hid_count; i++) {
+        if (g_hid[i].active)
+            g_hid[kept++] = g_hid[i];
+    }
+    g_hid_count = kept;
+}
+
 /* ---- periodic poll -----------------------------------------------------------
- * Called from the timer tick.  The xHCI core re-arms interrupt IN
- * endpoints after every transfer event, so reports accumulate in the
- * persistent per-endpoint buffer; here we pull whatever is fresh and
- * decode it.
+ * Called from the timer tick.  The hcd shim re-arms interrupt IN endpoints
+ * after every transfer event; here we pump the completions, which latch the
+ * fresh reports and decode them.
  */
 void usb_hid_poll(void)
 {
-    if (!g_hid_ready)
+    if (!g_hid_count)
         return;
-
-    for (int i = 0; i < g_hid_count; i++) {
-        hid_dev_t *dev = &g_hid[i];
-        if (!dev->active)
-            continue;
-
-        uint8_t buf[8];
-        int     ret = xhci_read_interrupt_report(dev->slot, dev->ep_addr, buf, dev->ep_packet);
-        if (ret < 0)
-            continue;
-
-        memcpy(dev->last_report, dev->report, sizeof(dev->report));
-        memcpy(dev->report, buf, ret > 8 ? 8 : (uint32_t)ret);
-
-        if (dev->type == HID_PROTOCOL_KEYBOARD)
-            hid_emit_kbd(dev);
-        else
-            hid_emit_mouse(dev);
-    }
-}
-
-/* Probe every addressed device for a HID keyboard or mouse. */
-void usb_hid_init(void)
-{
-    int count = xhci_device_count();
-    for (int i = 0; i < count && g_hid_count < HID_MAX_DEVICES; i++) {
-        int slot = xhci_device_slot(i);
-        if (slot < 0)
-            continue;
-
-        /* Device descriptor: class 0 means "per-interface", which is what
-         * keyboards and mice use. */
-        usb_device_desc_t dd;
-        uint8_t           raw[18];
-        if (xhci_control_transfer(slot, 0x80, 6, 0x0100, 0, raw, 18) < 0)
-            continue;
-        memcpy(&dd, raw, 18);
-
-        if (dd.bDeviceClass != 0)
-            continue;
-
-        /* Keyboard first (protocol 1), then mouse (protocol 2). */
-        for (int proto = 1; proto <= 2; proto++) {
-            hid_dev_t *dev = &g_hid[g_hid_count];
-            memset(dev, 0, sizeof(*dev));
-            dev->slot = slot;
-            dev->type = proto;
-            if (hid_probe_config(dev)) {
-                dbg_puts(proto == HID_PROTOCOL_KEYBOARD ? "USBHID: keyboard on slot "
-                                                        : "USBHID: mouse on slot ");
-                dbg_puts_dec(slot);
-                dbg_puts("\r\n");
-                g_hid_count++;
-            }
-        }
-    }
-    g_hid_ready = 1;
+    xhci_usb_reap();
 }

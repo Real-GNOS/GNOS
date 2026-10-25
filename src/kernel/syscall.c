@@ -21,11 +21,13 @@
 #include "vfs.h"
 #include "tmpfs.h"
 #include "proc.h"
+#include "namespace.h"
 #include "ptrace.h"
 #include "module.h"
 #include "heap.h"
 #include "sock.h"
 #include "net.h"
+#include "netlink/netlink.h"
 #include "signal.h"
 #include "vmm.h"
 #include "tty.h"
@@ -1373,11 +1375,14 @@ static int64_t sys_getrandom(uint64_t ubuf, uint64_t usize, uint64_t uflags)
 
 /* ---- mount(165) / umount2(166) ---------------------------------------
  * tmpfs is mountable anywhere, and the cgroup v2 hierarchy is mountable
- * under either its "cgroup2" or legacy "cgroup" name; everything else
- * (proc/sysfs/devtmpfs) is either already special-cased by the VFS (/proc)
- * or intentionally left alone (/dev must keep its static device nodes).
- * MS_REMOUNT is accepted as a no-op so shutdown-style "mount -o remount,ro"
- * does not fail the boot.
+ * under either its "cgroup2" or legacy "cgroup" name.  /proc is synthesized
+ * by the VFS at all times (procfs_resolve serves it directly) and /sys is
+ * the static tree in the initrd, so both are "already provided": their
+ * mount requests are no-op successes, not ENODEV.  OpenRC's localmount
+ * mounts them unconditionally, and a failure there fails the sysinit
+ * runlevel.  /dev is intentionally left alone (it must keep its static
+ * device nodes).  MS_REMOUNT is accepted as a no-op so shutdown-style
+ * "mount -o remount,ro" does not fail the boot.
  */
 #define MS_REMOUNT 0x20
 
@@ -1417,6 +1422,11 @@ static int64_t sys_mount(uint64_t usrc, uint64_t utgt, uint64_t ufs, uint64_t uf
         return vfs_mount_devtmpfs(abs);
     if (strcmp(fst, "cgroup2") == 0 || strcmp(fst, "cgroup") == 0)
         return vfs_mount_cgroupfs(abs);
+    /* See the block comment above: /proc and /sys are already provided, so
+     * the request is a no-op success rather than -E_NODEV. */
+    if (strcmp(fst, "proc") == 0 || strcmp(fst, "procfs") == 0 ||
+        strcmp(fst, "sysfs") == 0)
+        return 0;
     /* ext2/ext3/ext4 all name the same on-disk family this kernel reads;
      * the volume itself decides which layout its files use.  src must be
      * a /dev block device. */
@@ -2090,6 +2100,8 @@ static int64_t sock_to_fd(int s)
     if (h < 0) {
         if (s >= 0)
             sock_close(s);
+        else if (s <= -1000)
+            nl_close(-1000 - s);
         else
             unix_close(-2 - s);
         return h;
@@ -2110,13 +2122,16 @@ static int64_t sys_socket(int domain, int type, int protocol)
     if (domain == AF_UNIX) {
         s         = unix_create(type, protocol);
         unix_sock = 1;
+    } else if (domain == AF_NETLINK) {
+        s         = nl_create(type, protocol);
+        unix_sock = 2;
     } else {
         s         = sock_create(domain, type, protocol);
         unix_sock = 0;
     }
     if (s < 0)
         return s;
-    return sock_to_fd(unix_sock ? -2 - s : s);
+    return sock_to_fd(unix_sock == 1 ? -2 - s : unix_sock == 2 ? -1000 - s : s);
 }
 
 /* sockaddr_un in/out.  The path lives in user memory, so both sides go
@@ -2204,6 +2219,16 @@ static int64_t sys_bind(int fd, uint64_t uaddr, uint64_t alen)
     int s = fd_sock(fd);
     if (s == -1)
         return -E_NOTSOCK;
+    if (s <= -1000) {
+        /* AF_NETLINK: sockaddr_nl carries the port id and group mask. */
+        if (!uaddr || alen < 4)
+            return -E_INVAL;
+        sockaddr_nl_t nl;
+        memcpy(&nl, (const void *)(uintptr_t)uaddr, alen < sizeof(nl) ? alen : sizeof(nl));
+        if (nl.nl_family != AF_NETLINK)
+            return -E_AFNOSUPPORT;
+        return nl_bind(-1000 - s, nl.nl_pid, nl.nl_groups);
+    }
     if (s >= 0) {
         uint32_t ip;
         uint16_t port;
@@ -2307,6 +2332,22 @@ static int64_t sys_sendto(int fd, uint64_t ubuf, uint64_t len, int flags, uint64
     if (len && !buf_ok(ubuf, len, 0))
         return -E_FAULT;
 
+    if (s <= -1000) {
+        /* AF_NETLINK: destination is a sockaddr_nl (pid 0 = multicast). */
+        uint32_t dpid = 0, dgrp = 0;
+        if (uaddr) {
+            if (alen < 4)
+                return -E_INVAL;
+            sockaddr_nl_t nl;
+            memcpy(&nl, (const void *)(uintptr_t)uaddr, alen < sizeof(nl) ? alen : sizeof(nl));
+            if (nl.nl_family != AF_NETLINK)
+                return -E_AFNOSUPPORT;
+            dpid = nl.nl_pid;
+            dgrp = nl.nl_groups;
+        }
+        return nl_sendmsg(-1000 - s, (const void *)(uintptr_t)ubuf, (uint32_t)len, dpid, dgrp);
+    }
+
     if (s >= 0) {
         uint32_t ip   = 0;
         uint16_t port = 0;
@@ -2330,6 +2371,30 @@ static int64_t sys_recvfrom(int fd, uint64_t ubuf, uint64_t len, int flags, uint
         return -E_NOTSOCK;
     if (len && !buf_ok(ubuf, len, 1))
         return -E_FAULT;
+
+    if (s <= -1000) {
+        /* AF_NETLINK: the sender's pid/groups ride out through sockaddr_nl. */
+        uint32_t spid = 0, sgrp = 0;
+        int      n = nl_recvmsg(-1000 - s, (void *)(uintptr_t)ubuf, (uint32_t)len, flags, &spid, &sgrp);
+        if (n < 0)
+            return n;
+        if (uaddr && ualen) {
+            sockaddr_nl_t nl;
+            memset(&nl, 0, sizeof(nl));
+            nl.nl_family = AF_NETLINK;
+            nl.nl_pid    = spid;
+            nl.nl_groups = sgrp;
+            uint32_t room;
+            memcpy(&room, (const void *)(uintptr_t)ualen, sizeof(room));
+            if (room > sizeof(nl))
+                room = (uint32_t)sizeof(nl);
+            if (room)
+                memcpy((void *)(uintptr_t)uaddr, &nl, room);
+            uint32_t full = (uint32_t)sizeof(nl);
+            memcpy((void *)(uintptr_t)ualen, &full, sizeof(full));
+        }
+        return n;
+    }
 
     if (s >= 0) {
         uint32_t ip   = 0;
@@ -2365,6 +2430,27 @@ static int64_t sys_getsockname(int fd, uint64_t uaddr, uint64_t ualen, int peer)
         return -E_NOTSOCK;
     if (!uaddr || !ualen)
         return -E_INVAL;
+
+    if (s <= -1000) {
+        uint32_t spid = 0, sgrp = 0;
+        int      r = nl_getname(-1000 - s, &spid, &sgrp);
+        if (r < 0)
+            return r;
+        sockaddr_nl_t nl;
+        memset(&nl, 0, sizeof(nl));
+        nl.nl_family = AF_NETLINK;
+        nl.nl_pid    = spid;
+        nl.nl_groups = sgrp;
+        uint32_t room;
+        memcpy(&room, (const void *)(uintptr_t)ualen, sizeof(room));
+        if (room > sizeof(nl))
+            room = (uint32_t)sizeof(nl);
+        if (room)
+            memcpy((void *)(uintptr_t)uaddr, &nl, room);
+        uint32_t full = (uint32_t)sizeof(nl);
+        memcpy((void *)(uintptr_t)ualen, &full, sizeof(full));
+        return 0;
+    }
 
     if (s >= 0) {
         uint32_t ip   = 0;
@@ -5916,6 +6002,16 @@ void syscall_handler(regs_t *r)
         /* musl routes both fork() and pthread_create through clone, so a
          * musl-linked userland (OpenRC, bash, ...) needs it even for a fork. */
         ret = proc_clone(r);
+        break;
+
+    case SYS_unshare:
+        /* Unshare the namespaces named in the flag set (namespace.h). */
+        ret = namespace_unshare(a1);
+        break;
+
+    case SYS_setns:
+        /* Rebind the calling process to a namespace named by an fd. */
+        ret = namespace_setns((int)a1, (int)a2);
         break;
 
     case SYS_ppoll:

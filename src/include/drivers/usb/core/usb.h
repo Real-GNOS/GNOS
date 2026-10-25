@@ -1,0 +1,378 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * usb.h — USB host core and host-controller interface. (GPLv2)
+ *
+ * Ported from the Uinxed USB stack (include/drivers/usb/core/usb.h).  The
+ * core owns USB 2.0 chapter-9 descriptor parsing, control/bulk/interrupt
+ * plumbing to the right host controller, the bus-side enumeration
+ * choreography and the driver-model registration (devices on usb_bus_type,
+ * interfaces parented under them).  Host controllers implement
+ * usb_hcd_ops_t; the xHCI driver in GNOS provides one shim over its
+ * slot-based API.
+ *
+ * Deviation from the Uinxed original: usb_interface_t carries a 31-entry
+ * endpoint array -- the same per-interface limit the core itself enforces
+ * -- instead of the oversized USB_MAX_ENDPOINTS array, because the GNOS
+ * kernel heap is fixed-size and a usb_device_t must stay ~100 KiB.
+ */
+#ifndef GNUCOS_USB_H
+#define GNUCOS_USB_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "device.h"
+#include "vfs.h" /* GNOS errno names */
+
+#define USB_MAX_INTERFACES 64
+#define USB_MAX_ENDPOINTS  31 /* per interface; the core's parse limit */
+#define USB_MAX_CONTROLLERS 16
+#define USB_MAX_DEVICES     128
+
+#define USB_DIR_OUT 0x00
+#define USB_DIR_IN  0x80
+
+#define USB_TYPE_STANDARD   (0x00 << 5)
+#define USB_TYPE_CLASS      (0x01 << 5)
+#define USB_RECIP_DEVICE    0x00
+#define USB_RECIP_INTERFACE 0x01
+#define USB_RECIP_ENDPOINT  0x02
+#define USB_RECIP_OTHER     0x03
+
+#define USB_REQ_GET_STATUS        0x00
+#define USB_REQ_CLEAR_FEATURE     0x01
+#define USB_REQ_SET_FEATURE       0x03
+#define USB_REQ_SET_ADDRESS       0x05
+#define USB_REQ_GET_DESCRIPTOR    0x06
+#define USB_REQ_SET_DESCRIPTOR    0x07
+#define USB_REQ_GET_CONFIGURATION 0x08
+#define USB_REQ_SET_CONFIGURATION 0x09
+#define USB_REQ_GET_INTERFACE     0x0a
+#define USB_REQ_SET_INTERFACE     0x0b
+#define USB_REQ_SYNCH_FRAME       0x0c
+
+#define USB_DT_DEVICE    0x01
+#define USB_DT_CONFIG    0x02
+#define USB_DT_STRING    0x03
+#define USB_DT_INTERFACE 0x04
+#define USB_DT_ENDPOINT  0x05
+#define USB_DT_HID       0x21
+#define USB_DT_REPORT    0x22
+#define USB_DT_HUB       0x29
+#define USB_DT_HUB3      0x2a
+
+#define USB_CLASS_HID          0x03
+#define USB_CLASS_MASS_STORAGE 0x08
+#define USB_CLASS_HUB          0x09
+
+/* Standard feature selectors. */
+#define USB_FEAT_ENDPOINT_HALT        0x00
+#define USB_FEAT_DEVICE_REMOTE_WAKEUP 0x01
+#define USB_FEAT_TEST_MODE            0x02
+
+/* Hub-class feature selectors (USB 2.0 §11.24.2). */
+#define USB_HUB_FEAT_C_HUB_LOCAL_POWER  0
+#define USB_HUB_FEAT_C_HUB_OVER_CURRENT 1
+#define USB_PORT_FEAT_CONNECTION        0
+#define USB_PORT_FEAT_ENABLE            1
+#define USB_PORT_FEAT_SUSPEND           2
+#define USB_PORT_FEAT_OVER_CURRENT      3
+#define USB_PORT_FEAT_RESET             4
+#define USB_PORT_FEAT_LINK_STATE        5
+#define USB_PORT_FEAT_POWER             8
+#define USB_PORT_FEAT_LOW_SPEED         9
+#define USB_PORT_FEAT_C_CONNECTION      16
+#define USB_PORT_FEAT_C_ENABLE          17
+#define USB_PORT_FEAT_C_SUSPEND         18
+#define USB_PORT_FEAT_C_OVER_CURRENT    19
+#define USB_PORT_FEAT_C_RESET           20
+#define USB_PORT_FEAT_TEST              21
+#define USB_PORT_FEAT_INDICATOR         22
+#define USB_PORT_FEAT_C_PORT_L1         23
+
+/* Hub status bitmaps (USB 2.0 §11.24.2.6). */
+#define USB_HUB_STATUS_LOCAL_POWER  0x0001
+#define USB_HUB_STATUS_OVER_CURRENT 0x0002
+
+#define USB_PORT_STATUS_CONNECTION   0x0001
+#define USB_PORT_STATUS_ENABLE       0x0002
+#define USB_PORT_STATUS_SUSPEND      0x0004
+#define USB_PORT_STATUS_OVER_CURRENT 0x0008
+#define USB_PORT_STATUS_RESET        0x0010
+#define USB_PORT_STATUS_LINK_STATE   0x01e0
+#define USB_PORT_STATUS_POWER        0x0100
+#define USB_PORT_STATUS_LOW_SPEED    0x0200
+#define USB_PORT_STATUS_HIGH_SPEED   0x0400
+#define USB_PORT_STATUS_TEST         0x0800
+#define USB_PORT_STATUS_INDICATOR    0x1000
+
+#define USB_PORT_STATUS_C_CONNECTION   0x0001
+#define USB_PORT_STATUS_C_ENABLE       0x0002
+#define USB_PORT_STATUS_C_SUSPEND      0x0004
+#define USB_PORT_STATUS_C_OVER_CURRENT 0x0008
+#define USB_PORT_STATUS_C_RESET        0x0010
+#define USB_PORT_STATUS_C_BH_RESET     0x0020
+#define USB_PORT_STATUS_C_LINK_STATE   0x0040
+#define USB_PORT_STATUS_C_CONFIG_ERROR 0x0080
+
+#define USB_ENDPOINT_NUMBER_MASK   0x0f
+#define USB_ENDPOINT_DIR_MASK      0x80
+#define USB_ENDPOINT_XFERTYPE_MASK 0x03
+#define USB_ENDPOINT_XFER_CONTROL  0
+#define USB_ENDPOINT_XFER_ISOC     1
+#define USB_ENDPOINT_XFER_BULK     2
+#define USB_ENDPOINT_XFER_INT      3
+
+#define USB_CTRL_TIMEOUT_MS 1000
+#define USB_IO_TIMEOUT_MS   5000
+
+typedef enum {
+    USB_SPEED_LOW = 1,
+    USB_SPEED_FULL,
+    USB_SPEED_HIGH,
+    USB_SPEED_SUPER,
+    USB_SPEED_SUPER_PLUS,
+} usb_speed_t;
+
+/* Setup packet for control transfers (USB 2.0 ch. 9). */
+typedef struct __attribute__((packed)) {
+    uint8_t  request_type;
+    uint8_t  request;
+    uint16_t value;
+    uint16_t index;
+    uint16_t length;
+} usb_setup_packet_t;
+
+_Static_assert(sizeof(usb_setup_packet_t) == 8, "USB control transfer setup packet size");
+
+/* Device descriptor (USB 2.0 §9.6.1). */
+typedef struct __attribute__((packed)) {
+    uint8_t  length;
+    uint8_t  descriptor_type;
+    uint16_t usb_version;
+    uint8_t  device_class;
+    uint8_t  device_subclass;
+    uint8_t  device_protocol;
+    uint8_t  max_packet_size0;
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint16_t device_version;
+    uint8_t  manufacturer;
+    uint8_t  product;
+    uint8_t  serial_number;
+    uint8_t  configuration_count;
+} usb_device_descriptor_t;
+
+_Static_assert(sizeof(usb_device_descriptor_t) == 18, "USB device descriptor wire size");
+
+/* Configuration descriptor (USB 2.0 §9.6.3). */
+typedef struct __attribute__((packed)) {
+    uint8_t  length;
+    uint8_t  descriptor_type;
+    uint16_t total_length;
+    uint8_t  interface_count;
+    uint8_t  configuration_value;
+    uint8_t  configuration;
+    uint8_t  attributes;
+    uint8_t  max_power;
+} usb_config_descriptor_t;
+
+_Static_assert(sizeof(usb_config_descriptor_t) == 9, "USB configuration descriptor wire size");
+
+/* Interface descriptor (USB 2.0 §9.6.5). */
+typedef struct __attribute__((packed)) {
+    uint8_t length;
+    uint8_t descriptor_type;
+    uint8_t interface_number;
+    uint8_t alternate_setting;
+    uint8_t endpoint_count;
+    uint8_t interface_class;
+    uint8_t interface_subclass;
+    uint8_t interface_protocol;
+    uint8_t interface;
+} usb_interface_descriptor_t;
+
+_Static_assert(sizeof(usb_interface_descriptor_t) == 9, "USB interface descriptor wire size");
+
+/* Endpoint descriptor (USB 2.0 §9.6.6). */
+typedef struct __attribute__((packed)) {
+    uint8_t  length;
+    uint8_t  descriptor_type;
+    uint8_t  endpoint_address;
+    uint8_t  attributes;
+    uint16_t max_packet_size;
+    uint8_t  interval;
+} usb_endpoint_descriptor_t;
+
+_Static_assert(sizeof(usb_endpoint_descriptor_t) == 7, "USB endpoint descriptor wire size");
+
+/* USB 2.0 hub descriptor (§11.23.2.1). Device/port-removable bitmaps are
+ * variable-length: bNbrPorts bits each, rounded up to whole bytes. */
+typedef struct __attribute__((packed)) {
+    uint8_t  length;
+    uint8_t  descriptor_type;
+    uint8_t  port_count;
+    uint16_t characteristics;
+    uint8_t  power_good_time;
+    uint8_t  current_requirement;
+    uint8_t  device_removable[2];
+    uint8_t  port_power_mask[2];
+} usb_hub_descriptor_t;
+
+/* USB 2.0 hub descriptor fixed head; only the offsets are spec-fixed. */
+_Static_assert(offsetof(usb_hub_descriptor_t, characteristics) == 3, "USB 2.0 hub characteristics offset");
+_Static_assert(offsetof(usb_hub_descriptor_t, power_good_time) == 5, "USB 2.0 hub power-good-time offset");
+
+/* USB 3.x SuperSpeed hub descriptor (§10.13.2.1). */
+typedef struct __attribute__((packed)) {
+    uint8_t  length;
+    uint8_t  descriptor_type;
+    uint8_t  port_count;
+    uint16_t characteristics;
+    uint8_t  power_good_time;
+    uint8_t  current_requirement;
+    uint8_t  device_removable;
+    uint8_t  reserved;
+} usb_hub3_descriptor_t;
+
+/* USB 3.x hub descriptor fixed head (9 bytes here, 12 per spec). */
+_Static_assert(offsetof(usb_hub3_descriptor_t, characteristics) == 3, "USB 3.x hub characteristics offset");
+_Static_assert(offsetof(usb_hub3_descriptor_t, power_good_time) == 5, "USB 3.x hub power-good-time offset");
+
+struct usb_device;
+struct usb_interface;
+struct usb_endpoint;
+
+typedef void (*usb_interrupt_complete_t)(struct usb_endpoint *endpoint, const void *data, size_t length, int status, void *context);
+
+typedef struct usb_hcd_ops {
+    int (*control)(struct usb_device *device, const usb_setup_packet_t *setup, void *buffer, size_t length, uint32_t timeout_ms);
+    int (*transfer)(struct usb_endpoint *endpoint, void *buffer, size_t length, size_t *actual, uint32_t timeout_ms);
+    int (*interrupt_start)(struct usb_endpoint *endpoint, size_t length, usb_interrupt_complete_t complete, void *context);
+    void (*interrupt_stop)(struct usb_endpoint *endpoint);
+    int (*configure_endpoint)(struct usb_endpoint *endpoint);
+    void (*disable_endpoint)(struct usb_endpoint *endpoint);
+    int (*clear_halt)(struct usb_endpoint *endpoint);
+    void (*disable_device)(struct usb_device *device);
+
+    /*
+     * Enumerate a device on a hub downstream port. The hub driver has
+     * already reset the port; the HCD must address the device, read its
+     * descriptors, configure it, and hand back a populated usb_device_t.
+     */
+    int (*enumerate)(struct usb_device *hub, uint8_t port, struct usb_device **out);
+} usb_hcd_ops_t;
+
+typedef struct usb_endpoint {
+    struct usb_interface     *interface;
+    usb_endpoint_descriptor_t descriptor;
+    void                     *hc_private;
+    uint8_t                   data_toggle;
+} usb_endpoint_t;
+
+typedef struct usb_interface {
+    struct usb_device         *device;
+    usb_interface_descriptor_t descriptor;
+    usb_endpoint_t             endpoints[USB_MAX_ENDPOINTS];
+    uint8_t                    endpoint_count;
+    const uint8_t             *extra;
+    size_t                     extra_length;
+    void                      *driver_data;
+    struct device              dev;
+    bool                       registered;
+} usb_interface_t;
+
+typedef struct usb_device {
+    usb_device_descriptor_t descriptor;
+    usb_config_descriptor_t configuration;
+    usb_interface_t         interfaces[USB_MAX_INTERFACES];
+    uint8_t                 interface_count;
+    uint8_t                 address;
+    uint8_t                 bus_number;
+    uint8_t                 port_number;
+    uint8_t                 depth;
+    usb_speed_t             speed;
+    char                    manufacturer[64];
+    char                    product[64];
+    char                    serial[64];
+    char                    path[64];
+    const usb_hcd_ops_t    *hcd_ops;
+    void                   *hc_private;
+    struct device           dev;
+    bool                    configured;
+    bool                    connected;
+    bool                    registered;
+} usb_device_t;
+
+extern struct bus_type usb_bus_type;
+
+/* Device attribute group published by usb_sysfs.c (idVendor, speed, ...). */
+extern const struct attribute_group *usb_device_groups[];
+
+/* Register the usb bus with the driver model (/sys/bus/usb) and mark the
+ * core ready; implemented in usb_sysfs.c. */
+void usb_sysfs_init(void);
+
+/* Mark the usb core ready for device registration (bus registered by usb_sysfs_init). */
+int usb_core_init(void);
+
+/* Bring up a device: parse the configuration, set it, and probe interfaces. */
+int usb_add_device(usb_device_t *device, const uint8_t *configuration, size_t length);
+
+/* Mark a device offline and disconnect its class drivers. */
+void usb_disconnect_device(usb_device_t *device);
+
+/* Fully tear down a device and unregister its model entries. */
+void usb_remove_device(usb_device_t *device);
+
+/* Issue one control transfer to the HCD. */
+int usb_control_msg(usb_device_t *device, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, void *buffer, uint16_t length, uint32_t timeout_ms);
+
+/* Perform one bulk transfer on an endpoint. */
+int usb_bulk_msg(usb_endpoint_t *endpoint, void *buffer, size_t length, size_t *actual, uint32_t timeout_ms);
+
+/* Begin periodic interrupt-IN polling on an endpoint. */
+int usb_interrupt_start(usb_endpoint_t *endpoint, size_t length, usb_interrupt_complete_t complete, void *context);
+
+/* Stop periodic interrupt polling on an endpoint. */
+void usb_interrupt_stop(usb_endpoint_t *endpoint);
+
+/* Clear an endpoint stall via CLEAR_FEATURE, then reset the HCD state. */
+int usb_clear_halt(usb_endpoint_t *endpoint);
+
+/* Find an endpoint of the given transfer type and direction. */
+usb_endpoint_t *usb_find_endpoint(usb_interface_t *interface, uint8_t transfer_type, bool input);
+
+/* Locate a descriptor of the given type in an interface's extra data. */
+const uint8_t *usb_find_extra_descriptor(const usb_interface_t *interface, uint8_t descriptor_type, size_t *length);
+
+/* Fetch a string descriptor and convert it to ASCII. */
+int usb_get_string_descriptor(usb_device_t *device, uint8_t index, uint16_t language, char *output, size_t capacity);
+
+/* Fetch the full configuration descriptor into a malloc'd buffer. */
+int usb_read_config_descriptor(usb_device_t *device, uint8_t **config_out, uint16_t *length_out);
+
+/* Enumerate a downstream device on a hub port (hub has already been reset). */
+int usb_enumerate_device(usb_device_t *hub, uint8_t port, usb_speed_t speed, usb_device_t **out);
+
+/* HID class driver entry points, called by the core on probe/disconnect. */
+int  usb_hid_probe(usb_interface_t *interface);
+void usb_hid_disconnect(usb_interface_t *interface);
+
+/* Mass-storage class driver entry points, called by the core on probe/disconnect. */
+int  usb_storage_probe(usb_interface_t *interface);
+void usb_storage_disconnect(usb_interface_t *interface);
+
+/* Hub class driver entry points (no hub driver in GNOS yet: -E_OPNOTSUPP). */
+static inline int usb_hub_probe(usb_interface_t *interface)
+{
+    (void)interface;
+    return -E_OPNOTSUPP;
+}
+static inline void usb_hub_disconnect(usb_interface_t *interface)
+{
+    (void)interface;
+}
+
+#endif /* GNUCOS_USB_H */

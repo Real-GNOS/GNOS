@@ -105,6 +105,7 @@ USER_DIR   := src/usr
 BASEFLAGS := -m64 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
              -nostdinc -std=gnu11 -mno-red-zone -mgeneral-regs-only \
              -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fvisibility=hidden \
+             -fno-omit-frame-pointer \
              -Wall -Wextra -O2 -g $(KINCS)
 
 # kernel: PIE so Limine can relocate it into the higher half
@@ -147,6 +148,12 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/drm_vbe.o $(BUILD)/drm_svga.o $(BUILD)/simpledrm.o \
     $(BUILD)/kaslr.o \
                   $(BUILD)/subsys.o $(BUILD)/acpi.o $(BUILD)/sysfs.o \
+         $(BUILD)/kobject.o $(BUILD)/circular_list.o $(BUILD)/device.o \
+         $(BUILD)/usb_core.o $(BUILD)/host.o $(BUILD)/usb_sysfs.o \
+         $(BUILD)/namespace.o \
+         $(BUILD)/netlink.o \
+         $(BUILD)/ipv6.o \
+         $(BUILD)/gzip.o \
          $(BUILD)/debugcon.o $(BUILD)/ext2.o $(BUILD)/panic.o \
          $(BUILD)/gdt.o $(BUILD)/idt.o $(BUILD)/isr.o \
          $(BUILD)/kstring.o $(BUILD)/vfs.o $(BUILD)/procfs.o $(BUILD)/debugfs.o $(BUILD)/tmpfs.o $(BUILD)/tty_core.o $(BUILD)/tty_io.o $(BUILD)/console.o $(BUILD)/tty_kbd.o $(BUILD)/vt.o $(BUILD)/vt_ansi.o $(BUILD)/heap.o \
@@ -157,7 +164,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/lapic.o \
         $(BUILD)/net.o $(BUILD)/tcp.o $(BUILD)/sock.o \
          $(BUILD)/pci.o $(BUILD)/e1000.o $(BUILD)/audio.o $(BUILD)/audiodev.o \
-        $(BUILD)/hda.o $(BUILD)/ide.o $(BUILD)/atapi.o $(BUILD)/ata_block.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
+        $(BUILD)/hda.o $(BUILD)/ide.o $(BUILD)/atapi.o $(BUILD)/ahci.o $(BUILD)/satapi.o $(BUILD)/ata_block.o $(BUILD)/nvme.o $(BUILD)/cjkfont.o \
         $(BUILD)/cjkfont_data.o \
         $(BUILD)/input_core.o $(BUILD)/evdev.o $(BUILD)/evdev_queue.o \
         $(BUILD)/ps2.o $(BUILD)/keyboard.o $(BUILD)/mouse.o \
@@ -367,7 +374,7 @@ MUSL_INC  := $(MUSL_PREFIX)/include
 MUSL_GCC  := $(MUSL_PREFIX)/bin/musl-gcc
 
 # Programs built against musl rather than ulib.
-MUSLPROGS := hello mount coldplug chvt getty login bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest bufoktest
+MUSLPROGS := hello mount coldplug chvt getty login bgidm installer ttytest thrtest drmtest ptracetest insmod rmmod evtest eventest socktest ipctest wiggle nep1 cowtest bufoktest memtest nettest asmtest
 MUSL_OBJS := $(addprefix $(BUILD)/user/,$(addsuffix .o,$(MUSLPROGS)))
 MUSL_ELFS := $(addprefix $(BUILD)/,$(addsuffix .elf,$(MUSLPROGS)))
 
@@ -1477,15 +1484,9 @@ endif
 	       $(BUILD)/initrd-root/usr/lib/libswresample* \
 	       $(BUILD)/initrd-root/usr/lib/libswscale* \
 	       $(BUILD)/initrd-root/usr/lib/libpostproc* \
-	       $(BUILD)/initrd-root/usr/lib/libgtk-3* \
-	       $(BUILD)/initrd-root/usr/lib/libgdk* \
-	       $(BUILD)/initrd-root/usr/libexec/upower* \
-	       $(BUILD)/initrd-root/usr/share/icons \
+	       $(BUILD)/initrd-root/usr/share/icons/hicolor \
 	       $(BUILD)/initrd-root/usr/share/themes \
-	       $(BUILD)/initrd-root/etc/xdg/xfce4 \
-	       $(BUILD)/initrd-root/usr/bin/xfce4-* \
-	       $(BUILD)/initrd-root/usr/bin/startxfce4
-	find $(BUILD)/initrd-root/usr/bin -name "xfce4-*" -delete 2>/dev/null || true
+	       $(BUILD)/initrd-root/usr/share/sounds
 	find $(BUILD)/initrd-root -name "*.Xauthority" -delete 2>/dev/null || true
 	# `mount` is invoked by its bare name from OpenRC's init.sh and service
 	# scripts, so it must sit on PATH as /bin/mount (not /bin/mount.elf).  The
@@ -1686,8 +1687,11 @@ ifeq ($(USERLAND),src)
 	cp $(PY_SRC)/Modules/*.so \
 	   $(BUILD)/initrd-root/usr/lib/python3.12/lib-dynload/
 endif  # USERLAND=src: busybox/bash/coreutils/binutils/fastfetch/curl/nano/python
-	# ---- desktop stack (labwc/xfce) DISABLED for headless ISO -----------
-	# To re-enable: un-comment the labwc/xfce sections above this line.
+	# ---- desktop stack: Xfce on Xorg :0 --------------------------------
+	# Xorg (modesetting on the in-kernel KMS device) comes up in /usr/rc;
+	# the xfce4 session packages (xfwm4, xfce4-panel, xfdesktop,
+	# xfce4-terminal) come from build-alpine-rootfs.sh, and /sbin/start-xfce
+	# (installed from src/rootfs/sbin below) starts the session components.
 	
 	cp src/etc/inittab $(BUILD)/initrd-root/etc/inittab  # busybox init rewires openrc
 	# Standard Alpine runlevel set: hostname/sysctl/bootmisc/localmount in the
@@ -1820,8 +1824,11 @@ $(BUILD)/.kcmd: FORCE
 $(ISO): $(KRNL) $(INITRD) $(BUILD)/.kcmd $(LIMINE_BIOS) $(LIMINE_UEFI) | $(BUILD)
 	mkdir -p $(ISO_ROOT)
 	cp $(KRNL)      $(ISO_ROOT)/GNOSKr.elf
-	cp $(INITRD)    $(ISO_ROOT)/initrd.img
-	printf 'timeout: 1\n\n/GNOS\n    protocol: limine\n    kernel_path: boot():/GNOSKr.elf\n    module_path: boot():/initrd.img\n' > $(ISO_ROOT)/limine.conf
+	# The initrd ships gzip-compressed: Limine's loader decompresses gzipped
+	# modules on the fly, so the kernel side (module_request) is unchanged
+	# while the ISO holds a fraction of the ext2 image's size.
+	gzip -c $(INITRD) > $(ISO_ROOT)/initrd.img.gz
+	printf 'timeout: 1\n\n/GNOS\n    protocol: limine\n    kernel_path: boot():/GNOSKr.elf\n    module_path: boot():/initrd.img.gz\n' > $(ISO_ROOT)/limine.conf
 	@if [ -n "$(KCMD)" ]; then echo "    cmdline: $(KCMD)" >> $(ISO_ROOT)/limine.conf; fi
 	cp $(LIMINE_BIOS) $(ISO_ROOT)/limine-bios-cd.bin
 	cp $(LIMINE_UEFI) $(ISO_ROOT)/limine-uefi-cd.bin

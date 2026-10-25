@@ -17,6 +17,7 @@
 #include <stdint.h>
 
 #include "proc.h"
+#include "namespace.h"
 #include "cgroup.h"
 #include "sysvipc.h"
 #include "seccomp.h"
@@ -317,6 +318,7 @@ static proc_t *proc_alloc(void)
         memset(p, 0, sizeof(*p));
         p->pid        = g_next_pid++;
         p->tgid       = p->pid; /* a fresh process is its own group leader */
+        p->nsproxy    = &init_nsproxy;
         p->start_tick = timer_ticks();
         p->kstack_top = (uint64_t)(uintptr_t)g_kstacks[i] + KSTACK_SIZE;
         /* TEMPORARY Xorg debugging: record every stack-slot assignment so
@@ -1174,6 +1176,7 @@ static void inherit_creds(proc_t *child, const proc_t *parent)
     for (uint32_t i = 0; i < parent->ngroups; i++)
         child->groups[i] = parent->groups[i];
     child->ctty = parent->ctty;
+    child->nsproxy = nsproxy_get(parent->nsproxy ? parent->nsproxy : &init_nsproxy);
 }
 
 int proc_in_group(const proc_t *p, uint32_t gid)
@@ -1770,6 +1773,11 @@ static void proc_teardown(proc_t *p, int self)
      * shared-memory segments while p->as still names the address space the
      * segments are mapped into (vmm_put below may destroy it). */
     sysv_exit(p);
+
+    /* Namespace references die with the task: every fork()ed proc holds one
+     * ref on its nsproxy (inherit_creds), released exactly here. */
+    nsproxy_put(p->nsproxy);
+    p->nsproxy = NULL;
 
     for (int i = 0; i < PROC_MAX_FD; i++) {
         if (p->fds[i] >= 0) {

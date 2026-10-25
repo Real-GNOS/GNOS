@@ -11,13 +11,13 @@
  *     needs.  It costs a round trip whenever the network reorders, which on a
  *     QEMU slirp link and on loopback is never.
  *   - **One outstanding retransmission timer** for the whole connection,
- *     re-armed from the oldest unacknowledged byte, with a fixed RTO rather
- *     than a Jacobson/Karels estimate.
- *   - **No congestion control.**  The send window is whatever the peer
- *     advertised, bounded by our transmit buffer.  There is no slow start and
- *     no fast retransmit.  On a link that does not drop packets these do
- *     nothing; on one that does, this TCP will be a bad citizen, which is
- *     worth knowing before pointing it at the internet.
+ *     re-armed from the oldest unacknowledged byte.  The RTO starts at one
+ *     second and backs off exponentially per retransmission (capped at 60 s,
+ *     RFC 6298 style) rather than a Jacobson/Karels estimate.
+ *   - **Congestion control, RFC 5681.**  The send window is the peer's
+ *     advertised window clamped by a congestion window: slow start below
+ *     ssthresh, congestion avoidance above it, collapse on RTO, and fast
+ *     retransmit on three duplicate ACKs.  SACK is still not negotiated.
  *   - **No SACK, no window scaling, no timestamps.**  Options are parsed only
  *     far enough to find the MSS, and only MSS is ever sent.
  *
