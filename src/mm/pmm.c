@@ -134,6 +134,19 @@ void pmm_init(void)
      * would rather not find out which ones still matter. */
     mark_used(0, 0x100000);
 
+    /* The kernel's own physical span -- image AND BSS (the kernel stacks
+     * live in BSS) -- is never allocator territory, whatever the memory
+     * map says: a cache/DMA write landing in a kernel-stack frame is the
+     * shape that put userland version strings into Xorg's ppoll frame. */
+    {
+        extern volatile struct limine_kernel_address_request kernel_address_request;
+        extern char _kernel_end[];
+        if (kernel_address_request.response)
+            mark_used(kernel_address_request.response->physical_base,
+                      (uint64_t)(uintptr_t)_kernel_end -
+                          kernel_address_request.response->virtual_base);
+    }
+
     /* And of course the bitmap itself is not up for grabs. */
     mark_used(bm_phys, g_bitmap_bytes);
 

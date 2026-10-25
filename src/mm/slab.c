@@ -391,8 +391,9 @@ static void slab_rehome(kmem_cache_t *c, kmem_slab_t *s)
     }
 }
 
-/* Push every object an array cache holds back into its slab. */
-static void ac_drain(kmem_cache_t *c, kmem_ac_t *ac)
+/* Push every object an array cache holds back into its slab.  Kept for
+ * cache-shrink paths that are not wired yet; referenced nowhere today. */
+static void __attribute__((unused)) ac_drain(kmem_cache_t *c, kmem_ac_t *ac)
 {
     while (ac->avail) {
         void *o = ac->entry[--ac->avail];

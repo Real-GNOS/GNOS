@@ -82,6 +82,10 @@ typedef unsigned int ACPI_STATUS_K;
 #include "nvme.h"
 #include "drm.h"
 #include "drm_init.h"
+/* chrdev.h pulls drm_devtmpfs.h, which redeclares the kobject structs this
+ * file already has -- declare the two init hooks instead of including it. */
+void chrdev_init(void);
+int  chrdev_populate(void);
 #include "drm_svga.h"
 #include "procfs.h"
 #include "xhci.h"
@@ -407,6 +411,12 @@ void kernel_main(void)
     pty_init();
     audiodev_vfs_register(); /* /dev/dsp + /dev/snd pair, one call */
     tty_init();
+
+    /* The static character registry (drivers/char): mem + kmsg announce
+     * themselves here, then chrdev_populate() publishes every registered
+     * node under /dev through the same devtmpfs bridge the DRM port uses. */
+    chrdev_init();
+    chrdev_populate();
 
     /* The evdev driver publishes /dev/input/event0 (keyboard) and event1
      * (mouse) over the same i8042 ports tty_init just enabled.  It must

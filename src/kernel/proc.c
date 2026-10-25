@@ -72,6 +72,37 @@ static int schedule(void);
 static proc_t  g_procs[MAX_PROCS];
 static uint8_t g_kstacks[MAX_PROCS][KSTACK_SIZE] __attribute__((aligned(16)));
 
+/* Slot-claim bitmap.  During the whole fork path a slot reads PROC_UNUSED
+ * (invisible by design), so the state cannot tell two cores apart: on SMP
+ * both could claim the same 16 KiB kernel stack and overwrite each other's
+ * saved frames -- the ppoll frame corruption behind the Xorg/openrc hangs.
+ * The busy bit is the slot's true ownership flag. */
+static volatile uint64_t g_slot_busy;
+
+/* Hand a kernel-stack slot back to proc_alloc.  Clears the busy bit with
+ * release ordering so anyone who sees the bit clear also sees the slot's
+ * state store. */
+static void slot_release(proc_t *p)
+{
+    /* Defensive: a live task must never hand its 16 KiB stack to the next
+     * fork -- that is the ppoll-frame corruption behind the Xorg crash
+     * (two pids logged with the same slot/ks).  Refuse and say so: the
+     * slot stays owned and the caller's bug is visible on the debug
+     * console instead of corrupting silently. */
+    if (p->state == PROC_READY || p->state == PROC_RUNNING || p->state == PROC_BLOCKED) {
+        dbg_puts("SLOT_RELEASE REFUSED pid=");
+        dbg_puts_dec((uint32_t)p->pid);
+        dbg_puts(" state=");
+        dbg_puts_dec((uint32_t)p->state);
+        dbg_puts(" on_cpu=");
+        dbg_puts_dec((uint32_t)(p->on_cpu + 1));
+        dbg_puts("\r\n");
+        return;
+    }
+    __atomic_fetch_and(&g_slot_busy, ~(1ull << (p - g_procs)), __ATOMIC_RELEASE);
+    p->state = PROC_UNUSED;
+}
+
 /* execve's string arena and pointer vectors.  See the comment above for why
  * these are static rather than automatic. */
 static char     g_argbuf[ARG_BYTES];
@@ -311,7 +342,14 @@ static uint8_t g_fpu_init[512] __attribute__((aligned(16)));
 static proc_t *proc_alloc(void)
 {
     for (int i = 0; i < MAX_PROCS; i++) {
+        uint64_t bit = 1ull << i;
         if (g_procs[i].state != PROC_UNUSED)
+            continue;
+        /* Atomic claim: two cores can fork at once, and between the scan
+         * and fork setting a real state the slot reads PROC_UNUSED (the
+         * invisible-by-design window) -- the busy bit is what keeps both
+         * cores out of one 16 KiB stack. */
+        if (__atomic_fetch_or(&g_slot_busy, bit, __ATOMIC_ACQ_REL) & bit)
             continue;
 
         proc_t *p = &g_procs[i];
@@ -927,7 +965,7 @@ int proc_spawn_init(const char *path)
     if (cg_attach_new(p, CG_ROOT) < 0) {
         vmm_destroy(p->as);
         p->as    = NULL;
-        p->state = PROC_UNUSED;
+        slot_release(p);
         return -E_AGAIN;
     }
     proc_make_runnable(p);
@@ -1021,7 +1059,7 @@ static void kthreadd_main(void *arg)
 
         kthread_bootstrap_t *b = kmalloc(sizeof(*b));
         if (!b) {
-            p->state = PROC_UNUSED;
+            slot_release(p);
             kfree(w);
             continue;
         }
@@ -1053,7 +1091,7 @@ static void kthreadd_main(void *arg)
 
         if (cg_attach_new(p, CG_ROOT) < 0) {
             kfree(b);
-            p->state = PROC_UNUSED;
+            slot_release(p);
             continue;
         }
         proc_make_runnable(p);
@@ -1083,7 +1121,7 @@ int proc_spawn_kthreadd(void)
     /* Fabricate a switch_context frame pointing at kthreadd_main(NULL). */
     kthread_bootstrap_t *b = kmalloc(sizeof(*b));
     if (!b) {
-        p->state = PROC_UNUSED;
+        slot_release(p);
         return -1;
     }
     b->entry = kthreadd_main;
@@ -1111,7 +1149,7 @@ int proc_spawn_kthreadd(void)
         dbg_puts_dec((uint32_t)cg_live(0));
         dbg_puts("\r\n");
         kfree(b);
-        p->state = PROC_UNUSED;
+        slot_release(p);
         return -1;
     }
 
@@ -1135,7 +1173,7 @@ proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg)
 
     kthread_work_t *w = kmalloc(sizeof(*w));
     if (!w) {
-        p->state = PROC_UNUSED;
+        slot_release(p);
         return NULL;
     }
     w->proc  = p;
@@ -1230,7 +1268,7 @@ int proc_fork(regs_t *r)
 
     child->as = vmm_clone(parent->as);
     if (!child->as) {
-        child->state = PROC_UNUSED;
+        slot_release(child);
         return -E_NOMEM;
     }
 
@@ -1239,7 +1277,7 @@ int proc_fork(regs_t *r)
     if (cg_attach_new(child, parent->cg) < 0) {
         vmm_put(child->as);
         child->as    = NULL;
-        child->state = PROC_UNUSED;
+        slot_release(child);
         return -E_AGAIN;
     }
 
@@ -1354,7 +1392,7 @@ int proc_clone(regs_t *r)
     else
         child->as = vmm_clone(parent->as);
     if (!child->as) {
-        child->state = PROC_UNUSED;
+        slot_release(child);
         return -E_NOMEM;
     }
 
@@ -1363,7 +1401,7 @@ int proc_clone(regs_t *r)
     if (cg_attach_new(child, parent->cg) < 0) {
         vmm_put(child->as);
         child->as    = NULL;
-        child->state = PROC_UNUSED;
+        slot_release(child);
         return -E_AGAIN;
     }
 
@@ -2041,14 +2079,14 @@ int proc_waitpid(int pid, int *status, int options)
                 int cpid = c->pid;
                 if (status)
                     *status = c->term_sig ? (c->term_sig & 0x7F) : ((c->exit_status & 0xFF) << 8);
-                c->state = PROC_UNUSED;
+                slot_release(c);
                 /* Reaping the leader reaps the whole group: every thread
                  * zombie of it is unreachable now and its slot is freed
                  * here, the one place that knows it is safe. */
                 for (int j = 0; j < MAX_PROCS; j++) {
                     if (g_procs[j].state == PROC_ZOMBIE && g_procs[j].tgid == cpid &&
                         &g_procs[j] != c)
-                        g_procs[j].state = PROC_UNUSED;
+                        slot_release(&g_procs[j]);
                 }
                 return cpid;
             }
@@ -2576,10 +2614,14 @@ void sched_enqueue(proc_t *p)
  * would be picked by another core -- the picker cannot take the lock until
  * the switch that saved it has finished.
  */
-static int schedule(void)
+/* schedule() with g_proc_lock already held: sched_block* must store
+ * BLOCKED and park the stack inside one critical section, so a waker
+ * (which needs the same lock) can never observe BLOCKED before
+ * switch_context has saved rsp -- otherwise a second core could resume
+ * the task from a stale saved_rsp and run two cores on one kernel stack.
+ * Same return contract as schedule(). */
+static int schedule_locked(void)
 {
-    spin_lock_irq(&g_proc_lock);
-
     proc_t *prev = cpu_self()->current;
 
     /* Account the outgoing task's CPU time.  Virtual time only advances
@@ -2716,6 +2758,12 @@ static int schedule(void)
     return 1;
 }
 
+static int schedule(void)
+{
+    spin_lock_irq(&g_proc_lock);
+    return schedule_locked();
+}
+
 /* Drop a PI boost: the waiter left the owner's list and the owner's
  * effective weight falls back to the strongest remaining waiter. */
 void futex_pi_unregister(proc_t *p)
@@ -2820,10 +2868,16 @@ void sched_block(wait_reason_t why)
 
     proc_t *cur = cpu_self()->current;
     if (cur) {
-        cur->state       = PROC_BLOCKED;
         cur->wait_reason = why;
         bkl_leave_for_switch(cur);
-        schedule();
+        /* BLOCKED goes on the record inside the same critical section that
+         * parks the stack: a waker needs g_proc_lock to observe it, and by
+         * then switch_context has already saved rsp.  Set outside, a second
+         * core could resume this task from a stale saved_rsp and run two
+         * cores on one kernel stack. */
+        spin_lock_irq(&g_proc_lock);
+        cur->state       = PROC_BLOCKED;
+        schedule_locked();
         bkl_return_from_switch();
     }
 
@@ -2836,10 +2890,11 @@ void sched_block_irqoff(wait_reason_t why)
     proc_t *cur = cpu_self()->current;
     if (!cur)
         return;
-    cur->state       = PROC_BLOCKED;
     cur->wait_reason = why;
     bkl_leave_for_switch(cur);
-    schedule();
+    spin_lock_irq(&g_proc_lock); /* state store inside the park lock: see sched_block */
+    cur->state       = PROC_BLOCKED;
+    schedule_locked();
     bkl_return_from_switch();
 }
 
@@ -2848,11 +2903,12 @@ void sched_block_timeout(wait_reason_t why, uint64_t ticks)
     proc_t *p = cpu_self()->current;
     if (!p)
         return;
-    p->state       = PROC_BLOCKED;
     p->wait_reason = why;
     p->wake_tick   = timer_ticks() + (ticks ? ticks : 1);
     bkl_leave_for_switch(p);
-    schedule();
+    spin_lock_irq(&g_proc_lock); /* state store inside the park lock: see sched_block */
+    p->state       = PROC_BLOCKED;
+    schedule_locked();
     bkl_return_from_switch();
     p->wake_tick = 0;
 }

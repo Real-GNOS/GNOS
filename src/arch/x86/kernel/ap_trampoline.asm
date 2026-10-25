@@ -35,3 +35,6 @@ ap_entry:
 .halt:
     hlt
     jmp  .halt
+
+; No executable stack (same idiom as isr.asm/switch.asm).
+section .note.GNU-stack noalloc noexec nowrite progbits

@@ -22,10 +22,12 @@ int fatfs_umount(const char *path);
 /* Routing and resolution, called from vfs.c's path walk. */
 int fatfs_route(const char *abs, char *rel);
 int fatfs_resolve(const char *rel, struct vfs_node *out);
+int fatfs_attach(struct vfs_node *dev, uint64_t sectors);
+void fatfs_detach(void);
 
 /* The node operations vfs.c installs on resolved FAT nodes. */
-extern const vfs_ops_t *const fatfs_file_ops(void);
-extern const vfs_ops_t *const fatfs_dir_ops(void);
+extern const vfs_ops_t *fatfs_file_ops(void);
+extern const vfs_ops_t *fatfs_dir_ops(void);
 
 /* File management, the VFS-side equivalents of the syscalls below a mount. */
 int fatfs_unlink(const char *rel);

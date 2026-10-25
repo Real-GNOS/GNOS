@@ -21,6 +21,7 @@
 #include "tty_internal.h"
 #include "fbcon.h"
 #include "vfs.h"
+#include "chrdev.h"
 #include "proc.h"
 #include "vmm.h"
 #include "subsys.h"
@@ -191,12 +192,15 @@ void tty_init(void)
         "tty1", "tty2", "tty3", "tty4", "tty5", "tty6",
     };
     for (int i = 0; i < NR_VT; i++) {
-        vfs_register_dev(vt_names[i], (const vfs_ops_t *)tty_ops(), &g_vt[i]);
+        /* Every /dev char node goes through the chrdev registry; the node
+         * itself is created by chrdev_populate() after init. */
+        cdev_add_vfs("", vt_names[i], 0, 0, 1, 0620, 0, 5,
+                     (const vfs_ops_t *)tty_ops(), &g_vt[i]);
         subsys_set_state(subsys_register(vt_names[i], vt_names[i], SUBSYS_CLASS_TTY, 4, i + 1),
                          SUBSYS_STATE_LIVE);
     }
-    vfs_register_dev("tty", (const vfs_ops_t *)tty_ops(), NULL);
-    vfs_register_dev("console", (const vfs_ops_t *)tty_ops(), &g_vt[0]);
+    cdev_add_vfs("", "tty", 0, 0, 1, 0666, 0, 5, (const vfs_ops_t *)tty_ops(), NULL);
+    cdev_add_vfs("", "console", 0, 0, 1, 0600, 0, 0, (const vfs_ops_t *)tty_ops(), &g_vt[0]);
     vcs_init(); /* /dev/vcs, /dev/vcsa: the active screen as a file */
     subsys_set_state(subsys_register("tty", "tty", SUBSYS_CLASS_TTY, 5, 0), SUBSYS_STATE_LIVE);
     subsys_set_state(subsys_register("console", "console", SUBSYS_CLASS_TTY, 5, 1),

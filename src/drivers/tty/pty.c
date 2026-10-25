@@ -31,7 +31,9 @@
 #include "proc.h"
 #include "kstring.h"
 #include "heap.h"
+#include "stdio.h"
 #include "vfs.h"
+#include "chrdev.h"
 #include "sysnum.h"
 
 #define PTY_MAX  16
@@ -643,7 +645,7 @@ static void pty_pair_release(pty_t *p)
     if (p->slave_registered) {
         char name[16];
         pts_name(name, sizeof(name), p->index);
-        vfs_unregister_dev(name);
+        cdev_del(name); /* registry entry and /dev node go together */
         p->slave_registered = 0;
     }
     kfree(p->to_slave);
@@ -769,11 +771,16 @@ int pty_reattach_master(vfs_node_t *n)
     p->ws.ws_row = 25;
     p->ws.ws_col = 80;
 
-    /* The slave appears in the dev table under pts/N; the master keeps the
-     * pair pointer in its own (per-open) node. */
-    char name[16];
-    pts_name(name, sizeof(name), p->index);
-    if (vfs_register_devnum(name, &pty_slave_ops, p, 136, (uint32_t)p->index) != 0) {
+    /* The slave appears in the dev table under pts/N through the chrdev
+     * registry (published now, this pair is created at runtime); the
+     * master keeps the pair pointer in its own (per-open) node. */
+    char idx[8], del[16];
+    snprintf(idx, sizeof(idx), "%d", p->index);
+    if (cdev_add_vfs("pts", idx, 136, (uint32_t)p->index, 1, 0620, 0, 5,
+                     &pty_slave_ops, p) != 0 ||
+        cdev_publish_path("pts", idx) != 0) {
+        snprintf(del, sizeof(del), "pts/%s", idx);
+        cdev_del(del);
         kfree(p->to_slave);
         kfree(p->to_master);
         p->used = 0;
@@ -790,7 +797,9 @@ void pty_init(void)
 {
     for (int i = 0; i < PTY_MAX; i++)
         g_pty[i].index = -1;
-    vfs_register_dev("ptmx", &pty_ptmx_ops, NULL);
+    /* ptmx joins the chrdev registry; the node is created by
+     * chrdev_populate() after init. */
+    cdev_add_vfs("", "ptmx", 0, 0, 1, 0666, 0, 5, &pty_ptmx_ops, NULL);
     dbg_puts("PTY: /dev/ptmx ready (");
     dbg_puts_dec((uint32_t)PTY_MAX);
     dbg_puts(" pairs)\r\n");

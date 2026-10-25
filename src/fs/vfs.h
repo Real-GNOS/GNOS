@@ -29,7 +29,7 @@
 /* Six virtual terminals, /dev/tty, /dev/console, five memory devices and the
  * framebuffer already come to fourteen, and the old ceiling of sixteen left
  * no room for anything else to register at boot. */
-#define VFS_MAX_DEV   32
+#define VFS_MAX_DEV   128
 #define VFS_MAX_PIPES 16
 #define VFS_NAME_MAX  32
 
@@ -173,6 +173,9 @@ typedef struct vfs_node {
     const vfs_ops_t *ops;
     void            *priv;
     uint32_t         rdev; /* Linux new_encode_dev() value; 0 = none */
+    uint16_t         mode; /* permission bits incl. owner/group/other; 0 = none recorded */
+    uint16_t         uid;  /* owning user  */
+    uint16_t         gid;  /* owning group */
     ext2_dirent_t    e2;   /* valid when the node lives on the ext2 mount */
 } vfs_node_t;
 
@@ -193,6 +196,8 @@ int vfs_register_dev(const char *name, const vfs_ops_t *ops, void *priv);
  * card0 must read back as (226, 0), event0 as (13, 64) and so on. */
 int vfs_register_devnum(const char *name, const vfs_ops_t *ops, void *priv, uint32_t maj,
                         uint32_t min);
+/* Record a /dev node's ownership and mode (from the chrdev registry). */
+int vfs_dev_set_perm(const char *name, uint16_t mode, uint16_t uid, uint16_t gid);
 
 /* Create an anonymous open file -- no directory entry, no path.  This is
  * what memfd_create, eventfd and epoll_create1 hand back: a slot in the

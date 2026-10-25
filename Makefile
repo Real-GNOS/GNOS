@@ -132,6 +132,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/fbdev.o \
          $(BUILD)/drm_drv.o $(BUILD)/drm_file.o $(BUILD)/drm_auth.o \
          $(BUILD)/drm_ioctl.o $(BUILD)/drm_init.o $(BUILD)/drm_devtmpfs.o \
+         $(BUILD)/chrdev.o $(BUILD)/mem.o $(BUILD)/kmsg.o \
          $(BUILD)/drm_vfs.o \
          $(BUILD)/intrusive_list.o $(BUILD)/rbtree.o \
          $(BUILD)/drm_idr.o $(BUILD)/drm_hashtab.o $(BUILD)/drm_rect.o \
@@ -1694,6 +1695,14 @@ endif  # USERLAND=src: busybox/bash/coreutils/binutils/fastfetch/curl/nano/pytho
 	# (installed from src/rootfs/sbin below) starts the session components.
 	
 	cp src/etc/inittab $(BUILD)/initrd-root/etc/inittab  # busybox init rewires openrc
+	# init-early.sh stub: upstream sets a console font/keymap via tty ioctls
+	# (kbd_mode/setfont/printf >/dev/console), and one of those syscalls
+	# wedges forever on this kernel, hanging openrc sysinit before any
+	# service runs.  The cosmetic font/keymap setup is not worth the boot;
+	# a plain exit-0 keeps the boot going while the tty path gets fixed.
+	printf '#!/bin/sh\n# stub: upstream console font/keymap ioctls wedge (see Makefile)\nexit 0\n' \
+	    > $(BUILD)/initrd-root/lib/rc/sh/init-early.sh
+	chmod 755 $(BUILD)/initrd-root/lib/rc/sh/init-early.sh
 	# Standard Alpine runlevel set: hostname/sysctl/bootmisc/localmount in the
 	# boot runlevel, the local(8) script dir at default.  Without the runlevel
 	# symlinks the openrc runlevels stay empty and "openrc boot/default"

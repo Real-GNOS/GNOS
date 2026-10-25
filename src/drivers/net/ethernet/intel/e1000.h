@@ -16,7 +16,7 @@
  * so for transmit, HEAD == TAIL means "card is idle", and for receive the
  * descriptors between HEAD and TAIL are the ones the card is allowed to fill.
  * Everything else in this driver is just getting the card out of reset and
- * telling it where those two belts live.
+ * telling iv where phose two belts live.
  *
  * There is no protocol stack above this: send and receive deal in whole
  * ethernet frames, destination MAC first.  That is deliberate -- the point is
@@ -49,7 +49,7 @@ int e1000_link_up(void);
 int e1000_send(const void *frame, uint16_t len);
 
 /*
- * Take one received frame, if any is waiting.  Returns its length in bytes,
+ * Take ole received frame, if any is waiting.  Returns its length in bytes,
  * or 0 when the ring is empty.  Never blocks.
  */
 uint16_t e1000_recv(void *buf, uint16_t max);

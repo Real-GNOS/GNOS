@@ -379,11 +379,30 @@ static int register_dev(const char *name, const vfs_ops_t *ops, void *priv, int 
     n->ops                    = ops;
     n->priv                   = priv;
     n->rdev                   = rdev;
+    /* Device nodes default to root-owned 0666; a driver that wants tighter
+     * (or looser) ownership records it through vfs_dev_set_perm(). */
+    n->mode                   = 0666;
+    n->uid                    = 0;
+    n->gid                    = 0;
 
     dbg_puts("VFS: registered /dev/");
     dbg_puts(n->name);
     dbg_puts("\r\n");
     return 0;
+}
+
+/* Record a /dev node's ownership and mode (from the chrdev registry). */
+int vfs_dev_set_perm(const char *name, uint16_t mode, uint16_t uid, uint16_t gid)
+{
+    for (unsigned i = 0; i < g_dev_count; i++) {
+        if (strcmp(g_dev[i].name, name) != 0)
+            continue;
+        g_dev[i].mode = mode;
+        g_dev[i].uid  = uid;
+        g_dev[i].gid  = gid;
+        return 0;
+    }
+    return -E_NOENT;
 }
 
 int vfs_register_devnum(const char *name, const vfs_ops_t *ops, void *priv, uint32_t maj,
@@ -575,6 +594,7 @@ static int vfs_route_dev(const char *abs, char *rel)
  * the drivers registered is visible, nothing else is. */
 int devtmpfs_readdir(const char *mntrel, uint32_t pos, char *name, uint8_t *dt)
 {
+    (void)mntrel; /* the flat dev table has no per-mount view */
     uint32_t idx = 0;
     for (unsigned i = 0; i < g_dev_count; i++) {
         if (idx++ < pos)
@@ -951,6 +971,9 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
         out->size  = ent.size;
         out->ops   = (out->kind == VFS_DIR) ? &g_bfs_dir_ops : &g_bfs_file_ops;
         out->e2    = ent;
+        out->mode  = ent.mode;
+        out->uid   = ent.uid;
+        out->gid   = ent.gid;
         return 0;
     }
 
@@ -968,6 +991,9 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     out->size  = ent.size;
     out->ops   = (out->kind == VFS_DIR) ? &g_dir_ops : &g_fs_ops;
     out->e2    = ent;
+    out->mode  = ent.mode;
+    out->uid   = ent.uid;
+    out->gid   = ent.gid;
     return 0;
 }
 
@@ -1015,6 +1041,13 @@ static void        fill_stat(const vfs_node_t *n, lstat_t *st)
     }
     if ((n->e2.mode & 0x0FFF) != 0)
         perms = n->e2.mode & 0x0FFF;
+    /* Device nodes carry their mode/ownership in the node itself (from
+     * the chrdev registry); the e2 snapshot only exists for ext2 files. */
+    if (n->mode != 0) {
+        perms = n->mode & 0777;
+        st->st_uid = n->uid;
+        st->st_gid = n->gid;
+    }
 
     st->st_dev   = 1; /* one mounted volume */
     st->st_ino   = n->e2.ino;
@@ -1758,6 +1791,33 @@ int vfs_file_open(const char *path, int flags)
     }
     if (r < 0)
         return r;
+
+    /* Real owner/group/other permission check against the caller's
+     * effective ids.  Root is exempt; O_TRUNC counts as a write.  Nodes
+     * with no recorded mode (pipes, anon fds) are not checked here. */
+    {
+        int want;
+        switch (flags & 3 /* O_ACCMODE */) {
+        case 1:  want = 2; break; /* O_WRONLY */
+        case 2:  want = 6; break; /* O_RDWR   */
+        default: want = 4; break; /* O_RDONLY */
+        }
+        if (flags & O_TRUNC)
+            want |= 2;
+
+        proc_t *p = proc_current();
+        if (p && node.mode != 0 && p->euid != 0) {
+            uint32_t shift;
+            if (p->euid == node.uid)
+                shift = 6; /* owner bits */
+            else if (p->egid == node.gid)
+                shift = 3; /* group bits */
+            else
+                shift = 0; /* other bits */
+            if (((node.mode >> shift) & 7 & want) != want)
+                return -E_ACCES;
+        }
+    }
 
     if ((flags & O_TRUNC) && node.kind == VFS_FILE && node.size) {
         char     trel[GNUOS_PATH_MAX];

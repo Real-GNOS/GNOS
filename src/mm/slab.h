@@ -58,6 +58,7 @@ typedef struct {
 } kmem_slabinfo_t;
 
 int  kmem_slabinfo_next(int *iter, kmem_slabinfo_t *out);
+void slab_init(void);
 void slab_selftest(void);
 
 /* The one lock the slab layer takes; heap.c owns the region underneath. */

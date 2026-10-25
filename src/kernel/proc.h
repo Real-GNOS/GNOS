@@ -25,7 +25,9 @@
  * (~340 KiB), which is why the QEMU line went from -m 256M to -m 512M.
  */
 #define MAX_PROCS   64
-#define KSTACK_SIZE 0x4000 /* 16 KiB */
+#define KSTACK_SIZE 0x8000 /* 32 KiB -- 16 KiB overflowed: an execve's deep
+                            * call chain spilled past its slot base and
+                            * trashed the neighbour slot's trap frame */
 
 /* A full libc program opens far more descriptors than the toy utilities did:
  * BusyBox's `cp -a` alone holds a source fd, a destination fd and a directory

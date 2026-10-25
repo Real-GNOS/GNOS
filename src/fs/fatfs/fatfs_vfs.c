@@ -151,11 +151,11 @@ static const vfs_ops_t g_fat_file_ops = {
 static const vfs_ops_t g_fat_dir_ops = {
     .read = fat_dir_read, .write = fat_dir_write, .release = node_release};
 
-const vfs_ops_t *const fatfs_file_ops(void)
+const vfs_ops_t *fatfs_file_ops(void)
 {
     return &g_fat_file_ops;
 }
-const vfs_ops_t *const fatfs_dir_ops(void)
+const vfs_ops_t *fatfs_dir_ops(void)
 {
     return &g_fat_dir_ops;
 }

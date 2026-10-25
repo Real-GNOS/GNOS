@@ -1121,7 +1121,9 @@ static int64_t sys_futex_waitv(uint64_t uwaiters, uint64_t nr, uint64_t flags, u
     if (r < 0)
         return r;
 
-    p->state       = PROC_BLOCKED;
+    /* wait_reason only here: sched_block* records state=BLOCKED inside the
+     * park lock, so no other core can observe BLOCKED while saved_rsp is
+     * still stale. */
     p->wait_reason = WAIT_FUTEX;
     if (ticks >= 0)
         sched_block_timeout(WAIT_FUTEX, (uint64_t)ticks);
@@ -2970,6 +2972,18 @@ static void ppoll_slot_watch(const char *phase, uint64_t rsp_me, uint64_t o_bx, 
     dbg_puts(" now_bp=");
     dbg_puts_hex(bp);
     dbg_puts("\r\n");
+    /* One-shot hardware watchpoint: DR0 on the watched slot, write, 4 bytes
+     * (DR7 L0 | R/W0=01 | LEN0=11).  The corruption is deterministic, so
+     * whoever writes again after this print lands in the #DB dump. */
+    static int wp_armed;
+    if (!wp_armed) {
+        wp_armed = 1;
+        asm volatile("mov %0, %%dr0" :: "r"(rsp_me + SAVED_RBX_OFF));
+        asm volatile("mov %0, %%dr7" :: "r"((uint64_t)0xD0001));
+        dbg_puts("WP-ARM addr=");
+        dbg_puts_hex(rsp_me + SAVED_RBX_OFF);
+        dbg_puts("\r\n");
+    }
 }
 
 int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)

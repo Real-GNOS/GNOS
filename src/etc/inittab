@@ -2,17 +2,12 @@
 # This is Alpine's standard shape: openrc runs the three runlevels, one
 # respawning getty per virtual terminal.  Indentation and the colon format
 # are busybox's.
-# openrc is disabled for now, two kernel bugs deep:
-#   1. dependency generation (gendepends) blocks a syscall that never
-#      returns, wedging the boot (RC_NODEPS=1 skips that stage);
-#   2. with services actually running, executing them trips a triple fault
-#      (QEMU -no-reboot exits 0) partway through the boot runlevel.
-# Neither matters for the desktop: proc/sysfs/devtmpfs are kernel-mounted
-# and the session scripts set up everything else.  Re-enable once both are
-# fixed in the kernel.
-#::sysinit:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc sysinit
-#::sysinit:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc boot
-#::wait:/usr/bin/timeout 30 env RC_NODEPS=1 /sbin/openrc default
+# openrc back on: the wedge (and the Xorg ppoll corruption) traced to a
+# kernel slot-claim race -- two cores could fork into one 16 KiB kernel
+# stack (proc.c g_slot_busy).  Timeout guards stay as a safety net.
+::sysinit:/usr/bin/timeout 30 /sbin/openrc sysinit
+::sysinit:/usr/bin/timeout 30 /sbin/openrc boot
+::wait:/usr/bin/timeout 30 /sbin/openrc default
 # The user-buffer probe regression test: a writev whose iovec runs off the
 # image end must come back as an error, never a frozen machine (the shape
 # that took a mount(8) stdio flush down; src/usr/bufoktest.c).

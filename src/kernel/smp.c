@@ -165,3 +165,42 @@ void ap_main(int cpu)
     sched_start();
     __builtin_unreachable();
 }
+
+/* ---- user-RSP stash watchpoint (temporary exec debugging) --------------
+ *
+ * syscall_entry stashes the user RSP in cpu_t.user_rsp (GS+0x28) on every
+ * ring-3 entry and the iretq tail restores it from there.  The openrc #GP
+ * crashes showed that stash holding path strings and kernel pointers --
+ * someone overwrites it mid-syscall.  Arm DR0 on the BSP's stash slot and
+ * record the RIP the entry-time write returns to, so the #DB handler can
+ * wave through the one benign writer and dump everyone else in the act. */
+uint64_t g_user_rsp_watch_rip;
+uint64_t g_wp_benign_hits;
+
+void smp_arm_user_rsp_watch(void)
+{
+    extern char syscall_entry[];
+    /* entry+0x14: the instruction after `mov %rsp,%gs:0x28` (cli 1b,
+     * pushf/popf 10b, the mov 9b => 0xb + 9). */
+    g_user_rsp_watch_rip = (uint64_t)(uintptr_t)syscall_entry + 0x14;
+
+    /* Watch BOTH cores' stash, LOW and HIGH halves.  The corruption seen
+     * so far only touches the high dword (0x00007FFF -> 0x00006FFF), a
+     * 4-byte write at user_rsp+4 that a low-half-only watch never sees.
+     * DR0/DR1 = BSP low/high, DR2/DR3 = AP low/high. */
+    uint64_t slot0 = (uint64_t)(uintptr_t)&g_cpu[0].user_rsp;
+    uint64_t slot1 = (uint64_t)(uintptr_t)&g_cpu[1].user_rsp;
+    asm volatile("mov %0, %%dr0" :: "r"(slot0));
+    asm volatile("mov %0, %%dr1" :: "r"(slot0 + 4));
+    asm volatile("mov %0, %%dr2" :: "r"(slot1));
+    asm volatile("mov %0, %%dr3" :: "r"(slot1 + 4));
+    /* L0..L3 enabled; each watch: R/W=01 (write), LEN=11 (4 bytes). */
+    asm volatile("mov %0, %%dr7" :: "r"((uint64_t)0x7777000F));
+    dbg_puts("WP: watching user_rsp stash @");
+    dbg_puts_hex(slot0);
+    dbg_puts(" + AP ");
+    dbg_puts_hex(slot1);
+    dbg_puts(" (benign rip ");
+    dbg_puts_hex(g_user_rsp_watch_rip);
+    dbg_puts(")\r\n");
+}

@@ -232,6 +232,64 @@ static void __attribute__((noreturn)) fault_halt(regs_t *r, const char *tag)
         dbg_puts(" r14=");
         dbg_puts_hex(r->r14);
         dbg_puts("\r\n");
+
+        /* rbp-chain backtrace (same walk as panic.c): the wild-jump bugs
+         * dump registers but the callers are what pin down the source. */
+        dbg_puts("backtrace:\r\n");
+        const uint64_t *fp = (const uint64_t *)r->rbp;
+        for (int depth = 0; depth < 16 && fp; depth++) {
+            const uint64_t *next = (const uint64_t *)fp[0];
+            uint64_t        frip  = fp[1];
+            if ((uintptr_t)next <= (uintptr_t)fp || ((uintptr_t)next & 7) || !frip)
+                break;
+            dbg_puts("  #");
+            dbg_puts_dec((uint32_t)depth);
+            dbg_puts(" rip=");
+            dbg_puts_hex(frip);
+            dbg_puts("\r\n");
+            fp = next;
+        }
+
+        /* Trap-frame forensics.  At an iretq #GP the words at rsp are
+         * (rip, cs, rflags, rsp, ss) exactly as they would be restored --
+         * printing them (plus the victim) turns "the return frame was
+         * bad" into which process and which values went bad.  Kernel
+         * stacks live under the direct mapping, so plain loads are safe. */
+        proc_t *cur = proc_current();
+        if (cur) {
+            dbg_puts("victim pid=");
+            dbg_puts_dec((uint32_t)cur->pid);
+            dbg_puts(" name=");
+            dbg_puts(cur->name);
+            dbg_puts("\r\n");
+        }
+        {
+            /* The user-RSP stash and how many benign watchpoint hits we
+             * saw: distinguishes "the stash was corrupted" (stash differs
+             * from the frame slot) from "the frame was overwritten" (they
+             * match, both bad) -- and confirms DR watchpoints actually
+             * fire on this machine. */
+            uint64_t stash;
+            asm volatile("movq %%gs:0x28, %0" : "=r"(stash));
+            dbg_puts("user_rsp stash=");
+            dbg_puts_hex(stash);
+            dbg_puts(" benign-hits=");
+            dbg_puts_hex(g_wp_benign_hits);
+            dbg_puts("\r\n");
+        }
+        {
+            const uint64_t *sp = (const uint64_t *)r->rsp;
+            for (int i = -2; i < 8; i++) {
+                dbg_puts(i < 0 ? "  frame[-" : "  frame[");
+                if (i >= 0)
+                    dbg_puts_dec((uint32_t)i);
+                else
+                    dbg_puts_dec((uint32_t)-i);
+                dbg_puts("]=");
+                dbg_puts_hex(sp[i]);
+                dbg_puts("\r\n");
+            }
+        }
     }
 
     for (;;)
@@ -285,7 +343,6 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
     }
     {
         uint64_t mb = as->mmaps[hit].base;
-        uint64_t ms = as->mmaps[hit].size;
         unsigned vf = as->mmaps[hit].flags;
         /* TEMPORARY Xorg debugging: say why a fault is not being backed. */
         if (is_write && !(vf & VM_WRITE)) {
@@ -384,6 +441,41 @@ void isr_dispatch(regs_t *r)
         fault_halt(r, "GNOS: DOUBLE FAULT");
     }
 
+    /* #DB: a hardware watchpoint (DR0) fired.  The user-RSP stash watch
+     * waves through syscall_entry's own write (rip == the recorded benign
+     * return) and dumps any other writer in the act. */
+    if (r->vector == 1) {
+        uint64_t dr6;
+        asm volatile("mov %%dr6, %0" : "=r"(dr6));
+        if (r->rip == g_user_rsp_watch_rip) {
+            extern uint64_t g_wp_benign_hits;
+            g_wp_benign_hits++;
+            asm volatile("mov %0, %%dr6" :: "r"(0xFFFF0FF0UL));
+            goto out;
+        }
+        dbg_puts("WP-HIT rip=");
+        dbg_puts_hex(r->rip);
+        dbg_puts(" rsp=");
+        dbg_puts_hex(r->rsp);
+        dbg_puts(" dr6=");
+        dbg_puts_hex(dr6);
+        dbg_puts(" rax=");
+        dbg_puts_hex(r->rax);
+        dbg_puts(" rbx=");
+        dbg_puts_hex(r->rbx);
+        dbg_puts(" rcx=");
+        dbg_puts_hex(r->rcx);
+        dbg_puts(" rdx=");
+        dbg_puts_hex(r->rdx);
+        dbg_puts(" rsi=");
+        dbg_puts_hex(r->rsi);
+        dbg_puts(" rdi=");
+        dbg_puts_hex(r->rdi);
+        dbg_puts("\r\n");
+        asm volatile("mov %0, %%dr6" :: "r"(0xFFFF0FF0UL));
+        goto out;
+    }
+
     if (r->vector < 32) {
         /* #BP is the only fault we let through: it is how a debugger stops. */
         if (r->vector == 3) {
@@ -444,7 +536,7 @@ void isr_dispatch(regs_t *r)
                     addrspace_t *as = proc_current()->as;
                     dbg_puts("\nMMAP-RECORDS n=");
                     dbg_puts_dec((uint32_t)as->nmmaps);
-                    for (unsigned i = 0; i < as->nmmaps; i++) {
+                    for (int i = 0; i < as->nmmaps; i++) {
                         dbg_puts(" [");
                         dbg_puts_hex(as->mmaps[i].base);
                         dbg_puts("+");

@@ -127,6 +127,10 @@ extern uint8_t g_cpu_stack[MAX_CPUS][PERCPU_KSTACK];
 /* Discover the APs and start them.  Called once, on the BSP, after the
  * allocators and ACPI (the APs run the scheduler from ap_main on). */
 void smp_init(void);
+/* Temporary exec debugging: arm DR0 on the BSP user-RSP stash. */
+void smp_arm_user_rsp_watch(void);
+extern uint64_t g_user_rsp_watch_rip;
+extern uint64_t g_wp_benign_hits;
 
 /* C entry point for an AP; called from ap_trampoline.asm once its own stack
  * and GDT are loaded.  Does not return. */
