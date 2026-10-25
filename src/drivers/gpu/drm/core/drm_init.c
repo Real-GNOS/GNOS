@@ -115,6 +115,14 @@ int drm_class_registered = 0;
 
 /* ------------------------------------------------------------------- init */
 
+/* The DRM core is always built into this kernel; without this default a
+ * bare build (no .config) compiles this file to silent stubs and the
+ * /dev/dri nodes never appear -- Xorg then dies with "no screens found".
+ * simpledrm.c carries the same default for the same reason. */
+#ifndef CONFIG_DRM
+#define CONFIG_DRM 1
+#endif
+
 #if CONFIG_DRM
 
 int drm_init(void)
