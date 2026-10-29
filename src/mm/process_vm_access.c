@@ -14,6 +14,7 @@
 #include "pidfd.h"
 #include "vmm.h"
 #include "vfs.h"
+#include "kstring.h"
 
 typedef struct {
     uint64_t base, len;

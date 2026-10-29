@@ -127,8 +127,7 @@ int ata_identify(ata_disk_t *d)
     else if (lba1 || lba2) /* some other non-ATA signature */
         return 0;
 
-    outb(d->io + ATA_REG_COMMAND,
-         is_packet ? ATA_CMD_IDENTIFY_PACKET : ATA_CMD_IDENTIFY);
+    outb(d->io + ATA_REG_COMMAND, is_packet ? ATA_CMD_IDENTIFY_PACKET : ATA_CMD_IDENTIFY);
     if (ata_wait_drq(d) < 0)
         return 0;
 
@@ -141,8 +140,8 @@ int ata_identify(ata_disk_t *d)
     d->lba48   = (id[83] & (1u << 10)) != 0;
 
     uint64_t lba28 = (uint64_t)id[60] | ((uint64_t)id[61] << 16);
-    uint64_t lba48 = (uint64_t)id[100] | ((uint64_t)id[101] << 16) |
-                     ((uint64_t)id[102] << 32) | ((uint64_t)id[103] << 48);
+    uint64_t lba48 = (uint64_t)id[100] | ((uint64_t)id[101] << 16) | ((uint64_t)id[102] << 32) |
+                     ((uint64_t)id[103] << 48);
     d->sectors = (d->lba48 && lba48) ? lba48 : lba28;
     if (d->atapi && !d->sectors) {
         /* Removable media: IDENTIFY PACKET carries no capacity -- ask the
@@ -178,8 +177,7 @@ int ata_identify(ata_disk_t *d)
  * only in that the 48-bit one writes the high bytes first, and picking a
  * single path removes a whole class of "works until the disk gets big" bug.
  */
-static int ata_cmd_one(const ata_disk_t *d, uint64_t lba, uint8_t cmd28,
-                       uint8_t cmd48)
+static int ata_cmd_one(const ata_disk_t *d, uint64_t lba, uint8_t cmd28, uint8_t cmd48)
 {
     if (ata_wait_ready(d) < 0)
         return -1;
@@ -199,8 +197,7 @@ static int ata_cmd_one(const ata_disk_t *d, uint64_t lba, uint8_t cmd28,
     } else {
         /* In LBA28 the top four address bits live in the drive register,
          * which is also where the master/slave bit is. */
-        outb(d->io + ATA_REG_DRIVE,
-             (uint8_t)(0xE0 | (d->slave << 4) | ((lba >> 24) & 0x0F)));
+        outb(d->io + ATA_REG_DRIVE, (uint8_t)(0xE0 | (d->slave << 4) | ((lba >> 24) & 0x0F)));
         ata_delay400(d);
         outb(d->io + ATA_REG_FEATURES, 0);
         outb(d->io + ATA_REG_SECCOUNT, 1);
@@ -271,8 +268,7 @@ int ata_write_sector(const ata_disk_t *d, uint64_t lba, const uint8_t *buf)
      * power cut (or a QEMU exit) between the write and the next boot loses
      * data the caller was told had landed.
      */
-    outb(d->io + ATA_REG_COMMAND,
-         d->lba48 ? ATA_CMD_CACHE_FLUSH_EXT : ATA_CMD_CACHE_FLUSH);
+    outb(d->io + ATA_REG_COMMAND, d->lba48 ? ATA_CMD_CACHE_FLUSH_EXT : ATA_CMD_CACHE_FLUSH);
     ata_delay400(d);
     st = ata_wait_ready(d);
     if (st < 0 || (st & (ATA_SR_ERR | ATA_SR_DF)))

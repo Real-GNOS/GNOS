@@ -82,32 +82,32 @@ struct kset_uevent_ops {
 
 /* The core object-model primitive. */
 struct kobject {
-    const char       *name;   // name in sysfs
-    struct kobject   *parent; // parent kobject (NULL = sysfs root)
-    struct kset      *kset;   // containing kset
-    struct kobj_type *ktype;  // type descriptor
-    kref_t            kref;   // reference counter
+    const char       *name;    // name in sysfs
+    struct kobject   *parent;  // parent kobject (NULL = sysfs root)
+    struct kset      *kset;    // containing kset
+    struct kobj_type *ktype;   // type descriptor
+    kref_t            kref;    // reference counter
 
     /* internal */
-    clist_t    children;       // circular list of child kobjects
-    clist_t    attributes;     // circular list of sysfs_attr_entry_t
-    clist_t    bin_attributes; // list of sysfs_bin_attr_entry_t
-    clist_t    symlinks;       // circular list of sysfs_symlink_entry_t
-    spinlock_t lock;           // protects children/attributes/symlinks
+    clist_t    children;        // circular list of child kobjects
+    clist_t    attributes;      // circular list of sysfs_attr_entry_t
+    clist_t    bin_attributes;  // list of sysfs_bin_attr_entry_t
+    clist_t    symlinks;        // circular list of sysfs_symlink_entry_t
+    spinlock_t lock;            // protects children/attributes/symlinks
 
-    unsigned int state_initialized        : 1;
-    unsigned int state_in_sysfs           : 1;
-    unsigned int state_in_kset            : 1;
-    unsigned int state_add_uevent_sent    : 1;
+    unsigned int state_initialized : 1;
+    unsigned int state_in_sysfs : 1;
+    unsigned int state_in_kset : 1;
+    unsigned int state_add_uevent_sent : 1;
     unsigned int state_remove_uevent_sent : 1;
-    unsigned int uevent_suppress          : 1;
+    unsigned int uevent_suppress : 1;
 };
 
 /* kset - a collection of kobjects (appears as a sysfs subdirectory) */
 struct kset {
-    clist_t                       list;      // circular list of kobject entries
-    spinlock_t                    list_lock; // protects list modifications
-    struct kobject                kobj;      // embedded kobject (the default parent)
+    clist_t                       list;       // circular list of kobject entries
+    spinlock_t                    list_lock;  // protects list modifications
+    struct kobject                kobj;       // embedded kobject (the default parent)
     const struct kset_uevent_ops *uevent_ops;
     unsigned int                  dynamic : 1;
 };
@@ -131,10 +131,14 @@ uint32_t kref_read(const kref_t *kref);
 void kobject_init(struct kobject *kobj, struct kobj_type *ktype);
 
 /* Add a kobject to the hierarchy (creates sysfs directory) */
-__attribute__((format(printf, 3, 4))) int kobject_add(struct kobject *kobj, struct kobject *parent, const char *fmt, ...);
+__attribute__((format(printf, 3, 4))) int kobject_add(struct kobject *kobj, struct kobject *parent,
+                                                      const char *fmt, ...);
 
 /* Combined init + add with a va_list name format */
-__attribute__((format(printf, 4, 5))) int kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype, struct kobject *parent, const char *fmt, ...);
+__attribute__((format(printf, 4, 5))) int kobject_init_and_add(struct kobject   *kobj,
+                                                               struct kobj_type *ktype,
+                                                               struct kobject   *parent,
+                                                               const char       *fmt, ...);
 
 /* Allocate, init, and add a standalone kobject (creates a directory) */
 struct kobject *kobject_create_and_add(const char *name, struct kobject *parent);
@@ -155,7 +159,8 @@ void kobject_del(struct kobject *kobj);
 int kobject_rename(struct kobject *kobj, const char *new_name);
 
 /* Set the name of a kobject */
-__attribute__((format(printf, 2, 3))) int kobject_set_name(struct kobject *kobj, const char *fmt, ...);
+__attribute__((format(printf, 2, 3))) int kobject_set_name(struct kobject *kobj, const char *fmt,
+                                                           ...);
 
 /* Move a kobject to a new parent */
 int kobject_move(struct kobject *kobj, struct kobject *new_parent);
@@ -173,7 +178,8 @@ int kobject_list_add(clist_t *list, void *data);
 void kset_init(struct kset *kset);
 
 /* Create a kset, add it, and return it */
-struct kset *kset_create_and_add(const char *name, const struct kset_uevent_ops *uevent_ops, struct kobject *parent_kobj);
+struct kset *kset_create_and_add(const char *name, const struct kset_uevent_ops *uevent_ops,
+                                 struct kobject *parent_kobj);
 
 /* Unregister a kset (reverse of kset_create_and_add) */
 void kset_unregister(struct kset *kset);
@@ -191,7 +197,8 @@ int kobject_uevent(struct kobject *kobj, enum kobject_action action);
 int kobject_uevent_env(struct kobject *kobj, enum kobject_action action, char *envp[], int nenv);
 
 /* Append one KEY=value entry to a type or subsystem uevent callback. */
-__attribute__((format(printf, 2, 3))) int add_uevent_var(struct kobj_uevent_env *env, const char *fmt, ...);
+__attribute__((format(printf, 2, 3))) int add_uevent_var(struct kobj_uevent_env *env,
+                                                         const char             *fmt, ...);
 
 /* Parse and emit a userspace-triggered action written to a sysfs uevent file. */
 int kobject_synth_uevent(struct kobject *kobj, const char *buf, size_t count);

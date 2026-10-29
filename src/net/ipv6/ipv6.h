@@ -80,9 +80,9 @@ typedef struct {
 
 struct netif;
 
-void     ipv6_init(void);
+void ipv6_init(void);
 /* Assign the EUI-64 link-local address for an interface (net_init calls this). */
-void     ipv6_if_up(struct netif *ifp);
+void ipv6_if_up(struct netif *ifp);
 
 int      net_ipv6_parse(const void *data, uint32_t length, net_ipv6_packet_t *packet);
 uint16_t net_checksum_ipv6_pseudo(const ipv6_address_t *source, const ipv6_address_t *destination,
@@ -106,8 +106,8 @@ int ipv6_output(struct netif *ifp, const ipv6_address_t *source, const ipv6_addr
                 uint8_t protocol, const void *payload, uint16_t len);
 
 /* NDP: resolve a neighbor (queue + solicit) or learn from a wire reply. */
-int  ndp_resolve(struct netif *ifp, const ipv6_address_t *address, const void *payload, uint16_t len,
-                 uint8_t protocol);
+int ndp_resolve(struct netif *ifp, const ipv6_address_t *address, const void *payload, uint16_t len,
+                uint8_t protocol);
 void ndp_learn(struct netif *ifp, const ipv6_address_t *address, const uint8_t mac[6]);
 
 #endif /* GNUCOS_IPV6_H */

@@ -33,10 +33,7 @@
 #define __stringify_1(x) #x
 #define __stringify(x)   __stringify_1(x)
 
-#define __ATTR(_name, _mode)                        \
-    {                                               \
-        .name = __stringify(_name), .mode = (_mode) \
-    }
+#define __ATTR(_name, _mode) {.name = __stringify(_name), .mode = (_mode)}
 
 #define __ATTR_RO(_name) __ATTR(_name, 0444)
 #define __ATTR_WO(_name) __ATTR(_name, 0200)
@@ -44,10 +41,7 @@
 
 #define __ATTR_RO_MODE(_name, _mode) __ATTR(_name, _mode)
 
-#define __ATTR_NULL \
-    {               \
-        .name = NULL \
-    }
+#define __ATTR_NULL {.name = NULL}
 
 /* sysfs buffer helpers (PAGE_SIZE semantics) */
 #define SYSFS_PAGE_SIZE 4096
@@ -161,8 +155,10 @@ struct attribute {
 struct bin_attribute {
     struct attribute attr;
     size_t           size;
-    ssize_t (*read)(struct kobject *kobj, struct bin_attribute *attr, char *buffer, int64_t pos, size_t count);
-    ssize_t (*write)(struct kobject *kobj, struct bin_attribute *attr, char *buffer, int64_t pos, size_t count);
+    ssize_t (*read)(struct kobject *kobj, struct bin_attribute *attr, char *buffer, int64_t pos,
+                    size_t count);
+    ssize_t (*write)(struct kobject *kobj, struct bin_attribute *attr, char *buffer, int64_t pos,
+                     size_t count);
     int (*mmap)(struct kobject *kobj, struct bin_attribute *attr, void *vma);
 };
 

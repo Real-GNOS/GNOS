@@ -12,10 +12,11 @@
 
 #include <stddef.h>
 
-#define clist_foreach_cnt(clist, i, node, code)                                  \
-    ({                                                                           \
-        size_t i = 0;                                                            \
-        for (clist_t node = (clist); node; (node) = (node)->next, (i)++) (code); \
+#define clist_foreach_cnt(clist, i, node, code)                          \
+    ({                                                                   \
+        size_t i = 0;                                                    \
+        for (clist_t node = (clist); node; (node) = (node)->next, (i)++) \
+            (code);                                                      \
     })
 
 #define clist_first_node(clist, node, expr)                         \

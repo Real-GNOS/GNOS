@@ -194,8 +194,7 @@ void tty_init(void)
     for (int i = 0; i < NR_VT; i++) {
         /* Every /dev char node goes through the chrdev registry; the node
          * itself is created by chrdev_populate() after init. */
-        cdev_add_vfs("", vt_names[i], 0, 0, 1, 0620, 0, 5,
-                     (const vfs_ops_t *)tty_ops(), &g_vt[i]);
+        cdev_add_vfs("", vt_names[i], 0, 0, 1, 0620, 0, 5, (const vfs_ops_t *)tty_ops(), &g_vt[i]);
         subsys_set_state(subsys_register(vt_names[i], vt_names[i], SUBSYS_CLASS_TTY, 4, i + 1),
                          SUBSYS_STATE_LIVE);
     }

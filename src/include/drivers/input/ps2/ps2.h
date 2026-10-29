@@ -12,9 +12,9 @@
 #include <stdint.h>
 
 /* ---- i8042 ports ------------------------------------------------------ */
-#define PS2_DATA    0x60
-#define PS2_CMD     0x64
-#define PS2_STATUS  0x64
+#define PS2_DATA   0x60
+#define PS2_CMD    0x64
+#define PS2_STATUS 0x64
 
 #define PS2_ST_OUT_BUF  0x01
 #define PS2_ST_INPT_BUF 0x02

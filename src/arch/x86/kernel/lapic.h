@@ -31,6 +31,9 @@ void lapic_timer_start(void);
  * LAPIC delivered must call this or the core stops taking interrupts. */
 void lapic_eoi(void);
 
+int lapic_ready(void);
+int lapic_send_nmi_others(void);
+
 /* Register the handler for LAPIC_TIMER_VECTOR (timer.c's ap_timer_irq). */
 void lapic_timer_install(irq_handler_t fn);
 

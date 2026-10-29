@@ -28,8 +28,7 @@ static void check(const char *what, int ok)
  * keep them, and disappear on munmap (a second munmap fails with EINVAL). */
 static void test_anon_mmap(void)
 {
-    unsigned char *p = mmap(NULL, 8192, PROT_READ | PROT_WRITE,
-                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    unsigned char *p = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
         printf("  mmap failed: errno=%d\n", errno);
         fails++;
@@ -52,8 +51,7 @@ static void test_anon_mmap(void)
  * mapping is the same physical memory in both address spaces. */
 static void test_shared_across_fork(void)
 {
-    volatile int *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    volatile int *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
         printf("  mmap shared failed: errno=%d\n", errno);
         fails++;
@@ -81,8 +79,7 @@ static void test_shared_across_fork(void)
  * mapping dies with SIGSEGV, which the child reports via its wait status. */
 static void test_protection(void)
 {
-    volatile char *p = mmap(NULL, 4096, PROT_READ,
-                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    volatile char *p = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
         printf("  mmap ro failed: errno=%d\n", errno);
         fails++;
@@ -109,11 +106,11 @@ static void test_protection(void)
  * size, all written, all verified, all freed. */
 static void test_heap_pressure(void)
 {
-    static void *blocks[256];
+    static void  *blocks[256];
     static size_t sizes[256];
-    int ok = 1;
+    int           ok = 1;
     for (int i = 0; i < 256; i++) {
-        sizes[i] = (size_t)(i % 511) * 37 + 1;
+        sizes[i]  = (size_t)(i % 511) * 37 + 1;
         blocks[i] = malloc(sizes[i]);
         if (!blocks[i]) {
             ok = 0;

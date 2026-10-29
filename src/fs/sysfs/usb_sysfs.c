@@ -41,7 +41,8 @@ static ssize_t product_show(struct device *dev, struct device_attribute *attribu
 }
 
 /* Read the device's manufacturer string. */
-static ssize_t manufacturer_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t manufacturer_show(struct device *dev, struct device_attribute *attribute,
+                                 char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -63,7 +64,8 @@ static ssize_t speed_show(struct device *dev, struct device_attribute *attribute
     usb_device_t *device        = dev ? dev->driver_data : NULL;
     const char   *speed_table[] = {"0", "1.5", "12", "480", "5000", "10000"};
     const char   *speed         = "0";
-    if (device && device->speed > 0 && device->speed <= USB_SPEED_SUPER_PLUS) speed = speed_table[device->speed];
+    if (device && device->speed > 0 && device->speed <= USB_SPEED_SUPER_PLUS)
+        speed = speed_table[device->speed];
     return sysfs_emit(buffer, "%s\n", speed);
 }
 
@@ -84,7 +86,8 @@ static ssize_t busnum_show(struct device *dev, struct device_attribute *attribut
 }
 
 /* Read the device class code. */
-static ssize_t b_device_class_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t b_device_class_show(struct device *dev, struct device_attribute *attribute,
+                                   char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -92,7 +95,8 @@ static ssize_t b_device_class_show(struct device *dev, struct device_attribute *
 }
 
 /* Read the device subclass code. */
-static ssize_t b_device_subclass_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t b_device_subclass_show(struct device *dev, struct device_attribute *attribute,
+                                      char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -100,7 +104,8 @@ static ssize_t b_device_subclass_show(struct device *dev, struct device_attribut
 }
 
 /* Read the device protocol code. */
-static ssize_t b_device_protocol_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t b_device_protocol_show(struct device *dev, struct device_attribute *attribute,
+                                      char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -108,7 +113,8 @@ static ssize_t b_device_protocol_show(struct device *dev, struct device_attribut
 }
 
 /* Read the control endpoint's maximum packet size. */
-static ssize_t b_max_packet_size0_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t b_max_packet_size0_show(struct device *dev, struct device_attribute *attribute,
+                                       char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -125,7 +131,8 @@ static ssize_t version_show(struct device *dev, struct device_attribute *attribu
 }
 
 /* Read the number of configurations. */
-static ssize_t b_num_configurations_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t b_num_configurations_show(struct device *dev, struct device_attribute *attribute,
+                                         char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -150,7 +157,8 @@ static ssize_t devpath_show(struct device *dev, struct device_attribute *attribu
 }
 
 /* Read the active configuration value. */
-static ssize_t b_configuration_value_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t b_configuration_value_show(struct device *dev, struct device_attribute *attribute,
+                                          char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -158,7 +166,8 @@ static ssize_t b_configuration_value_show(struct device *dev, struct device_attr
 }
 
 /* Read the configuration attributes. */
-static ssize_t bm_attributes_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t bm_attributes_show(struct device *dev, struct device_attribute *attribute,
+                                  char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -166,7 +175,8 @@ static ssize_t bm_attributes_show(struct device *dev, struct device_attribute *a
 }
 
 /* Read the configuration's maximum power draw. */
-static ssize_t b_max_power_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t b_max_power_show(struct device *dev, struct device_attribute *attribute,
+                                char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;
@@ -174,7 +184,8 @@ static ssize_t b_max_power_show(struct device *dev, struct device_attribute *att
 }
 
 /* Read the configuration's interface count. */
-static ssize_t b_num_interfaces_show(struct device *dev, struct device_attribute *attribute, char *buffer)
+static ssize_t b_num_interfaces_show(struct device *dev, struct device_attribute *attribute,
+                                     char *buffer)
 {
     (void)attribute;
     usb_device_t *device = dev ? dev->driver_data : NULL;

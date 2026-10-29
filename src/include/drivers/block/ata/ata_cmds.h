@@ -23,11 +23,11 @@
 #define ATA_REG_COMMAND  7 /* write */
 
 /* ---- status bits ------------------------------------------------------ */
-#define ATA_SR_ERR  0x01
-#define ATA_SR_DRQ  0x08
-#define ATA_SR_DF   0x20
-#define ATA_SR_RDY  0x40
-#define ATA_SR_BSY  0x80
+#define ATA_SR_ERR 0x01
+#define ATA_SR_DRQ 0x08
+#define ATA_SR_DF  0x20
+#define ATA_SR_RDY 0x40
+#define ATA_SR_BSY 0x80
 
 /* Device control register: nIEN stops the drive asserting its IRQ line,
  * SRST is the software reset bit. */
@@ -50,17 +50,17 @@
 /* ---- IDENTIFY DEVICE word offsets --------------------------------------
  * Shared by the PATA and SATA halves: both parse the same 256-word answer,
  * so the field positions live here and not in each driver. */
-#define ATA_IDENT_DEVICETYPE    0
-#define ATA_IDENT_CYLINDERS     2
-#define ATA_IDENT_HEADS         6
-#define ATA_IDENT_SECTORS       12
-#define ATA_IDENT_SERIAL        20
-#define ATA_IDENT_MODEL         54
-#define ATA_IDENT_MAX_LBA       120
-#define ATA_IDENT_CAPABILITIES  98
-#define ATA_IDENT_FIELDVALID    106
-#define ATA_IDENT_MAX_LBA_EXT   200
-#define ATA_IDENT_COMMANDSETS   164
+#define ATA_IDENT_DEVICETYPE   0
+#define ATA_IDENT_CYLINDERS    2
+#define ATA_IDENT_HEADS        6
+#define ATA_IDENT_SECTORS      12
+#define ATA_IDENT_SERIAL       20
+#define ATA_IDENT_MODEL        54
+#define ATA_IDENT_MAX_LBA      120
+#define ATA_IDENT_CAPABILITIES 98
+#define ATA_IDENT_FIELDVALID   106
+#define ATA_IDENT_MAX_LBA_EXT  200
+#define ATA_IDENT_COMMANDSETS  164
 
 /* ---- SCSI/ATAPI packet opcodes ---------------------------------------- */
 #define GPCMD_TEST_UNIT_READY  0x00

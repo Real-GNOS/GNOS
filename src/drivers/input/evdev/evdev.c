@@ -14,6 +14,7 @@
 #include "proc.h"
 #include "timer.h"
 #include "kstring.h"
+#include "chrdev.h"
 
 static const vfs_ops_t g_evdev_ops;
 
@@ -44,8 +45,8 @@ int evdev_init(void)
     evdev_queue_init(&g_kbd_dev.q);
     evdev_queue_init(&g_mouse_dev.q);
 
-    if (vfs_register_devnum("input/event0", &g_evdev_ops, &g_kbd_dev, 13, 64) != 0 ||
-        vfs_register_devnum("input/event1", &g_evdev_ops, &g_mouse_dev, 13, 65) != 0)
+    if (cdev_add_vfs("input", "event0", 13, 64, 1, 0666, 0, 0, &g_evdev_ops, &g_kbd_dev) != 0 ||
+        cdev_add_vfs("input", "event1", 13, 65, 1, 0666, 0, 0, &g_evdev_ops, &g_mouse_dev) != 0)
         return -1;
     return 0;
 }
@@ -68,7 +69,7 @@ void evdev_push_event(evdev_dev_t *d, uint16_t type, uint16_t code, int32_t valu
         if (value)
             d->key_state[code >> 4] |= (uint16_t)(1u << (code & 15));
         else
-            d->key_state[code >> 4] &= (uint16_t)~(1u << (code & 15));
+            d->key_state[code >> 4] &= (uint16_t) ~(1u << (code & 15));
     }
 
     /* A full ring drops the event, exactly like Linux's evdev overflow. */
@@ -208,8 +209,7 @@ static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
      * error.  EVIOCSREP is _IOW('E', 0x03) and EVIOCSKEYCODE is
      * _IOW('E', 0x04) -- the old test only matched 0x04 and silently
      * rejected the repeat-rate write. */
-    if ((cmd >> 30) == 1 /* _IOC_WRITE */ &&
-        ((cmd & 0xFF) == 0x03 || (cmd & 0xFF) == 0x04))
+    if ((cmd >> 30) == 1 /* _IOC_WRITE */ && ((cmd & 0xFF) == 0x03 || (cmd & 0xFF) == 0x04))
         return 0;
     if ((cmd >> 30) == 2 /* _IOC_READ */ && (cmd & 0xFF) == 0x03) {
         uint16_t rep[2] = {250, 33}; /* delay ms, period ms */

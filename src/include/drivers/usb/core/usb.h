@@ -25,8 +25,8 @@
 #include "device.h"
 #include "vfs.h" /* GNOS errno names */
 
-#define USB_MAX_INTERFACES 64
-#define USB_MAX_ENDPOINTS  31 /* per interface; the core's parse limit */
+#define USB_MAX_INTERFACES  64
+#define USB_MAX_ENDPOINTS   31 /* per interface; the core's parse limit */
 #define USB_MAX_CONTROLLERS 16
 #define USB_MAX_DEVICES     128
 
@@ -221,8 +221,10 @@ typedef struct __attribute__((packed)) {
 } usb_hub_descriptor_t;
 
 /* USB 2.0 hub descriptor fixed head; only the offsets are spec-fixed. */
-_Static_assert(offsetof(usb_hub_descriptor_t, characteristics) == 3, "USB 2.0 hub characteristics offset");
-_Static_assert(offsetof(usb_hub_descriptor_t, power_good_time) == 5, "USB 2.0 hub power-good-time offset");
+_Static_assert(offsetof(usb_hub_descriptor_t, characteristics) == 3,
+               "USB 2.0 hub characteristics offset");
+_Static_assert(offsetof(usb_hub_descriptor_t, power_good_time) == 5,
+               "USB 2.0 hub power-good-time offset");
 
 /* USB 3.x SuperSpeed hub descriptor (§10.13.2.1). */
 typedef struct __attribute__((packed)) {
@@ -237,19 +239,25 @@ typedef struct __attribute__((packed)) {
 } usb_hub3_descriptor_t;
 
 /* USB 3.x hub descriptor fixed head (9 bytes here, 12 per spec). */
-_Static_assert(offsetof(usb_hub3_descriptor_t, characteristics) == 3, "USB 3.x hub characteristics offset");
-_Static_assert(offsetof(usb_hub3_descriptor_t, power_good_time) == 5, "USB 3.x hub power-good-time offset");
+_Static_assert(offsetof(usb_hub3_descriptor_t, characteristics) == 3,
+               "USB 3.x hub characteristics offset");
+_Static_assert(offsetof(usb_hub3_descriptor_t, power_good_time) == 5,
+               "USB 3.x hub power-good-time offset");
 
 struct usb_device;
 struct usb_interface;
 struct usb_endpoint;
 
-typedef void (*usb_interrupt_complete_t)(struct usb_endpoint *endpoint, const void *data, size_t length, int status, void *context);
+typedef void (*usb_interrupt_complete_t)(struct usb_endpoint *endpoint, const void *data,
+                                         size_t length, int status, void *context);
 
 typedef struct usb_hcd_ops {
-    int (*control)(struct usb_device *device, const usb_setup_packet_t *setup, void *buffer, size_t length, uint32_t timeout_ms);
-    int (*transfer)(struct usb_endpoint *endpoint, void *buffer, size_t length, size_t *actual, uint32_t timeout_ms);
-    int (*interrupt_start)(struct usb_endpoint *endpoint, size_t length, usb_interrupt_complete_t complete, void *context);
+    int (*control)(struct usb_device *device, const usb_setup_packet_t *setup, void *buffer,
+                   size_t length, uint32_t timeout_ms);
+    int (*transfer)(struct usb_endpoint *endpoint, void *buffer, size_t length, size_t *actual,
+                    uint32_t timeout_ms);
+    int (*interrupt_start)(struct usb_endpoint *endpoint, size_t length,
+                           usb_interrupt_complete_t complete, void *context);
     void (*interrupt_stop)(struct usb_endpoint *endpoint);
     int (*configure_endpoint)(struct usb_endpoint *endpoint);
     void (*disable_endpoint)(struct usb_endpoint *endpoint);
@@ -327,13 +335,16 @@ void usb_disconnect_device(usb_device_t *device);
 void usb_remove_device(usb_device_t *device);
 
 /* Issue one control transfer to the HCD. */
-int usb_control_msg(usb_device_t *device, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, void *buffer, uint16_t length, uint32_t timeout_ms);
+int usb_control_msg(usb_device_t *device, uint8_t request_type, uint8_t request, uint16_t value,
+                    uint16_t index, void *buffer, uint16_t length, uint32_t timeout_ms);
 
 /* Perform one bulk transfer on an endpoint. */
-int usb_bulk_msg(usb_endpoint_t *endpoint, void *buffer, size_t length, size_t *actual, uint32_t timeout_ms);
+int usb_bulk_msg(usb_endpoint_t *endpoint, void *buffer, size_t length, size_t *actual,
+                 uint32_t timeout_ms);
 
 /* Begin periodic interrupt-IN polling on an endpoint. */
-int usb_interrupt_start(usb_endpoint_t *endpoint, size_t length, usb_interrupt_complete_t complete, void *context);
+int usb_interrupt_start(usb_endpoint_t *endpoint, size_t length, usb_interrupt_complete_t complete,
+                        void *context);
 
 /* Stop periodic interrupt polling on an endpoint. */
 void usb_interrupt_stop(usb_endpoint_t *endpoint);
@@ -345,10 +356,12 @@ int usb_clear_halt(usb_endpoint_t *endpoint);
 usb_endpoint_t *usb_find_endpoint(usb_interface_t *interface, uint8_t transfer_type, bool input);
 
 /* Locate a descriptor of the given type in an interface's extra data. */
-const uint8_t *usb_find_extra_descriptor(const usb_interface_t *interface, uint8_t descriptor_type, size_t *length);
+const uint8_t *usb_find_extra_descriptor(const usb_interface_t *interface, uint8_t descriptor_type,
+                                         size_t *length);
 
 /* Fetch a string descriptor and convert it to ASCII. */
-int usb_get_string_descriptor(usb_device_t *device, uint8_t index, uint16_t language, char *output, size_t capacity);
+int usb_get_string_descriptor(usb_device_t *device, uint8_t index, uint16_t language, char *output,
+                              size_t capacity);
 
 /* Fetch the full configuration descriptor into a malloc'd buffer. */
 int usb_read_config_descriptor(usb_device_t *device, uint8_t **config_out, uint16_t *length_out);

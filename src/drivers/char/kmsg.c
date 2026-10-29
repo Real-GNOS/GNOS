@@ -8,15 +8,15 @@
 #include "chrdev.h"
 #include "heap.h"
 #include "kstring.h"
-#include "vfs.h"      /* E_* */
+#include "vfs.h"           /* E_* */
 #include "drm_vsnprintf.h" /* plogk */
 
 #define KMSG_MAJOR 1
 #define KMSG_MINOR 11
 
 /* No queued records are kept; reads report -EAGAIN. */
-static int64_t kmsg_read(void *ctx, void *private_data, uint64_t flags, void *buffer,
-                         size_t offset, size_t size)
+static int64_t kmsg_read(void *ctx, void *private_data, uint64_t flags, void *buffer, size_t offset,
+                         size_t size)
 {
     (void)ctx;
     (void)private_data;
@@ -64,14 +64,27 @@ static int64_t kmsg_write(void *ctx, void *private_data, uint64_t flags, const v
     return (int64_t)size;
 }
 
+static int32_t kmsg_vfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
+{
+    (void)n;
+    return (int32_t)kmsg_read(NULL, NULL, 0, buf, (size_t)off, (size_t)len);
+}
+
+static int32_t kmsg_vfs_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
+{
+    (void)n;
+    return (int32_t)kmsg_write(NULL, NULL, 0, buf, (size_t)off, (size_t)len);
+}
+
+static const vfs_ops_t g_kmsg_vfs_ops = {
+    .read  = kmsg_vfs_read,
+    .write = kmsg_vfs_write,
+};
+
 /* Register the /dev/kmsg character device. */
 void kmsgdev_init(void)
 {
-    static tmpfs_device_ops_t ops;
-    memset(&ops, 0, sizeof(ops));
-    ops.file_read  = kmsg_read;
-    ops.file_write = kmsg_write;
-    if (cdev_add("", "kmsg", KMSG_MAJOR, KMSG_MINOR, 1, (uint16_t)file_stream,
-                 0600, &ops) != EOK)
+    if (cdev_add_vfs("", "kmsg", KMSG_MAJOR, KMSG_MINOR, 1, 0600, 0, 0, &g_kmsg_vfs_ops, NULL) !=
+        EOK)
         plogk("chrdev: Cannot register /dev/kmsg\n");
 }

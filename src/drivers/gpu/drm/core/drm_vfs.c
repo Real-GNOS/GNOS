@@ -22,7 +22,7 @@
 #include "pmm.h"
 #include "vfs.h"
 
-extern int  drm_read(struct drm_file *file_priv, char *buf, size_t count, size_t *offset);
+extern int          drm_read(struct drm_file *file_priv, char *buf, size_t count, size_t *offset);
 extern unsigned int drm_poll(struct drm_file *file_priv, unsigned int events);
 
 /* read() on a DRM node dequeues events: it blocks while there are none and

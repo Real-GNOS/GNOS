@@ -22,10 +22,10 @@ typedef struct evdev_dev {
      * a bitmap, not an array indexed by type: EV_LED is 0x11, and the old
      * uint16_t kind_bits[8] indexed it out of bounds. */
     uint32_t kind_bits;
-    uint16_t key_bits[64];   /* KEY_CNT = 1024 bits: codes the device emits */
-    uint16_t key_state[64];  /* currently held keys, for EVIOCGKEY */
-    uint16_t rel_bits[2];    /* REL_CNT = 32 bits */
-    uint16_t led_bits;       /* LED_CNT = 16 bits, for EVIOCGBIT(EV_LED) */
+    uint16_t key_bits[64];  /* KEY_CNT = 1024 bits: codes the device emits */
+    uint16_t key_state[64]; /* currently held keys, for EVIOCGKEY */
+    uint16_t rel_bits[2];   /* REL_CNT = 32 bits */
+    uint16_t led_bits;      /* LED_CNT = 16 bits, for EVIOCGBIT(EV_LED) */
     int      grabbed;
     int      nonblock;
 } evdev_dev_t;

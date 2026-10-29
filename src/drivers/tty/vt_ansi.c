@@ -70,8 +70,8 @@ static void ansi_newline(vt_ansi_t *s, const vt_ansi_callbacks_t *cb, void *ctx)
     vt_ansi_line_feed(s, cb, ctx);
 }
 
-static void ansi_put_codepoint(vt_ansi_t *s, uint32_t cp, int wide,
-                               const vt_ansi_callbacks_t *cb, void *ctx)
+static void ansi_put_codepoint(vt_ansi_t *s, uint32_t cp, int wide, const vt_ansi_callbacks_t *cb,
+                               void *ctx)
 {
     if (s->cols == 0 || s->rows == 0)
         return;
@@ -183,8 +183,7 @@ static void save_cursor(vt_ansi_t *s)
     s->saved_attrs = s->attrs;
 }
 
-static void restore_cursor(vt_ansi_t *s, const vt_ansi_callbacks_t *cb,
-                           void *ctx)
+static void restore_cursor(vt_ansi_t *s, const vt_ansi_callbacks_t *cb, void *ctx)
 {
     s->x     = s->saved_x;
     s->y     = s->saved_y;
@@ -194,43 +193,41 @@ static void restore_cursor(vt_ansi_t *s, const vt_ansi_callbacks_t *cb,
     ansi_touch(s, cb, ctx);
 }
 
-static void alt_screen_enter(vt_ansi_t *s, const vt_ansi_callbacks_t *cb,
-                             void *ctx)
+static void alt_screen_enter(vt_ansi_t *s, const vt_ansi_callbacks_t *cb, void *ctx)
 {
     if (s->alt_active)
         return;
     if (cb->alt_screen(ctx, 1) != 0)
         return;
 
-    s->alt_x              = s->x;
-    s->alt_y              = s->y;
-    s->alt_fg             = s->fg;
-    s->alt_bg             = s->bg;
-    s->alt_attrs          = s->attrs;
-    s->alt_scroll_top     = s->scroll_top;
-    s->alt_scroll_bottom  = s->scroll_bottom;
-    s->alt_active         = 1;
+    s->alt_x             = s->x;
+    s->alt_y             = s->y;
+    s->alt_fg            = s->fg;
+    s->alt_bg            = s->bg;
+    s->alt_attrs         = s->attrs;
+    s->alt_scroll_top    = s->scroll_top;
+    s->alt_scroll_bottom = s->scroll_bottom;
+    s->alt_active        = 1;
 
-    s->x            = 0;
-    s->y            = 0;
-    s->scroll_top   = 0;
+    s->x             = 0;
+    s->y             = 0;
+    s->scroll_top    = 0;
     s->scroll_bottom = s->rows ? s->rows - 1 : 0;
 }
 
-static void alt_screen_exit(vt_ansi_t *s, const vt_ansi_callbacks_t *cb,
-                            void *ctx)
+static void alt_screen_exit(vt_ansi_t *s, const vt_ansi_callbacks_t *cb, void *ctx)
 {
     if (!s->alt_active)
         return;
     cb->alt_screen(ctx, 0);
     s->alt_active = 0;
 
-    s->x            = s->alt_x;
-    s->y            = s->alt_y;
-    s->fg           = s->alt_fg;
-    s->bg           = s->alt_bg;
-    s->attrs        = s->alt_attrs;
-    s->scroll_top   = s->alt_scroll_top;
+    s->x             = s->alt_x;
+    s->y             = s->alt_y;
+    s->fg            = s->alt_fg;
+    s->bg            = s->alt_bg;
+    s->attrs         = s->alt_attrs;
+    s->scroll_top    = s->alt_scroll_top;
     s->scroll_bottom = s->alt_scroll_bottom;
 
     cb->repaint(ctx);
@@ -316,8 +313,7 @@ static void apply_sgr(vt_ansi_t *s)
                     int pr = (int)((vt_ansi_palette[k] >> 16) & 0xFF);
                     int pg = (int)((vt_ansi_palette[k] >> 8) & 0xFF);
                     int pb = (int)(vt_ansi_palette[k] & 0xFF);
-                    int d  = (r - pr) * (r - pr) + (g - pg) * (g - pg) +
-                             (b - pb) * (b - pb);
+                    int d  = (r - pr) * (r - pr) + (g - pg) * (g - pg) + (b - pb) * (b - pb);
                     if (d < bestd) {
                         bestd = d;
                         best  = k;
@@ -337,8 +333,7 @@ static void apply_sgr(vt_ansi_t *s)
     }
 }
 
-static void csi_dispatch(vt_ansi_t *s, char fin, const vt_ansi_callbacks_t *cb,
-                         void *ctx)
+static void csi_dispatch(vt_ansi_t *s, char fin, const vt_ansi_callbacks_t *cb, void *ctx)
 {
     int n, m;
 
@@ -457,8 +452,7 @@ static void csi_dispatch(vt_ansi_t *s, char fin, const vt_ansi_callbacks_t *cb,
     case 'r': /* DECSTBM: set scroll region [top;bottom] (1-based) */
         n = ansi_param(s, 0, 1);
         m = ansi_param(s, 1, (int)s->rows);
-        if (n >= 1 && m >= 1 && (uint32_t)n <= s->rows &&
-            (uint32_t)m <= s->rows && n < m) {
+        if (n >= 1 && m >= 1 && (uint32_t)n <= s->rows && (uint32_t)m <= s->rows && n < m) {
             s->scroll_top    = (uint32_t)n - 1;
             s->scroll_bottom = (uint32_t)m - 1;
         }
@@ -496,8 +490,7 @@ static void csi_dispatch(vt_ansi_t *s, char fin, const vt_ansi_callbacks_t *cb,
 /* Feed one byte through the escape parser.  Returns 1 when the byte was
  * consumed as part of a sequence, 0 when the caller still has to interpret
  * it as a printable/control byte. */
-static int esc_feed(vt_ansi_t *s, uint8_t b, const vt_ansi_callbacks_t *cb,
-                    void *ctx)
+static int esc_feed(vt_ansi_t *s, uint8_t b, const vt_ansi_callbacks_t *cb, void *ctx)
 {
     switch (s->state) {
     case ST_GROUND:
@@ -551,8 +544,7 @@ static int esc_feed(vt_ansi_t *s, uint8_t b, const vt_ansi_callbacks_t *cb,
             s->state = ST_GROUND;
             return 1;
         }
-        if (b == '(' || b == ')' || b == '*' || b == '+' || b == '#' ||
-            b == '%') {
+        if (b == '(' || b == ')' || b == '*' || b == '+' || b == '#' || b == '%') {
             /* Charset/line-attribute designation: the next byte is a
              * designator, not text.  The old parser returned to ground here,
              * so ESC ( B used to draw a stray 'B'. */
@@ -624,12 +616,12 @@ static int esc_feed(vt_ansi_t *s, uint8_t b, const vt_ansi_callbacks_t *cb,
 
 void vt_ansi_init(vt_ansi_t *s, uint32_t cols, uint32_t rows)
 {
-    *s = (vt_ansi_t){0};
-    s->cols            = cols;
-    s->rows            = rows;
-    s->scroll_bottom   = rows ? rows - 1 : 0;
-    s->cursor_visible  = 1;
-    s->state           = ST_GROUND;
+    *s                = (vt_ansi_t){0};
+    s->cols           = cols;
+    s->rows           = rows;
+    s->scroll_bottom  = rows ? rows - 1 : 0;
+    s->cursor_visible = 1;
+    s->state          = ST_GROUND;
 }
 
 void vt_ansi_resize(vt_ansi_t *s, uint32_t cols, uint32_t rows)
@@ -642,8 +634,7 @@ void vt_ansi_resize(vt_ansi_t *s, uint32_t cols, uint32_t rows)
     s->scroll_bottom = rows ? rows - 1 : 0;
 }
 
-void vt_ansi_put_byte(vt_ansi_t *s, uint8_t b, const vt_ansi_callbacks_t *cb,
-                      void *ctx)
+void vt_ansi_put_byte(vt_ansi_t *s, uint8_t b, const vt_ansi_callbacks_t *cb, void *ctx)
 {
     /* Control characters still mean something mid-sequence: CR or LF must
      * act now, not wait for the sequence to end. */

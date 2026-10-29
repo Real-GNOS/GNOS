@@ -56,8 +56,8 @@ typedef struct {
 } __attribute__((packed)) msc_csw_t;
 
 typedef struct {
-    usb_endpoint_t *ep_in;  /* bulk IN  endpoint */
-    usb_endpoint_t *ep_out; /* bulk OUT endpoint */
+    usb_endpoint_t *ep_in;   /* bulk IN  endpoint */
+    usb_endpoint_t *ep_out;  /* bulk OUT endpoint */
     uint32_t        nblocks; /* from READ CAPACITY */
     uint8_t         active;
 } msc_dev_t;
@@ -84,7 +84,8 @@ static int msc_command(msc_dev_t *dev, const uint8_t *cdb, uint8_t cdb_len, void
     memcpy(cbw.CBWCB, cdb, cdb_len);
 
     size_t actual = 0;
-    if (usb_bulk_msg(dev->ep_out, &cbw, MSC_CBW_LENGTH, &actual, USB_IO_TIMEOUT_MS) != 0 || actual != MSC_CBW_LENGTH)
+    if (usb_bulk_msg(dev->ep_out, &cbw, MSC_CBW_LENGTH, &actual, USB_IO_TIMEOUT_MS) != 0 ||
+        actual != MSC_CBW_LENGTH)
         return -1;
 
     uint32_t transferred = 0;
@@ -96,7 +97,8 @@ static int msc_command(msc_dev_t *dev, const uint8_t *cdb, uint8_t cdb_len, void
     }
 
     msc_csw_t csw;
-    if (usb_bulk_msg(dev->ep_in, &csw, MSC_CSW_LENGTH, &actual, USB_IO_TIMEOUT_MS) != 0 || actual != MSC_CSW_LENGTH)
+    if (usb_bulk_msg(dev->ep_in, &csw, MSC_CSW_LENGTH, &actual, USB_IO_TIMEOUT_MS) != 0 ||
+        actual != MSC_CSW_LENGTH)
         return -1;
     if (csw.dCSWSignature != MSC_CSW_SIGNATURE || csw.dCSWTag != cbw.dCBWTag)
         return -1;
@@ -185,7 +187,7 @@ int usb_storage_probe(usb_interface_t *interface)
 {
     if (!interface || !interface->device)
         return -E_INVAL;
-    if (interface->descriptor.interface_class != 0x08 || /* mass storage   */
+    if (interface->descriptor.interface_class != 0x08 ||    /* mass storage   */
         interface->descriptor.interface_subclass != 0x06 || /* transparent */
         interface->descriptor.interface_protocol != 0x50)   /* BOT         */
         return -E_OPNOTSUPP;
@@ -220,7 +222,7 @@ int usb_storage_probe(usb_interface_t *interface)
     dev->nblocks = sd.nblocks;
     g_scsi       = scsi_device_by_index(scsi_count() - 1);
 
-    dev->active = 1;
+    dev->active   = 1;
     msc_bdev_t *b = &g_msc_bdevs[g_msc_count];
     b->dev        = dev;
     b->sd         = g_scsi;
@@ -254,7 +256,8 @@ void usb_storage_disconnect(usb_interface_t *interface)
         return;
     for (int i = 0; i < g_msc_count; i++) {
         msc_dev_t *dev = &g_msc[i];
-        if (dev->active && dev->ep_in && dev->ep_in->interface && dev->ep_in->interface->device == interface->device)
+        if (dev->active && dev->ep_in && dev->ep_in->interface &&
+            dev->ep_in->interface->device == interface->device)
             dev->active = 0; /* the bdev reads start failing through sd->live */
     }
 }

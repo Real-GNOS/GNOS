@@ -44,9 +44,7 @@ static spinlock_t dma_buf_lock = {0};
 /* The dma-buf backend is anonymous-node based; there is no filesystem to
  * register.  Keep the entry point so device registration can state the
  * dependency explicitly, and make it idempotent. */
-void drm_prime_init(void)
-{
-}
+void drm_prime_init(void) {}
 
 /* Take a dma-buf reference. */
 void dma_buf_get(struct dma_buf *dma_buf)
@@ -152,7 +150,8 @@ struct dma_buf *drm_gem_prime_export(struct drm_gem_object *obj, uint32_t flags)
  * GEM object.  This is the safe path for drivers whose objects embed private
  * state and therefore cannot be represented by the generic import wrapper.
  */
-struct drm_gem_object *drm_gem_prime_import_same_dev(struct drm_device *dev, struct dma_buf *dma_buf)
+struct drm_gem_object *drm_gem_prime_import_same_dev(struct drm_device *dev,
+                                                     struct dma_buf    *dma_buf)
 {
     if (dev == NULL || dma_buf == NULL || dma_buf->obj == NULL || dma_buf->obj->dev != dev) {
         return NULL;

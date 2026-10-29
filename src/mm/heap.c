@@ -214,11 +214,22 @@ void kfree(void *p)
     if (!p)
         return;
 
+    if ((uintptr_t)p < 0x10000) {
+        dbg_puts("KHEAP: low free p=");
+        dbg_puts_hex((uint64_t)(uintptr_t)p);
+        dbg_puts(" caller=");
+        dbg_puts_hex((uint64_t)(uintptr_t)__builtin_return_address(0));
+        dbg_puts("\r\n");
+        panic("kheap: low free");
+    }
+
     kheap_hdr_t *b = (kheap_hdr_t *)((uint8_t *)p - HDR_SIZE);
     if (b->magic != KHEAP_MAGIC || b->free || b->size < KHEAP_MIN_BLOCK ||
         (uint8_t *)b + b->size > g_base + g_size) {
         dbg_puts("KHEAP: bad free at ");
         dbg_puts_hex((uint64_t)(uintptr_t)p);
+        dbg_puts(" caller=");
+        dbg_puts_hex((uint64_t)(uintptr_t)__builtin_return_address(0));
         dbg_puts(" (size=");
         dbg_puts_hex(b->size);
         dbg_puts(" free=");

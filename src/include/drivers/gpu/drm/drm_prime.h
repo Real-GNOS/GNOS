@@ -43,6 +43,6 @@ struct drm_gem_object *drm_gem_prime_import_dev(struct drm_device *dev, struct d
  * wrapper that lacks their object layout.
  */
 struct drm_gem_object *drm_gem_prime_import_same_dev(struct drm_device *dev,
-                                                     struct dma_buf *dma_buf);
+                                                     struct dma_buf    *dma_buf);
 
 #endif /* INCLUDE_DRM_DRM_PRIME_H_ */

@@ -83,8 +83,7 @@ void atapi_soft_reset(const ata_disk_t *d)
     ata_wait_ready(d);
 }
 
-int atapi_packet_read(const ata_disk_t *d, const uint8_t *pkt, uint32_t nbytes,
-                      uint8_t *buf)
+int atapi_packet_read(const ata_disk_t *d, const uint8_t *pkt, uint32_t nbytes, uint8_t *buf)
 {
     /* The drive's byte-count limit is 16 bits; 65536 is encoded as zero. */
     if (nbytes > 65536)
@@ -125,8 +124,7 @@ int atapi_packet_read(const ata_disk_t *d, const uint8_t *pkt, uint32_t nbytes,
     }
 
     for (int i = 0; i < 6; i++) /* the packet, as words */
-        outw(d->io + ATA_REG_DATA,
-             (uint16_t)(pkt[i * 2] | ((uint16_t)pkt[i * 2 + 1] << 8)));
+        outw(d->io + ATA_REG_DATA, (uint16_t)(pkt[i * 2] | ((uint16_t)pkt[i * 2 + 1] << 8)));
 
     /* Data phase.  A CD spin-up can take seconds, hence the larger budget. */
     uint32_t words = (nbytes + 1) / 2;
@@ -169,7 +167,7 @@ int atapi_read(const ata_disk_t *d, uint64_t lba, uint32_t nsect, uint8_t *buf)
     while (nsect) {
         /* 32 * 2048 is the largest transfer the 16-bit byte count holds, so
          * one packet per 32 sectors and no more. */
-        uint32_t now = nsect > 32u ? 32u : nsect;
+        uint32_t now     = nsect > 32u ? 32u : nsect;
         uint8_t  pkt[12] = {
             GPCMD_READ_10,
             0,

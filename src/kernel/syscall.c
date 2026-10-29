@@ -53,6 +53,10 @@
 #include "pidfd.h"
 #include "pagecache.h"
 #include "process_vm_access.h"
+#include "cgroup.h"
+#include "secretmem.h"
+#include "quota.h"
+#include "landlock.h"
 
 /* reboot(169) command codes; the Linux ABI as musl's reboot() passes them. */
 #define LINUX_REBOOT_CMD_RESTART   0x01234567
@@ -1426,8 +1430,7 @@ static int64_t sys_mount(uint64_t usrc, uint64_t utgt, uint64_t ufs, uint64_t uf
         return vfs_mount_cgroupfs(abs);
     /* See the block comment above: /proc and /sys are already provided, so
      * the request is a no-op success rather than -E_NODEV. */
-    if (strcmp(fst, "proc") == 0 || strcmp(fst, "procfs") == 0 ||
-        strcmp(fst, "sysfs") == 0)
+    if (strcmp(fst, "proc") == 0 || strcmp(fst, "procfs") == 0 || strcmp(fst, "sysfs") == 0)
         return 0;
     /* ext2/ext3/ext4 all name the same on-disk family this kernel reads;
      * the volume itself decides which layout its files use.  src must be
@@ -2377,7 +2380,7 @@ static int64_t sys_recvfrom(int fd, uint64_t ubuf, uint64_t len, int flags, uint
     if (s <= -1000) {
         /* AF_NETLINK: the sender's pid/groups ride out through sockaddr_nl. */
         uint32_t spid = 0, sgrp = 0;
-        int      n = nl_recvmsg(-1000 - s, (void *)(uintptr_t)ubuf, (uint32_t)len, flags, &spid, &sgrp);
+        int n = nl_recvmsg(-1000 - s, (void *)(uintptr_t)ubuf, (uint32_t)len, flags, &spid, &sgrp);
         if (n < 0)
             return n;
         if (uaddr && ualen) {
@@ -2517,14 +2520,14 @@ static int64_t sys_getsockopt(int fd, int level, int name, uint64_t uval, uint64
         if (level == 1 /* SOL_SOCKET */ && name == 3 /* SO_TYPE */)
             v = 1 /* SOCK_STREAM */;
         if (level == 1 && name == 17 /* SO_PEERCRED (21 is SO_SNDTIMEO!) */) {
-            int      u    = -2 - s;
-            int32_t  pid  = 0;
+            int      u   = -2 - s;
+            int32_t  pid = 0;
             uint32_t uid = 0, gid = 0;
             unix_peer_creds(u, &pid, &uid, &gid);
             struct {
                 int32_t  pid;
                 uint32_t uid, gid;
-            } creds = {pid, uid, gid};
+            } creds      = {pid, uid, gid};
             uint32_t out = (uint32_t)sizeof(creds);
             if (room < out)
                 out = room;
@@ -2997,8 +3000,8 @@ static void ppoll_slot_watch(const char *phase, uint64_t rsp_me, uint64_t o_bx, 
     static int wp_armed;
     if (!wp_armed) {
         wp_armed = 1;
-        asm volatile("mov %0, %%dr0" :: "r"(rsp_me + SAVED_RBX_OFF));
-        asm volatile("mov %0, %%dr7" :: "r"((uint64_t)0xD0001));
+        asm volatile("mov %0, %%dr0" ::"r"(rsp_me + SAVED_RBX_OFF));
+        asm volatile("mov %0, %%dr7" ::"r"((uint64_t)0xD0001));
         dbg_puts("WP-ARM addr=");
         dbg_puts_hex(rsp_me + SAVED_RBX_OFF);
         dbg_puts("\r\n");
@@ -3102,7 +3105,7 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
                                  * makes an idle X11/dbus socket report
                                  * readable while recvmsg returns EAGAIN? */
                                 uint32_t rused;
-                                int pc, nf, lst, hp;
+                                int      pc, nf, lst, hp;
                                 unix_readable_detail(u, &rused, &pc, &nf, &lst, &hp);
                                 dbg_puts("POLL-U u=");
                                 dbg_puts_dec((uint32_t)u);
@@ -4499,17 +4502,16 @@ static int64_t sys_sigaltstack(uint64_t ustack, uint64_t uold)
     proc_t *p = proc_current();
     if (!p)
         return -E_INVAL;
-    int active = (p->alt_ss_sp && p->alt_ss_size &&
-                  !(p->alt_ss_flags & SS_DISABLE));
+    int active = (p->alt_ss_sp && p->alt_ss_size && !(p->alt_ss_flags & SS_DISABLE));
 
     if (uold) {
         if (!user_ptr_ok(uold, sizeof(kstack_t)))
             return -E_INVAL;
         kstack_t *o = (kstack_t *)(uintptr_t)uold;
-        o->ss_sp     = active ? p->alt_ss_sp : 0;
-        o->ss_size   = active ? p->alt_ss_size : 0;
-        o->ss_flags  = active ? 0 : SS_DISABLE;
-        o->__pad     = 0;
+        o->ss_sp    = active ? p->alt_ss_sp : 0;
+        o->ss_size  = active ? p->alt_ss_size : 0;
+        o->ss_flags = active ? 0 : SS_DISABLE;
+        o->__pad    = 0;
     }
 
     if (!ustack)
@@ -6589,14 +6591,12 @@ done:
     ptrace_syscall_exit(r);
 }
 
-void syscall_init(void)
+void syscall_init_cpu(void)
 {
-    syscall_install(syscall_handler);
-
-    /* Enable the `syscall` instruction as a second entry point (musl uses
-     * it instead of int 0x80).  We return to user mode with iretq, so only
-     * the SYSCALL half of IA32_STAR matters: it supplies the kernel code
-     * selector the CPU switches into on entry. */
+    /* Enable the `syscall` instruction.  These MSRs are per-core: an AP that
+     * skips this takes #UD on the first user `syscall`.  We return to user
+     * mode with iretq, so only the SYSCALL half of IA32_STAR matters: it
+     * supplies the kernel code selector the CPU switches into on entry. */
     wrmsr(0xC0000081,                 /* IA32_STAR: syscall CS = kernel,  */
           ((uint64_t)SEL_KCODE << 32) /* sysret CS field (unused here)    */
               | ((uint64_t)SEL_UCODE << 48));
@@ -6616,13 +6616,16 @@ void syscall_init(void)
         efer |= 0x1; /* SCE: enable syscall */
         if ((d & (1u << 20)) && maxext >= 0x80000001u)
             efer |= 0x800; /* NXE when NX exists */
-        dbg_puts("SYSGATE: efer=");
-        dbg_puts_hex(efer);
-        dbg_puts("\r\n");
         wrmsr(0xC0000080, efer);
     }
     /* IA32_FMASK left at 0: the stub clears IF itself, and leaving RFLAGS
      * untouched means the saved R11 still carries the user's IF for iretq. */
+}
+
+void syscall_init(void)
+{
+    syscall_install(syscall_handler);
+    syscall_init_cpu();
 
     dbg_puts("GNOS: syscall gate installed (int 0x80 + syscall)\r\n");
 }

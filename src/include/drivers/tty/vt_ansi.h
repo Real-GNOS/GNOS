@@ -39,9 +39,9 @@ typedef struct vt_ansi {
     uint32_t x, y;
     uint32_t scroll_top, scroll_bottom;
 
-    uint8_t  fg, bg;      /* palette index, 0 = console default colour */
-    uint8_t  attrs;       /* VT_ANSI_ATTR_*                           */
-    uint8_t  cursor_visible;
+    uint8_t fg, bg; /* palette index, 0 = console default colour */
+    uint8_t attrs;  /* VT_ANSI_ATTR_*                           */
+    uint8_t cursor_visible;
 
     uint32_t saved_x, saved_y;
     uint8_t  saved_fg, saved_bg, saved_attrs;
@@ -54,8 +54,8 @@ typedef struct vt_ansi {
     uint32_t alt_scroll_top, alt_scroll_bottom;
 
     /* Escape/UTF-8 decoders. */
-    uint8_t  state;
-    uint8_t  private;
+    uint8_t state;
+    uint8_t private;
     uint8_t  nparams;
     uint32_t params[VT_ANSI_MAX_PARAMS];
 
@@ -83,10 +83,8 @@ typedef struct vt_ansi_callbacks {
     void (*erase_chars)(void *ctx, uint32_t x, uint32_t y, uint32_t count);
     void (*insert_lines)(void *ctx, uint32_t y, uint32_t bottom, uint32_t count);
     void (*delete_lines)(void *ctx, uint32_t y, uint32_t bottom, uint32_t count);
-    void (*insert_chars)(void *ctx, uint32_t x, uint32_t y, uint32_t count,
-                         uint32_t cols);
-    void (*delete_chars)(void *ctx, uint32_t x, uint32_t y, uint32_t count,
-                         uint32_t cols);
+    void (*insert_chars)(void *ctx, uint32_t x, uint32_t y, uint32_t count, uint32_t cols);
+    void (*delete_chars)(void *ctx, uint32_t x, uint32_t y, uint32_t count, uint32_t cols);
     /* Scroll [top, bottom] by `count` lines.  scroll_up is also the newline
      * path at the bottom of the region, so it moves pixels as well as cells. */
     void (*scroll_up)(void *ctx, uint32_t top, uint32_t bottom, uint32_t count);
@@ -94,12 +92,12 @@ typedef struct vt_ansi_callbacks {
     /* Blank the whole console (RIS and "erase display" mode 2). */
     void (*clear)(void *ctx);
     /* Swap the alternate cell buffer; returns 0 on success. */
-    int  (*alt_screen)(void *ctx, int on);
+    int (*alt_screen)(void *ctx, int on);
     /* Repaint the visible grid from the cell buffer. */
     void (*repaint)(void *ctx);
     /* Display width of a code point: 0 = zero-width/control, 1 = narrow,
      * 2 = double-width.  Provided by the font layer. */
-    int  (*char_width)(void *ctx, uint32_t cp);
+    int (*char_width)(void *ctx, uint32_t cp);
 } vt_ansi_callbacks_t;
 
 /* The 16-colour ANSI palette in x8r8g8b8.  Index 0 is the "default" slot and
@@ -112,8 +110,7 @@ void vt_ansi_init(vt_ansi_t *s, uint32_t cols, uint32_t rows);
 void vt_ansi_resize(vt_ansi_t *s, uint32_t cols, uint32_t rows);
 
 /* Feed one output byte (already past OPOST) through the terminal. */
-void vt_ansi_put_byte(vt_ansi_t *s, uint8_t b, const vt_ansi_callbacks_t *cb,
-                      void *ctx);
+void vt_ansi_put_byte(vt_ansi_t *s, uint8_t b, const vt_ansi_callbacks_t *cb, void *ctx);
 
 /* A bare line feed: move down one row without changing the column.  Used by
  * the tty layer when OPOST/ONLCR are off, where '\n' must not behave like

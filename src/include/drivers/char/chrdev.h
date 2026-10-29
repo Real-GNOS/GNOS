@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * chrdev.h — character device registry.  (GPL-2.0)
- * announce devices they own through cdev_add(); chrdev_populate() walks
- * the registry at boot and publishes the /dev nodes through the
- * devtmpfs bridge the DRM brought in (drm_devtmpfs.h).
+ * Drivers announce devices through cdev_add_vfs() (native GNOS vfs_ops_t)
+ * or cdev_add() (Uinxed tmpfs_device_ops_t); chrdev_populate() walks the
+ * registry at boot and publishes each /dev node through the matching
+ * backend.  The tmpfs backend lives in drm_devtmpfs.h.
  *
  */
 
@@ -23,21 +24,20 @@ typedef struct cdev {
     uint16_t           mode;      /* node mode; 0 selects the driver default */
     uint16_t           uid;
     uint16_t           gid;
-    tmpfs_device_ops_t ops;       /* Uinxed bridge backend */
-    const vfs_ops_t   *vops;      /* native GNOS backend; non-NULL wins */
-    void              *vpriv;     /* node priv for the native backend */
+    tmpfs_device_ops_t ops;   /* Uinxed bridge backend */
+    const vfs_ops_t   *vops;  /* native GNOS backend; non-NULL wins */
+    void              *vpriv; /* node priv for the native backend */
     struct cdev       *next;
 } cdev_t;
 
 /* Register a static character device (creates the node in chrdev_populate). */
-int cdev_add(const char *dir, const char *name, uint32_t major, uint32_t minor,
-             uint32_t count, uint16_t node_type, uint16_t mode,
-             const tmpfs_device_ops_t *ops);
+int cdev_add(const char *dir, const char *name, uint32_t major, uint32_t minor, uint32_t count,
+             uint16_t node_type, uint16_t mode, const tmpfs_device_ops_t *ops);
 
 /* Register a static character device with explicit ownership. */
 int cdev_add_owned(const char *dir, const char *name, uint32_t major, uint32_t minor,
-                   uint32_t count, uint16_t node_type, uint16_t mode,
-                   uint16_t uid, uint16_t gid, const tmpfs_device_ops_t *ops);
+                   uint32_t count, uint16_t node_type, uint16_t mode, uint16_t uid, uint16_t gid,
+                   const tmpfs_device_ops_t *ops);
 
 /* Remove a static character device by its full /dev path. */
 int cdev_del(const char *path);
@@ -45,9 +45,8 @@ int cdev_del(const char *path);
 /* Register a character device with GNOS's native vfs_ops_t backend (the
  * TTY path).  The entry joins the same registry the Uinxed-bridge devices
  * use; the /dev node is created by chrdev_publish_path / cdev_publish. */
-int cdev_add_vfs(const char *dir, const char *name, uint32_t major, uint32_t minor,
-                 uint32_t count, uint16_t mode, uint16_t uid, uint16_t gid,
-                 const vfs_ops_t *vops, void *vpriv);
+int cdev_add_vfs(const char *dir, const char *name, uint32_t major, uint32_t minor, uint32_t count,
+                 uint16_t mode, uint16_t uid, uint16_t gid, const vfs_ops_t *vops, void *vpriv);
 
 /* Create the /dev node for one registry entry: (dir, name) addressed by
  * path, for devices that appear at runtime (pty slaves).  Returns 0 or a

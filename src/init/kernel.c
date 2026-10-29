@@ -190,7 +190,7 @@ void kernel_main(void)
          * 1f 8b magic here: the inflate itself needs the PMM, which is not
          * up yet, so it runs after pmm_init() further down.
          */
-        initrd_gz = root_size > 18 && root_img[0] == 0x1f && root_img[1] == 0x8b;
+        initrd_gz        = root_size > 18 && root_img[0] == 0x1f && root_img[1] == 0x8b;
         g_bi.initrd_addr = (uint64_t)(uintptr_t)mod->address;
         g_bi.initrd_size = mod->size;
         dbg_puts("GNOS: initrd = ");
@@ -405,22 +405,21 @@ void kernel_main(void)
     if (!vfs_init(root_img, root_size))
         panic("initrd is not a mountable ext2 volume");
 
-    /* /dev/ptmx is a /dev node, so it has to be registered after the VFS
-     * exists: vfs_init() starts the device table from scratch, and
-     * anything registered before it is forgotten. */
+    /* The tty, sound and pty drivers join the character-device registry.
+     * Their /dev nodes appear when chrdev_populate() runs below. */
     pty_init();
     audiodev_vfs_register(); /* /dev/dsp + /dev/snd pair, one call */
     tty_init();
 
     /* The static character registry (drivers/char): mem + kmsg announce
-     * themselves here, then chrdev_populate() publishes every registered
-     * node under /dev through the same devtmpfs bridge the DRM port uses. */
+     * themselves here.  Every other static device (tty, sound, input, fb,
+     * DRM) joins the same registry below; chrdev_populate() publishes the
+     * whole set once the last driver has registered. */
     chrdev_init();
-    chrdev_populate();
 
-    /* The evdev driver publishes /dev/input/event0 (keyboard) and event1
-     * (mouse) over the same i8042 ports tty_init just enabled.  It must
-     * come after the VFS for the same /dev-table reason as fbdev. */
+    /* The evdev driver registers /dev/input/event0 (keyboard) and event1
+     * (mouse) over the same i8042 ports tty_init just enabled.  The nodes
+     * are published with the rest by chrdev_populate(). */
     input_init();
 
     /* USB 3.0 (xHCI) comes up after the VFS and the input core, because
@@ -435,18 +434,23 @@ void kernel_main(void)
         subsys_set_state(slot_xhci, SUBSYS_STATE_LIVE);
     }
 
-    /* /dev/fb0 goes in after the VFS (it needs the /dev table) but shares the
-     * framebuffer with fbcon: the boot log stays on screen until a user-space
-     * program opens the device and draws over it. */
+    /* /dev/fb0 joins the character-device registry but shares the framebuffer
+     * with fbcon: the boot log stays on screen until a user-space program
+     * opens the device and draws over it. */
     fbdev_init(&g_bi);
 
-    /* The DRM/KMS driver publishes /dev/dri/card0 and /dev/dri/renderD128 on
+    /* The DRM/KMS driver registers /dev/dri/card0 and /dev/dri/renderD128 on
      * top of the same framebuffer: dumb-buffer clients modeset through the
      * bochs VBE registers and blit their buffers to the screen.  The ported
      * Uinxed core registers the class, then the dummy driver probes the
      * software KMS pipeline. */
     drm_init();
     drm_init_fallback();
+
+    /* Every static character device has now announced itself; publish the
+     * registry in one place.  Runtime devices (pty slaves) publish
+     * themselves through cdev_publish_path(). */
+    chrdev_populate();
 
     /* Disks come after the VFS for the same reason /dev/fb0 does -- they are
      * published as /dev nodes and there is no /dev before the mount.  Note

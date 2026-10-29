@@ -29,6 +29,7 @@
 /* ACPICA calls the ctype helpers without including <ctype.h> itself; the
  * platform header is where they are expected to come from. */
 #include "ctype.h"
+#include <string.h>
 
 /* Internal DEBUG prints are off: every function entry would push a line
  * through the 9600-ish debug console and drown the boot log.  Flip this on

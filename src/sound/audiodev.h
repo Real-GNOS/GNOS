@@ -32,20 +32,20 @@ struct audiodev;
  * card must fill; everything else may be NULL and is skipped.
  */
 struct audiodev_ops {
-    const char *name;      /* subsys registry name: "ac97", "hda", ...   */
-    uint16_t    major;     /* Linux-ish major/minor for coldplug         */
+    const char *name;  /* subsys registry name: "ac97", "hda", ...   */
+    uint16_t    major; /* Linux-ish major/minor for coldplug         */
     uint16_t    minor;
 
     /* Bring the card up.  1 on success, 0 if absent or unusable -- the
      * same convention ac97_init() and hda_init() already follow.        */
-    int  (*probe)(void);
+    int (*probe)(void);
 
     /* Optional audit run after a successful probe; 1 on pass.          */
-    int  (*selftest)(void);
+    int (*selftest)(void);
 
     /* PCM-out: signed 16-bit stereo frames at the card's configured
      * rate.  Return 1 when the whole buffer was consumed.              */
-    int  (*play)(const int16_t *samples, uint32_t frames);
+    int (*play)(const int16_t *samples, uint32_t frames);
 
     /* Block until the engine has played everything queued.             */
     void (*drain)(void);
@@ -57,20 +57,20 @@ struct audiodev_ops {
      * through audiodev_play().  These mirror the primitives audio.c's
      * AC'97 engine already provides, which is where the shape comes from.
      */
-    uint32_t (*frames_total)(void);   /* frames ever handed to the engine */
-    uint32_t (*in_flight)(void);      /* queued, not yet played           */
-    int      (*free_frames)(void);    /* ring space left, in frames       */
-    int      (*engine_halted)(void);  /* engine stopped under us (XRUN)   */
-    void     (*reset_ring)(void);     /* rewind the descriptor ring       */
-    void     (*begin)(void);          /* start/resume the DMA engine      */
-    void     (*stop)(void);           /* halt the DMA engine              */
+    uint32_t (*frames_total)(void); /* frames ever handed to the engine */
+    uint32_t (*in_flight)(void);    /* queued, not yet played           */
+    int (*free_frames)(void);       /* ring space left, in frames       */
+    int (*engine_halted)(void);     /* engine stopped under us (XRUN)   */
+    void (*reset_ring)(void);       /* rewind the descriptor ring       */
+    void (*begin)(void);            /* start/resume the DMA engine      */
+    void (*stop)(void);             /* halt the DMA engine              */
 };
 
 /* One registered card.  Public only so introspection can read it. */
 struct audiodev {
     const struct audiodev_ops *ops;
-    int      slot;   /* subsys registry slot, -1 before register        */
-    uint8_t  state;  /* SUBSYS_STATE_* once probe has run               */
+    int                        slot;  /* subsys registry slot, -1 before register        */
+    uint8_t                    state; /* SUBSYS_STATE_* once probe has run               */
 };
 
 /*
@@ -100,7 +100,7 @@ int audiodev_vfs_register(void);
 struct audiodev *audiodev_default(void);
 
 /* How many cards were registered, and read-only access to one of them. */
-int               audiodev_count(void);
+int                    audiodev_count(void);
 const struct audiodev *audiodev_get(int idx);
 
 /* Unified streaming: route to the default card.  1 on full consumption. */

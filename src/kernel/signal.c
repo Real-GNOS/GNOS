@@ -201,7 +201,7 @@ int signal_deliver(proc_t *p, int sig, regs_t *r)
     int on_alt = 0;
     if ((act->flags & SA_ONSTACK) && p->alt_ss_sp && p->alt_ss_size &&
         !(p->alt_ss_flags & SS_DISABLE)) {
-        uint64_t atop = p->alt_ss_sp + p->alt_ss_size;
+        uint64_t atop  = p->alt_ss_sp + p->alt_ss_size;
         uint64_t afp   = ((atop - 128) - FPSTATE_SIZE) & ~63ull;
         uint64_t abase = ((afp - sizeof(rt_sigframe_t)) & ~15ull) - 8;
         if (user_buf_ok(p->as, abase, sizeof(rt_sigframe_t), 1) &&
@@ -265,7 +265,7 @@ int signal_deliver(proc_t *p, int sig, regs_t *r)
         f->uc.uc_stack.ss_size  = 0;
         f->uc.uc_stack.ss_flags = SS_DISABLE;
     }
-    f->uc.uc_sigmask        = retmask;
+    f->uc.uc_sigmask = retmask;
 
     /* We do not track who sent a signal, so every one of them looks like it
      * came from kill() by an unknown pid, which is what SI_USER means. */

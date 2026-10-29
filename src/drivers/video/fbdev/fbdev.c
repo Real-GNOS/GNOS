@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #include "bootinfo.h"
+#include "chrdev.h"
 #include "debugcon.h"
 #include "fbcon.h"
 #include "gfx.h"
@@ -282,10 +283,9 @@ int fbdev_init(const bootinfo_t *bi)
     g_fb.len   = (uint64_t)bi->fb_pitch * bi->fb_height;
     g_fb.live  = 1;
 
-    /* vfs_register_devnum() answers 0 for success and a negative errno
-     * otherwise, so this is a != test and not a truth test.  fb0 is (29, 0)
-     * in the Linux device number space. */
-    if (vfs_register_devnum("fb0", &g_fb_ops, 0, 29, 0) != 0) {
+    /* fb0 is (29, 0) in the Linux device number space; the node is created
+     * by chrdev_populate() after all static devices have registered. */
+    if (cdev_add_vfs("", "fb0", 29, 0, 1, 0666, 0, 0, &g_fb_ops, NULL) != 0) {
         dbg_puts("FBDEV: /dev/fb0 registration failed\n");
         g_fb.live = 0;
         subsys_set_state(slot, SUBSYS_STATE_FAILED);

@@ -23,8 +23,7 @@ void atapi_soft_reset(const ata_disk_t *d);
  * a uint32_t because a 32-sector transfer is exactly 65536, which does not
  * fit in 16 bits even though the drive's byte-count register encodes it as
  * zero.  Returns 0 or -1. */
-int atapi_packet_read(const ata_disk_t *d, const uint8_t *pkt, uint32_t nbytes,
-                      uint8_t *buf);
+int atapi_packet_read(const ata_disk_t *d, const uint8_t *pkt, uint32_t nbytes, uint8_t *buf);
 
 /* READ(10) `nsect` 2048-byte sectors starting at `lba`, in chunks small
  * enough for the packet byte-count limit. */

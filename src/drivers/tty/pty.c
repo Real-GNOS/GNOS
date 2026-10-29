@@ -776,8 +776,7 @@ int pty_reattach_master(vfs_node_t *n)
      * master keeps the pair pointer in its own (per-open) node. */
     char idx[8], del[16];
     snprintf(idx, sizeof(idx), "%d", p->index);
-    if (cdev_add_vfs("pts", idx, 136, (uint32_t)p->index, 1, 0620, 0, 5,
-                     &pty_slave_ops, p) != 0 ||
+    if (cdev_add_vfs("pts", idx, 136, (uint32_t)p->index, 1, 0620, 0, 5, &pty_slave_ops, p) != 0 ||
         cdev_publish_path("pts", idx) != 0) {
         snprintf(del, sizeof(del), "pts/%s", idx);
         cdev_del(del);

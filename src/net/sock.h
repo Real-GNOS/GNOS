@@ -28,8 +28,8 @@
 
 /* Address families, types and protocols: the Linux numbers, because musl
  * passes them through verbatim and BusyBox switches on them. */
-#define AF_INET 2
-#define AF_UNIX 1
+#define AF_INET    2
+#define AF_UNIX    1
 #define AF_NETLINK 16
 
 #define SOCK_STREAM 1

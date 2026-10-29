@@ -53,7 +53,8 @@ void usb_host_register(usb_host_t *host)
     for (usb_host_t *entry = usb_host_list; entry; entry = entry->next) {
         if (entry->bus_number == host->bus_number) {
             spin_unlock(&usb_host_lock);
-            plogk("usb: %s: bus %u already in use; controller left unregistered.\n", host->name, host->bus_number);
+            plogk("usb: %s: bus %u already in use; controller left unregistered.\n", host->name,
+                  host->bus_number);
             return;
         }
     }
@@ -66,7 +67,8 @@ void usb_host_register(usb_host_t *host)
 /* Remove a host controller from the global list. */
 int usb_host_unregister(usb_host_t *host)
 {
-    if (!host) return -E_INVAL;
+    if (!host)
+        return -E_INVAL;
     spin_lock(&usb_host_lock);
     usb_host_t **prev = &usb_host_list;
     while (*prev) {
@@ -116,7 +118,8 @@ usb_host_t *usb_host_find_by_type(usb_host_type_t type, int index)
 /* Allocate a free device address on a bus (1..127). */
 int usb_host_allocate_address(uint8_t bus_number, uint8_t *address)
 {
-    if (!address) return -E_INVAL;
+    if (!address)
+        return -E_INVAL;
     spin_lock(&usb_address_lock);
     for (uint8_t addr = 1; addr < 128; addr++) {
         uint8_t byte = addr / 8, bit = addr % 8;
@@ -134,7 +137,8 @@ int usb_host_allocate_address(uint8_t bus_number, uint8_t *address)
 /* Release a device address on a bus. */
 void usb_host_release_address(uint8_t bus_number, uint8_t address)
 {
-    if (!address || address >= 128) return;
+    if (!address || address >= 128)
+        return;
     spin_lock(&usb_address_lock);
     uint8_t byte = address / 8, bit = address % 8;
     usb_address_bitmap[bus_number][byte] &= ~(1u << bit);

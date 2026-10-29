@@ -173,7 +173,8 @@ void panic_from_frame(const char *msg, const regs_t *r)
     for (int depth = 0; depth < 16 && fp; depth++) {
         const uint64_t *next = (const uint64_t *)fp[0];
         uint64_t        rip  = fp[1];
-        if ((uintptr_t)next <= (uintptr_t)fp || ((uintptr_t)next & 7) || !rip) break;
+        if ((uintptr_t)next <= (uintptr_t)fp || ((uintptr_t)next & 7) || !rip)
+            break;
         dbg_puts("  #");
         dbg_puts_dec((uint32_t)depth);
         dbg_puts(" rip=");

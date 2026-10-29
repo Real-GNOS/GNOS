@@ -19,11 +19,11 @@
 
 #include "drm_vsnprintf.h" /* plogk */
 
-#define NDP_CACHE     8
-#define NDP_QUEUE     4 /* packets parked per cache entry */
-#define NDP_PROBES    3
-#define NDP_PROBE_MS  1000
-#define NDP_ENTRY_MS  60000
+#define NDP_CACHE    8
+#define NDP_QUEUE    4 /* packets parked per cache entry */
+#define NDP_PROBES   3
+#define NDP_PROBE_MS 1000
+#define NDP_ENTRY_MS 60000
 
 /* ---- the checksum ---------------------------------------------------------- */
 
@@ -184,7 +184,7 @@ void ndp_learn(struct netif *ifp, const ipv6_address_t *address, const uint8_t m
     ndp_entry_t *e = ndp_slot(address);
     if (!e || !address || !mac)
         return;
-    e->addr    = *address;
+    e->addr = *address;
     memcpy(e->mac, mac, 6);
     e->seen_at = timer_ticks();
     e->used    = 1;
@@ -201,8 +201,8 @@ void ndp_learn(struct netif *ifp, const ipv6_address_t *address, const uint8_t m
 static void icmpv6_send(struct netif *ifp, const ipv6_address_t *dst, uint8_t type, uint8_t code,
                         const void *payload, uint16_t plen)
 {
-    uint16_t  len = (uint16_t)(8 + plen);
-    uint8_t  *msg = kmalloc(len);
+    uint16_t len = (uint16_t)(8 + plen);
+    uint8_t *msg = kmalloc(len);
     if (!msg)
         return;
     memset(msg, 0, 8);
@@ -234,7 +234,8 @@ static void ndp_solicit(struct netif *ifp, const ipv6_address_t *target)
 }
 
 /* Process one inbound ICMPv6 message (echo, NDP, errors). */
-static void icmpv6_input(struct netif *ifp, const ipv6_info_t *info, const uint8_t *msg, uint16_t len)
+static void icmpv6_input(struct netif *ifp, const ipv6_info_t *info, const uint8_t *msg,
+                         uint16_t len)
 {
     if (len < 8)
         return;
@@ -250,9 +251,11 @@ static void icmpv6_input(struct netif *ifp, const ipv6_info_t *info, const uint8
         reply[2] = reply[3] = 0;
         ipv6_address_t src;
         memcpy(src.bytes, ifp->ipv6_link_local, IPV6_ADDRESS_LEN);
-        uint16_t csum = net_checksum_ipv6_pseudo(&src, &info->source, IPV6_NEXT_ICMP, reply, info->payload_length);
+        uint16_t csum = net_checksum_ipv6_pseudo(&src, &info->source, IPV6_NEXT_ICMP, reply,
+                                                 info->payload_length);
         net_put16(reply + 2, csum ? csum : 0xFFFFu);
-        ipv6_output(ifp, &src, &info->source, IPV6_NEXT_ICMP, reply, (uint16_t)info->payload_length);
+        ipv6_output(ifp, &src, &info->source, IPV6_NEXT_ICMP, reply,
+                    (uint16_t)info->payload_length);
         kfree(reply);
         return;
     }
@@ -302,9 +305,10 @@ int net_ipv6_parse(const void *data, uint32_t length, net_ipv6_packet_t *packet)
     if ((uint32_t)payload_length > length - IPV6_HEADER_LEN)
         return -E_INVAL;
     memset(packet, 0, sizeof(*packet));
-    packet->flow_label = ((uint32_t)(bytes[1] & 0x0fU) << 16) | ((uint32_t)bytes[2] << 8) | bytes[3];
-    packet->total_len  = (uint16_t)(IPV6_HEADER_LEN + payload_length);
-    packet->hop_limit  = bytes[7];
+    packet->flow_label =
+        ((uint32_t)(bytes[1] & 0x0fU) << 16) | ((uint32_t)bytes[2] << 8) | bytes[3];
+    packet->total_len = (uint16_t)(IPV6_HEADER_LEN + payload_length);
+    packet->hop_limit = bytes[7];
     memcpy(packet->source.bytes, bytes + 8, IPV6_ADDRESS_LEN);
     memcpy(packet->destination.bytes, bytes + 24, IPV6_ADDRESS_LEN);
 
@@ -341,7 +345,7 @@ int ipv6_input(struct netif *ifp, ipv6_pbuf_t *packet)
     }
     if (!local) {
         static const uint8_t all_nodes[16] = {0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
-        local = !memcmp(parsed.destination.bytes, all_nodes, 16);
+        local                              = !memcmp(parsed.destination.bytes, all_nodes, 16);
     }
     if (!local) {
         kfree(packet->data);
@@ -362,9 +366,12 @@ int ipv6_input(struct netif *ifp, ipv6_pbuf_t *packet)
         /* No IPv6 transports yet: tell the peer, port unreachable. */
         uint8_t        quote[IPV6_HEADER_LEN + 8];
         ipv6_address_t dst;
-        memcpy(quote, packet->data, parsed.transport_offset < IPV6_HEADER_LEN + 8 ? parsed.transport_offset : IPV6_HEADER_LEN + 8);
+        memcpy(quote, packet->data,
+               parsed.transport_offset < IPV6_HEADER_LEN + 8 ? parsed.transport_offset
+                                                             : IPV6_HEADER_LEN + 8);
         dst = parsed.source;
-        icmpv6_send(ifp, &dst, ICMPV6_DEST_UNREACHABLE, ICMPV6_PORT_UNREACHABLE, quote, (uint16_t)sizeof(quote));
+        icmpv6_send(ifp, &dst, ICMPV6_DEST_UNREACHABLE, ICMPV6_PORT_UNREACHABLE, quote,
+                    (uint16_t)sizeof(quote));
     }
     kfree(packet->data);
     kfree(packet);
@@ -431,14 +438,14 @@ int net_ip6_queuedown(const ipv6_address_t *destination, const void *frame, uint
         uint8_t *copy = kmalloc(len);
         if (copy) {
             memcpy(copy, frame, len);
-            e->pend[e->pend_n]      = copy;
-            e->pend_len[e->pend_n]  = len;
+            e->pend[e->pend_n]     = copy;
+            e->pend_len[e->pend_n] = len;
             e->pend_n++;
         }
     }
-    e->addr    = *destination;
-    e->seen_at = timer_ticks();
-    e->used    = 1;
+    e->addr      = *destination;
+    e->seen_at   = timer_ticks();
+    e->used      = 1;
     uint64_t now = timer_ticks();
     if (!e->probe_at || now - e->probe_at >= NDP_PROBE_MS) {
         if (e->probes++ < NDP_PROBES) {
@@ -450,8 +457,8 @@ int net_ip6_queuedown(const ipv6_address_t *destination, const void *frame, uint
             /* Concede: drop the parked packets, caller sees -E_NOBUFS. */
             for (int i = 0; i < e->pend_n; i++)
                 kfree(e->pend[i]);
-            e->pend_n = 0;
-            e->probes = 0;
+            e->pend_n   = 0;
+            e->probes   = 0;
             e->probe_at = 0;
             return 0;
         }

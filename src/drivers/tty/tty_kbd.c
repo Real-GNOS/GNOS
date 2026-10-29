@@ -132,8 +132,8 @@ static int vt_hotkey(uint8_t code)
 void tty_kbd_reset_modifiers(void)
 {
     g_shift = g_ctrl = g_alt = 0;
-    g_ext                 = 0;
-    g_e1_skip             = 0;
+    g_ext                    = 0;
+    g_e1_skip                = 0;
 }
 
 /* ---- scancode decoding ------------------------------------------------- */

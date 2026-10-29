@@ -46,12 +46,12 @@
  * CD-ROMs satapi.c drives.
  */
 typedef struct {
-    const ata_disk_t *pata; /* PIO channel state, NULL when AHCI */
+    const ata_disk_t *pata;     /* PIO channel state, NULL when AHCI */
     int               ahci_idx; /* index into ahci_devices[], -1 when PATA */
-    uint64_t          lba0;    /* first sector of the window   */
-    uint64_t          nsect;   /* window length, in sectors    */
-    uint32_t          secsize; /* bytes per sector: 512 ATA, 2048 ATAPI */
-    char              name[8]; /* "sda", "sda1"                */
+    uint64_t          lba0;     /* first sector of the window   */
+    uint64_t          nsect;    /* window length, in sectors    */
+    uint32_t          secsize;  /* bytes per sector: 512 ATA, 2048 ATAPI */
+    char              name[8];  /* "sda", "sda1"                */
     char              model[41];
     uint8_t           is_part;
     uint8_t           used;
@@ -77,8 +77,7 @@ static ata_bdev_t *part_slot(int disk, int idx)
  * write it back.  That read-modify-write is what makes `echo x > /dev/sda`
  * change one byte instead of destroying 511 of its neighbours.
  */
-static int32_t clamp(const ata_bdev_t *b, uint64_t off, uint32_t len,
-                     uint64_t *end)
+static int32_t clamp(const ata_bdev_t *b, uint64_t off, uint32_t len, uint64_t *end)
 {
     uint64_t cap = b->nsect * b->secsize;
     if (off >= cap)
@@ -95,8 +94,7 @@ static int32_t clamp(const ata_bdev_t *b, uint64_t off, uint32_t len,
  * packet run for a CD; the AHCI side takes runs of up to 255 per call, its
  * sector count field being a byte.  Returns 0, or a negative errno.
  */
-static int bdev_read_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect,
-                             uint8_t *out)
+static int bdev_read_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect, uint8_t *out)
 {
     if (!nsect)
         return 0;
@@ -104,8 +102,7 @@ static int bdev_read_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect,
     if (b->pata) {
         if (b->secsize == ATA_SECTOR) {
             for (uint32_t i = 0; i < nsect; i++)
-                if (ata_read_sector(b->pata, lba + i,
-                                    out + (size_t)i * ATA_SECTOR) < 0)
+                if (ata_read_sector(b->pata, lba + i, out + (size_t)i * ATA_SECTOR) < 0)
                     return -E_IO;
             return 0;
         }
@@ -117,27 +114,24 @@ static int bdev_read_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect,
         uint8_t now = left > 255 ? 255 : (uint8_t)left;
         int     ret = (b->secsize == ATA_SECTOR)
                           ? ahci_read_sectors((uint8_t)b->ahci_idx, now, lba, out)
-                          : ahci_satapi_read_sectors((uint8_t)b->ahci_idx, now,
-                                                     lba, out);
+                          : ahci_satapi_read_sectors((uint8_t)b->ahci_idx, now, lba, out);
         if (ret < 0)
             return ret;
-        out  += (size_t)now * b->secsize;
-        lba  += now;
+        out += (size_t)now * b->secsize;
+        lba += now;
         left -= now;
     }
     return 0;
 }
 
-static int bdev_write_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect,
-                              const uint8_t *in)
+static int bdev_write_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect, const uint8_t *in)
 {
     if (!nsect)
         return 0;
 
     if (b->pata) {
         for (uint32_t i = 0; i < nsect; i++)
-            if (ata_write_sector(b->pata, lba + i,
-                                 in + (size_t)i * ATA_SECTOR) < 0)
+            if (ata_write_sector(b->pata, lba + i, in + (size_t)i * ATA_SECTOR) < 0)
                 return -E_IO;
         return 0;
     }
@@ -151,8 +145,8 @@ static int bdev_write_sectors(const ata_bdev_t *b, uint64_t lba, uint32_t nsect,
         int     ret = ahci_write_sectors((uint8_t)b->ahci_idx, now, lba, in);
         if (ret < 0)
             return ret;
-        in   += (size_t)now * ATA_SECTOR;
-        lba  += now;
+        in += (size_t)now * ATA_SECTOR;
+        lba += now;
         left -= now;
     }
 
@@ -173,8 +167,8 @@ static int32_t bdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     if (want <= 0)
         return want;
 
-    uint8_t *out   = (uint8_t *)buf;
-    uint64_t pos   = off;
+    uint8_t *out = (uint8_t *)buf;
+    uint64_t pos = off;
     uint8_t  sec[2048]; /* one sector of either kind */
 
     while (pos < end) {
@@ -206,8 +200,7 @@ static int32_t bdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return (int32_t)(end - off);
 }
 
-static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
-                          uint32_t len)
+static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     ata_bdev_t *b = (ata_bdev_t *)n->priv;
     if (!b || !b->used || !b->secsize)
@@ -239,7 +232,7 @@ static int32_t bdev_write(vfs_node_t *n, uint64_t off, const void *buf,
             if (bdev_write_sectors(b, lba, 1, sec) < 0)
                 return (pos > off) ? (int32_t)(pos - off) : -E_IO;
         }
-        in  += chunk;
+        in += chunk;
         pos += chunk;
     }
     return want;
@@ -342,8 +335,7 @@ static const vfs_ops_t g_bdev_ops = {
 
 static uint32_t rd32(const uint8_t *p)
 {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static uint64_t rd64(const uint8_t *p)
@@ -373,8 +365,7 @@ static void part_name(char *dst, const char *disk, int idx)
  * straddle a sector boundary; read the second sector only when it does
  * instead of assuming 128-byte entries line up with 512-byte sectors.
  */
-static int gpt_read_entry(const ata_bdev_t *b, uint64_t entry_lba,
-                          uint32_t entry_sz, uint32_t i,
+static int gpt_read_entry(const ata_bdev_t *b, uint64_t entry_lba, uint32_t entry_sz, uint32_t i,
                           uint8_t *out, uint32_t want)
 {
     uint64_t byte = entry_lba * ATA_SECTOR + (uint64_t)i * entry_sz;
@@ -454,17 +445,16 @@ static int ata_scan_partitions(int disk)
 
         ata_bdev_t *p = part_slot(disk, i);
         p->pata       = whole->pata; /* a partition inherits its disk's
-                                       * backend, with a window on it */
-        p->ahci_idx   = whole->ahci_idx;
-        p->lba0       = whole->lba0 + start;
-        p->nsect      = count;
-        p->secsize    = whole->secsize;
-        p->is_part    = 1;
-        p->used       = 1;
+                                      * backend, with a window on it */
+        p->ahci_idx = whole->ahci_idx;
+        p->lba0     = whole->lba0 + start;
+        p->nsect    = count;
+        p->secsize  = whole->secsize;
+        p->is_part  = 1;
+        p->used     = 1;
         part_name(p->name, whole->name, i);
 
-        if (vfs_register_blkdev(p->name, &g_bdev_ops, p,
-                                p->nsect * p->secsize) != 0) {
+        if (vfs_register_blkdev(p->name, &g_bdev_ops, p, p->nsect * p->secsize) != 0) {
             p->used = 0;
             continue;
         }
@@ -511,8 +501,7 @@ static int ata_scan_gpt(int disk)
     for (uint32_t i = 0; i < nentries; i++) {
         /* 48 bytes cover the type GUID and the first/last LBA fields. */
         uint8_t ent[48];
-        if (gpt_read_entry(whole, entry_lba, entry_sz, i, ent,
-                           sizeof ent) < 0)
+        if (gpt_read_entry(whole, entry_lba, entry_sz, i, ent, sizeof ent) < 0)
             continue;
 
         const uint8_t *guid  = ent + GPT_TYPE_GUID;
@@ -535,18 +524,17 @@ static int ata_scan_gpt(int disk)
         uint64_t    count = last - first + 1;
         ata_bdev_t *p     = part_slot(disk, i);
         p->pata           = whole->pata; /* a partition inherits its
-                                           * disk's backend, with a
-                                           * window on it */
-        p->ahci_idx       = whole->ahci_idx;
-        p->lba0           = whole->lba0 + first;
-        p->nsect          = count;
-        p->secsize        = whole->secsize;
-        p->is_part        = 1;
-        p->used           = 1;
+                                          * disk's backend, with a
+                                          * window on it */
+        p->ahci_idx = whole->ahci_idx;
+        p->lba0     = whole->lba0 + first;
+        p->nsect    = count;
+        p->secsize  = whole->secsize;
+        p->is_part  = 1;
+        p->used     = 1;
         part_name(p->name, whole->name, i);
 
-        if (vfs_register_blkdev(p->name, &g_bdev_ops, p,
-                                p->nsect * p->secsize) != 0) {
+        if (vfs_register_blkdev(p->name, &g_bdev_ops, p, p->nsect * p->secsize) != 0) {
             p->used = 0;
             continue;
         }
@@ -593,8 +581,7 @@ int ata_read_boot_partition(uint8_t *dst, uint32_t cap)
         uint32_t now = (uint32_t)(p->nsect - i);
         if (now > 255)
             now = 255;
-        if (bdev_read_sectors(p, p->lba0 + i, now,
-                              dst + (size_t)i * p->secsize) < 0)
+        if (bdev_read_sectors(p, p->lba0 + i, now, dst + (size_t)i * p->secsize) < 0)
             return 0;
         i += now;
     }
@@ -657,15 +644,15 @@ static void probe_ahci(void)
     for (int i = 0; i < ahci_device_count && g_ndisks < MAX_DISKS; i++) {
         ahci_device_t *a = &ahci_devices[i];
 
-        int idx = g_ndisks++;
-        ata_bdev_t *b = &g_bdevs[idx];
-        b->pata      = NULL;
-        b->ahci_idx  = i;
-        b->lba0      = 0;
-        b->nsect     = a->size;
-        b->secsize   = a->sector_size;
-        b->is_part   = 0;
-        b->used      = 1;
+        int         idx = g_ndisks++;
+        ata_bdev_t *b   = &g_bdevs[idx];
+        b->pata         = NULL;
+        b->ahci_idx     = i;
+        b->lba0         = 0;
+        b->nsect        = a->size;
+        b->secsize      = a->sector_size;
+        b->is_part      = 0;
+        b->used         = 1;
         memcpy(b->model, a->model, sizeof b->model);
     }
 }
@@ -715,8 +702,7 @@ static void publish_disks(void)
          * find-first keeps a re-publish from registering the name twice. */
         if (idx > 0 && subsys_find(b->name) < 0)
             subsys_set_state(
-                subsys_register(b->name, b->name, SUBSYS_CLASS_BLOCK, 8,
-                                (uint16_t)(idx * 16)),
+                subsys_register(b->name, b->name, SUBSYS_CLASS_BLOCK, 8, (uint16_t)(idx * 16)),
                 SUBSYS_STATE_LIVE);
 
         if (b->secsize != ATA_SECTOR) {

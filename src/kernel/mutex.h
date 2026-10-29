@@ -17,10 +17,10 @@
 struct proc;
 
 typedef struct mutex {
-    spinlock_t   slot;   /* guards owner/waiters/count below */
-    struct proc *owner;  /* current holder, NULL when free */
+    spinlock_t   slot;    /* guards owner/waiters/count below */
+    struct proc *owner;   /* current holder, NULL when free */
     struct proc *waiters; /* FIFO of parked processes */
-    uint32_t     count;  /* wait queue length, for the fast check */
+    uint32_t     count;   /* wait queue length, for the fast check */
 } mutex_t;
 
 void mutex_init(mutex_t *m);

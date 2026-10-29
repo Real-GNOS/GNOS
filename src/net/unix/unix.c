@@ -528,12 +528,12 @@ void unix_peer_creds(int u, int32_t *pid, uint32_t *uid, uint32_t *gid)
 
 /* TEMPORARY xfce debugging: expose the readiness inputs so the poll path
  * can print which of them fired for an idle X11/dbus socket. */
-void unix_readable_detail(int u, uint32_t *rused, int *peer_closed, int *n_fds,
-                          int *listening, int *has_peer)
+void unix_readable_detail(int u, uint32_t *rused, int *peer_closed, int *n_fds, int *listening,
+                          int *has_peer)
 {
     unix_t *s = unix_at(u);
     if (!s) {
-        *rused = 0;
+        *rused       = 0;
         *peer_closed = *n_fds = *listening = *has_peer = -1;
         return;
     }

@@ -43,7 +43,7 @@ int unix_getname(int u, char *path, uint32_t *len, int peer);
 void unix_peer_creds(int u, int32_t *pid, uint32_t *uid, uint32_t *gid);
 
 /* TEMPORARY xfce debugging: the readiness inputs behind unix_readable. */
-void unix_readable_detail(int u, uint32_t *rused, int *peer_closed, int *n_fds,
-                          int *listening, int *has_peer);
+void unix_readable_detail(int u, uint32_t *rused, int *peer_closed, int *n_fds, int *listening,
+                          int *has_peer);
 
 #endif

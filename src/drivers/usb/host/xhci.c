@@ -873,31 +873,42 @@ static int slot_of(const usb_device_t *dev)
     return dev ? (int)(uintptr_t)dev->hc_private : 0;
 }
 
-static int xhci_hcd_control(struct usb_device *device, const usb_setup_packet_t *setup, void *buffer, size_t length, uint32_t timeout_ms)
+static int xhci_hcd_control(struct usb_device *device, const usb_setup_packet_t *setup,
+                            void *buffer, size_t length, uint32_t timeout_ms)
 {
     (void)timeout_ms;
-    if (!setup) return -E_INVAL;
-    int r = xhci_control_transfer(slot_of(device), setup->request_type, setup->request, setup->value, setup->index, buffer, (uint16_t)length);
+    if (!setup)
+        return -E_INVAL;
+    int r = xhci_control_transfer(slot_of(device), setup->request_type, setup->request,
+                                  setup->value, setup->index, buffer, (uint16_t)length);
     return r < 0 ? r : 0;
 }
 
-static int xhci_hcd_transfer(struct usb_endpoint *endpoint, void *buffer, size_t length, size_t *actual, uint32_t timeout_ms)
+static int xhci_hcd_transfer(struct usb_endpoint *endpoint, void *buffer, size_t length,
+                             size_t *actual, uint32_t timeout_ms)
 {
     (void)timeout_ms;
-    if (actual) *actual = 0;
-    if (!endpoint || !endpoint->interface || !endpoint->interface->device) return -E_INVAL;
-    int r = xhci_bulk_transfer(slot_of(endpoint->interface->device), endpoint->descriptor.endpoint_address, buffer, length);
-    if (actual && r > 0) *actual = (size_t)r;
+    if (actual)
+        *actual = 0;
+    if (!endpoint || !endpoint->interface || !endpoint->interface->device)
+        return -E_INVAL;
+    int r = xhci_bulk_transfer(slot_of(endpoint->interface->device),
+                               endpoint->descriptor.endpoint_address, buffer, length);
+    if (actual && r > 0)
+        *actual = (size_t)r;
     return r < 0 ? r : 0;
 }
 
 static int xhci_hcd_configure_endpoint(struct usb_endpoint *endpoint)
 {
-    if (!endpoint || !endpoint->interface || !endpoint->interface->device) return -E_INVAL;
+    if (!endpoint || !endpoint->interface || !endpoint->interface->device)
+        return -E_INVAL;
 
     uint8_t xfer = endpoint->descriptor.attributes & USB_ENDPOINT_XFERTYPE_MASK;
-    if (xfer == USB_ENDPOINT_XFER_CONTROL) return 0; /* EP0 was set up by address_device() */
-    if (xfer == USB_ENDPOINT_XFER_ISOC) return -E_OPNOTSUPP;
+    if (xfer == USB_ENDPOINT_XFER_CONTROL)
+        return 0; /* EP0 was set up by address_device() */
+    if (xfer == USB_ENDPOINT_XFER_ISOC)
+        return -E_OPNOTSUPP;
 
     int      slot  = slot_of(endpoint->interface->device);
     int      addr  = endpoint->descriptor.endpoint_address;
@@ -908,14 +919,17 @@ static int xhci_hcd_configure_endpoint(struct usb_endpoint *endpoint)
     else
         ep_type = is_in ? EP_CTX_INTERRUPT_IN : 3;
     uint32_t ep_id = (uint32_t)(addr & USB_ENDPOINT_NUMBER_MASK) * 2 + (uint32_t)is_in;
-    if (!get_or_create_ep_ring((uint32_t)slot, ep_id, ep_type, endpoint->descriptor.max_packet_size, endpoint->descriptor.interval, NULL))
+    if (!get_or_create_ep_ring((uint32_t)slot, ep_id, ep_type, endpoint->descriptor.max_packet_size,
+                               endpoint->descriptor.interval, NULL))
         return -E_IO;
     return 0;
 }
 
-static int xhci_hcd_interrupt_start(struct usb_endpoint *endpoint, size_t length, usb_interrupt_complete_t complete, void *context)
+static int xhci_hcd_interrupt_start(struct usb_endpoint *endpoint, size_t length,
+                                    usb_interrupt_complete_t complete, void *context)
 {
-    if (!endpoint || !endpoint->interface || !endpoint->interface->device || !complete || !length) return -E_INVAL;
+    if (!endpoint || !endpoint->interface || !endpoint->interface->device || !complete || !length)
+        return -E_INVAL;
 
     xhci_int_armed_t *armed = NULL;
     for (int i = 0; i < 8; i++) {
@@ -924,12 +938,16 @@ static int xhci_hcd_interrupt_start(struct usb_endpoint *endpoint, size_t length
             break;
         }
     }
-    if (!armed) return -E_NOMEM;
+    if (!armed)
+        return -E_NOMEM;
 
     uint64_t phys = 0;
     uint8_t *buf  = (uint8_t *)xhci_alloc_page(&phys);
-    if (!buf) return -E_NOMEM;
-    if (xhci_setup_interrupt_in(slot_of(endpoint->interface->device), endpoint->descriptor.endpoint_address, endpoint->descriptor.max_packet_size, endpoint->descriptor.interval, buf, phys) != 0)
+    if (!buf)
+        return -E_NOMEM;
+    if (xhci_setup_interrupt_in(
+            slot_of(endpoint->interface->device), endpoint->descriptor.endpoint_address,
+            endpoint->descriptor.max_packet_size, endpoint->descriptor.interval, buf, phys) != 0)
         return -E_IO;
 
     armed->ep       = endpoint;
@@ -944,7 +962,8 @@ static int xhci_hcd_interrupt_start(struct usb_endpoint *endpoint, size_t length
 
 static void xhci_hcd_interrupt_stop(struct usb_endpoint *endpoint)
 {
-    if (!endpoint) return;
+    if (!endpoint)
+        return;
     for (int i = 0; i < 8; i++) {
         if (g_int_armed[i].active && g_int_armed[i].ep == endpoint) {
             g_int_armed[i].active = 0;
@@ -955,7 +974,8 @@ static void xhci_hcd_interrupt_stop(struct usb_endpoint *endpoint)
 
 static void xhci_hcd_disable_endpoint(struct usb_endpoint *endpoint)
 {
-    if (!endpoint) return;
+    if (!endpoint)
+        return;
     xhci_hcd_interrupt_stop(endpoint);
     endpoint->hc_private = NULL;
 }
@@ -969,20 +989,25 @@ static int xhci_hcd_clear_halt(struct usb_endpoint *endpoint)
 static void xhci_hcd_disable_device(struct usb_device *device)
 {
     int slot = slot_of(device);
-    if (slot > 0 && slot <= (int)xhci.max_slots) xhci_usb_dev[slot] = NULL;
+    if (slot > 0 && slot <= (int)xhci.max_slots)
+        xhci_usb_dev[slot] = NULL;
 }
 
 /* Reap armed interrupt-IN endpoints; completion callbacks run here, in the
  * caller's context (the timer tick via usb_hid_poll()). */
 void xhci_usb_reap(void)
 {
-    if (xhci.initialized != XHCI_STATE_READY) return;
+    if (xhci.initialized != XHCI_STATE_READY)
+        return;
     for (int i = 0; i < 8; i++) {
         xhci_int_armed_t *armed = &g_int_armed[i];
-        if (!armed->active || !armed->complete || !armed->ep || !armed->ep->interface) continue;
+        if (!armed->active || !armed->complete || !armed->ep || !armed->ep->interface)
+            continue;
         uint8_t tmp[64];
-        int     r = xhci_read_interrupt_report(slot_of(armed->ep->interface->device), armed->ep->descriptor.endpoint_address, tmp, armed->len);
-        if (r < 0) continue;
+        int     r = xhci_read_interrupt_report(slot_of(armed->ep->interface->device),
+                                               armed->ep->descriptor.endpoint_address, tmp, armed->len);
+        if (r < 0)
+            continue;
         armed->complete(armed->ep, tmp, (size_t)r, 0, armed->context);
     }
 }
@@ -990,14 +1015,17 @@ void xhci_usb_reap(void)
 /* Enumerate one root-hub port: reset, slot, address, descriptors, usb core. */
 static int xhci_usb_enumerate(uint32_t port, usb_device_t **out)
 {
-    if (reset_port(port) < 0) return -E_IO;
+    if (reset_port(port) < 0)
+        return -E_IO;
     uint32_t slot;
-    if (enable_slot(&slot) < 0) return -E_IO;
+    if (enable_slot(&slot) < 0)
+        return -E_IO;
 
     /* PORTSC speed encoding (1=full, 2=low, 3=high, 4=super) -> usb_speed_t. */
-    static const usb_speed_t speed_map[] = {USB_SPEED_FULL, USB_SPEED_FULL, USB_SPEED_LOW, USB_SPEED_HIGH, USB_SPEED_SUPER};
-    uint32_t    speed_xhci = (portsc_read(port) >> 10) & 0xF;
-    usb_speed_t speed      = speed_xhci <= 4 ? speed_map[speed_xhci] : USB_SPEED_FULL;
+    static const usb_speed_t speed_map[] = {USB_SPEED_FULL, USB_SPEED_FULL, USB_SPEED_LOW,
+                                            USB_SPEED_HIGH, USB_SPEED_SUPER};
+    uint32_t                 speed_xhci  = (portsc_read(port) >> 10) & 0xF;
+    usb_speed_t              speed       = speed_xhci <= 4 ? speed_map[speed_xhci] : USB_SPEED_FULL;
 
     if (address_device(slot, port, speed_xhci) < 0) {
         send_cmd(TRB_DISABLE_SLOT, 0, slot << 24);
@@ -1007,7 +1035,8 @@ static int xhci_usb_enumerate(uint32_t port, usb_device_t **out)
     timer_delay_ms(10);
 
     usb_device_t *dev = kcalloc(1, sizeof(usb_device_t));
-    if (!dev) return -E_NOMEM;
+    if (!dev)
+        return -E_NOMEM;
     dev->connected   = true;
     dev->speed       = speed;
     dev->bus_number  = g_xhci_bus;
@@ -1016,31 +1045,42 @@ static int xhci_usb_enumerate(uint32_t port, usb_device_t **out)
     dev->hc_private  = (void *)(uintptr_t)slot;
     snprintf(dev->path, sizeof(dev->path), "%u-%u", g_xhci_bus, port);
 
-    int r = usb_control_msg(dev, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0, &dev->descriptor, sizeof(dev->descriptor), USB_CTRL_TIMEOUT_MS);
+    int r = usb_control_msg(dev, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                            USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0, &dev->descriptor,
+                            sizeof(dev->descriptor), USB_CTRL_TIMEOUT_MS);
     if (r != 0 || dev->descriptor.length < sizeof(dev->descriptor)) {
-        if (r == 0) r = -E_IO; /* short descriptor */
+        if (r == 0)
+            r = -E_IO; /* short descriptor */
         goto fail;
     }
-    uint16_t lang      = 0x0409;
+    uint16_t lang = 0x0409;
     uint8_t  lang_desc[4];
-    if (usb_control_msg(dev, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_GET_DESCRIPTOR, USB_DT_STRING << 8, 0, lang_desc, sizeof(lang_desc), USB_CTRL_TIMEOUT_MS) == 0
-        && lang_desc[0] >= 4) {
+    if (usb_control_msg(dev, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                        USB_REQ_GET_DESCRIPTOR, USB_DT_STRING << 8, 0, lang_desc, sizeof(lang_desc),
+                        USB_CTRL_TIMEOUT_MS) == 0 &&
+        lang_desc[0] >= 4) {
         lang = (uint16_t)(lang_desc[2] | ((uint16_t)lang_desc[3] << 8));
     }
-    usb_get_string_descriptor(dev, dev->descriptor.manufacturer, lang, dev->manufacturer, sizeof(dev->manufacturer));
-    usb_get_string_descriptor(dev, dev->descriptor.product, lang, dev->product, sizeof(dev->product));
-    usb_get_string_descriptor(dev, dev->descriptor.serial_number, lang, dev->serial, sizeof(dev->serial));
+    usb_get_string_descriptor(dev, dev->descriptor.manufacturer, lang, dev->manufacturer,
+                              sizeof(dev->manufacturer));
+    usb_get_string_descriptor(dev, dev->descriptor.product, lang, dev->product,
+                              sizeof(dev->product));
+    usb_get_string_descriptor(dev, dev->descriptor.serial_number, lang, dev->serial,
+                              sizeof(dev->serial));
 
     uint8_t *config     = NULL;
     uint16_t config_len = 0;
     r                   = usb_read_config_descriptor(dev, &config, &config_len);
-    if (r != 0) goto fail;
+    if (r != 0)
+        goto fail;
     r = usb_add_device(dev, config, config_len);
     kfree(config);
-    if (r != 0) goto fail;
+    if (r != 0)
+        goto fail;
 
     xhci_usb_dev[slot] = dev;
-    if (out) *out = dev;
+    if (out)
+        *out = dev;
     return 0;
 fail:
     kfree(dev);

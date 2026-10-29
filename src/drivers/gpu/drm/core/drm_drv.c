@@ -25,6 +25,7 @@
 
 #include "drm_device.h"
 #include "drm_devtmpfs.h" /* devtmpfs shim -> GNOS VFS */
+#include "chrdev.h"
 #include "drm_hashtab.h"
 #include "drm_init.h"
 #include "drm_prime.h"
@@ -160,7 +161,8 @@ static void drm_register_node(struct drm_device *dev, struct drm_minor *minor, u
                               bool primary)
 {
     tmpfs_device_ops_t ops;
-    char               path[64];
+    uint32_t           maj = (uint32_t)((devt >> 8) & 0xfff);
+    uint32_t           min = (uint32_t)((devt & 0xff) | ((devt >> 12) & 0xfffff00));
     int                ret;
 
     memset(&ops, 0, sizeof(ops));
@@ -171,11 +173,9 @@ static void drm_register_node(struct drm_device *dev, struct drm_minor *minor, u
     ops.file_ioctl = drm_dev_file_ioctl;
     ops.ctx        = dev;
 
-    snprintf(path, sizeof(path), "/dev/dri/%s", minor->device_node_name);
-
-    ret = devtmpfs_register_char_device(path, devt, devt, file_stream, &ops);
+    ret = cdev_add("dri", minor->device_node_name, maj, min, 1, (uint16_t)file_stream, 0666, &ops);
     if (ret != 0) {
-        DRM_ERROR("Failed to register %s: %d\n", path, ret);
+        DRM_ERROR("Failed to register /dev/dri/%s: %d\n", minor->device_node_name, ret);
         return;
     }
 

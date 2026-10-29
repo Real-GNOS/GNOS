@@ -244,6 +244,7 @@ int vfs_statfs(const char *path, void *out);
  * a negative errno.  This is the VFS side of mount(2); only tmpfs is
  * supported, so any other fstype fails with -E_NODEV at the syscall layer. */
 int vfs_mount_tmpfs(const char *path);
+int vfs_mount_devtmpfs(const char *path);
 
 /* Mount the (single, shared) cgroup v2 hierarchy at `path`, as mount(2)
  * does for fstype "cgroup"/"cgroup2".  Returns 0 or a negative errno.

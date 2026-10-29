@@ -22,8 +22,8 @@
 
 #define AUDIODEV_MAX 8
 
-static struct audiodev g_devs[AUDIODEV_MAX];
-static int             g_count;
+static struct audiodev  g_devs[AUDIODEV_MAX];
+static int              g_count;
 static struct audiodev *g_default;
 
 /* ---- streaming adapters ------------------------------------------------
@@ -57,13 +57,13 @@ static int ac97_play_frames(const int16_t *samples, uint32_t frames)
  */
 static const struct audiodev_ops g_builtin[] = {
     {
-        .name      = "ac97",
-        .major     = 14,
-        .minor     = 3,
-        .probe     = ac97_init,
-        .selftest  = ac97_selftest,
-        .play      = ac97_play_frames,
-        .drain     = audio_drain,
+        .name     = "ac97",
+        .major    = 14,
+        .minor    = 3,
+        .probe    = ac97_init,
+        .selftest = ac97_selftest,
+        .play     = ac97_play_frames,
+        .drain    = audio_drain,
         /* calsa hooks: straight through to the engine in audio.c */
         .frames_total  = audio_frames_total,
         .in_flight     = audio_in_flight_frames,
@@ -74,13 +74,13 @@ static const struct audiodev_ops g_builtin[] = {
         .stop          = audio_stop,
     },
     {
-        .name      = "hda",
-        .major     = 116,
-        .minor     = 0,
-        .probe     = hda_init,
-        .selftest  = hda_selftest,
-        .play      = NULL,
-        .drain     = NULL,
+        .name     = "hda",
+        .major    = 116,
+        .minor    = 0,
+        .probe    = hda_init,
+        .selftest = hda_selftest,
+        .play     = NULL,
+        .drain    = NULL,
     },
 };
 
@@ -96,14 +96,12 @@ int audiodev_register(const struct audiodev_ops *ops)
     /* Reject a duplicate name the same way subsys_register() does: two
      * cards claiming "ac97" is a wiring mistake, not a stereo pair. */
     for (int i = 0; i < g_count; i++)
-        if (g_devs[i].ops && g_devs[i].ops->name &&
-            strcmp(g_devs[i].ops->name, ops->name) == 0)
+        if (g_devs[i].ops && g_devs[i].ops->name && strcmp(g_devs[i].ops->name, ops->name) == 0)
             return -1;
 
     struct audiodev *d = &g_devs[g_count];
-    d->ops   = ops;
-    d->slot  = subsys_register(ops->name, NULL, SUBSYS_CLASS_SOUND,
-                               ops->major, ops->minor);
+    d->ops             = ops;
+    d->slot  = subsys_register(ops->name, NULL, SUBSYS_CLASS_SOUND, ops->major, ops->minor);
     d->state = SUBSYS_STATE_REGISTERED;
     if (d->slot < 0) {
         d->ops = NULL;
@@ -196,9 +194,9 @@ void audiodev_drain(void)
 
 /* ---- calsa (compat ALSA) engine hooks ---------------------------------- */
 
-#define PCM_HOOK(expr_lacking_card, call)                                     \
-    if (!g_default || !g_default->ops || !g_default->ops->call)               \
-        return (expr_lacking_card);                                           \
+#define PCM_HOOK(expr_lacking_card, call)                       \
+    if (!g_default || !g_default->ops || !g_default->ops->call) \
+        return (expr_lacking_card);                             \
     return g_default->ops->call()
 
 uint32_t audiodev_pcm_frames_total(void)

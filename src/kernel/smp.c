@@ -16,7 +16,9 @@
 #include "idt.h"
 #include "debugcon.h"
 #include "lapic.h"
+#include "panic.h"
 #include "proc.h"
+#include "syscall.h"
 
 cpu_t g_cpu[MAX_CPUS];
 int   g_ncpus;
@@ -35,6 +37,69 @@ void bkl_acquire(void)
 void bkl_release(void)
 {
     spin_unlock(&g_bkl);
+}
+
+static spinlock_t        g_tlb_lock;
+static uint32_t          g_tlb_epoch;
+static volatile int      g_tlb_active;
+static volatile uint32_t g_tlb_ack[MAX_CPUS];
+
+static inline void cpu_relax(void)
+{
+    asm volatile("pause");
+}
+
+void smp_tlb_shootdown_all(void)
+{
+    int online = smp_online_count();
+    if (online <= 1)
+        return;
+    if (!lapic_ready())
+        panic("smp_tlb: LAPIC unavailable");
+
+    spin_lock_irq(&g_tlb_lock);
+
+    uint32_t epoch;
+    do {
+        epoch = ++g_tlb_epoch;
+    } while (epoch == 0);
+
+    __atomic_store_n(&g_tlb_active, 1, __ATOMIC_RELEASE);
+    if (lapic_send_nmi_others() < 0) {
+        __atomic_store_n(&g_tlb_active, 0, __ATOMIC_RELEASE);
+        spin_unlock_irq(&g_tlb_lock);
+        panic("smp_tlb: NMI delivery failed");
+    }
+
+    for (int i = 0; i < g_ncpus; i++) {
+        if (!g_cpu[i].online || i == (int)cpu_self()->id)
+            continue;
+        uint64_t spin = 0;
+        while (__atomic_load_n(&g_tlb_ack[i], __ATOMIC_ACQUIRE) != epoch) {
+            if (++spin > 2000000000ULL) {
+                __atomic_store_n(&g_tlb_active, 0, __ATOMIC_RELEASE);
+                spin_unlock_irq(&g_tlb_lock);
+                panic("smp_tlb: no ack from CPU");
+            }
+            cpu_relax();
+        }
+    }
+
+    __atomic_store_n(&g_tlb_active, 0, __ATOMIC_RELEASE);
+    spin_unlock_irq(&g_tlb_lock);
+}
+
+int smp_tlb_handle_nmi(void)
+{
+    if (!__atomic_load_n(&g_tlb_active, __ATOMIC_ACQUIRE))
+        return 0;
+
+    uint32_t epoch = __atomic_load_n(&g_tlb_epoch, __ATOMIC_RELAXED);
+    uint64_t cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(cr3) : : "memory");
+    asm volatile("mov %0, %%cr3" ::"r"(cr3) : "memory");
+    __atomic_store_n(&g_tlb_ack[cpu_self()->id], epoch, __ATOMIC_RELEASE);
+    return 1;
 }
 
 /* Static per-CPU stacks, ready before smp_init() runs (no heap needed). */
@@ -131,7 +196,9 @@ void ap_main(int cpu)
                         .base  = (uint64_t)(uintptr_t)g_cpu[cpu].gdt};
     asm volatile("lgdt %0" ::"m"(gdtr) : "memory");
 
-    /* Reload every data selector onto the new GDT. */
+    /* Reload every data selector and CS onto the new GDT.  CS is what the
+     * CPU will push into every interrupt frame; leaving it on Limine's
+     * selector (0x28 here, our TSS) makes the first iretq #GP(0x28). */
     asm volatile(
         "mov %0, %%ax\n\t"
         "mov %%ax, %%ds\n\t"
@@ -139,10 +206,15 @@ void ap_main(int cpu)
         "mov %%ax, %%fs\n\t"
         "mov %%ax, %%gs\n\t"
         "mov %%ax, %%ss\n\t"
-        "mov %1, %%ax\n\t"
+        "pushq %1\n\t"
+        "lea 1f(%%rip), %%rax\n\t"
+        "pushq %%rax\n\t"
+        "lretq\n\t"
+        "1:\n\t"
+        "mov %2, %%ax\n\t"
         "ltr %%ax\n\t"
         :
-        : "i"(SEL_KDATA), "i"(SEL_TSS)
+        : "i"(SEL_KDATA), "i"(SEL_KCODE), "i"(SEL_TSS)
         : "rax", "memory");
 
     /* `mov %ax,%gs` zeroed IA32_GS_BASE (long-mode selector reload); restore
@@ -154,6 +226,25 @@ void ap_main(int cpu)
 
     /* The shared IDT is a safety net until interrupts come on. */
     idt_load();
+
+    /* FPU/SSE control bits are per-core too.  Limine leaves the AP with
+     * CR4.OSFXSR/OSXMMEXCPT clear, so the first user SSE instruction (musl
+     * emits `pxor %xmm0,%xmm0`) takes #UD on this core. */
+    {
+        uint64_t cr0, cr4;
+        asm volatile("mov %%cr0, %0" : "=r"(cr0));
+        cr0 &= ~((1ULL << 2) | (1ULL << 3)); /* clear EM and TS */
+        cr0 |= (1ULL << 1);                  /* MP */
+        asm volatile("mov %0, %%cr0" ::"r"(cr0) : "memory");
+        asm volatile("mov %%cr4, %0" : "=r"(cr4));
+        cr4 |= (1ULL << 9) | (1ULL << 10); /* OSFXSR | OSXMMEXCPT */
+        asm volatile("mov %0, %%cr4" ::"r"(cr4) : "memory");
+    }
+
+    /* SYSCALL MSRs are per-core; without this the first user `syscall` on
+     * this AP takes #UD (vector 6) at the instruction.  Do it before the
+     * core is published online so nobody schedules user code here yet. */
+    syscall_init_cpu();
 
     g_cpu[cpu].online = 1;
 
@@ -190,12 +281,12 @@ void smp_arm_user_rsp_watch(void)
      * DR0/DR1 = BSP low/high, DR2/DR3 = AP low/high. */
     uint64_t slot0 = (uint64_t)(uintptr_t)&g_cpu[0].user_rsp;
     uint64_t slot1 = (uint64_t)(uintptr_t)&g_cpu[1].user_rsp;
-    asm volatile("mov %0, %%dr0" :: "r"(slot0));
-    asm volatile("mov %0, %%dr1" :: "r"(slot0 + 4));
-    asm volatile("mov %0, %%dr2" :: "r"(slot1));
-    asm volatile("mov %0, %%dr3" :: "r"(slot1 + 4));
+    asm volatile("mov %0, %%dr0" ::"r"(slot0));
+    asm volatile("mov %0, %%dr1" ::"r"(slot0 + 4));
+    asm volatile("mov %0, %%dr2" ::"r"(slot1));
+    asm volatile("mov %0, %%dr3" ::"r"(slot1 + 4));
     /* L0..L3 enabled; each watch: R/W=01 (write), LEN=11 (4 bytes). */
-    asm volatile("mov %0, %%dr7" :: "r"((uint64_t)0x7777000F));
+    asm volatile("mov %0, %%dr7" ::"r"((uint64_t)0x7777000F));
     dbg_puts("WP: watching user_rsp stash @");
     dbg_puts_hex(slot0);
     dbg_puts(" + AP ");

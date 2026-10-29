@@ -90,7 +90,7 @@ static void drm_dummy_gem_free_object(struct drm_gem_object *obj)
  * drm_gem_prime_import_dev(), which builds a borrow wrapper.
  */
 static struct drm_gem_object *drm_dummy_gem_prime_import(struct drm_device *dev,
-                                                         struct dma_buf *dma_buf)
+                                                         struct dma_buf    *dma_buf)
 {
     return drm_gem_prime_import_same_dev(dev, dma_buf);
 }

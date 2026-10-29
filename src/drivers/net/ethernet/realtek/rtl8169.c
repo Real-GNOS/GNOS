@@ -46,17 +46,16 @@
 
 #define RTL8169_VENDOR_REALTEK 0x10EC
 
-#define RTL8169_RX_COUNT 256
-#define RTL8169_TX_COUNT 256
+#define RTL8169_RX_COUNT    256
+#define RTL8169_TX_COUNT    256
 #define RTL8169_BUFFER_SIZE 2048 /* one frame buffer per descriptor */
-#define RTL8169_MAX_FRAME (NET_MTU + 18)
-#define RTL8169_CRC_LEN 4 /* the length reported by the chip includes the FCS */
-#define RTL8169_ETH_ZLEN 60
-#define RTL8169_RESET_POLL 100000
-#define RTL8169_TX_POLL 200000
+#define RTL8169_MAX_FRAME   (NET_MTU + 18)
+#define RTL8169_CRC_LEN     4 /* the length reported by the chip includes the FCS */
+#define RTL8169_ETH_ZLEN    60
+#define RTL8169_RESET_POLL  100000
+#define RTL8169_TX_POLL     200000
 
-#define RTL8169_RX_INTS \
-    (RTL8169_ISR_ROK | RTL8169_ISR_RER | RTL8169_ISR_RDU | RTL8169_ISR_FOVW)
+#define RTL8169_RX_INTS (RTL8169_ISR_ROK | RTL8169_ISR_RER | RTL8169_ISR_RDU | RTL8169_ISR_FOVW)
 #define RTL8169_INT_MASK \
     (RTL8169_RX_INTS | RTL8169_ISR_TOK | RTL8169_ISR_TER | RTL8169_ISR_LINKCHG | RTL8169_ISR_TDU)
 
@@ -292,9 +291,8 @@ static void rtl8169_program_hw(void)
     w8(RTL8169_REG_9346CR, RTL8169_9346_UNLOCK);
 
     /* Receive: accept everything, unlimited DMA burst/FIFO. */
-    w32(RTL8169_REG_RCR,
-        RTL8169_RCR_AAP | RTL8169_RCR_APM | RTL8169_RCR_AM | RTL8169_RCR_AB |
-            RTL8169_RCR_MXDMA | RTL8169_RCR_RXFTH);
+    w32(RTL8169_REG_RCR, RTL8169_RCR_AAP | RTL8169_RCR_APM | RTL8169_RCR_AM | RTL8169_RCR_AB |
+                             RTL8169_RCR_MXDMA | RTL8169_RCR_RXFTH);
 
     /* The transmitter must be enabled before TCR is written. */
     w8(RTL8169_REG_CR, RTL8169_CR_TE);
@@ -328,7 +326,7 @@ uint16_t rtl8169_recv(void *buf, uint16_t max)
     /* A burst of malformed descriptors must not hold the caller here
      * forever; after eight of them, let the next poll try again. */
     for (int guard = 0; guard < 8; guard++) {
-        volatile rtl8169_desc_t *d = &g_rx[g_rx_next];
+        volatile rtl8169_desc_t *d   = &g_rx[g_rx_next];
         uint32_t                 cmd = d->command;
         __sync_synchronize();
 
@@ -337,9 +335,8 @@ uint16_t rtl8169_recv(void *buf, uint16_t max)
 
         uint32_t length   = cmd & RTL8169_RX_LEN_MASK;
         int      complete = (cmd & RTL8169_DESC_FS) && (cmd & RTL8169_DESC_LS);
-        int      good     = complete && !(cmd & RTL8169_RX_ERROR_MASK) &&
-                       length > RTL8169_CRC_LEN && length <= RTL8169_BUFFER_SIZE &&
-                       length - RTL8169_CRC_LEN <= RTL8169_MAX_FRAME;
+        int      good = complete && !(cmd & RTL8169_RX_ERROR_MASK) && length > RTL8169_CRC_LEN &&
+                   length <= RTL8169_BUFFER_SIZE && length - RTL8169_CRC_LEN <= RTL8169_MAX_FRAME;
 
         uint16_t n = 0;
         if (good) {

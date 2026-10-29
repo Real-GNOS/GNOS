@@ -19,10 +19,10 @@
 #define NL_MAX_SOCKS 16
 
 /* Protocol families (Linux numbers). */
-#define NETLINK_ROUTE           0
-#define NETLINK_KOBJECT_UEVENT  15
+#define NETLINK_ROUTE          0
+#define NETLINK_KOBJECT_UEVENT 15
 
-#define NL_GRP_NONE  0
+#define NL_GRP_NONE   0
 #define NL_GRP_KERNEL 1 /* uevent: group 1 is what libudev subscribes to */
 
 /* Message flags. */
@@ -36,9 +36,9 @@
 #define NLMSG_ERROR 0x02
 #define NLMSG_DONE  0x03
 
-#define NLMSG_HDRLEN    16
-#define NLMSG_ALIGN(len)     (((len) + 3) & ~3U)
-#define NLMSG_LENGTH(len)    ((len) + NLMSG_HDRLEN)
+#define NLMSG_HDRLEN            16
+#define NLMSG_ALIGN(len)        (((len) + 3) & ~3U)
+#define NLMSG_LENGTH(len)       ((len) + NLMSG_HDRLEN)
 #define NLMSG_PAYLOAD(nh, base) ((int)((nh)->nlmsg_len) - NLMSG_ALIGN(base))
 
 typedef struct {
@@ -54,23 +54,24 @@ typedef struct {
     nlmsghdr_t msg;
 } nlmsgerr_t;
 
-#define NLMSG_OK(nh, len) \
-    ((len) >= sizeof(nlmsghdr_t) && (nh)->nlmsg_len >= sizeof(nlmsghdr_t) && (nh)->nlmsg_len <= (len))
+#define NLMSG_OK(nh, len)                                                    \
+    ((len) >= sizeof(nlmsghdr_t) && (nh)->nlmsg_len >= sizeof(nlmsghdr_t) && \
+     (nh)->nlmsg_len <= (len))
 
 typedef struct {
     uint16_t rta_len;
     uint16_t rta_type;
 } rtattr_t;
 
-#define RTA_ALIGN(len)    (((len) + 3) & ~3U)
-#define RTA_LENGTH(len)   (sizeof(rtattr_t) + (len))
-#define RTA_DATA(rta)     ((void *)((char *)(rta) + RTA_ALIGN(sizeof(rtattr_t))))
+#define RTA_ALIGN(len)  (((len) + 3) & ~3U)
+#define RTA_LENGTH(len) (sizeof(rtattr_t) + (len))
+#define RTA_DATA(rta)   ((void *)((char *)(rta) + RTA_ALIGN(sizeof(rtattr_t))))
 
 /* rtnetlink message types. */
-#define RTM_NEWLINK 16
-#define RTM_GETLINK 18
-#define RTM_NEWADDR 20
-#define RTM_GETADDR 22
+#define RTM_NEWLINK  16
+#define RTM_GETLINK  18
+#define RTM_NEWADDR  20
+#define RTM_GETADDR  22
 #define RTM_NEWROUTE 24
 #define RTM_GETROUTE 26
 
@@ -96,18 +97,18 @@ typedef struct {
 #define ARPHRD_LOOPBACK 772
 
 #ifndef IFF_UP /* net.h's ioctl layer carries its own copy */
-#define IFF_UP       0x1
+#define IFF_UP        0x1
 #define IFF_BROADCAST 0x2
-#define IFF_LOOPBACK 0x8
-#define IFF_RUNNING  0x40
+#define IFF_LOOPBACK  0x8
+#define IFF_RUNNING   0x40
 #endif
 
 /* Socket options. */
-#define NETLINK_ADD_MEMBERSHIP    1
-#define NETLINK_DROP_MEMBERSHIP   2
-#define NETLINK_PKTINFO           3
-#define NETLINK_BROADCAST_ERROR   4
-#define NETLINK_NO_ENOBUFS        5
+#define NETLINK_ADD_MEMBERSHIP  1
+#define NETLINK_DROP_MEMBERSHIP 2
+#define NETLINK_PKTINFO         3
+#define NETLINK_BROADCAST_ERROR 4
+#define NETLINK_NO_ENOBUFS      5
 
 typedef struct {
     uint16_t nl_family;
@@ -154,12 +155,12 @@ int  nl_getname(int u, uint32_t *pid, uint32_t *groups);
 
 /* sendto(2): dest_pid 0 + groups != 0 multicasts; dest_pid != 0 unicasts;
  * uevent-protocol writes carry the raw action@/devpath ABI. */
-int  nl_sendmsg(int u, const void *buf, uint32_t len, uint32_t dest_pid, uint32_t dest_groups);
-int  nl_recvmsg(int u, void *buf, uint32_t len, int flags, uint32_t *out_pid, uint32_t *out_groups);
-int  nl_readable(int u);
-int  nl_writable(int u);
-int  nl_set_nonblock(int u, int on);
-int  nl_setsockopt(int u, int name, const void *val, uint32_t vlen);
+int nl_sendmsg(int u, const void *buf, uint32_t len, uint32_t dest_pid, uint32_t dest_groups);
+int nl_recvmsg(int u, void *buf, uint32_t len, int flags, uint32_t *out_pid, uint32_t *out_groups);
+int nl_readable(int u);
+int nl_writable(int u);
+int nl_set_nonblock(int u, int on);
+int nl_setsockopt(int u, int name, const void *val, uint32_t vlen);
 
 /* Kernel uplink: queue a datagram for every subscriber of `group`. */
 int  netlink_broadcast(uint32_t protocol, uint32_t group, const void *data, uint32_t len);

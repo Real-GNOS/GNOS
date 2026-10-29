@@ -22,6 +22,7 @@
 #include "pidfd.h"
 #include "proc.h"
 #include "vfs.h" /* errno values */
+#include "syscall.h"
 
 /* include/uapi/linux/landlock.h */
 #define LANDLOCK_CREATE_RULESET_VERSION (1U << 0)

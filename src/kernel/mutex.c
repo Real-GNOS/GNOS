@@ -25,11 +25,11 @@
 
 void mutex_init(mutex_t *m)
 {
-    m->slot.v        = 0;
+    m->slot.v           = 0;
     m->slot.saved_flags = 0;
-    m->owner         = NULL;
-    m->waiters       = NULL;
-    m->count         = 0;
+    m->owner            = NULL;
+    m->waiters          = NULL;
+    m->count            = 0;
 }
 
 void mutex_destroy(mutex_t *m)
@@ -65,7 +65,7 @@ void mutex_lock(mutex_t *m)
 
     /* Contended: link onto the FIFO, then park.  slot must be released
      * before blocking -- the releaser needs it to reach this waiter. */
-    proc_t *cur  = proc_current();
+    proc_t *cur     = proc_current();
     cur->mutex_next = NULL;
     cur->wait_mutex = (struct mutex *)m;
     if (m->waiters) {
@@ -103,7 +103,7 @@ void mutex_unlock(mutex_t *m)
         m->count--;
         next->mutex_next = NULL;
         next->wait_mutex = NULL;
-        m->owner = next;
+        m->owner         = next;
         spin_unlock_irq(&m->slot);
         sched_wake(next);
         return;

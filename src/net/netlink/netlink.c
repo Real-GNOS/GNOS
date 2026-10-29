@@ -34,9 +34,9 @@ typedef struct {
     uint8_t   closed;
     uint8_t   no_enobufs;
     int       protocol;
-    uint32_t  nl_pid;    /* 0 = unbound */
+    uint32_t  nl_pid; /* 0 = unbound */
     uint32_t  nl_groups;
-    nl_msg_t *recvq;     /* FIFO of queued datagrams */
+    nl_msg_t *recvq; /* FIFO of queued datagrams */
     uint32_t  recvq_len;
     uint32_t  recvq_max;
     uint32_t  recvq_bytes;
@@ -46,8 +46,8 @@ static nl_sock_t g_nl[NL_MAX_SOCKS];
 
 /* Multicast registry: which sockets listen on which protocol/groups. */
 typedef struct {
-    int       sock; /* g_nl index, -1 = free */
-    uint32_t  groups;
+    int      sock; /* g_nl index, -1 = free */
+    uint32_t groups;
 } nl_member_t;
 
 #define NL_MCAST_MAX 16
@@ -98,7 +98,8 @@ static int nl_queue(nl_sock_t *ns, const void *data, uint32_t len, uint32_t pid,
 }
 
 /* Deliver to every socket subscribed to `groups` on `protocol`. */
-static int nl_broadcast(uint32_t protocol, uint32_t groups, const void *data, uint32_t len, uint32_t pid)
+static int nl_broadcast(uint32_t protocol, uint32_t groups, const void *data, uint32_t len,
+                        uint32_t pid)
 {
     if (protocol >= 8)
         return -E_PROTONOSUPPORT;
@@ -155,7 +156,8 @@ void nl_close(int u)
     if (ns->protocol < 8) {
         for (uint32_t i = 0; i < g_nl_mcast[ns->protocol].count; i++) {
             if (g_nl_mcast[ns->protocol].m[i].sock == u) {
-                g_nl_mcast[ns->protocol].m[i] = g_nl_mcast[ns->protocol].m[g_nl_mcast[ns->protocol].count - 1];
+                g_nl_mcast[ns->protocol].m[i] =
+                    g_nl_mcast[ns->protocol].m[g_nl_mcast[ns->protocol].count - 1];
                 g_nl_mcast[ns->protocol].count--;
                 break;
             }
@@ -200,12 +202,12 @@ int nl_bind(int u, uint32_t pid, uint32_t groups)
     if (slot < 0) {
         if (g_nl_mcast[ns->protocol].count >= NL_MCAST_MAX)
             return -E_NOBUFS;
-        slot = (int)g_nl_mcast[ns->protocol].count++;
+        slot                                  = (int)g_nl_mcast[ns->protocol].count++;
         g_nl_mcast[ns->protocol].m[slot].sock = u;
     }
     g_nl_mcast[ns->protocol].m[slot].groups = groups;
-    ns->nl_pid    = pid;
-    ns->nl_groups = groups;
+    ns->nl_pid                              = pid;
+    ns->nl_groups                           = groups;
     return 0;
 }
 
@@ -236,7 +238,8 @@ static int nl_uevent_valid(const uint8_t *buf, uint32_t len)
         }
     if (!at || at == (const char *)buf || at[1] != '/')
         return 0;
-    static const char *const actions[] = {"add", "remove", "change", "move", "online", "offline", "bind", "unbind"};
+    static const char *const actions[] = {"add",    "remove",  "change", "move",
+                                          "online", "offline", "bind",   "unbind"};
     size_t                   alen      = (size_t)(at - (const char *)buf);
     for (unsigned i = 0; i < sizeof(actions) / sizeof(actions[0]); i++)
         if (strlen(actions[i]) == alen && memcmp(buf, actions[i], alen) == 0)
@@ -266,7 +269,9 @@ int nl_sendmsg(int u, const void *buf, uint32_t len, uint32_t dest_pid, uint32_t
             for (uint32_t i = 0; i < g_nl_mcast[ns->protocol].count; i++) {
                 int o = g_nl_mcast[ns->protocol].m[i].sock;
                 if (o >= 0 && g_nl[o].nl_pid == dest_pid)
-                    return nl_queue(&g_nl[o], buf, len, ns->nl_pid, dest_groups) == 0 ? (int)len : -E_CONNREFUSED;
+                    return nl_queue(&g_nl[o], buf, len, ns->nl_pid, dest_groups) == 0
+                               ? (int)len
+                               : -E_CONNREFUSED;
             }
             return -E_CONNREFUSED;
         }
@@ -281,7 +286,8 @@ int nl_sendmsg(int u, const void *buf, uint32_t len, uint32_t dest_pid, uint32_t
         for (uint32_t i = 0; i < g_nl_mcast[ns->protocol].count; i++) {
             int o = g_nl_mcast[ns->protocol].m[i].sock;
             if (o >= 0 && g_nl[o].nl_pid == dest_pid)
-                return nl_queue(&g_nl[o], buf, len, ns->nl_pid, dest_groups) == 0 ? (int)len : -E_CONNREFUSED;
+                return nl_queue(&g_nl[o], buf, len, ns->nl_pid, dest_groups) == 0 ? (int)len
+                                                                                  : -E_CONNREFUSED;
         }
         return -E_CONNREFUSED;
     }
@@ -358,8 +364,9 @@ int nl_setsockopt(int u, int name, const void *val, uint32_t vlen)
     if (name == NETLINK_ADD_MEMBERSHIP || name == NETLINK_DROP_MEMBERSHIP) {
         if (ival <= 0 || ival > 32)
             return -E_INVAL;
-        uint32_t bit  = 1u << (uint32_t)(ival - 1);
-        uint32_t mask = name == NETLINK_ADD_MEMBERSHIP ? (ns->nl_groups | bit) : (ns->nl_groups & ~bit);
+        uint32_t bit = 1u << (uint32_t)(ival - 1);
+        uint32_t mask =
+            name == NETLINK_ADD_MEMBERSHIP ? (ns->nl_groups | bit) : (ns->nl_groups & ~bit);
         if (ns->nl_pid) /* rebind updates the registry mask */
             return nl_bind(u, ns->nl_pid, mask) == -E_ADDRINUSE ? 0 : nl_bind(u, ns->nl_pid, mask);
         ns->nl_groups = mask;

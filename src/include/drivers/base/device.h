@@ -30,28 +30,32 @@ struct class;
 struct device_attribute {
     struct attribute attr;
     ssize_t (*show)(struct device *dev, struct device_attribute *attr, char *buf);
-    ssize_t (*store)(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
+    ssize_t (*store)(struct device *dev, struct device_attribute *attr, const char *buf,
+                     size_t count);
 };
 
 /* Bus attribute type */
 struct bus_attribute {
     struct attribute attr;
     ssize_t (*show)(struct bus_type *bus, struct bus_attribute *attr, char *buf);
-    ssize_t (*store)(struct bus_type *bus, struct bus_attribute *attr, const char *buf, size_t count);
+    ssize_t (*store)(struct bus_type *bus, struct bus_attribute *attr, const char *buf,
+                     size_t count);
 };
 
 /* Driver attribute type */
 struct driver_attribute {
     struct attribute attr;
     ssize_t (*show)(struct device_driver *drv, struct driver_attribute *attr, char *buf);
-    ssize_t (*store)(struct device_driver *drv, struct driver_attribute *attr, const char *buf, size_t count);
+    ssize_t (*store)(struct device_driver *drv, struct driver_attribute *attr, const char *buf,
+                     size_t count);
 };
 
 /* Class attribute type */
 struct class_attribute {
     struct attribute attr;
     ssize_t (*show)(struct class *cls, struct class_attribute *attr, char *buf);
-    ssize_t (*store)(struct class *cls, struct class_attribute *attr, const char *buf, size_t count);
+    ssize_t (*store)(struct class *cls, struct class_attribute *attr, const char *buf,
+                     size_t count);
 };
 
 /* bus_type - a communication channel between CPUs and devices */
@@ -96,7 +100,7 @@ struct device {
     struct device        *parent; /* parent device (NULL = root) */
     struct bus_type      *bus;    /* bus the device sits on */
     struct device_driver *driver; /* driver bound to this device */
-    struct class         *class;  /* optional class grouping */
+    struct class *class;          /* optional class grouping */
 
     void       *driver_data; /* private driver data */
     dev_t       devt;        /* major:minor device number */
@@ -112,7 +116,8 @@ struct device {
 };
 
 /* class - groups devices by functional type (e.g. "net", "tty") */
-struct class {
+struct class
+{
     const char *name;
     struct kset subsys; /* kset under /sys/class/ */
 
@@ -143,7 +148,10 @@ struct device *get_device(struct device *dev);
 void           put_device(struct device *dev);
 
 /* Create and register a device with a formatted name, or NULL on failure */
-__attribute__((format(printf, 5, 6))) struct device *device_create(struct class *cls, struct device *parent, dev_t devt, void *drvdata, const char *fmt, ...);
+__attribute__((format(printf, 5, 6))) struct device *device_create(struct class  *cls,
+                                                                   struct device *parent,
+                                                                   dev_t devt, void *drvdata,
+                                                                   const char *fmt, ...);
 
 /* Unregister and destroy a device created by device_create */
 void device_destroy(struct class *cls, dev_t devt);
@@ -169,7 +177,8 @@ int  class_register(struct class *cls);
 void class_unregister(struct class *cls);
 
 /* Find a device in a class by a caller-supplied match function */
-struct device *class_find_device(struct class *cls, struct device *start, const void *data, int (*match)(struct device *, const void *));
+struct device *class_find_device(struct class *cls, struct device *start, const void *data,
+                                 int (*match)(struct device *, const void *));
 
 /* Create/remove an attribute file on a class */
 int  class_create_file(struct class *cls, const struct class_attribute *attr);

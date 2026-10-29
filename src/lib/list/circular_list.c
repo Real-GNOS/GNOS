@@ -14,7 +14,8 @@
 clist_t clist_alloc(void *data)
 {
     clist_t node = (clist_t)kmalloc(sizeof(*node));
-    if (!node) return 0;
+    if (!node)
+        return 0;
 
     node->data = data;
     node->prev = 0;
@@ -50,12 +51,14 @@ clist_t clist_append(clist_t clist, void *data)
 {
     clist_t node = clist_alloc(data);
 
-    if (!node) return clist;
+    if (!node)
+        return clist;
     if (!clist) {
         clist = node;
     } else {
         clist_t current = clist;
-        while (current->next) current = current->next;
+        while (current->next)
+            current = current->next;
         current->next = node;
         node->prev    = current;
     }
@@ -67,10 +70,12 @@ clist_t clist_prepend(clist_t clist, void *data)
 {
     clist_t node = clist_alloc(data);
 
-    if (!node) return clist;
+    if (!node)
+        return clist;
 
     node->next = clist;
-    if (clist) clist->prev = node;
+    if (clist)
+        clist->prev = node;
 
     clist = node;
     return clist;
@@ -79,11 +84,14 @@ clist_t clist_prepend(clist_t clist, void *data)
 /* Remove and free the last node (tail) of the circular linked list and return its data */
 void *clist_pop(clist_t *clist_p)
 {
-    if (!clist_p || !*clist_p) return 0;
+    if (!clist_p || !*clist_p)
+        return 0;
     clist_t clist = clist_tail(*clist_p);
 
-    if (*clist_p == clist) *clist_p = clist->prev;
-    if (clist->prev) clist->prev->next = 0;
+    if (*clist_p == clist)
+        *clist_p = clist->prev;
+    if (clist->prev)
+        clist->prev->next = 0;
     clist_t data = clist->data;
 
     kfree(clist);
@@ -93,28 +101,34 @@ void *clist_pop(clist_t *clist_p)
 /* Find and return the head (first node) of the circular linked list */
 clist_t clist_head(clist_t clist)
 {
-    if (!clist) return 0;
-    for (; clist->prev; clist = clist->prev);
+    if (!clist)
+        return 0;
+    for (; clist->prev; clist = clist->prev)
+        ;
     return clist;
 }
 
 /* Find and return the tail (last node) of the circular linked list */
 clist_t clist_tail(clist_t clist)
 {
-    if (!clist) return 0;
-    for (; clist->next; clist = clist->next);
+    if (!clist)
+        return 0;
+    for (; clist->next; clist = clist->next)
+        ;
     return clist;
 }
 
 /* Get the nth node in the circular linked list (0-based index) */
 clist_t clist_nth(clist_t clist, size_t n)
 {
-    if (!clist) return 0;
+    if (!clist)
+        return 0;
     clist = clist_head(clist);
 
     for (size_t i = 0; i < n; i++) {
         clist = clist->next;
-        if (!clist) return 0;
+        if (!clist)
+            return 0;
     }
     return clist;
 }
@@ -122,12 +136,14 @@ clist_t clist_nth(clist_t clist, size_t n)
 /* Get the nth node from the end of the circular linked list (0-based index) */
 clist_t clist_nth_last(clist_t clist, size_t n)
 {
-    if (!clist) return 0;
+    if (!clist)
+        return 0;
     clist = clist_tail(clist);
 
     for (size_t i = 0; i < n; i++) {
         clist = clist->prev;
-        if (!clist) return 0;
+        if (!clist)
+            return 0;
     }
     return clist;
 }
@@ -137,7 +153,8 @@ int clist_search(clist_t clist, void *data)
 {
     clist_t current = clist;
     while (current) {
-        if (current->data == data) return 1;
+        if (current->data == data)
+            return 1;
         current = current->next;
     }
     return 0;
@@ -146,18 +163,21 @@ int clist_search(clist_t clist, void *data)
 /* Delete the first node containing the specified data from the circular linked list */
 clist_t clist_delete(clist_t clist, void *data)
 {
-    if (!clist) return 0;
+    if (!clist)
+        return 0;
     if (clist->data == data) {
         clist_t temp = clist;
         clist        = clist->next;
-        if (clist) clist->prev = NULL;
+        if (clist)
+            clist->prev = NULL;
         kfree(temp);
         return clist;
     }
     for (clist_t current = clist->next; current; current = current->next) {
         if (current->data == data) {
             current->prev->next = current->next;
-            if (current->next) current->next->prev = current->prev;
+            if (current->next)
+                current->next->prev = current->prev;
             kfree(current);
             break;
         }
@@ -168,20 +188,25 @@ clist_t clist_delete(clist_t clist, void *data)
 /* Delete the first node containing the specified data, using a callback to free the data */
 clist_t clist_delete_with(clist_t clist, void *data, free_t callback)
 {
-    if (!clist) return 0;
+    if (!clist)
+        return 0;
     if (clist->data == data) {
         clist_t temp = clist;
         clist        = clist->next;
-        if (clist) clist->prev = NULL;
-        if (callback) callback(temp->data);
+        if (clist)
+            clist->prev = NULL;
+        if (callback)
+            callback(temp->data);
         kfree(temp);
         return clist;
     }
     for (clist_t current = clist->next; current; current = current->next) {
         if (current->data == data) {
             current->prev->next = current->next;
-            if (current->next != 0) current->next->prev = current->prev;
-            if (callback) callback(current->data);
+            if (current->next != 0)
+                current->next->prev = current->prev;
+            if (callback)
+                callback(current->data);
             kfree(current);
             break;
         }
@@ -192,16 +217,19 @@ clist_t clist_delete_with(clist_t clist, void *data, free_t callback)
 /* Delete a specific node from the circular linked list */
 clist_t clist_delete_node(clist_t clist, clist_t node)
 {
-    if (!clist || !node) return clist;
+    if (!clist || !node)
+        return clist;
     if (clist == node) {
         clist_t temp = clist;
         clist        = clist->next;
-        if (clist) clist->prev = NULL;
+        if (clist)
+            clist->prev = NULL;
         kfree(temp);
         return clist;
     }
     node->prev->next = node->next;
-    if (node->next) node->next->prev = node->prev;
+    if (node->next)
+        node->next->prev = node->prev;
     kfree(node);
     return clist;
 }
@@ -209,17 +237,21 @@ clist_t clist_delete_node(clist_t clist, clist_t node)
 /* Delete a specific node, using a callback to free its data */
 clist_t clist_delete_node_with(clist_t clist, clist_t node, free_t callback)
 {
-    if (!clist || !node) return clist;
+    if (!clist || !node)
+        return clist;
     if (clist == node) {
         clist_t temp = clist;
         clist        = clist->next;
-        if (clist) clist->prev = NULL;
+        if (clist)
+            clist->prev = NULL;
         kfree(temp);
         return clist;
     }
     node->prev->next = node->next;
-    if (node->next) node->next->prev = node->prev;
-    if (callback) callback(node->data);
+    if (node->next)
+        node->next->prev = node->prev;
+    if (callback)
+        callback(node->data);
     kfree(node);
     return clist;
 }

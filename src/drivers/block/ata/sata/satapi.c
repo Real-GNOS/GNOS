@@ -50,16 +50,14 @@ int                  ahci_satapi_device_count = 0;
 /* Big-endian 32-bit read: SCSI data is network order, the kernel is not. */
 static uint32_t be32(const uint8_t *p)
 {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
 /* Issue an ATAPI packet command via the port's command engine.  All data
  * movement in this file is device to host (reads); the direction bit says
  * so. */
-static int satapi_issue_packet(ahci_port_state_t *port, int slot,
-                               const uint8_t *cdb, uint16_t cdb_len,
-                               int device_to_host, uint64_t buf_phys,
+static int satapi_issue_packet(ahci_port_state_t *port, int slot, const uint8_t *cdb,
+                               uint16_t cdb_len, int device_to_host, uint64_t buf_phys,
                                uint32_t byte_count)
 {
     volatile hba_cmd_header_t *hdr = &port->cmd_list[slot];
@@ -157,8 +155,7 @@ void ahci_satapi_init(void)
             ahci_devices[i].sector_size = blk_sz;
         }
 
-        (void)ahci_satapi_inquiry((uint8_t)i, ahci_devices[i].model,
-                                  sizeof(ahci_devices[i].model));
+        (void)ahci_satapi_inquiry((uint8_t)i, ahci_devices[i].model, sizeof(ahci_devices[i].model));
         dbg_puts("ahci-satapi: port ");
         dbg_puts_dec((uint32_t)hw_port);
         dbg_puts(" (");
@@ -174,8 +171,7 @@ void ahci_satapi_init(void)
 }
 
 /* Read sectors from an ATAPI device via READ(12). */
-int ahci_satapi_read_sectors(uint8_t drive, uint8_t numsects, uint64_t lba,
-                             void *buffer)
+int ahci_satapi_read_sectors(uint8_t drive, uint8_t numsects, uint64_t lba, void *buffer)
 {
     if (drive >= AHCI_MAX_DEVICES || !ahci_satapi_devices[drive].reserved)
         return -E_NODEV;
@@ -216,8 +212,7 @@ int ahci_satapi_read_sectors(uint8_t drive, uint8_t numsects, uint64_t lba,
             return -E_BUSY;
         }
 
-        int ret = satapi_issue_packet(port, slot, cdb, 12, 1,
-                                      port->dma_buf_phys, total_bytes);
+        int ret = satapi_issue_packet(port, slot, cdb, 12, 1, port->dma_buf_phys, total_bytes);
         if (ret != 0) {
             spin_unlock(&port->lock);
             return ret;
@@ -232,9 +227,8 @@ int ahci_satapi_read_sectors(uint8_t drive, uint8_t numsects, uint64_t lba,
 }
 
 /* Send a raw ATAPI packet command over the port. */
-uint8_t ahci_satapi_send_packet(uint8_t drive, const uint8_t *cdb,
-                                uint16_t byte_limit, uint8_t direction,
-                                void *buf, size_t *xfer_len)
+uint8_t ahci_satapi_send_packet(uint8_t drive, const uint8_t *cdb, uint16_t byte_limit,
+                                uint8_t direction, void *buf, size_t *xfer_len)
 {
     if (drive >= AHCI_MAX_DEVICES || !ahci_satapi_devices[drive].reserved)
         return 0xFF;
@@ -252,8 +246,7 @@ uint8_t ahci_satapi_send_packet(uint8_t drive, const uint8_t *cdb,
         ret = satapi_issue_packet(port, slot, cdb, 12, 0, 0, 0);
     } else {
         uint32_t bytes = byte_limit;
-        ret            = satapi_issue_packet(port, slot, cdb, 12, 1,
-                                             port->dma_buf_phys, bytes);
+        ret            = satapi_issue_packet(port, slot, cdb, 12, 1, port->dma_buf_phys, bytes);
         if (ret == 0 && buf && xfer_len) {
             size_t copy_len = (*xfer_len < bytes) ? *xfer_len : bytes;
             memcpy(buf, port->dma_buf, copy_len);
@@ -266,8 +259,7 @@ uint8_t ahci_satapi_send_packet(uint8_t drive, const uint8_t *cdb,
 
 /* READ CAPACITY: the answer is two big-endian 32-bit fields, last block
  * number (add one for the count) and block length. */
-uint8_t ahci_satapi_read_capacity(uint8_t drive, uint32_t *lba_size,
-                                  uint32_t *blk_size)
+uint8_t ahci_satapi_read_capacity(uint8_t drive, uint32_t *lba_size, uint32_t *blk_size)
 {
     uint8_t cdb[SATAPI_CDB_LEN] = {GPCMD_READ_CAPACITY, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     uint8_t cap_buf[8]          = {0};
@@ -300,8 +292,8 @@ uint8_t ahci_satapi_inquiry(uint8_t drive, char *model, size_t model_size)
     if (!model || !model_size)
         return 0xFF;
     memset(inquiry, 0, sizeof(inquiry));
-    err = ahci_satapi_send_packet(drive, cdb, (uint16_t)sizeof(inquiry),
-                                  SATAPI_PROT_PIO, inquiry, &len);
+    err = ahci_satapi_send_packet(drive, cdb, (uint16_t)sizeof(inquiry), SATAPI_PROT_PIO, inquiry,
+                                  &len);
     if (err)
         return err;
 

@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * chrdev.c — character device registry.  (GPL-2.0)
- * Drivers call cdev_add() to announce their devices; chrdev_populate() walks the registry
- * once at boot and publishes every node under /dev through the devtmpfs
- * bridge (devtmpfs_register_char_device).
+ * Drivers announce devices with cdev_add_vfs() (native GNOS vfs_ops_t) or
+ * cdev_add() (Uinxed tmpfs_device_ops_t).  chrdev_populate() walks the
+ * registry once at boot and publishes every node under /dev through the
+ * matching backend.
  */
 
 #include "chrdev.h"
@@ -23,16 +24,14 @@ static void cdev_flat_name(const cdev_t *cdev, char *out, size_t cap)
         snprintf(out, cap, "%s", cdev->name);
 }
 
-int cdev_add(const char *dir, const char *name, uint32_t major, uint32_t minor,
-             uint32_t count, uint16_t node_type, uint16_t mode,
-             const tmpfs_device_ops_t *ops)
+int cdev_add(const char *dir, const char *name, uint32_t major, uint32_t minor, uint32_t count,
+             uint16_t node_type, uint16_t mode, const tmpfs_device_ops_t *ops)
 {
     return cdev_add_owned(dir, name, major, minor, count, node_type, mode, 0, 0, ops);
 }
 
-int cdev_add_vfs(const char *dir, const char *name, uint32_t major, uint32_t minor,
-                 uint32_t count, uint16_t mode, uint16_t uid, uint16_t gid,
-                 const vfs_ops_t *vops, void *vpriv)
+int cdev_add_vfs(const char *dir, const char *name, uint32_t major, uint32_t minor, uint32_t count,
+                 uint16_t mode, uint16_t uid, uint16_t gid, const vfs_ops_t *vops, void *vpriv)
 {
     if (!name || !vops) {
         plogk("chrdev: cdev_add_vfs: missing name or ops.\n");
@@ -56,14 +55,14 @@ int cdev_add_vfs(const char *dir, const char *name, uint32_t major, uint32_t min
     cdev->vops       = vops;
     cdev->vpriv      = vpriv;
 
-    cdev->next    = chrdev_list;
-    chrdev_list   = cdev;
+    cdev->next  = chrdev_list;
+    chrdev_list = cdev;
     return 0;
 }
 
 int cdev_add_owned(const char *dir, const char *name, uint32_t major, uint32_t minor,
-                   uint32_t count, uint16_t node_type, uint16_t mode,
-                   uint16_t uid, uint16_t gid, const tmpfs_device_ops_t *ops)
+                   uint32_t count, uint16_t node_type, uint16_t mode, uint16_t uid, uint16_t gid,
+                   const tmpfs_device_ops_t *ops)
 {
     if (!name || !ops) {
         plogk("chrdev: cdev_add: missing name or ops.\n");
@@ -89,8 +88,8 @@ int cdev_add_owned(const char *dir, const char *name, uint32_t major, uint32_t m
     cdev->gid        = gid;
     cdev->ops        = *ops;
 
-    cdev->next   = chrdev_list;
-    chrdev_list  = cdev;
+    cdev->next  = chrdev_list;
+    chrdev_list = cdev;
     return 0;
 }
 
@@ -107,13 +106,13 @@ int cdev_del(const char *path)
     link = &chrdev_list;
     while (*link) {
         char entry[96];
-        snprintf(entry, sizeof(entry), "/dev/%s%s%s", (*link)->dir,
-                 (*link)->dir[0] ? "/" : "", (*link)->name);
+        snprintf(entry, sizeof(entry), "/dev/%s%s%s", (*link)->dir, (*link)->dir[0] ? "/" : "",
+                 (*link)->name);
         if (strcmp(entry, full) == 0) {
             cdev_t *victim = *link;
-            char     flat[96];
+            char    flat[96];
             cdev_flat_name(victim, flat, sizeof(flat));
-            *link          = victim->next;
+            *link = victim->next;
             kfree(victim);
             vfs_unregister_dev(flat); /* node goes with the registry entry */
             status = 0;
@@ -187,20 +186,15 @@ static int cdev_publish(const cdev_t *cdev)
     cdev_flat_name(cdev, flat, sizeof(flat));
 
     if (cdev->vops) {
-        if (vfs_register_devnum(flat, cdev->vops, cdev->vpriv, cdev->major,
-                                cdev->minor_base) != 0)
+        if (vfs_register_devnum(flat, cdev->vops, cdev->vpriv, cdev->major, cdev->minor_base) != 0)
             return -E_INVAL;
     } else {
         snprintf(path, sizeof(path), "/dev/%s", flat);
-        if (devtmpfs_register_char_device(path, MKDEV(cdev->major, cdev->minor_base),
-                                          MKDEV(cdev->major, cdev->minor_base),
-                                          (int)cdev->node_type,
-                                          (tmpfs_device_ops_t *)&cdev->ops) != 0)
+        if (devtmpfs_register_char_device(
+                path, MKDEV(cdev->major, cdev->minor_base), MKDEV(cdev->major, cdev->minor_base),
+                (int)cdev->node_type, (tmpfs_device_ops_t *)&cdev->ops) != 0)
             return -E_INVAL;
     }
-    dbg_puts("VFS: registered /dev/");
-    dbg_puts(flat);
-    dbg_puts("\r\n");
     /* Push the registry's ownership/mode into the dev table so the VFS
      * open-path permission check and stat see the real values. */
     if (cdev->mode)
@@ -226,7 +220,7 @@ int cdev_publish_path(const char *dir, const char *name)
 
 int chrdev_populate(void)
 {
-    int count = 0;
+    int    count = 0;
     cdev_t cdev;
 
     for (int index = 0; chrdev_at(index, &cdev); index++) {
@@ -235,8 +229,7 @@ int chrdev_populate(void)
             if (cdev.count > 1) {
                 if (i == 0)
                     snprintf(base, sizeof(base), "%s", cdev.name);
-                snprintf(cdev.name, sizeof(cdev.name), "%s%u", base,
-                         cdev.minor_base + i);
+                snprintf(cdev.name, sizeof(cdev.name), "%s%u", base, cdev.minor_base + i);
             }
             if (cdev_publish(&cdev) == 0)
                 count++;

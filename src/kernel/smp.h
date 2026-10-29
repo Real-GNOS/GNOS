@@ -128,7 +128,7 @@ extern uint8_t g_cpu_stack[MAX_CPUS][PERCPU_KSTACK];
  * allocators and ACPI (the APs run the scheduler from ap_main on). */
 void smp_init(void);
 /* Temporary exec debugging: arm DR0 on the BSP user-RSP stash. */
-void smp_arm_user_rsp_watch(void);
+void            smp_arm_user_rsp_watch(void);
 extern uint64_t g_user_rsp_watch_rip;
 extern uint64_t g_wp_benign_hits;
 
@@ -142,5 +142,8 @@ void ap_entry(void);
 
 /* Number of cores that actually came online (BSP always counts). */
 int smp_online_count(void);
+
+void smp_tlb_shootdown_all(void);
+int  smp_tlb_handle_nmi(void);
 
 #endif

@@ -86,13 +86,13 @@ typedef struct {
      * engine, one instance per console. */
     vt_ansi_t ansi;
 
-    cell_t   cells[FBCON_MAX_ROWS * FBCON_MAX_COLS];
+    cell_t cells[FBCON_MAX_ROWS * FBCON_MAX_COLS];
 
     /* Alternate screen (?1049h): a full-screen TUI (nano, vi) switches to a
      * private buffer on entry and back to the normal screen on exit, which
      * is what restores the shell prompt instead of leaving the editor's last
      * frame behind. */
-    cell_t  *alt_cells;
+    cell_t *alt_cells;
 } console_t;
 
 static console_t g_con[FBCON_MAX_CONS];
@@ -418,8 +418,7 @@ static void con_insert_lines(void *ctx, uint32_t y, uint32_t bottom, uint32_t co
 
     for (uint32_t k = 0; k < count; k++) {
         for (uint32_t row = bottom; row > y; row--)
-            memmove(cell_at(c, 0, row), cell_at(c, 0, row - 1),
-                    g_fb.cols * sizeof(cell_t));
+            memmove(cell_at(c, 0, row), cell_at(c, 0, row - 1), g_fb.cols * sizeof(cell_t));
         for (uint32_t col = 0; col < g_fb.cols; col++) {
             cell_t *cell = cell_at(c, col, y);
             cell->cp     = 0;
@@ -436,8 +435,7 @@ static void con_delete_lines(void *ctx, uint32_t y, uint32_t bottom, uint32_t co
 
     for (uint32_t k = 0; k < count; k++) {
         for (uint32_t row = y; row < bottom; row++)
-            memmove(cell_at(c, 0, row), cell_at(c, 0, row + 1),
-                    g_fb.cols * sizeof(cell_t));
+            memmove(cell_at(c, 0, row), cell_at(c, 0, row + 1), g_fb.cols * sizeof(cell_t));
         for (uint32_t col = 0; col < g_fb.cols; col++) {
             cell_t *cell = cell_at(c, col, bottom);
             cell->cp     = 0;
@@ -448,8 +446,7 @@ static void con_delete_lines(void *ctx, uint32_t y, uint32_t bottom, uint32_t co
     }
 }
 
-static void con_insert_chars(void *ctx, uint32_t x, uint32_t y, uint32_t count,
-                             uint32_t cols)
+static void con_insert_chars(void *ctx, uint32_t x, uint32_t y, uint32_t count, uint32_t cols)
 {
     console_t *c   = ctx;
     uint32_t   col = x;
@@ -462,8 +459,7 @@ static void con_insert_chars(void *ctx, uint32_t x, uint32_t y, uint32_t count,
     }
 }
 
-static void con_delete_chars(void *ctx, uint32_t x, uint32_t y, uint32_t count,
-                             uint32_t cols)
+static void con_delete_chars(void *ctx, uint32_t x, uint32_t y, uint32_t count, uint32_t cols)
 {
     console_t *c = ctx;
 
@@ -488,8 +484,7 @@ static void con_scroll_down(void *ctx, uint32_t top, uint32_t bottom, uint32_t c
 
     for (uint32_t k = 0; k < count; k++) {
         for (uint32_t row = bottom; row > top; row--)
-            memmove(cell_at(c, 0, row), cell_at(c, 0, row - 1),
-                    g_fb.cols * sizeof(cell_t));
+            memmove(cell_at(c, 0, row), cell_at(c, 0, row - 1), g_fb.cols * sizeof(cell_t));
         for (uint32_t col = 0; col < g_fb.cols; col++) {
             cell_t *cell = cell_at(c, col, top);
             cell->cp     = 0;
@@ -693,11 +688,11 @@ void fbcon_set_color_on(int con, uint32_t fg, uint32_t bg)
         return;
     /* This old API set raw pixels; keep it meaningful by mapping it to the
      * default colours and clearing, so callers still get "reset". */
-    t->def_fg      = fg;
-    t->def_bg      = bg;
-    t->ansi.fg     = 0;
-    t->ansi.bg     = 0;
-    t->ansi.attrs  = 0;
+    t->def_fg     = fg;
+    t->def_bg     = bg;
+    t->ansi.fg    = 0;
+    t->ansi.bg    = 0;
+    t->ansi.attrs = 0;
 }
 
 /* ---- console 0 --------------------------------------------------------- */

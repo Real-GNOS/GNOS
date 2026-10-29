@@ -27,8 +27,10 @@
 #include "pci.h"
 #include "io.h"
 #include "vfs.h"
+#include "chrdev.h"
 #include "audio.h"
 #include "pmm.h"
+#include "vmm.h"
 #include "kstring.h"
 #include "debugcon.h"
 
@@ -471,7 +473,8 @@ static const vfs_ops_t g_dsp_ops = {
 
 int audio_vfs_register(void)
 {
-    int r = vfs_register_devnum("dsp", &g_dsp_ops, NULL, 14, 3);
-    vfs_register_devnum("audio", &g_dsp_ops, NULL, 14, 4);
-    return r;
+    int r = cdev_add_vfs("", "dsp", 14, 3, 1, 0666, 0, 0, &g_dsp_ops, NULL);
+    if (r != 0)
+        return r;
+    return cdev_add_vfs("", "audio", 14, 4, 1, 0666, 0, 0, &g_dsp_ops, NULL);
 }

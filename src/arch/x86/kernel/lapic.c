@@ -31,6 +31,8 @@ extern uint64_t g_hhdm;
 #define LAPIC_ID         0x020
 #define LAPIC_EOI        0x0B0
 #define LAPIC_SPURIOUS   0x0F0
+#define LAPIC_ICR_LO     0x300
+#define LAPIC_ICR_HI     0x310
 #define LAPIC_LVT_TIMER  0x320
 #define LAPIC_INIT_COUNT 0x380
 #define LAPIC_CUR_COUNT  0x390
@@ -38,6 +40,11 @@ extern uint64_t g_hhdm;
 
 #define LVT_TIMER_PERIODIC 0x20000
 #define DIVIDE_BY_16       0x3
+
+#define ICR_DM_NMI        0x00000400
+#define ICR_LEVEL_ASSERT  0x00004000
+#define ICR_DEST_ALL_BUT  0x000C0000
+#define ICR_DELIVERY_PEND 0x00001000
 
 static volatile uint32_t *g_lapic; /* mapped base, set by lapic_init() */
 
@@ -85,6 +92,34 @@ irq_handler_t lapic_timer_handler(void)
 void lapic_eoi(void)
 {
     lapic_write(LAPIC_EOI, 0);
+}
+
+int lapic_ready(void)
+{
+    return g_lapic != 0;
+}
+
+int lapic_send_nmi_others(void)
+{
+    if (!g_lapic)
+        return -1;
+
+    uint64_t spin = 0;
+    while (lapic_read(LAPIC_ICR_LO) & ICR_DELIVERY_PEND) {
+        if (++spin > 100000000ULL)
+            return -1;
+        asm volatile("pause");
+    }
+
+    lapic_write(LAPIC_ICR_HI, 0);
+    lapic_write(LAPIC_ICR_LO, ICR_DM_NMI | ICR_LEVEL_ASSERT | ICR_DEST_ALL_BUT);
+
+    for (uint64_t spin = 0; spin < 100000000ULL; spin++) {
+        if (!(lapic_read(LAPIC_ICR_LO) & ICR_DELIVERY_PEND))
+            return 0;
+        asm volatile("pause");
+    }
+    return -1;
 }
 
 void lapic_init(void)

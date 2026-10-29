@@ -53,15 +53,15 @@
 
 #define RTL8139_VENDOR_REALTEK 0x10EC
 
-#define RTL8139_RX_BUF_IDX 2 /* RCR receive ring length: 32 KiB + 16 bytes */
+#define RTL8139_RX_BUF_IDX  2 /* RCR receive ring length: 32 KiB + 16 bytes */
 #define RTL8139_RX_BUF_SIZE (8192u << RTL8139_RX_BUF_IDX)
 #define RTL8139_RX_RING_PAGES \
     ((RTL8139_RX_BUF_SIZE + 16 + (uint32_t)PAGE_SIZE - 1) / (uint32_t)PAGE_SIZE)
 
-#define RTL8139_TX_COUNT 4    /* four hardware transmit descriptors */
-#define RTL8139_TX_MAX   2048 /* one page per transmit buffer */
-#define RTL8139_ETH_ZLEN 60   /* minimum frame without the FCS */
-#define RTL8139_CRC_LEN  4    /* the length in the RX header includes the FCS */
+#define RTL8139_TX_COUNT  4    /* four hardware transmit descriptors */
+#define RTL8139_TX_MAX    2048 /* one page per transmit buffer */
+#define RTL8139_ETH_ZLEN  60   /* minimum frame without the FCS */
+#define RTL8139_CRC_LEN   4    /* the length in the RX header includes the FCS */
 #define RTL8139_MAX_FRAME 1518
 
 #define RTL8139_RESET_POLL 1000
@@ -69,7 +69,7 @@
 
 #define RTL8139_RX_ERRORS \
     (RTL8139_RX_FAE | RTL8139_RX_CRC | RTL8139_RX_LONG | RTL8139_RX_RUNT | RTL8139_RX_ISE)
-#define RTL8139_RX_INTS (RTL8139_ISR_ROK | RTL8139_ISR_RER | RTL8139_ISR_RXOVW | RTL8139_ISR_FOVW)
+#define RTL8139_RX_INTS  (RTL8139_ISR_ROK | RTL8139_ISR_RER | RTL8139_ISR_RXOVW | RTL8139_ISR_FOVW)
 #define RTL8139_INT_MASK (RTL8139_RX_INTS | RTL8139_ISR_PUN)
 
 /* Device IDs that use the classic RTL8139 register layout. */
@@ -280,10 +280,9 @@ static void rtl8139_program_hw(void)
     w32(RTL8139_REG_TCR, RTL8139_TCR_IFG_NORMAL | ((uint32_t)RTL8139_TCR_MXDMA << 8));
 
     /* Physical/multicast/broadcast, 256-byte FIFO threshold, 32 KiB ring. */
-    w32(RTL8139_REG_RCR, ((uint32_t)RTL8139_RCR_RXFTH << 13) |
-                             ((uint32_t)RTL8139_RX_BUF_IDX << 11) |
-                             ((uint32_t)RTL8139_RCR_MXDMA << 8) | RTL8139_RCR_APM |
-                             RTL8139_RCR_AM | RTL8139_RCR_AB);
+    w32(RTL8139_REG_RCR,
+        ((uint32_t)RTL8139_RCR_RXFTH << 13) | ((uint32_t)RTL8139_RX_BUF_IDX << 11) |
+            ((uint32_t)RTL8139_RCR_MXDMA << 8) | RTL8139_RCR_APM | RTL8139_RCR_AM | RTL8139_RCR_AB);
 
     w8(RTL8139_REG_CR, RTL8139_CR_TE | RTL8139_CR_RE);
     write_flush();
@@ -342,8 +341,7 @@ uint16_t rtl8139_recv(void *buf, uint16_t max)
         uint32_t length = hdr >> 16; /* includes the 4-byte FCS */
 
         int good = (status & RTL8139_RX_ROK) && !(status & RTL8139_RX_ERRORS) &&
-                   length > RTL8139_CRC_LEN &&
-                   length <= RTL8139_MAX_FRAME + RTL8139_CRC_LEN;
+                   length > RTL8139_CRC_LEN && length <= RTL8139_MAX_FRAME + RTL8139_CRC_LEN;
 
         if (!good) {
             if (length <= RTL8139_CRC_LEN || length > RTL8139_RX_BUF_SIZE)
@@ -355,7 +353,7 @@ uint16_t rtl8139_recv(void *buf, uint16_t max)
             continue;
         }
 
-        uint32_t n    = length - RTL8139_CRC_LEN;
+        uint32_t n = length - RTL8139_CRC_LEN;
         if (n > max)
             n = max;
         uint32_t data = (off + RTL8139_CRC_LEN) % RTL8139_RX_BUF_SIZE;
@@ -383,8 +381,8 @@ int rtl8139_send(const void *frame, uint16_t len)
     if (!g_ok || !frame || len == 0 || len > RTL8139_TX_MAX)
         return 0;
 
-    unsigned i    = g_tx_next;
-    uint32_t tsd  = r32(RTL8139_REG_TSD0 + i * 4);
+    unsigned i   = g_tx_next;
+    uint32_t tsd = r32(RTL8139_REG_TSD0 + i * 4);
 
     /* OWN == 0 means the card still owns the descriptor.  A synchronous
      * sender should almost never see this, but a previous timeout can leave

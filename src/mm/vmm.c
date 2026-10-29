@@ -210,6 +210,23 @@ uint32_t vmm_frame_ref_slots(void)
 static uint64_t g_kernel_pml4_phys;
 static int      g_watchmap_count; /* TEMPORARY Xorg debugging */
 
+static int vmm_tlb_needs_shootdown(addrspace_t *as)
+{
+    if (!as || smp_online_count() <= 1)
+        return 0;
+    if (as->pml4_phys == g_kernel_pml4_phys)
+        return 1;
+    return as->refs > 1;
+}
+
+static void vmm_tlb_flush_as(addrspace_t *as)
+{
+    if (vmm_tlb_needs_shootdown(as))
+        smp_tlb_shootdown_all();
+}
+
+static int vmm_cow_break_core(addrspace_t *as, uint64_t va);
+
 static uint64_t *table(uint64_t phys)
 {
     return (uint64_t *)pmm_virt(phys);
@@ -466,21 +483,9 @@ int vmm_map(addrspace_t *as, uint64_t vaddr, uint64_t paddr, unsigned flags)
         dbg_puts_hex(vaddr);
         dbg_puts("\r\n");
     }
-    uint64_t old = *pte;
-    /* Replacing a *counted* mapping (COW fork page, or external shared
-     * memory) has to drop the reference it was holding, or the frame leaks
-     * along with its table entry.  Two things make this safe to do here and
-     * nowhere else:
-     *   - the new frame must differ: remapping the same frame at the same
-     *     address is an update, not a replacement, and unref'ing it could
-     *     free the frame the new PTE is about to install;
-     *   - a private (uncounted) frame is deliberately left alone.  Nothing
-     *     stops one from being mapped at several addresses, so freeing it
-     *     on the strength of this one PTE would be a use-after-free; that
-     *     overwriting loses a frame at all is pre-existing behaviour this
-     *     change does not try to alter. */
-    if ((old & PTE_P) && (old & (PTE_COW | PTE_AVL)) && (old & PTE_ADDR) != (paddr & PTE_ADDR))
-        vmm_share_unref(old & PTE_ADDR);
+    uint64_t old     = *pte;
+    int      had     = (old & PTE_P) != 0;
+    int      release = had && (old & (PTE_COW | PTE_AVL)) && (old & PTE_ADDR) != (paddr & PTE_ADDR);
 
     *pte = (paddr & PTE_ADDR) | pte_flags(flags);
     /* A SysV shared-memory page marks the PTE with the available bit so
@@ -488,6 +493,13 @@ int vmm_map(addrspace_t *as, uint64_t vaddr, uint64_t paddr, unsigned flags)
      * (the segment owns the frame; see VM_EXTSHM). */
     if (flags & VM_EXTSHM)
         *pte |= PTE_AVL;
+
+    if (had) {
+        asm volatile("invlpg (%0)" ::"r"(vaddr) : "memory");
+        vmm_tlb_flush_as(as);
+    }
+    if (release)
+        vmm_share_unref(old & PTE_ADDR);
     return 1;
 }
 
@@ -521,6 +533,8 @@ int vmm_protect(addrspace_t *as, uint64_t vaddr, uint64_t size, unsigned prot)
     dbg_puts_dec(prot);
     dbg_puts("\r\n");
 
+    int changed = 0;
+    int failed  = 0;
     for (uint64_t va = vaddr; va < vaddr + size; va += PAGE_SIZE) {
         uint64_t *pte = walk(as, va, 0, 0);
         if (!pte || !(*pte & PTE_P))
@@ -531,12 +545,23 @@ int vmm_protect(addrspace_t *as, uint64_t vaddr, uint64_t size, unsigned prot)
          * wants its own copy from here on: granting it while the frame is
          * still shared would hand the parent's memory to the child's writes
          * with no fault in between to stop them. */
-        if ((bits & PTE_RW) && (*pte & PTE_COW))
-            vmm_cow_break(as, va);
-        *pte = (*pte & ~(PTE_RW | PTE_NX)) | (bits & (PTE_RW | PTE_NX));
+        if ((bits & PTE_RW) && (*pte & PTE_COW)) {
+            if (!vmm_cow_break_core(as, va)) {
+                failed = 1;
+                continue;
+            }
+            changed = 1;
+        }
+        uint64_t old = *pte;
+        uint64_t new = (old & ~(PTE_RW | PTE_NX)) | (bits & (PTE_RW | PTE_NX));
+        if (new != old)
+            changed = 1;
+        *pte = new;
         asm volatile("invlpg (%0)" : : "r"(va) : "memory");
     }
-    return 1;
+    if (changed)
+        vmm_tlb_flush_as(as);
+    return failed ? 0 : 1;
 }
 
 uint64_t vmm_resolve(addrspace_t *as, uint64_t vaddr)
@@ -580,7 +605,7 @@ static void frame_ref_forget_if_last(uint64_t frame)
  *
  * Returns 1 when the caller may write at `va` afterwards, 0 on failure.
  */
-int vmm_cow_break(addrspace_t *as, uint64_t va)
+static int vmm_cow_break_core(addrspace_t *as, uint64_t va)
 {
     if (!as)
         return 0;
@@ -590,19 +615,7 @@ int vmm_cow_break(addrspace_t *as, uint64_t va)
         return 0;
 
     uint64_t frame = *pte & PTE_ADDR;
-
-    /* Threads share one set of page tables between several CPUs, and this
-     * kernel has no way to flush a TLB entry on another core.  Swapping the
-     * frame out from under a sibling would leave it reading the old page, so
-     * a page the whole thread group can see stays shared and simply becomes
-     * writable: within one address space nothing needed separating anyway. */
-    if (as->refs > 1) {
-        *pte = (*pte & ~PTE_COW) | PTE_RW;
-        asm volatile("invlpg (%0)" : : "r"(va) : "memory");
-        return 1;
-    }
-
-    int refs = vmm_frame_ref_count(frame);
+    int      refs  = vmm_frame_ref_count(frame);
 
     /* Nobody else holds this frame any more (every other holder has already
      * taken its own copy, or unmapped it): keep the page and stop pretending
@@ -629,6 +642,14 @@ int vmm_cow_break(addrspace_t *as, uint64_t va)
 
     vmm_share_unref(frame); /* this page table let go of the old frame */
     return 1;
+}
+
+int vmm_cow_break(addrspace_t *as, uint64_t va)
+{
+    int ok = vmm_cow_break_core(as, va);
+    if (ok)
+        vmm_tlb_flush_as(as);
+    return ok;
 }
 
 int vmm_page_shared(addrspace_t *as, uint64_t vaddr)
@@ -765,10 +786,20 @@ uint64_t vmm_map_mmio(uint64_t phys, uint64_t size)
     return base;
 }
 
+#define VMM_TLB_BATCH 32
+
 int vmm_unmap(addrspace_t *as, uint64_t vaddr, uint64_t size)
 {
     uint64_t start = vaddr & ~0xFFFULL;
     uint64_t end   = (vaddr + size + 0xFFF) & ~0xFFFULL;
+    uint64_t cur;
+    asm volatile("mov %%cr3, %0" : "=r"(cur));
+    int current = (cur & PTE_ADDR) == as->pml4_phys;
+    int cross   = vmm_tlb_needs_shootdown(as);
+
+    uint64_t bframe[VMM_TLB_BATCH];
+    int      bshared[VMM_TLB_BATCH];
+    int      nb = 0;
 
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
         uint64_t *pte = walk(as, va, 0, 0);
@@ -787,29 +818,44 @@ int vmm_unmap(addrspace_t *as, uint64_t vaddr, uint64_t size)
          * of one reference, and it is freed only when the last one leaves.
          * PTE_AVL covers the external owners (a SysV segment, a shared
          * anonymous mapping); PTE_COW is the fork() case. */
-        if (*pte & (PTE_AVL | PTE_COW)) {
-            vmm_share_unref(*pte & PTE_ADDR);
-            if (as->pages > 0)
-                as->pages--;
-            if (as->cg >= 0)
-                cg_mem_discharge(as->cg, PAGE_SIZE);
-        } else {
-            pmm_free(*pte & PTE_ADDR);
-            if (as->pages > 0)
-                as->pages--; /* resident-page accounting (cgroup memory) */
-            if (as->cg >= 0)
-                cg_mem_discharge(as->cg, PAGE_SIZE);
-        }
-        *pte = 0;
-    }
-    /* Drop stale TLB entries for the range, but only if this is the address
-     * space we are actually running on; reloading CR3 for another process
-     * would switch the page tables out from under the caller. */
-    uint64_t cur;
-    asm volatile("mov %%cr3, %0" : "=r"(cur));
-    if ((cur & PTE_ADDR) == as->pml4_phys) {
-        for (uint64_t va = start; va < end; va += PAGE_SIZE)
+        uint64_t old    = *pte;
+        int      shared = (old & (PTE_AVL | PTE_COW)) != 0;
+        *pte            = 0;
+        if (as->pages > 0)
+            as->pages--;
+        if (as->cg >= 0)
+            cg_mem_discharge(as->cg, PAGE_SIZE);
+        if (current)
             asm volatile("invlpg (%0)" ::"r"(va) : "memory");
+
+        if (cross) {
+            bframe[nb]  = old & PTE_ADDR;
+            bshared[nb] = shared;
+            nb++;
+            if (nb == VMM_TLB_BATCH) {
+                smp_tlb_shootdown_all();
+                for (int i = 0; i < nb; i++) {
+                    if (bshared[i])
+                        vmm_share_unref(bframe[i]);
+                    else
+                        pmm_free(bframe[i]);
+                }
+                nb = 0;
+            }
+        } else if (shared) {
+            vmm_share_unref(old & PTE_ADDR);
+        } else {
+            pmm_free(old & PTE_ADDR);
+        }
+    }
+    if (nb) {
+        smp_tlb_shootdown_all();
+        for (int i = 0; i < nb; i++) {
+            if (bshared[i])
+                vmm_share_unref(bframe[i]);
+            else
+                pmm_free(bframe[i]);
+        }
     }
     return 1;
 }
@@ -1136,10 +1182,9 @@ addrspace_t *vmm_clone(addrspace_t *src)
     if (!dst)
         return NULL;
 
-    /* Sharing is off for a page table more than one task is running in: this
-     * kernel has no way to flush another CPU's TLB, so a sibling thread that
-     * still believed the page writable would write straight through into the
-     * child's view of it.  An eager copy is simply always safe. */
+    /* Sharing is off for a page table more than one task is running in: the
+     * clone path would also have to write-protect the source PTEs and shoot
+     * those changes down while sibling threads run.  An eager copy is safe. */
     int sharing = (src->refs == 1);
     if (sharing) {
         uint32_t need = 0;

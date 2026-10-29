@@ -84,9 +84,9 @@ static const uint16_t hid_modifier_keys[8] = {
 };
 
 typedef struct {
-    usb_device_t   *udev;     /* owning device (core-registered) */
-    usb_endpoint_t *ep;       /* interrupt IN endpoint */
-    int             type;     /* HID_PROTOCOL_KEYBOARD / HID_PROTOCOL_MOUSE */
+    usb_device_t   *udev;      /* owning device (core-registered) */
+    usb_endpoint_t *ep;        /* interrupt IN endpoint */
+    int             type;      /* HID_PROTOCOL_KEYBOARD / HID_PROTOCOL_MOUSE */
     uint8_t         ep_packet; /* endpoint max packet size */
     uint8_t         report[8];
     uint8_t         last_report[8];
@@ -156,7 +156,8 @@ static void hid_emit_mouse(hid_dev_t *dev)
 
 /* Completion callback, run by xhci_usb_reap() from the timer tick: latch the
  * fresh report and decode it through the same path the old poll loop used. */
-static void hid_complete(usb_endpoint_t *endpoint, const void *data, size_t length, int status, void *context)
+static void hid_complete(usb_endpoint_t *endpoint, const void *data, size_t length, int status,
+                         void *context)
 {
     (void)endpoint;
     (void)status;
@@ -200,9 +201,11 @@ int usb_hid_probe(usb_interface_t *interface)
 
     /* Switch to boot protocol and stop the idle rate so reports only
      * arrive on change -- the two things real firmware does. */
-    if (usb_control_msg(dev->udev, USB_RT_HID, HID_REQ_SET_PROTOCOL, (uint16_t)proto, interface->descriptor.interface_number, NULL, 0, USB_CTRL_TIMEOUT_MS) != 0)
+    if (usb_control_msg(dev->udev, USB_RT_HID, HID_REQ_SET_PROTOCOL, (uint16_t)proto,
+                        interface->descriptor.interface_number, NULL, 0, USB_CTRL_TIMEOUT_MS) != 0)
         return -E_IO;
-    (void)usb_control_msg(dev->udev, USB_RT_HID, HID_REQ_SET_IDLE, 0, interface->descriptor.interface_number, NULL, 0, USB_CTRL_TIMEOUT_MS);
+    (void)usb_control_msg(dev->udev, USB_RT_HID, HID_REQ_SET_IDLE, 0,
+                          interface->descriptor.interface_number, NULL, 0, USB_CTRL_TIMEOUT_MS);
 
     if (usb_interrupt_start(dev->ep, dev->ep_packet, hid_complete, dev) != 0)
         return -E_IO;

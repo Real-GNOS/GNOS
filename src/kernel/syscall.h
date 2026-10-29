@@ -15,6 +15,10 @@
 /* Register the int 0x80 handler.  Call after idt_init(). */
 void syscall_init(void);
 
+/* Program this CPU's SYSCALL MSRs (STAR/LSTAR and EFER.SCE).  The MSRs are
+ * per-core, so every AP must call this before it can run user code. */
+void syscall_init_cpu(void);
+
 /* The scan/block core shared by poll(2), select(2) and epoll_wait(2).
  * `p` points at pollfd triples (fd, events, revents) -- user memory for the
  * poll family, kernel scratch for epoll.  Returns the number of descriptors

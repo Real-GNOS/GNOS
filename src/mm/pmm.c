@@ -140,11 +140,11 @@ void pmm_init(void)
      * shape that put userland version strings into Xorg's ppoll frame. */
     {
         extern volatile struct limine_kernel_address_request kernel_address_request;
-        extern char _kernel_end[];
+        extern char                                          _kernel_end[];
         if (kernel_address_request.response)
-            mark_used(kernel_address_request.response->physical_base,
-                      (uint64_t)(uintptr_t)_kernel_end -
-                          kernel_address_request.response->virtual_base);
+            mark_used(
+                kernel_address_request.response->physical_base,
+                (uint64_t)(uintptr_t)_kernel_end - kernel_address_request.response->virtual_base);
     }
 
     /* And of course the bitmap itself is not up for grabs. */

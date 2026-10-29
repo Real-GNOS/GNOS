@@ -81,12 +81,12 @@
 #define RTL8169_PHYSTATUS_LINKSTS (1u << 1)
 
 /* Descriptor dword 0 bits. */
-#define RTL8169_DESC_OWN     (1u << 31) /* set: owned by the card */
-#define RTL8169_DESC_EOR     (1u << 30) /* end of ring */
-#define RTL8169_DESC_FS      (1u << 29) /* first segment */
-#define RTL8169_DESC_LS      (1u << 28) /* last segment */
-#define RTL8169_TX_LEN_MASK  0x0000ffffu
-#define RTL8169_RX_LEN_MASK  0x00003fffu
+#define RTL8169_DESC_OWN    (1u << 31) /* set: owned by the card */
+#define RTL8169_DESC_EOR    (1u << 30) /* end of ring */
+#define RTL8169_DESC_FS     (1u << 29) /* first segment */
+#define RTL8169_DESC_LS     (1u << 28) /* last segment */
+#define RTL8169_TX_LEN_MASK 0x0000ffffu
+#define RTL8169_RX_LEN_MASK 0x00003fffu
 
 /* RX status error summary: RWT(22) | RES(21) | RUNT(20) | CRC(19). */
 #define RTL8169_RX_ERROR_MASK (0x0fu << 19)

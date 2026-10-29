@@ -43,21 +43,21 @@
 /* Masks a watch may legitimately ask for; anything else is EINVAL. */
 #define IN_WATCHABLE_MASK 0x0000ffff
 
-#define INOTIFY_MAX_WATCHES 128
+#define INOTIFY_MAX_WATCHES   128
 #define INOTIFY_MAX_INSTANCES 16
-#define INOTIFY_Q_BYTES 4096
+#define INOTIFY_Q_BYTES       4096
 
 /* One queued event, kernel-side: the read(2) layout is wd/mask/cookie/
  * len/name[] with name len-padded, so keep the exact record and copy it
  * out verbatim. */
 typedef struct inotify_rec {
     struct inotify_rec *next;
-    int32_t  wd;
-    uint32_t mask;
-    uint32_t cookie;
-    uint32_t len;   /* name length, 0 when unnamed */
-    uint32_t off;   /* offset of name within the record's data */
-    char     name[INOTIFY_Q_BYTES >= 256 ? 224 : 32]; /* keeps rec <= 256B */
+    int32_t             wd;
+    uint32_t            mask;
+    uint32_t            cookie;
+    uint32_t            len; /* name length, 0 when unnamed */
+    uint32_t            off; /* offset of name within the record's data */
+    char                name[INOTIFY_Q_BYTES >= 256 ? 224 : 32]; /* keeps rec <= 256B */
 } inotify_rec_t;
 
 /* A watch: an absolute path prefix plus the mask the caller asked for. */
@@ -70,13 +70,13 @@ typedef struct {
 
 typedef struct inotify_inst {
     struct inotify_inst *next;
-    inotify_watch_t watches[INOTIFY_MAX_WATCHES];
-    inotify_rec_t  *q_head;
-    inotify_rec_t  *q_tail;
-    uint32_t        q_bytes; /* records queued, vs the byte cap */
-    uint32_t        q_count;
-    int             next_wd;
-    int             nonblock;
+    inotify_watch_t      watches[INOTIFY_MAX_WATCHES];
+    inotify_rec_t       *q_head;
+    inotify_rec_t       *q_tail;
+    uint32_t             q_bytes; /* records queued, vs the byte cap */
+    uint32_t             q_count;
+    int                  next_wd;
+    int                  nonblock;
 } inotify_inst_t;
 
 static inotify_inst_t *g_insts[INOTIFY_MAX_INSTANCES];
@@ -130,8 +130,8 @@ static void inotify_release(vfs_node_t *n)
 /* Append one record to an instance.  A full queue collapses the event
  * into a single IN_Q_OVERFLOW on wd=-1, exactly Linux's rule, and an
  * already-overflowed queue stays that way instead of spamming. */
-static void inst_enqueue(inotify_inst_t *inst, int wd, uint32_t mask,
-                         uint32_t cookie, const char *name)
+static void inst_enqueue(inotify_inst_t *inst, int wd, uint32_t mask, uint32_t cookie,
+                         const char *name)
 {
     static int overflowed_pending;
 
@@ -145,7 +145,7 @@ static void inst_enqueue(inotify_inst_t *inst, int wd, uint32_t mask,
         inst->q_bytes + sizeof(inotify_rec_t) > INOTIFY_Q_BYTES) {
         if (!overflowed_pending) {
             overflowed_pending = 1;
-            inotify_rec_t *r = kmalloc(sizeof(inotify_rec_t));
+            inotify_rec_t *r   = kmalloc(sizeof(inotify_rec_t));
             if (!r)
                 return;
             memset(r, 0, sizeof *r);
@@ -168,10 +168,10 @@ static void inst_enqueue(inotify_inst_t *inst, int wd, uint32_t mask,
     if (!r)
         return;
     memset(r, 0, sizeof *r);
-    r->wd    = wd;
-    r->mask  = mask;
+    r->wd     = wd;
+    r->mask   = mask;
     r->cookie = cookie;
-    r->len   = nlen;
+    r->len    = nlen;
     if (nlen)
         memcpy(r->name, name, nlen);
     inst->q_bytes += sizeof(inotify_rec_t);
@@ -203,10 +203,8 @@ void inotify_event_fire(const char *path, uint32_t mask, uint32_t cookie)
              * everything below it; a file watch fires only on the exact
              * path. */
             int match = (plen == wlen && memcmp(path, wpath, wlen) == 0) ||
-                        (plen > wlen && wpath[wlen - 1] == '/' &&
-                         memcmp(path, wpath, wlen) == 0) ||
-                        (plen > wlen && memcmp(path, wpath, wlen) == 0 &&
-                         path[wlen] == '/');
+                        (plen > wlen && wpath[wlen - 1] == '/' && memcmp(path, wpath, wlen) == 0) ||
+                        (plen > wlen && memcmp(path, wpath, wlen) == 0 && path[wlen] == '/');
             if (!match)
                 continue;
             uint32_t wmask = inst->watches[w].mask;
@@ -214,8 +212,7 @@ void inotify_event_fire(const char *path, uint32_t mask, uint32_t cookie)
                 continue;
             /* IN_ISDIR: the hooks that know say so in the mask already. */
             inst_enqueue(inst, inst->watches[w].wd, mask, cookie,
-                         plen > wlen ? path + wlen + (path[wlen] == '/' ? 1 : 0)
-                                     : NULL);
+                         plen > wlen ? path + wlen + (path[wlen] == '/' ? 1 : 0) : NULL);
             /* IN_ONESHOT: one event, then the watch removes itself. */
             if (wmask & IN_ONESHOT) {
                 inst->watches[w].used = 0;
@@ -255,7 +252,7 @@ static int32_t inotify_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
     uint8_t *out = (uint8_t *)buf;
     uint32_t got = 0;
     while (inst->q_head) {
-        inotify_rec_t *r   = inst->q_head;
+        inotify_rec_t *r      = inst->q_head;
         uint32_t       reclen = sizeof(inotify_rec_t) - sizeof(r->name) + r->len;
         if (got && got + reclen > len)
             break; /* no room for another whole event */
@@ -284,8 +281,8 @@ static int32_t inotify_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len
 
 /* poll(2)/epoll readiness: readable iff the queue holds events.  POLLIN/
  * POLLRDNORM are the poll(2) bits from the UAPI header. */
-#define POLLIN      0x001
-#define POLLRDNORM  0x040
+#define POLLIN     0x001
+#define POLLRDNORM 0x040
 
 static int inotify_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
@@ -362,7 +359,7 @@ int64_t sys_inotify_init(void)
 int64_t sys_inotify_add_watch(int fd, uint64_t upath, uint32_t mask)
 {
     inotify_inst_t *inst;
-    int e = inst_of(fd, &inst);
+    int             e = inst_of(fd, &inst);
     if (e < 0)
         return e;
     if (mask & ~(uint32_t)IN_WATCHABLE_MASK)
@@ -379,8 +376,7 @@ int64_t sys_inotify_add_watch(int fd, uint64_t upath, uint32_t mask)
     mutex_lock(&g_inotify_mutex);
     inotify_watch_t *slot = NULL;
     for (int i = 0; i < INOTIFY_MAX_WATCHES; i++) {
-        if (inst->watches[i].used &&
-            strcmp(inst->watches[i].path, path) == 0) {
+        if (inst->watches[i].used && strcmp(inst->watches[i].path, path) == 0) {
             if (mask & IN_MASK_CREATE) {
                 mutex_unlock(&g_inotify_mutex);
                 return -E_EXIST;
@@ -413,7 +409,7 @@ int64_t sys_inotify_add_watch(int fd, uint64_t upath, uint32_t mask)
 int64_t sys_inotify_rm_watch(int fd, uint32_t wd)
 {
     inotify_inst_t *inst;
-    int e = inst_of(fd, &inst);
+    int             e = inst_of(fd, &inst);
     if (e < 0)
         return e;
     mutex_lock(&g_inotify_mutex);

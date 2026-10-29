@@ -550,8 +550,8 @@ struct drm_gem_object {
     spinlock_t         ref_lock;
     uint32_t           handle_count;
     uint32_t           size;
-    void              *backing;     /* allocated backing memory for dumb/prime buffers */
-    uint64_t           mmap_offset; /* offset returned by dumb_map_offset for mmap lookup */
+    void              *backing;          /* allocated backing memory for dumb/prime buffers */
+    uint64_t           mmap_offset;      /* offset returned by dumb_map_offset for mmap lookup */
     ilist_node_t       handle_list_node; /* legacy, per-file entries are separate */
 
     /* PRIME.  An exported object owns no dma-buf reference: the buffer is
@@ -888,13 +888,13 @@ int drm_gem_dumb_map_offset(struct drm_file *file_priv, struct drm_device *dev, 
 int drm_gem_dumb_destroy(struct drm_file *file_priv, struct drm_device *dev, uint32_t handle);
 
 /* GEM ioctl handlers. */
-int  drm_gem_open_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int  drm_gem_close_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int  drm_gem_flink_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-int  drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle,
-                                uint32_t flags, int *prime_fd);
-int  drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv, int prime_fd,
-                                uint32_t *handle);
+int drm_gem_open_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_gem_close_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_gem_flink_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+int drm_gem_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv, uint32_t handle,
+                               uint32_t flags, int *prime_fd);
+int drm_gem_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv, int prime_fd,
+                               uint32_t *handle);
 
 /* GEM object lifecycle. */
 int  drm_gem_object_init(struct drm_device *dev, struct drm_gem_object *obj, size_t size);

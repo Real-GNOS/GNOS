@@ -573,13 +573,14 @@ static void gen_maps(sbuf_t *s)
 static void gen_cpuinfo(sbuf_t *s)
 {
     extern int g_ncpus;
-    int n = (g_ncpus > 0) ? g_ncpus : 1;
+    int        n = (g_ncpus > 0) ? g_ncpus : 1;
     for (int i = 0; i < n; i++) {
         sb_str(s, "processor       : ");
         sb_dec(s, (uint64_t)i, 0);
-        sb_str(s, "\nvendor_id       : GNOS\ncpu family      : 64\n"
-                  "model           : 1\nmodel name      : GNOS x86-64\n"
-                  "stepping        : 0\ncpu cores       : ");
+        sb_str(s,
+               "\nvendor_id       : GNOS\ncpu family      : 64\n"
+               "model           : 1\nmodel name      : GNOS x86-64\n"
+               "stepping        : 0\ncpu cores       : ");
         sb_dec(s, (uint64_t)n, 0);
         sb_str(s, "\nsiblings        : ");
         sb_dec(s, (uint64_t)n, 0);
@@ -628,27 +629,27 @@ static const procfile_t g_files[] = {
  * the defaults match what /lib/sysctl.d/00-alpine.conf sets so that
  * applying that config at boot is a no-op that succeeds. */
 typedef struct {
-    const char *path;  /* absolute, always beginning "/proc/sys" */
+    const char *path; /* absolute, always beginning "/proc/sys" */
     char        val[64];
 } sysctl_t;
 
 static sysctl_t g_sysctls[] = {
-    {"/proc/sys/net/ipv4/tcp_syncookies",            "1"},
-    {"/proc/sys/net/ipv4/conf/default/rp_filter",     "1"},
-    {"/proc/sys/net/ipv4/conf/all/rp_filter",        "1"},
-    {"/proc/sys/net/ipv4/ping_group_range",           "999 59999"},
-    {"/proc/sys/net/ipv4/conf/all/accept_redirects",  "0"},
+    {"/proc/sys/net/ipv4/tcp_syncookies", "1"},
+    {"/proc/sys/net/ipv4/conf/default/rp_filter", "1"},
+    {"/proc/sys/net/ipv4/conf/all/rp_filter", "1"},
+    {"/proc/sys/net/ipv4/ping_group_range", "999 59999"},
+    {"/proc/sys/net/ipv4/conf/all/accept_redirects", "0"},
     {"/proc/sys/net/ipv4/conf/all/secure_redirects", "1"},
-    {"/proc/sys/net/ipv6/conf/all/accept_redirects",  "0"},
+    {"/proc/sys/net/ipv6/conf/all/accept_redirects", "0"},
     {"/proc/sys/net/ipv4/conf/all/accept_source_route", "0"},
     {"/proc/sys/net/ipv6/conf/all/accept_source_route", "0"},
-    {"/proc/sys/net/ipv4/tcp_rfc1337",                "1"},
-    {"/proc/sys/net/ipv6/conf/default/use_tempaddr",  "2"},
-    {"/proc/sys/net/ipv6/conf/all/use_tempaddr",      "2"},
-    {"/proc/sys/kernel/panic",                        "120"},
-    {"/proc/sys/fs/protected_hardlinks",             "1"},
-    {"/proc/sys/fs/protected_symlinks",              "1"},
-    {"/proc/sys/kernel/unprivileged_bpf_disabled",    "1"},
+    {"/proc/sys/net/ipv4/tcp_rfc1337", "1"},
+    {"/proc/sys/net/ipv6/conf/default/use_tempaddr", "2"},
+    {"/proc/sys/net/ipv6/conf/all/use_tempaddr", "2"},
+    {"/proc/sys/kernel/panic", "120"},
+    {"/proc/sys/fs/protected_hardlinks", "1"},
+    {"/proc/sys/fs/protected_symlinks", "1"},
+    {"/proc/sys/kernel/unprivileged_bpf_disabled", "1"},
 };
 #define NSYSCTLS ((int)(sizeof(g_sysctls) / sizeof(g_sysctls[0])))
 
@@ -696,12 +697,23 @@ static const vfs_ops_t g_sysctl_ops = {.read = sysctl_read, .write = sysctl_writ
 
 /* The directories.  There are few enough to list rather than derive. */
 static const char *g_dirs[] = {
-    "/proc", "/proc/net", "/proc/self", "/proc/self/fd", "/proc/boot",
-    "/proc/sys", "/proc/sys/kernel", "/proc/sys/fs", "/proc/sys/net",
-    "/proc/sys/net/ipv4", "/proc/sys/net/ipv4/conf",
-    "/proc/sys/net/ipv4/conf/all", "/proc/sys/net/ipv4/conf/default",
-    "/proc/sys/net/ipv6", "/proc/sys/net/ipv6/conf",
-    "/proc/sys/net/ipv6/conf/all", "/proc/sys/net/ipv6/conf/default",
+    "/proc",
+    "/proc/net",
+    "/proc/self",
+    "/proc/self/fd",
+    "/proc/boot",
+    "/proc/sys",
+    "/proc/sys/kernel",
+    "/proc/sys/fs",
+    "/proc/sys/net",
+    "/proc/sys/net/ipv4",
+    "/proc/sys/net/ipv4/conf",
+    "/proc/sys/net/ipv4/conf/all",
+    "/proc/sys/net/ipv4/conf/default",
+    "/proc/sys/net/ipv6",
+    "/proc/sys/net/ipv6/conf",
+    "/proc/sys/net/ipv6/conf/all",
+    "/proc/sys/net/ipv6/conf/default",
 };
 #define NDIRS ((int)(sizeof(g_dirs) / sizeof(g_dirs[0])))
 

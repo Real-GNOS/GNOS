@@ -17,6 +17,7 @@
 #include "vfs.h"
 #include "heap.h"
 #include "kstring.h"
+#include "syscall.h"
 
 #define PIDFD_NONBLOCK 0x8000 /* O_NONBLOCK, as passed by musl */
 

@@ -13,9 +13,10 @@
 
 #include "chrdev.h"
 #include "smp.h"
-#include "vfs.h"            /* E_* */
-#include "pmm.h"            /* pmm_virt, pmm_total_frames */
-#include "drm_vsnprintf.h"  /* plogk */
+#include "subsys.h"
+#include "vfs.h"           /* E_* */
+#include "pmm.h"           /* pmm_virt, pmm_total_frames */
+#include "drm_vsnprintf.h" /* plogk */
 
 #define MEM_MAJOR 1
 
@@ -33,7 +34,7 @@ typedef struct {
 } mem_memory_device_t;
 
 static mem_memory_device_t mem_devices[] = {
-    {.kind = MEM_MEM_NULL}, {.kind = MEM_MEM_PHYS}, {.kind = MEM_MEM_ZERO},
+    {.kind = MEM_MEM_NULL}, {.kind = MEM_MEM_PHYS},   {.kind = MEM_MEM_ZERO},
     {.kind = MEM_MEM_FULL}, {.kind = MEM_MEM_RANDOM}, {.kind = MEM_MEM_URANDOM},
 };
 
@@ -42,12 +43,9 @@ static const struct {
     uint8_t     minor;
     uint16_t    mode;
 } mem_nodes[] = {
-    {.name = "null",    .minor = 3, .mode = 0666},
-    {.name = "mem",     .minor = 1, .mode = 0600},
-    {.name = "zero",    .minor = 5, .mode = 0666},
-    {.name = "full",    .minor = 7, .mode = 0666},
-    {.name = "random",  .minor = 8, .mode = 0666},
-    {.name = "urandom", .minor = 9, .mode = 0666},
+    {.name = "null", .minor = 3, .mode = 0666},   {.name = "mem", .minor = 1, .mode = 0600},
+    {.name = "zero", .minor = 5, .mode = 0666},   {.name = "full", .minor = 7, .mode = 0666},
+    {.name = "random", .minor = 8, .mode = 0666}, {.name = "urandom", .minor = 9, .mode = 0666},
 };
 
 /* ---- entropy pool ------------------------------------------------------
@@ -60,30 +58,25 @@ static const struct {
  * rotation sweep -- not a cipher, but it spreads a single strong word
  * across the whole pool so one good RDRAND output heals 32 lanes. */
 
-#define POOL_LANES     32
-#define RAND_MIN_BITS  128
+#define POOL_LANES    32
+#define RAND_MIN_BITS 128
 
-static spinlock_t   g_pool_lock;
-static uint64_t     g_pool[POOL_LANES];
-static uint32_t     g_entropy_bits;
-static int          g_rdrand_have, g_rdseed_have;
+static spinlock_t g_pool_lock;
+static uint64_t   g_pool[POOL_LANES];
+static uint32_t   g_entropy_bits;
+static int        g_rdrand_have, g_rdseed_have;
 
 static void cpuid_detect(void)
 {
     uint32_t eax, ebx, ecx, edx;
-    __asm__ volatile("cpuid"
-                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                     : "a"(1), "c"(0));
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
     g_rdrand_have = (ecx >> 30) & 1;
     /* RDSEED lives in leaf 7 EBX bit 18.  Leaf 1 ECX bit 31 is the
      * hypervisor-present flag -- reading RDSEED from there is what armed
      * the first rdseed under QEMU and #UD'd the boot. */
-    __asm__ volatile("cpuid"
-                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                     : "a"(7), "c"(0));
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
     g_rdseed_have = (eax >= 7) ? ((ebx >> 18) & 1) : 0;
-    plogk("mem: entropy sources: rdrand=%d rdseed=%d tsc=1\n",
-          g_rdrand_have, g_rdseed_have);
+    plogk("mem: entropy sources: rdrand=%d rdseed=%d tsc=1\n", g_rdrand_have, g_rdseed_have);
 }
 
 /* splitmix64 one-step avalanche: the cheap bijection used to fold a source
@@ -184,7 +177,7 @@ static int64_t random_read(mem_memory_kind_t kind, void *buffer, size_t size)
         spin_unlock(&g_pool_lock);
         return -E_AGAIN;
     }
-    uint8_t *out = buffer;
+    uint8_t *out   = buffer;
     size_t   total = size;
     while (size) {
         if (g_entropy_bits < RAND_MIN_BITS || size < sizeof(uint64_t)) {
@@ -198,7 +191,7 @@ static int64_t random_read(mem_memory_kind_t kind, void *buffer, size_t size)
             break;
         }
         uint64_t w = g_pool[0];
-        g_pool[0] = g_pool[1];
+        g_pool[0]  = g_pool[1];
         for (int i = 1; i < POOL_LANES - 1; i++)
             g_pool[i] = g_pool[i + 1];
         g_pool[POOL_LANES - 1] = splitmix64(g_pool[POOL_LANES - 2] + g_pool[7]);
@@ -219,8 +212,8 @@ static uint64_t phys_limit(void)
     return pmm_total_frames() * 4096ULL;
 }
 
-static int64_t phys_read(void *ctx, void *private_data, uint64_t flags, void *buffer,
-                         size_t offset, size_t size)
+static int64_t phys_read(void *ctx, void *private_data, uint64_t flags, void *buffer, size_t offset,
+                         size_t size)
 {
     (void)ctx;
     (void)private_data;
@@ -245,10 +238,32 @@ static int64_t phys_write(void *ctx, void *private_data, uint64_t flags, const v
     return (int64_t)size;
 }
 
+/* ---- native vfs_ops_t wrappers ----------------------------------------- */
+
+static int64_t mem_read(void *ctx, void *private_data, uint64_t flags, void *buffer, size_t offset,
+                        size_t size);
+static int64_t mem_write(void *ctx, void *private_data, uint64_t flags, const void *buffer,
+                         size_t offset, size_t size);
+
+static int32_t mem_vfs_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
+{
+    return (int32_t)mem_read(n->priv, NULL, 0, buf, (size_t)off, (size_t)len);
+}
+
+static int32_t mem_vfs_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
+{
+    return (int32_t)mem_write(n->priv, NULL, 0, buf, (size_t)off, (size_t)len);
+}
+
+static const vfs_ops_t g_mem_vfs_ops = {
+    .read  = mem_vfs_read,
+    .write = mem_vfs_write,
+};
+
 /* ---- generic read/write dispatch --------------------------------------- */
 
-static int64_t mem_read(void *ctx, void *private_data, uint64_t flags, void *buffer,
-                        size_t offset, size_t size)
+static int64_t mem_read(void *ctx, void *private_data, uint64_t flags, void *buffer, size_t offset,
+                        size_t size)
 {
     mem_memory_device_t *device = ctx;
     (void)private_data;
@@ -303,13 +318,13 @@ void memdev_init(void)
     spin_unlock(&g_pool_lock);
 
     for (size_t i = 0; i < sizeof(mem_nodes) / sizeof(mem_nodes[0]); i++) {
-        tmpfs_device_ops_t ops;
-        memset(&ops, 0, sizeof(ops));
-        ops.file_read  = mem_read;
-        ops.file_write = mem_write;
-        ops.ctx        = &mem_devices[i];
-        if (cdev_add("", mem_nodes[i].name, MEM_MAJOR, mem_nodes[i].minor, 1,
-                     (uint16_t)file_stream, mem_nodes[i].mode, &ops) != EOK)
+        if (cdev_add_vfs("", mem_nodes[i].name, MEM_MAJOR, mem_nodes[i].minor, 1, mem_nodes[i].mode,
+                         0, 0, &g_mem_vfs_ops, &mem_devices[i]) != EOK) {
             plogk("chrdev: Cannot register /dev/%s\n", mem_nodes[i].name);
+            continue;
+        }
+        int slot = subsys_register(mem_nodes[i].name, mem_nodes[i].name, SUBSYS_CLASS_MEM, 1,
+                                   mem_nodes[i].minor);
+        subsys_set_state(slot, SUBSYS_STATE_LIVE);
     }
 }

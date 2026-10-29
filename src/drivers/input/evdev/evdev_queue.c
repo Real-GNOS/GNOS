@@ -45,8 +45,7 @@ uint32_t evdev_queue_pop_to(evdev_queue_t *q, void *dst, uint32_t max)
     uint32_t n = q->count < max ? q->count : max;
 
     for (uint32_t i = 0; i < n; i++) {
-        memcpy((uint8_t *)dst + i * sizeof(input_event_t), &q->ev[q->head],
-               sizeof(input_event_t));
+        memcpy((uint8_t *)dst + i * sizeof(input_event_t), &q->ev[q->head], sizeof(input_event_t));
         q->head = (q->head + 1) % EVDEV_QUEUE_SIZE;
         q->count--;
     }

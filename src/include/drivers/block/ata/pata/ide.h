@@ -17,9 +17,9 @@
 #include "ata_cmds.h"
 
 typedef struct {
-    uint16_t io;      /* command block base    */
-    uint16_t ctrl;    /* control block base    */
-    uint8_t  slave;   /* 0 = master, 1 = slave */
+    uint16_t io;    /* command block base    */
+    uint16_t ctrl;  /* control block base    */
+    uint8_t  slave; /* 0 = master, 1 = slave */
     uint8_t  lba48;
     uint8_t  atapi;   /* PACKET-device (CD-ROM): SCSI over ATA */
     uint32_t secsize; /* bytes per sector: 512 ATA, 2048 ATAPI */

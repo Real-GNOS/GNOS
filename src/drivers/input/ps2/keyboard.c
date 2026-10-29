@@ -74,8 +74,7 @@ static uint16_t scancode_to_key(uint8_t sc, int ext)
 void ps2_keyboard_fill_caps(evdev_dev_t *d)
 {
     d->kind_bits |= (1u << EV_SYN) | (1u << EV_KEY) | (1u << EV_LED);
-    d->led_bits = (uint16_t)((1u << LED_NUML) | (1u << LED_CAPSL) |
-                             (1u << LED_SCROLLL));
+    d->led_bits = (uint16_t)((1u << LED_NUML) | (1u << LED_CAPSL) | (1u << LED_SCROLLL));
 
     for (uint16_t sc = 1; sc <= 0x58; sc++) {
         uint16_t key = scancode_to_key((uint8_t)sc, 0);

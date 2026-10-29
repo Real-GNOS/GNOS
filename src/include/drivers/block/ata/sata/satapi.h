@@ -48,20 +48,17 @@ void ahci_satapi_init(void);
 
 /* Read numsects blk_size-byte blocks from the device.  Returns 0 or a
  * negative errno. */
-int ahci_satapi_read_sectors(uint8_t drive, uint8_t numsects, uint64_t lba,
-                             void *buffer);
+int ahci_satapi_read_sectors(uint8_t drive, uint8_t numsects, uint64_t lba, void *buffer);
 
 /* Execute a 12-byte SCSI CDB.  When direction is not SATAPI_PROT_NODATA the
  * first byte_limit bytes of device output are copied into buf and
  * *xfer_len is set to the byte count.  Returns 0 on success, 0xFF on error
  * or 0xFE when no command slot is free. */
-uint8_t ahci_satapi_send_packet(uint8_t drive, const uint8_t *cdb,
-                                uint16_t byte_limit, uint8_t direction,
-                                void *buf, size_t *xfer_len);
+uint8_t ahci_satapi_send_packet(uint8_t drive, const uint8_t *cdb, uint16_t byte_limit,
+                                uint8_t direction, void *buf, size_t *xfer_len);
 
 /* READ CAPACITY: fill the last block number plus one and the block size. */
-uint8_t ahci_satapi_read_capacity(uint8_t drive, uint32_t *lba_size,
-                                  uint32_t *blk_size);
+uint8_t ahci_satapi_read_capacity(uint8_t drive, uint32_t *lba_size, uint32_t *blk_size);
 
 /* INQUIRY: vendor (8 bytes) and product (16 bytes) identification, space
  * trimmed and joined into model. */

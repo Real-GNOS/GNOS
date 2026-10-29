@@ -396,11 +396,11 @@ static int32_t iso_dir_read(struct vfs_node *n, uint64_t off, void *buf, uint32_
 
 static const vfs_ops_t g_iso_file_ops = {.read = iso_file_read, .release = iso_release};
 static const vfs_ops_t g_iso_dir_ops  = {.read = iso_dir_read, .release = iso_release};
-const vfs_ops_t *const iso9660_file_ops(void)
+const vfs_ops_t       *iso9660_file_ops(void)
 {
     return &g_iso_file_ops;
 }
-const vfs_ops_t *const iso9660_dir_ops(void)
+const vfs_ops_t *iso9660_dir_ops(void)
 {
     return &g_iso_dir_ops;
 }

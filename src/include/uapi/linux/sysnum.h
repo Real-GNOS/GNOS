@@ -207,24 +207,24 @@
 /* Anonymous-fd syscalls for the Wayland plumbing (wl_shm pools, the
  * compositor's event loop), same numbers as Linux x86-64: memfd_create
  * backs wl_shm, eventfd/eventfd2 carry wakeups, epoll drives the loop. */
-#define SYS_epoll_create    213
-#define SYS_epoll_wait      232
-#define SYS_epoll_ctl       233
-#define SYS_epoll_pwait     281
-#define SYS_eventfd         284
-#define SYS_eventfd2        290
-#define SYS_epoll_create1   291
-#define SYS_inotify_init    253
+#define SYS_epoll_create      213
+#define SYS_epoll_wait        232
+#define SYS_epoll_ctl         233
+#define SYS_epoll_pwait       281
+#define SYS_eventfd           284
+#define SYS_eventfd2          290
+#define SYS_epoll_create1     291
+#define SYS_inotify_init      253
 #define SYS_inotify_add_watch 254
-#define SYS_inotify_rm_watch 255
-#define SYS_inotify_init1   294
-#define SYS_timerfd_create  283
-#define SYS_timerfd_settime 286
-#define SYS_timerfd_gettime 287
-#define SYS_signalfd4       289
-#define SYS_memfd_create    319
-#define SYS_clock_getres    229
-#define SYS_clock_nanosleep 230
+#define SYS_inotify_rm_watch  255
+#define SYS_inotify_init1     294
+#define SYS_timerfd_create    283
+#define SYS_timerfd_settime   286
+#define SYS_timerfd_gettime   287
+#define SYS_signalfd4         289
+#define SYS_memfd_create      319
+#define SYS_clock_getres      229
+#define SYS_clock_nanosleep   230
 
 #define SYS_signal 400 /* signal(sig, SIG_DFL|SIG_IGN) */
 #define SYS_gstat  403 /* private: the old 24-byte gstat_t */

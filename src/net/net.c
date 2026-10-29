@@ -925,7 +925,7 @@ static void eth_input(const uint8_t *frame, uint16_t len)
         /* IPv6 (ipv6/ipv6.c): copy into an owned frame, the input side frees it. */
         ipv6_pbuf_t *pb = kmalloc(sizeof(*pb));
         if (pb) {
-            pb->data   = kmalloc(plen ? plen : 1);
+            pb->data = kmalloc(plen ? plen : 1);
             if (pb->data) {
                 memcpy(pb->data, payload, plen);
                 pb->length = plen;

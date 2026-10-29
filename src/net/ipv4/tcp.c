@@ -89,8 +89,8 @@ struct tcp_pcb {
     uint32_t ssthresh;  /* slow-start threshold */
     uint32_t dupacks;   /* duplicate-ACK count for fast retransmit */
     uint32_t rto_ticks; /* current RTO; doubles per retry, resets on progress */
-    uint64_t tw_at;   /* TIME_WAIT expiry, 0 = not in TIME_WAIT */
-    uint64_t conn_at; /* connect() deadline, 0 = none */
+    uint64_t tw_at;     /* TIME_WAIT expiry, 0 = not in TIME_WAIT */
+    uint64_t conn_at;   /* connect() deadline, 0 = none */
 
     int error; /* pending async error, SO_ERROR style */
 
@@ -322,11 +322,11 @@ static void tcp_retransmit(tcp_pcb_t *p);
  * threshold effectively open until the first loss says otherwise. */
 static void cwnd_init(tcp_pcb_t *p)
 {
-    uint32_t mss  = p->snd_mss ? p->snd_mss : TCP_MSS;
-    p->cwnd       = mss;
-    p->ssthresh   = 0xFFFFu;
-    p->dupacks    = 0;
-    p->rto_ticks  = TCP_RTO_TICKS;
+    uint32_t mss = p->snd_mss ? p->snd_mss : TCP_MSS;
+    p->cwnd      = mss;
+    p->ssthresh  = 0xFFFFu;
+    p->dupacks   = 0;
+    p->rto_ticks = TCP_RTO_TICKS;
 }
 
 static void rto_arm(tcp_pcb_t *p)
@@ -557,9 +557,9 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
                 tcp_send_rst(src, dst, seg, dlen, flags);
                 return;
             }
-            p->snd_una     = sack;
-            p->rto_at      = 0;
-            p->state       = TCPS_ESTABLISHED;
+            p->snd_una = sack;
+            p->rto_at  = 0;
+            p->state   = TCPS_ESTABLISHED;
             cwnd_init(p); /* the child starts its own slow start */
             tcp_pcb_t *par = p->parent;
             /* par->used: a closed listener's pcb may already be recycled. */
@@ -591,11 +591,11 @@ void tcp_input(uint32_t src, uint32_t dst, const uint8_t *seg, uint16_t len)
              * snd_una and collapse the window without waiting for the RTO. */
             if (++p->dupacks == 3) {
                 uint32_t mss = p->snd_mss ? p->snd_mss : TCP_MSS;
-                p->ssthresh = p->cwnd / 2;
+                p->ssthresh  = p->cwnd / 2;
                 if (p->ssthresh < 2 * TCP_MSS)
                     p->ssthresh = 2 * TCP_MSS;
-                p->cwnd      = p->ssthresh + 3 * mss;
-                p->retries   = 0; /* ACKs prove the peer is alive */
+                p->cwnd    = p->ssthresh + 3 * mss;
+                p->retries = 0; /* ACKs prove the peer is alive */
                 tcp_retransmit(p);
             }
         }

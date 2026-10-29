@@ -39,7 +39,6 @@
 #include "kstring.h"
 #include "debugcon.h"
 #include "inotify.h"
-#include "subsys.h"
 #include "syscall.h"
 
 typedef struct {
@@ -254,67 +253,6 @@ static int32_t pipe_node_write(vfs_node_t *n, uint64_t off, const void *buf, uin
     return (int32_t)done;
 }
 
-/* ---- /dev/null --------------------------------------------------------- */
-/* Reads return EOF, writes silently succeed.  No ioctl makes sense, so the
- * generic handler answers ENOTTY. */
-static int32_t null_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
-{
-    (void)n;
-    (void)off;
-    (void)buf;
-    (void)len;
-    return 0;
-}
-
-static int32_t null_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
-{
-    (void)n;
-    (void)off;
-    (void)buf;
-    return (int32_t)len;
-}
-
-static const vfs_ops_t g_null_ops = {.read = null_node_read, .write = null_node_write};
-
-/* ---- /dev/zero and /dev/full ------------------------------------------- */
-/* Both read as an endless run of zero bytes.  They differ only in what a
- * write does, and that difference is the entire point of /dev/full: it is the
- * only portable way to make a program take its ENOSPC path on demand. */
-static int32_t zero_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
-{
-    (void)n;
-    (void)off;
-    memset(buf, 0, len);
-    return (int32_t)len;
-}
-
-static int32_t full_node_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
-{
-    (void)n;
-    (void)off;
-    (void)buf;
-    (void)len;
-    return -E_NOSPC;
-}
-
-static const vfs_ops_t g_zero_ops = {.read = zero_node_read, .write = null_node_write};
-static const vfs_ops_t g_full_ops = {.read = zero_node_read, .write = full_node_write};
-
-/* ---- /dev/random and /dev/urandom -------------------------------------- */
-/* One generator behind both names.  Linux stopped distinguishing them years
- * ago -- random(4) no longer blocks once seeded -- and a kernel with no
- * entropy source has nothing to gain by pretending otherwise: a blocking
- * /dev/random here would simply hang the boot. */
-static int32_t random_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
-{
-    (void)n;
-    (void)off;
-    krandom_bytes(buf, len);
-    return (int32_t)len;
-}
-
-static const vfs_ops_t g_random_ops = {.read = random_node_read, .write = null_node_write};
-
 static const vfs_ops_t g_pipe_ops = {.read = pipe_node_read, .write = pipe_node_write};
 
 int vfs_init(uint8_t *img, uint32_t img_size)
@@ -339,28 +277,6 @@ int vfs_init(uint8_t *img, uint32_t img_size)
     dbg_puts_dec(g_fs.inodes_count);
     dbg_puts(" inodes)\r\n");
 
-    /* The memory devices.  These are the nodes a POSIX userland assumes are
-     * simply there -- shells redirect to /dev/null, mke2fs and dd read
-     * /dev/zero, and musl's ASLR and BusyBox's mktemp fall back to
-     * /dev/urandom when getrandom(2) is unavailable.  They are registered
-     * here rather than by a driver because they have no hardware behind
-     * them: they are the VFS itself.  The major/minor numbers are Linux's,
-     * so a coldplug run produces the same /dev a Linux box would. */
-    static const struct {
-        const char      *name;
-        const vfs_ops_t *ops;
-        uint16_t         minor;
-    } memdevs[] = {
-        {"null", &g_null_ops, 3},     {"zero", &g_zero_ops, 5},      {"full", &g_full_ops, 7},
-        {"random", &g_random_ops, 8}, {"urandom", &g_random_ops, 9},
-    };
-    for (unsigned i = 0; i < sizeof(memdevs) / sizeof(memdevs[0]); i++) {
-        if (vfs_register_dev(memdevs[i].name, memdevs[i].ops, NULL) < 0)
-            continue;
-        int slot = subsys_register(memdevs[i].name, memdevs[i].name, SUBSYS_CLASS_MEM, 1,
-                                   memdevs[i].minor);
-        subsys_set_state(slot, SUBSYS_STATE_LIVE);
-    }
     return 1;
 }
 
@@ -370,6 +286,15 @@ static int register_dev(const char *name, const vfs_ops_t *ops, void *priv, int 
 {
     if (g_dev_count >= VFS_MAX_DEV)
         return -E_NOMEM;
+
+    for (unsigned i = 0; i < g_dev_count; i++) {
+        if (strcmp(g_dev[i].name, name) == 0) {
+            dbg_puts("VFS: duplicate /dev/");
+            dbg_puts(name);
+            dbg_puts("\r\n");
+            return -E_EXIST;
+        }
+    }
 
     vfs_node_t *n = &g_dev[g_dev_count++];
     strncpy(n->name, name, VFS_NAME_MAX - 1);
@@ -381,9 +306,9 @@ static int register_dev(const char *name, const vfs_ops_t *ops, void *priv, int 
     n->rdev                   = rdev;
     /* Device nodes default to root-owned 0666; a driver that wants tighter
      * (or looser) ownership records it through vfs_dev_set_perm(). */
-    n->mode                   = 0666;
-    n->uid                    = 0;
-    n->gid                    = 0;
+    n->mode = 0666;
+    n->uid  = 0;
+    n->gid  = 0;
 
     dbg_puts("VFS: registered /dev/");
     dbg_puts(n->name);
@@ -1044,7 +969,7 @@ static void        fill_stat(const vfs_node_t *n, lstat_t *st)
     /* Device nodes carry their mode/ownership in the node itself (from
      * the chrdev registry); the e2 snapshot only exists for ext2 files. */
     if (n->mode != 0) {
-        perms = n->mode & 0777;
+        perms      = n->mode & 0777;
         st->st_uid = n->uid;
         st->st_gid = n->gid;
     }
@@ -1798,9 +1723,15 @@ int vfs_file_open(const char *path, int flags)
     {
         int want;
         switch (flags & 3 /* O_ACCMODE */) {
-        case 1:  want = 2; break; /* O_WRONLY */
-        case 2:  want = 6; break; /* O_RDWR   */
-        default: want = 4; break; /* O_RDONLY */
+        case 1:
+            want = 2;
+            break; /* O_WRONLY */
+        case 2:
+            want = 6;
+            break; /* O_RDWR   */
+        default:
+            want = 4;
+            break; /* O_RDONLY */
         }
         if (flags & O_TRUNC)
             want |= 2;

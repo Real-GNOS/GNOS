@@ -46,7 +46,8 @@ static void test_bswap(void)
 {
     check("bswap64 reverses bytes", bswap64(0x0123456789ABCDEFull) == 0xEFCDAB8967452301ull);
     check("bswap32 reverses bytes", bswap32(0x12345678u) == 0x78563412u);
-    check("bswap is an involution", bswap64(bswap64(0xDEADBEEFCAFEBABEull)) == 0xDEADBEEFCAFEBABEull);
+    check("bswap is an involution",
+          bswap64(bswap64(0xDEADBEEFCAFEBABEull)) == 0xDEADBEEFCAFEBABEull);
 }
 
 static void test_rotate_shift(void)
@@ -72,7 +73,7 @@ static void test_muldiv(void)
     check("mulq high word set", hi == 2 && lo == 0);
 
     uint64_t rem = 0;
-    uint64_t q = div128(1, 0, 3, &rem); /* (1<<64)/3 */
+    uint64_t q   = div128(1, 0, 3, &rem); /* (1<<64)/3 */
     check("divq 128/32 quotient", q == 0x5555555555555555ull);
     check("divq remainder", rem == 1);
 }

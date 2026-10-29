@@ -3,9 +3,10 @@
  * drm_devtmpfs.c — GNOS bridge for Uinxed's devtmpfs_register_char_device.
  * (GPLv2)
  *
- * Uinxed's DRM core registers its nodes with devtmpfs_register_char_device()
- * passing a tmpfs_device_ops_t table of per-open callbacks.  GNOS's VFS has
- * no devtmpfs and no per-open private-data callbacks; it publishes /dev
+ * Uinxed's DRM core describes its nodes with a tmpfs_device_ops_t table of
+ * per-open callbacks.  GNOS's chrdev registry accepts those entries through
+ * cdev_add(); this file is the adapter that publishes them.  GNOS's VFS has
+ * no devtmpfs and no per-open private-data callbacks, so it publishes /dev
  * nodes with vfs_register_devnum() and dispatches through a flat vfs_ops_t
  * keyed on the node.  This file converts one into the other:
  *
@@ -20,6 +21,7 @@
  * the name relative to /dev ("dri/card0").
  */
 #include "drm_devtmpfs.h"
+#include "chrdev.h"
 #include "kstring.h"
 #include "drm_device.h" /* drm_open */
 #include "drm_init.h"   /* drm_get_singleton */
@@ -152,16 +154,17 @@ static int drm_bridge_poll(vfs_node_t *n, int16_t events, int16_t *revents)
     return 0;
 }
 
+static const vfs_ops_t g_drm_ops = {
+    .ioctl = drm_bridge_ioctl,
+    .mmap  = drm_bridge_mmap,
+    .read  = drm_bridge_read,
+    .write = drm_bridge_write,
+    .poll  = drm_bridge_poll,
+};
+
 int devtmpfs_register_char_device(const char *path, uint64_t devt, uint64_t devt2,
                                   int file_stream_flags, tmpfs_device_ops_t *ops)
 {
-    static const vfs_ops_t g_drm_ops = {
-        .ioctl = drm_bridge_ioctl,
-        .mmap  = drm_bridge_mmap,
-        .read  = drm_bridge_read,
-        .write = drm_bridge_write,
-        .poll  = drm_bridge_poll,
-    };
     char     name[64];
     uint32_t maj = (uint32_t)((devt >> 8) & 0xfff);
     uint32_t min = (uint32_t)((devt & 0xff) | ((devt >> 12) & 0xfffff00));

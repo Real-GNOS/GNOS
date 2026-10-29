@@ -16,6 +16,7 @@
 #include "quota.h"
 #include "vfs.h"
 #include "proc.h"
+#include "syscall.h"
 
 /* include/uapi/linux/quota.h */
 #define Q_SYNC         0x800001

@@ -130,7 +130,7 @@ static int32_t vcs_write(struct vfs_node *n, uint64_t off, const void *buf, uint
         } else if ((c & 0xF0) == 0xE0 && done + 1 < len) {
             uint8_t lo = p[done++] & 0x3F;
             uint8_t hi = p[done++] & 0x3F;
-            cp = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)lo << 6) | hi;
+            cp         = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)lo << 6) | hi;
         }
         fbcon_set_cell(0, idx / cols, idx % cols, cp, 0x07);
         idx++;
@@ -147,8 +147,8 @@ void vcs_init(void)
 {
     /* All four screen-file nodes join the chrdev registry; the nodes are
      * created by chrdev_populate() after init. */
-    cdev_add_vfs("", "vcs",   0, 0, 1, 0644, 0, 0, &g_vcs_ops, NULL);       /* active screen  */
-    cdev_add_vfs("", "vcsa",  0, 0, 1, 0644, 0, 0, &g_vcs_ops, (void *)1); /* with attributes */
-    cdev_add_vfs("", "vcs0",  0, 0, 1, 0644, 0, 0, &g_vcs_ops, NULL);
+    cdev_add_vfs("", "vcs", 0, 0, 1, 0644, 0, 0, &g_vcs_ops, NULL);       /* active screen  */
+    cdev_add_vfs("", "vcsa", 0, 0, 1, 0644, 0, 0, &g_vcs_ops, (void *)1); /* with attributes */
+    cdev_add_vfs("", "vcs0", 0, 0, 1, 0644, 0, 0, &g_vcs_ops, NULL);
     cdev_add_vfs("", "vcsa0", 0, 0, 1, 0644, 0, 0, &g_vcs_ops, (void *)1);
 }

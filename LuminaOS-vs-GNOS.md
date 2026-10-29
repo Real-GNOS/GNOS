@@ -74,3 +74,10 @@ GNOS 用 56k 行证明了"我不光懂，我还真把它造出来了"。
   但那是因为它根本没碰 GNOS 在踩的那些坑（musl、meson、XFCE）
 
 （数据来源：/persistent/home/elaina/LuminaOS 本地统计，2026-08-21）
+
+## 2026-10-26 复核
+
+- **GNOS 桌面已实测**：Xorg + Xfce4 能跑，终端可用；不是只能停在 `build/desk` 或 labwc 构建日志里的传说。上文“搬运 159k 第三方代码才见到 labwc”的表述需要按 Xorg/Xfce4 的实际启动链修正。
+- **LuminaOS 已不是纯 i386/LSP**：本地 `main` 在 `origin/main` 之后多了 12 个提交，已迁 x86-64 long mode/ELF64/VBE；但 README 仍写 i386/LSP。
+- **新版仍是自定义 ABI**：27 个 syscall、`int 0x80`；FAT16 路径式文件系统，无 VFS/fd/fork/exec/mmap，单用户进程；`sched_preempt_pending` 没有调用者，不是真抢占。
+- 因此上文的 i386/LSP/4.7k 行描述只适用于旧版；新版提升在架构与启动，不在 POSIX/多进程/完整桌面。

@@ -66,13 +66,13 @@ typedef enum leaf_kind {
 } leaf_kind_t;
 
 typedef struct sysfs_leaf {
-    leaf_kind_t            kind;
-    struct kobject        *dir;  /* kobject containing the leaf */
-    struct kobject        *kobj; /* LEAF_DIR: the kobject itself */
-    sysfs_attr_entry_t    *attr;
+    leaf_kind_t             kind;
+    struct kobject         *dir;  /* kobject containing the leaf */
+    struct kobject         *kobj; /* LEAF_DIR: the kobject itself */
+    sysfs_attr_entry_t     *attr;
     sysfs_bin_attr_entry_t *bin;
     sysfs_symlink_entry_t  *sym;
-    char                   name[KOBJ_NAME_LEN]; /* last component */
+    char                    name[KOBJ_NAME_LEN]; /* last component */
 } sysfs_leaf_t;
 
 /* ---- emit helpers -------------------------------------------------------- */
@@ -83,7 +83,8 @@ __attribute__((format(printf, 2, 3))) int sysfs_emit(char *buf, const char *fmt,
     va_list args;
     int     n;
 
-    if (!buf) return 0;
+    if (!buf)
+        return 0;
 
     va_start(args, fmt);
     n = vsnprintf(buf, SYSFS_PAGE_SIZE, fmt, args);
@@ -98,8 +99,10 @@ __attribute__((format(printf, 3, 4))) int sysfs_emit_at(char *buf, int at, const
     va_list args;
     int     n;
 
-    if (!buf) return 0;
-    if (at < 0 || at >= SYSFS_PAGE_SIZE) return 0;
+    if (!buf)
+        return 0;
+    if (at < 0 || at >= SYSFS_PAGE_SIZE)
+        return 0;
 
     va_start(args, fmt);
     n = vsnprintf(buf + at, SYSFS_PAGE_SIZE - at, fmt, args);
@@ -115,10 +118,12 @@ static sysfs_attr_entry_t *sysfs_find_attr(struct kobject *kobj, const char *nam
 {
     clist_t node;
 
-    if (!kobj || !name) return NULL;
+    if (!kobj || !name)
+        return NULL;
     for (node = kobj->attributes; node; node = node->next) {
         sysfs_attr_entry_t *entry = node->data;
-        if (entry && entry->attr && entry->attr->name && streq(entry->attr->name, name)) return entry;
+        if (entry && entry->attr && entry->attr->name && streq(entry->attr->name, name))
+            return entry;
     }
     return NULL;
 }
@@ -126,10 +131,12 @@ static sysfs_attr_entry_t *sysfs_find_attr(struct kobject *kobj, const char *nam
 /* Look up a binary attribute entry by name. */
 static sysfs_bin_attr_entry_t *sysfs_find_bin_attr(struct kobject *kobj, const char *name)
 {
-    if (!kobj || !name) return NULL;
+    if (!kobj || !name)
+        return NULL;
     for (clist_t node = kobj->bin_attributes; node; node = node->next) {
         sysfs_bin_attr_entry_t *entry = node->data;
-        if (entry && entry->attr && entry->attr->attr.name && streq(entry->attr->attr.name, name)) return entry;
+        if (entry && entry->attr && entry->attr->attr.name && streq(entry->attr->attr.name, name))
+            return entry;
     }
     return NULL;
 }
@@ -139,10 +146,12 @@ static sysfs_symlink_entry_t *sysfs_find_symlink(struct kobject *kobj, const cha
 {
     clist_t node;
 
-    if (!kobj || !name) return NULL;
+    if (!kobj || !name)
+        return NULL;
     for (node = kobj->symlinks; node; node = node->next) {
         sysfs_symlink_entry_t *entry = node->data;
-        if (entry && entry->name && streq(entry->name, name)) return entry;
+        if (entry && entry->name && streq(entry->name, name))
+            return entry;
     }
     return NULL;
 }
@@ -156,7 +165,8 @@ static int sysfs_name_valid(const char *name)
 /* Whether a name collides with an existing child, attribute, or symlink. */
 static int sysfs_name_exists(struct kobject *kobj, const char *name)
 {
-    return kobject_find_child(kobj, name) || sysfs_find_attr(kobj, name) || sysfs_find_bin_attr(kobj, name) || sysfs_find_symlink(kobj, name);
+    return kobject_find_child(kobj, name) || sysfs_find_attr(kobj, name) ||
+           sysfs_find_bin_attr(kobj, name) || sysfs_find_symlink(kobj, name);
 }
 
 /* ---- symlink targets ----------------------------------------------------- */
@@ -169,30 +179,40 @@ static char *sysfs_relative_path(struct kobject *from, struct kobject *target)
     int             from_depth   = 0;
     int             target_depth = 0;
 
-    for (struct kobject *node = from; node && from_depth < 64; node = node->parent) from_path[from_depth++] = node;
-    for (struct kobject *node = target; node && target_depth < 64; node = node->parent) target_path[target_depth++] = node;
-    if (!from_depth || !target_depth || from_path[from_depth - 1] != target_path[target_depth - 1]) return NULL;
+    for (struct kobject *node = from; node && from_depth < 64; node = node->parent)
+        from_path[from_depth++] = node;
+    for (struct kobject *node = target; node && target_depth < 64; node = node->parent)
+        target_path[target_depth++] = node;
+    if (!from_depth || !target_depth || from_path[from_depth - 1] != target_path[target_depth - 1])
+        return NULL;
 
     int from_index   = from_depth - 1;
     int target_index = target_depth - 1;
-    while (from_index >= 0 && target_index >= 0 && from_path[from_index] == target_path[target_index]) {
+    while (from_index >= 0 && target_index >= 0 &&
+           from_path[from_index] == target_path[target_index]) {
         from_index--;
         target_index--;
     }
 
     size_t length = (size_t)(from_index + 1) * 3;
-    for (int i = target_index; i >= 0; i--) length += strlen(target_path[i]->name) + (i ? 1 : 0);
-    if (!length) length = 1;
+    for (int i = target_index; i >= 0; i--)
+        length += strlen(target_path[i]->name) + (i ? 1 : 0);
+    if (!length)
+        length = 1;
 
     char *path = kmalloc(length + 1);
-    if (!path) return NULL;
+    if (!path)
+        return NULL;
     path[0] = '\0';
-    for (int i = 0; i <= from_index; i++) strcat(path, "../");
+    for (int i = 0; i <= from_index; i++)
+        strcat(path, "../");
     for (int i = target_index; i >= 0; i--) {
         strcat(path, target_path[i]->name);
-        if (i) strcat(path, "/");
+        if (i)
+            strcat(path, "/");
     }
-    if (!path[0]) strcpy(path, ".");
+    if (!path[0])
+        strcpy(path, ".");
     return path;
 }
 
@@ -213,21 +233,24 @@ typedef struct legacy_ent {
 
 static ssize_t legacy_show(struct kobject *kobj, struct attribute *attr, char *buf)
 {
-    legacy_ent_t *e = container_of(attr, legacy_ent_t, attr);
+    legacy_ent_t *e   = container_of(attr, legacy_ent_t, attr);
     uint32_t      len = 0;
 
     (void)kobj;
     e->gen(buf, SYSFS_PAGE_SIZE, &len);
-    if (len > SYSFS_PAGE_SIZE) return -E_OVERFLOW;
+    if (len > SYSFS_PAGE_SIZE)
+        return -E_OVERFLOW;
     return (ssize_t)len;
 }
 
-static ssize_t legacy_store(struct kobject *kobj, struct attribute *attr, const char *buf, size_t count)
+static ssize_t legacy_store(struct kobject *kobj, struct attribute *attr, const char *buf,
+                            size_t count)
 {
     legacy_ent_t *e = container_of(attr, legacy_ent_t, attr);
 
     (void)kobj;
-    if (!e->put) return -E_ACCES;
+    if (!e->put)
+        return -E_ACCES;
     int r = e->put(buf, (uint32_t)count);
     return r < 0 ? (ssize_t)r : (ssize_t)count;
 }
@@ -312,10 +335,12 @@ static int sysfs_ensure_root(void)
         "block", "bus", "class", "dev", "devices", "firmware", "fs", "kernel", "module", "power",
     };
 
-    if (sysfs_root_kobj) return 0;
+    if (sysfs_root_kobj)
+        return 0;
 
     struct kobject *root = kcalloc(1, sizeof(struct kobject));
-    if (!root) return -E_NOMEM;
+    if (!root)
+        return -E_NOMEM;
 
     kobject_init(root, &sysfs_root_ktype);
     int ret = kobject_set_name(root, "%s", "sys");
@@ -409,13 +434,15 @@ static int sysfs_walk(const char *rel, sysfs_leaf_t *leaf)
     for (;;) {
         const char *slash = strchr(p, '/');
         size_t      clen  = slash ? (size_t)(slash - p) : strlen(p);
-        if (!clen) return -E_INVAL;
-        if (clen >= KOBJ_NAME_LEN) return -E_NAMETOOLONG;
+        if (!clen)
+            return -E_INVAL;
+        if (clen >= KOBJ_NAME_LEN)
+            return -E_NAMETOOLONG;
 
         char comp[KOBJ_NAME_LEN];
         memcpy(comp, p, clen);
         comp[clen] = '\0';
-        int last = !slash;
+        int last   = !slash;
 
         struct kobject *child = kobject_find_child(cur, comp);
         if (child) {
@@ -431,7 +458,8 @@ static int sysfs_walk(const char *rel, sysfs_leaf_t *leaf)
             continue;
         }
 
-        if (!last) return -E_NOENT; /* attributes are always leaves */
+        if (!last)
+            return -E_NOENT; /* attributes are always leaves */
 
         sysfs_attr_entry_t *attr = sysfs_find_attr(cur, comp);
         if (attr) {
@@ -487,12 +515,15 @@ static const vfs_ops_t g_sysfs_dir_ops = {.read = sysfs_dir_read, .write = sysfs
 static int32_t sysfs_attr_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     sysfs_attr_entry_t *e = n->priv;
-    if (!e || !e->owner) return -E_INVAL;
+    if (!e || !e->owner)
+        return -E_INVAL;
     struct kobject *kobj = e->owner;
-    if (!kobj->ktype || !kobj->ktype->sysfs_ops || !kobj->ktype->sysfs_ops->show) return -E_INVAL;
+    if (!kobj->ktype || !kobj->ktype->sysfs_ops || !kobj->ktype->sysfs_ops->show)
+        return -E_INVAL;
 
     char *page = kmalloc(SYSFS_PAGE_SIZE);
-    if (!page) return -E_NOMEM;
+    if (!page)
+        return -E_NOMEM;
     ssize_t r = kobj->ktype->sysfs_ops->show(kobj, e->attr, page);
     if (r < 0) {
         kfree(page);
@@ -503,7 +534,8 @@ static int32_t sysfs_attr_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t 
         return 0;
     }
     uint32_t avail = (uint32_t)((uint64_t)r - off);
-    if (len > avail) len = avail;
+    if (len > avail)
+        len = avail;
     memcpy(buf, page + off, len);
     kfree(page);
     return (int32_t)len;
@@ -513,20 +545,27 @@ static int32_t sysfs_attr_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t 
 static int32_t sysfs_attr_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     sysfs_attr_entry_t *e = n->priv;
-    if (!e || !e->owner) return -E_INVAL;
-    if (off != 0) return -E_INVAL;
-    if (len >= SYSFS_PAGE_SIZE) return -E_RANGE;
-    if (!(e->mode & 0200)) return -E_ACCES;
+    if (!e || !e->owner)
+        return -E_INVAL;
+    if (off != 0)
+        return -E_INVAL;
+    if (len >= SYSFS_PAGE_SIZE)
+        return -E_RANGE;
+    if (!(e->mode & 0200))
+        return -E_ACCES;
     struct kobject *kobj = e->owner;
-    if (!kobj->ktype || !kobj->ktype->sysfs_ops || !kobj->ktype->sysfs_ops->store) return -E_INVAL;
+    if (!kobj->ktype || !kobj->ktype->sysfs_ops || !kobj->ktype->sysfs_ops->store)
+        return -E_INVAL;
 
     char *copy = kmalloc(len + 1);
-    if (!copy) return -E_NOMEM;
+    if (!copy)
+        return -E_NOMEM;
     memcpy(copy, buf, len);
     copy[len] = '\0';
     ssize_t r = kobj->ktype->sysfs_ops->store(kobj, e->attr, copy, len);
     kfree(copy);
-    if (r < 0) return (int32_t)r;
+    if (r < 0)
+        return (int32_t)r;
     return (int32_t)len;
 }
 
@@ -536,15 +575,18 @@ static const vfs_ops_t g_sysfs_attr_ops = {.read = sysfs_attr_read, .write = sys
 static int32_t sysfs_bin_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
 {
     sysfs_bin_attr_entry_t *e = n->priv;
-    if (!e || !e->owner || !e->attr || !e->attr->read) return -E_INVAL;
+    if (!e || !e->owner || !e->attr || !e->attr->read)
+        return -E_INVAL;
     return (int32_t)e->attr->read(e->owner, e->attr, buf, (int64_t)off, len);
 }
 
 static int32_t sysfs_bin_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
 {
     sysfs_bin_attr_entry_t *e = n->priv;
-    if (!e || !e->owner || !e->attr || !e->attr->write) return -E_INVAL;
-    if (!(e->mode & 0200)) return -E_ACCES;
+    if (!e || !e->owner || !e->attr || !e->attr->write)
+        return -E_INVAL;
+    if (!(e->mode & 0200))
+        return -E_ACCES;
     return (int32_t)e->attr->write(e->owner, e->attr, (char *)buf, (int64_t)off, len);
 }
 
@@ -582,29 +624,30 @@ int sysfs_resolve(const char *path, vfs_node_t *out, int follow)
 
     sysfs_leaf_t leaf;
     int          r = sysfs_walk(path[4] ? path + 5 : "", &leaf);
-    if (r) return r;
+    if (r)
+        return r;
 
     switch (leaf.kind) {
-        case LEAF_DIR:
-            fill_node(out, leaf.name, VFS_DIR, &g_sysfs_dir_ops, NULL);
+    case LEAF_DIR:
+        fill_node(out, leaf.name, VFS_DIR, &g_sysfs_dir_ops, NULL);
+        return 0;
+    case LEAF_ATTR:
+        fill_node(out, leaf.name, VFS_FILE, &g_sysfs_attr_ops, leaf.attr);
+        return 0;
+    case LEAF_BIN:
+        fill_node(out, leaf.name, VFS_FILE, &g_sysfs_bin_ops, leaf.bin);
+        return 0;
+    case LEAF_SYM:
+        if (follow && leaf.sym->target) {
+            /* Symlink targets are always kobjects: a followed link
+             * resolves straight to the target directory. */
+            fill_node(out, leaf.sym->target->name, VFS_DIR, &g_sysfs_dir_ops, NULL);
             return 0;
-        case LEAF_ATTR:
-            fill_node(out, leaf.name, VFS_FILE, &g_sysfs_attr_ops, leaf.attr);
-            return 0;
-        case LEAF_BIN:
-            fill_node(out, leaf.name, VFS_FILE, &g_sysfs_bin_ops, leaf.bin);
-            return 0;
-        case LEAF_SYM:
-            if (follow && leaf.sym->target) {
-                /* Symlink targets are always kobjects: a followed link
-                 * resolves straight to the target directory. */
-                fill_node(out, leaf.sym->target->name, VFS_DIR, &g_sysfs_dir_ops, NULL);
-                return 0;
-            }
-            fill_node(out, leaf.name, VFS_SYMLINK, &g_sysfs_sym_ops, NULL);
-            return 0;
-        default:
-            return -E_NOENT;
+        }
+        fill_node(out, leaf.name, VFS_SYMLINK, &g_sysfs_sym_ops, NULL);
+        return 0;
+    default:
+        return -E_NOENT;
     }
 }
 
@@ -617,16 +660,20 @@ int sysfs_readlink(const char *path, char *buf, uint32_t cap)
 
     sysfs_leaf_t leaf;
     int          r = sysfs_walk(path[4] ? path + 5 : "", &leaf);
-    if (r) return r;
-    if (leaf.kind != LEAF_SYM || !leaf.sym->target) return -E_INVAL;
+    if (r)
+        return r;
+    if (leaf.kind != LEAF_SYM || !leaf.sym->target)
+        return -E_INVAL;
 
     /* The link text is the tree-relative path from the link's directory to
      * its target -- the same "../..." spelling Linux sysfs uses, so libudev
      * can concatenate it onto the link's own path. */
     char *target = sysfs_relative_path(leaf.dir, leaf.sym->target);
-    if (!target) return -E_NOENT;
+    if (!target)
+        return -E_NOENT;
     size_t len = strlen(target);
-    if (cap && len > cap - 1) len = cap - 1;
+    if (cap && len > cap - 1)
+        len = cap - 1;
     memcpy(buf, target, len);
     kfree(target);
     return (int)len;
@@ -666,7 +713,10 @@ static int sysfs_enum_kobj(struct kobject *kobj, uint32_t index, char *name, uin
     }
     for (clist_t node = kobj->attributes; node; node = node->next, n++) {
         sysfs_attr_entry_t *e = node->data;
-        if (!e || !e->attr || !e->attr->name) { n--; continue; }
+        if (!e || !e->attr || !e->attr->name) {
+            n--;
+            continue;
+        }
         if (index == (n - 2)) {
             strncpy(name, e->attr->name, VFS_NAME_MAX - 1);
             *type = DT_REG;
@@ -675,7 +725,10 @@ static int sysfs_enum_kobj(struct kobject *kobj, uint32_t index, char *name, uin
     }
     for (clist_t node = kobj->bin_attributes; node; node = node->next, n++) {
         sysfs_bin_attr_entry_t *e = node->data;
-        if (!e || !e->attr || !e->attr->attr.name) { n--; continue; }
+        if (!e || !e->attr || !e->attr->attr.name) {
+            n--;
+            continue;
+        }
         if (index == (n - 2)) {
             strncpy(name, e->attr->attr.name, VFS_NAME_MAX - 1);
             *type = DT_REG;
@@ -684,7 +737,10 @@ static int sysfs_enum_kobj(struct kobject *kobj, uint32_t index, char *name, uin
     }
     for (clist_t node = kobj->symlinks; node; node = node->next, n++) {
         sysfs_symlink_entry_t *e = node->data;
-        if (!e || !e->name) { n--; continue; }
+        if (!e || !e->name) {
+            n--;
+            continue;
+        }
         if (index == (n - 2)) {
             strncpy(name, e->name, VFS_NAME_MAX - 1);
             *type = DT_LNK;
@@ -710,13 +766,16 @@ int sysfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *type
 
     sysfs_leaf_t leaf;
     int          r = sysfs_walk(dirpath + 5, &leaf);
-    if (r) return r;
+    if (r)
+        return r;
     if (leaf.kind == LEAF_SYM) {
         /* A directory listing through a class link reads the target. */
-        if (!leaf.sym->target) return -E_NOENT;
+        if (!leaf.sym->target)
+            return -E_NOENT;
         return sysfs_enum_kobj(leaf.sym->target, index, name, type);
     }
-    if (leaf.kind != LEAF_DIR) return -E_NOTDIR;
+    if (leaf.kind != LEAF_DIR)
+        return -E_NOTDIR;
     return sysfs_enum_kobj(leaf.kobj, index, name, type);
 }
 
@@ -727,14 +786,18 @@ int sysfs_readdir(const char *dirpath, uint32_t index, char *name, uint8_t *type
  * kobject whose ktype dispatches show/store -- the same as `dir_kobj` for
  * plain attributes, the group's parent for group attributes.
  */
-static int sysfs_create_file_mode(struct kobject *dir_kobj, struct kobject *owner, const struct attribute *attr, uint16_t mode)
+static int sysfs_create_file_mode(struct kobject *dir_kobj, struct kobject *owner,
+                                  const struct attribute *attr, uint16_t mode)
 {
-    if (!dir_kobj || !owner || !attr || !sysfs_name_valid(attr->name)) return -E_INVAL;
-    if (sysfs_name_exists(dir_kobj, attr->name)) return -E_EXIST;
+    if (!dir_kobj || !owner || !attr || !sysfs_name_valid(attr->name))
+        return -E_INVAL;
+    if (sysfs_name_exists(dir_kobj, attr->name))
+        return -E_EXIST;
 
     sysfs_attr_entry_t *entry = kcalloc(1, sizeof(*entry));
-    if (!entry) return -E_NOMEM;
-    entry->attr = (struct attribute *)attr;
+    if (!entry)
+        return -E_NOMEM;
+    entry->attr  = (struct attribute *)attr;
     entry->owner = owner;
     entry->mode  = mode;
 
@@ -755,23 +818,29 @@ int sysfs_create_file(struct kobject *kobj, const struct attribute *attr)
 /* Remove an attribute file. */
 void sysfs_remove_file(struct kobject *kobj, const struct attribute *attr)
 {
-    if (!kobj || !attr || !attr->name) return;
+    if (!kobj || !attr || !attr->name)
+        return;
 
     sysfs_attr_entry_t *entry = sysfs_find_attr(kobj, attr->name);
-    if (!entry) return;
+    if (!entry)
+        return;
 
     kobj->attributes = clist_delete(kobj->attributes, entry);
     kfree(entry);
 }
 
 /* Create a binary attribute file with the given mode. */
-static int sysfs_create_bin_file_mode(struct kobject *kobj, struct kobject *owner, const struct bin_attribute *attr, uint16_t mode)
+static int sysfs_create_bin_file_mode(struct kobject *kobj, struct kobject *owner,
+                                      const struct bin_attribute *attr, uint16_t mode)
 {
-    if (!kobj || !attr || !sysfs_name_valid(attr->attr.name)) return -E_INVAL;
-    if (sysfs_name_exists(kobj, attr->attr.name)) return -E_EXIST;
+    if (!kobj || !attr || !sysfs_name_valid(attr->attr.name))
+        return -E_INVAL;
+    if (sysfs_name_exists(kobj, attr->attr.name))
+        return -E_EXIST;
 
     sysfs_bin_attr_entry_t *entry = kcalloc(1, sizeof(*entry));
-    if (!entry) return -E_NOMEM;
+    if (!entry)
+        return -E_NOMEM;
     entry->attr  = (struct bin_attribute *)attr;
     entry->owner = owner;
     entry->mode  = mode;
@@ -793,10 +862,12 @@ int sysfs_create_bin_file(struct kobject *kobj, const struct bin_attribute *attr
 /* Remove a binary attribute file. */
 void sysfs_remove_bin_file(struct kobject *kobj, const struct bin_attribute *attr)
 {
-    if (!kobj || !attr || !attr->attr.name) return;
+    if (!kobj || !attr || !attr->attr.name)
+        return;
 
     sysfs_bin_attr_entry_t *entry = sysfs_find_bin_attr(kobj, attr->attr.name);
-    if (!entry || entry->attr != attr) return;
+    if (!entry || entry->attr != attr)
+        return;
 
     kobj->bin_attributes = clist_delete(kobj->bin_attributes, entry);
     kfree(entry);
@@ -805,11 +876,14 @@ void sysfs_remove_bin_file(struct kobject *kobj, const struct bin_attribute *att
 /* Create a symlink under a kobject. */
 int sysfs_create_symlink(struct kobject *kobj, struct kobject *target, const char *name)
 {
-    if (!kobj || !target || !sysfs_name_valid(name)) return -E_INVAL;
-    if (sysfs_name_exists(kobj, name)) return -E_EXIST;
+    if (!kobj || !target || !sysfs_name_valid(name))
+        return -E_INVAL;
+    if (sysfs_name_exists(kobj, name))
+        return -E_EXIST;
 
     sysfs_symlink_entry_t *entry = kcalloc(1, sizeof(*entry));
-    if (!entry) return -E_NOMEM;
+    if (!entry)
+        return -E_NOMEM;
     entry->name = kstrdup(name);
     if (!entry->name) {
         kfree(entry);
@@ -835,10 +909,12 @@ int sysfs_create_symlink(struct kobject *kobj, struct kobject *target, const cha
 /* Remove a symlink under a kobject. */
 void sysfs_remove_symlink(struct kobject *kobj, const char *name)
 {
-    if (!kobj || !name) return;
+    if (!kobj || !name)
+        return;
 
     sysfs_symlink_entry_t *entry = sysfs_find_symlink(kobj, name);
-    if (!entry) return;
+    if (!entry)
+        return;
 
     kobj->symlinks = clist_delete(kobj->symlinks, entry);
     kobject_put(entry->target);
@@ -858,16 +934,20 @@ int sysfs_create_group(struct kobject *kobj, const struct attribute_group *grp)
     size_t                 bin_count         = 0;
     int                    ret;
 
-    if (!kobj || !grp) return -E_INVAL;
+    if (!kobj || !grp)
+        return -E_INVAL;
 
     if (grp->attrs)
-        while (grp->attrs[attr_capacity]) attr_capacity++;
+        while (grp->attrs[attr_capacity])
+            attr_capacity++;
     if (grp->bin_attrs)
-        while (grp->bin_attrs[bin_capacity]) bin_capacity++;
+        while (grp->bin_attrs[bin_capacity])
+            bin_capacity++;
 
     if (attr_capacity) {
         created_attrs = kcalloc(attr_capacity, sizeof(struct attribute *));
-        if (!created_attrs) return -E_NOMEM;
+        if (!created_attrs)
+            return -E_NOMEM;
     }
     if (bin_capacity) {
         created_bin_attrs = kcalloc(bin_capacity, sizeof(struct bin_attribute *));
@@ -898,17 +978,20 @@ int sysfs_create_group(struct kobject *kobj, const struct attribute_group *grp)
     if (grp->attrs) {
         struct attribute **attr;
         for (attr = grp->attrs; *attr; attr++) {
-            if (!(*attr)->name) continue;
+            if (!(*attr)->name)
+                continue;
 
             uint16_t mode = (*attr)->mode;
             if (grp->is_visible) {
                 int visible = grp->is_visible(kobj, *attr, (int)(attr - grp->attrs));
-                if (!visible) continue;
+                if (!visible)
+                    continue;
                 mode = (uint16_t)visible;
             }
 
             ret = sysfs_create_file_mode(target_kobj, kobj, *attr, mode);
-            if (ret != 0) goto err_group;
+            if (ret != 0)
+                goto err_group;
             created_attrs[attr_count++] = *attr;
         }
     }
@@ -917,17 +1000,20 @@ int sysfs_create_group(struct kobject *kobj, const struct attribute_group *grp)
     if (grp->bin_attrs) {
         struct bin_attribute **bin;
         for (bin = grp->bin_attrs; *bin; bin++) {
-            if (!(*bin)->attr.name) continue;
+            if (!(*bin)->attr.name)
+                continue;
 
             uint16_t mode = (*bin)->attr.mode;
             if (grp->is_visible) {
                 int visible = grp->is_visible(kobj, &(*bin)->attr, (int)(bin - grp->bin_attrs));
-                if (!visible) continue;
+                if (!visible)
+                    continue;
                 mode = (uint16_t)visible;
             }
 
             ret = sysfs_create_bin_file_mode(target_kobj, kobj, *bin, mode);
-            if (ret != 0) goto err_group;
+            if (ret != 0)
+                goto err_group;
             created_bin_attrs[bin_count++] = *bin;
         }
     }
@@ -936,8 +1022,10 @@ int sysfs_create_group(struct kobject *kobj, const struct attribute_group *grp)
     kfree(created_bin_attrs);
     return 0;
 err_group:
-    while (attr_count) sysfs_remove_file(target_kobj, created_attrs[--attr_count]);
-    while (bin_count) sysfs_remove_bin_file(target_kobj, created_bin_attrs[--bin_count]);
+    while (attr_count)
+        sysfs_remove_file(target_kobj, created_attrs[--attr_count]);
+    while (bin_count)
+        sysfs_remove_bin_file(target_kobj, created_bin_attrs[--bin_count]);
     if (grp->name && target_kobj != kobj) {
         kobject_del(target_kobj);
         kobject_put(target_kobj);
@@ -952,12 +1040,14 @@ void sysfs_remove_group(struct kobject *kobj, const struct attribute_group *grp)
 {
     struct kobject *target_kobj;
 
-    if (!kobj || !grp) return;
+    if (!kobj || !grp)
+        return;
 
     /* If the group has a name, find the subdirectory kobject */
     if (grp->name) {
         target_kobj = kobject_find_child(kobj, grp->name);
-        if (!target_kobj) return;
+        if (!target_kobj)
+            return;
     } else {
         target_kobj = kobj;
     }
@@ -965,14 +1055,16 @@ void sysfs_remove_group(struct kobject *kobj, const struct attribute_group *grp)
     if (grp->attrs) {
         struct attribute **attr;
         for (attr = grp->attrs; *attr; attr++) {
-            if (!(*attr)->name) continue;
+            if (!(*attr)->name)
+                continue;
             sysfs_remove_file(target_kobj, *attr);
         }
     }
     if (grp->bin_attrs) {
         struct bin_attribute **bin;
         for (bin = grp->bin_attrs; *bin; bin++) {
-            if (!(*bin)->attr.name) continue;
+            if (!(*bin)->attr.name)
+                continue;
             sysfs_remove_bin_file(target_kobj, *bin);
         }
     }
@@ -986,13 +1078,15 @@ void sysfs_remove_group(struct kobject *kobj, const struct attribute_group *grp)
 /* Create several attribute groups. */
 int sysfs_create_groups(struct kobject *kobj, const struct attribute_group **groups)
 {
-    if (!groups) return 0;
+    if (!groups)
+        return 0;
 
     for (int i = 0; groups[i]; i++) {
         int ret = sysfs_create_group(kobj, groups[i]);
         if (ret != 0) {
             /* Rollback previously created groups */
-            for (int j = i - 1; j >= 0; j--) sysfs_remove_group(kobj, groups[j]);
+            for (int j = i - 1; j >= 0; j--)
+                sysfs_remove_group(kobj, groups[j]);
             return ret;
         }
     }
@@ -1002,28 +1096,31 @@ int sysfs_create_groups(struct kobject *kobj, const struct attribute_group **gro
 /* Remove several attribute groups. */
 void sysfs_remove_groups(struct kobject *kobj, const struct attribute_group **groups)
 {
-    if (!groups) return;
-    for (int i = 0; groups[i]; i++) sysfs_remove_group(kobj, groups[i]);
+    if (!groups)
+        return;
+    for (int i = 0; groups[i]; i++)
+        sysfs_remove_group(kobj, groups[i]);
 }
 
 /* Remove every attribute, binary attribute and symlink of a kobject. */
 void sysfs_cleanup_kobject_files(struct kobject *kobj)
 {
-    if (!kobj) return;
+    if (!kobj)
+        return;
 
     while (kobj->attributes) {
         sysfs_attr_entry_t *entry = kobj->attributes->data;
-        kobj->attributes = clist_delete(kobj->attributes, entry);
+        kobj->attributes          = clist_delete(kobj->attributes, entry);
         kfree(entry);
     }
     while (kobj->bin_attributes) {
         sysfs_bin_attr_entry_t *entry = kobj->bin_attributes->data;
-        kobj->bin_attributes = clist_delete(kobj->bin_attributes, entry);
+        kobj->bin_attributes          = clist_delete(kobj->bin_attributes, entry);
         kfree(entry);
     }
     while (kobj->symlinks) {
         sysfs_symlink_entry_t *entry = kobj->symlinks->data;
-        kobj->symlinks = clist_delete(kobj->symlinks, entry);
+        kobj->symlinks               = clist_delete(kobj->symlinks, entry);
         kobject_put(entry->target);
         kfree(entry->name);
         kfree(entry);
@@ -1039,12 +1136,17 @@ void sysfs_cleanup_kobject_files(struct kobject *kobj)
  */
 int sysfs_create_dir(struct kobject *kobj)
 {
-    if (!kobj) return -E_INVAL;
-    if (kobj->state_in_sysfs) return -E_EXIST;
-    if (!kobj->name || !kobj->name[0]) return -E_INVAL;
+    if (!kobj)
+        return -E_INVAL;
+    if (kobj->state_in_sysfs)
+        return -E_EXIST;
+    if (!kobj->name || !kobj->name[0])
+        return -E_INVAL;
     if (kobj->parent) {
         struct kobject *collision = kobject_find_child(kobj->parent, kobj->name);
-        if ((collision && collision != kobj) || sysfs_find_attr(kobj->parent, kobj->name) || sysfs_find_bin_attr(kobj->parent, kobj->name) || sysfs_find_symlink(kobj->parent, kobj->name))
+        if ((collision && collision != kobj) || sysfs_find_attr(kobj->parent, kobj->name) ||
+            sysfs_find_bin_attr(kobj->parent, kobj->name) ||
+            sysfs_find_symlink(kobj->parent, kobj->name))
             return -E_EXIST;
     }
     kobj->state_in_sysfs = 1;
@@ -1054,7 +1156,8 @@ int sysfs_create_dir(struct kobject *kobj)
 /* Mark a kobject's sysfs directory gone. */
 void sysfs_remove_dir(struct kobject *kobj)
 {
-    if (!kobj || !kobj->state_in_sysfs) return;
+    if (!kobj || !kobj->state_in_sysfs)
+        return;
     kobj->state_in_sysfs = 0;
 }
 
@@ -1063,10 +1166,13 @@ void sysfs_remove_dir(struct kobject *kobj)
  * retitle. */
 int sysfs_rename_dir(struct kobject *kobj, const char *new_name)
 {
-    if (!kobj || !new_name || !new_name[0]) return -E_INVAL;
+    if (!kobj || !new_name || !new_name[0])
+        return -E_INVAL;
     if (kobj->parent) {
         struct kobject *collision = kobject_find_child(kobj->parent, new_name);
-        if ((collision && collision != kobj) || sysfs_find_attr(kobj->parent, new_name) || sysfs_find_bin_attr(kobj->parent, new_name) || sysfs_find_symlink(kobj->parent, new_name))
+        if ((collision && collision != kobj) || sysfs_find_attr(kobj->parent, new_name) ||
+            sysfs_find_bin_attr(kobj->parent, new_name) ||
+            sysfs_find_symlink(kobj->parent, new_name))
             return -E_EXIST;
     }
     return 0;
@@ -1075,9 +1181,11 @@ int sysfs_rename_dir(struct kobject *kobj, const char *new_name)
 /* Collision check for a kobject move; kobject_move() relinks the tree. */
 int sysfs_move_dir(struct kobject *kobj, struct kobject *new_parent)
 {
-    if (!kobj || !new_parent) return -E_INVAL;
+    if (!kobj || !new_parent)
+        return -E_INVAL;
     struct kobject *collision = kobject_find_child(new_parent, kobj->name);
-    if ((collision && collision != kobj) || sysfs_find_attr(new_parent, kobj->name) || sysfs_find_bin_attr(new_parent, kobj->name) || sysfs_find_symlink(new_parent, kobj->name))
+    if ((collision && collision != kobj) || sysfs_find_attr(new_parent, kobj->name) ||
+        sysfs_find_bin_attr(new_parent, kobj->name) || sysfs_find_symlink(new_parent, kobj->name))
         return -E_EXIST;
     return 0;
 }
@@ -1086,12 +1194,16 @@ int sysfs_move_dir(struct kobject *kobj, struct kobject *new_parent)
 
 int sysfs_add_file(const char *relpath, sysfs_gen_t gen, sysfs_put_t put)
 {
-    if (!relpath || !gen) return -E_INVAL;
-    if (relpath[0] == '/' || !relpath[0]) return -E_INVAL;
-    if (strchr(relpath, '/') == relpath + strlen(relpath) - 1) return -E_INVAL;
+    if (!relpath || !gen)
+        return -E_INVAL;
+    if (relpath[0] == '/' || !relpath[0])
+        return -E_INVAL;
+    if (strchr(relpath, '/') == relpath + strlen(relpath) - 1)
+        return -E_INVAL;
 
     int ret = sysfs_ensure_root();
-    if (ret) return ret;
+    if (ret)
+        return ret;
 
     /* Find-or-create the directory chain from the root. */
     struct kobject *cur = sysfs_root_kobj;
@@ -1099,8 +1211,10 @@ int sysfs_add_file(const char *relpath, sysfs_gen_t gen, sysfs_put_t put)
     for (;;) {
         const char *slash = strchr(p, '/');
         size_t      clen  = slash ? (size_t)(slash - p) : strlen(p);
-        if (!clen) return -E_INVAL;
-        if (clen >= KOBJ_NAME_LEN) return -E_NAMETOOLONG;
+        if (!clen)
+            return -E_INVAL;
+        if (clen >= KOBJ_NAME_LEN)
+            return -E_NAMETOOLONG;
 
         char comp[KOBJ_NAME_LEN];
         memcpy(comp, p, clen);
@@ -1113,10 +1227,12 @@ int sysfs_add_file(const char *relpath, sysfs_gen_t gen, sysfs_put_t put)
              * paths like "kernel/ostype" -- the kobject "kernel" hosts
              * the attribute "ostype"). */
             sysfs_attr_entry_t *dup = sysfs_find_attr(cur, comp);
-            if (dup) return -E_EXIST;
+            if (dup)
+                return -E_EXIST;
 
             legacy_ent_t *e = kcalloc(1, sizeof(*e));
-            if (!e) return -E_NOMEM;
+            if (!e)
+                return -E_NOMEM;
             e->gen       = gen;
             e->put       = put;
             e->attr.name = kstrdup(comp);
@@ -1137,7 +1253,8 @@ int sysfs_add_file(const char *relpath, sysfs_gen_t gen, sysfs_put_t put)
             /* Intermediate: needs a ktype that can dispatch the legacy
              * callbacks when this level later hosts a leaf attribute. */
             child = kcalloc(1, sizeof(struct kobject));
-            if (!child) return -E_NOMEM;
+            if (!child)
+                return -E_NOMEM;
             kobject_init(child, &legacy_ktype);
             ret = kobject_add(child, cur, "%s", comp);
             if (ret != 0) {

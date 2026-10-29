@@ -60,11 +60,10 @@ static void test_tcp_loopback(void)
         return;
     }
     struct sockaddr_in a = {0};
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = htons(4390);
-    if (bind(lfd, (struct sockaddr *)&a, sizeof a) < 0 ||
-        listen(lfd, 1) < 0) {
+    a.sin_family         = AF_INET;
+    a.sin_addr.s_addr    = htonl(INADDR_LOOPBACK);
+    a.sin_port           = htons(4390);
+    if (bind(lfd, (struct sockaddr *)&a, sizeof a) < 0 || listen(lfd, 1) < 0) {
         printf("  bind/listen failed: errno=%d\n", errno);
         fails++;
         close(lfd);
@@ -87,7 +86,7 @@ static void test_tcp_loopback(void)
         if (write(cfd, "hello", 5) != 5)
             _exit(3);
         char rb[8] = {0};
-        int r = read(cfd, rb, sizeof rb);
+        int  r     = read(cfd, rb, sizeof rb);
         if (r != 3 || memcmp(rb, "ack", 3) != 0)
             _exit(4);
         close(cfd);
@@ -95,11 +94,11 @@ static void test_tcp_loopback(void)
     }
 
     int cfd = accept(lfd, NULL, NULL);
-    int ok = cfd >= 0;
+    int ok  = cfd >= 0;
     check("tcp: accept returns a connection", ok);
     if (ok) {
         char buf[8] = {0};
-        ok = read(cfd, buf, sizeof buf) == 5 && memcmp(buf, "hello", 5) == 0;
+        ok          = read(cfd, buf, sizeof buf) == 5 && memcmp(buf, "hello", 5) == 0;
         check("tcp: server receives payload", ok);
         check("tcp: server replies", write(cfd, "ack", 3) == 3);
         close(cfd);
@@ -121,18 +120,18 @@ static void test_udp_loopback(void)
         return;
     }
     struct sockaddr_in a = {0};
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = htons(4391);
+    a.sin_family         = AF_INET;
+    a.sin_addr.s_addr    = htonl(INADDR_LOOPBACK);
+    a.sin_port           = htons(4391);
     check("udp: bind 127.0.0.1:4391", bind(ufd, (struct sockaddr *)&a, sizeof a) == 0);
 
     struct sockaddr_in dst = a;
     check("udp: sendto", sendto(ufd, "datagram", 8, 0, (struct sockaddr *)&dst, sizeof dst) == 8);
 
-    struct sockaddr_in src = {0};
-    socklen_t slen = sizeof src;
-    char buf[16] = {0};
-    int r = recvfrom(ufd, buf, sizeof buf, 0, (struct sockaddr *)&src, &slen);
+    struct sockaddr_in src     = {0};
+    socklen_t          slen    = sizeof src;
+    char               buf[16] = {0};
+    int                r       = recvfrom(ufd, buf, sizeof buf, 0, (struct sockaddr *)&src, &slen);
     check("udp: recvfrom gets 8 bytes", r == 8);
     check("udp: payload intact", memcmp(buf, "datagram", 8) == 0);
     check("udp: sender address reported", src.sin_addr.s_addr == htonl(INADDR_LOOPBACK));

@@ -154,7 +154,8 @@ static int ahci_port_start(ahci_port_state_t *port)
 }
 
 /* AHCI issue cmd. */
-static int ahci_issue_cmd(ahci_port_state_t *port, int slot, uint8_t *cfis, int write, uint64_t buf_phys, uint32_t byte_count)
+static int ahci_issue_cmd(ahci_port_state_t *port, int slot, uint8_t *cfis, int write,
+                          uint64_t buf_phys, uint32_t byte_count)
 {
     volatile hba_cmd_header_t *hdr = &port->cmd_list[slot];
     volatile uint8_t          *p   = port->port_mmio;
@@ -503,7 +504,8 @@ void ahci_init(void)
     }
 
     /* HBA reset */
-    ahci_write32(hba_mmio, HOST_CTL, (ahci_read32(hba_mmio, HOST_CTL) | HOST_AHCI_EN) & ~HOST_IRQ_EN);
+    ahci_write32(hba_mmio, HOST_CTL,
+                 (ahci_read32(hba_mmio, HOST_CTL) | HOST_AHCI_EN) & ~HOST_IRQ_EN);
     ahci_write32(hba_mmio, HOST_CTL, ahci_read32(hba_mmio, HOST_CTL) | HOST_AHCI_EN | HOST_RESET);
 
     int reset_timeout = 100000;
@@ -607,7 +609,8 @@ void ahci_init(void)
 
         /* Assert then deassert COMRESET before starting the command engine.
          * The spec asks for 1 ms of assert. */
-        ahci_write32(port->port_mmio, PORT_SCTL, (ahci_read32(port->port_mmio, PORT_SCTL) & ~0xFu) | 0x1);
+        ahci_write32(port->port_mmio, PORT_SCTL,
+                     (ahci_read32(port->port_mmio, PORT_SCTL) & ~0xFu) | 0x1);
         timer_delay_ms(1);
         ahci_write32(port->port_mmio, PORT_SCTL, ahci_read32(port->port_mmio, PORT_SCTL) & ~0xFu);
 
@@ -661,7 +664,8 @@ void ahci_init(void)
             dev->type        = AHCI_DEV_SATAPI;
             dev->sector_size = 2048;
             dev->size        = 0;
-            ahci_write32(port->port_mmio, PORT_CMD, ahci_read32(port->port_mmio, PORT_CMD) | PORT_CMD_ATAPI);
+            ahci_write32(port->port_mmio, PORT_CMD,
+                         ahci_read32(port->port_mmio, PORT_CMD) | PORT_CMD_ATAPI);
             dbg_puts("ahci: port ");
             dbg_puts_dec((uint32_t)i);
             dbg_puts(": SATAPI optical device detected\n");

@@ -28,10 +28,20 @@
 #include "calsa.h"
 #include "kstring.h"
 #include "vfs.h"
+#include "chrdev.h"
+#ifndef __linux__
+#define __linux__        1
+#define GNOS_UNDEF_LINUX 1
+#endif
 #include "sound/asound.h"
+#ifdef GNOS_UNDEF_LINUX
+#undef __linux__
+#undef GNOS_UNDEF_LINUX
+#endif
 #include "sysnum.h"
 #include "vmm.h"
 #include "pmm.h"
+#include "debugcon.h"
 
 extern uint64_t g_hhdm;
 
@@ -510,10 +520,15 @@ int calsa_vfs_register(void)
     g_control_k       = (struct snd_pcm_mmap_control *)(uintptr_t)(g_control_phys + g_hhdm);
     g_status_k->state = SNDRV_PCM_STATE_OPEN;
     {
-        vfs_register_devnum("snd/controlC0", &g_ctl_ops, NULL, 116, 0);
-        vfs_register_devnum("snd/pcmC0D0p", &g_pcm_ops, NULL, 116, 16);
-        vfs_register_devnum("snd/pcmC0D0c", &g_pcm_ops, NULL, 116, 24);
-        vfs_register_devnum("snd/timer", &g_ctl_ops, NULL, 116, 33);
+        int r;
+        if ((r = cdev_add_vfs("snd", "controlC0", 116, 0, 1, 0666, 0, 0, &g_ctl_ops, NULL)) != 0)
+            return r;
+        if ((r = cdev_add_vfs("snd", "pcmC0D0p", 116, 16, 1, 0666, 0, 0, &g_pcm_ops, NULL)) != 0)
+            return r;
+        if ((r = cdev_add_vfs("snd", "pcmC0D0c", 116, 24, 1, 0666, 0, 0, &g_pcm_ops, NULL)) != 0)
+            return r;
+        if ((r = cdev_add_vfs("snd", "timer", 116, 33, 1, 0666, 0, 0, &g_ctl_ops, NULL)) != 0)
+            return r;
         g_play.state           = SNDRV_PCM_STATE_OPEN;
         g_play.start_threshold = 1;
         g_play.avail_min       = ALSA_PERIOD_FRAMES;

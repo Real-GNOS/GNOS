@@ -239,7 +239,7 @@ static void __attribute__((noreturn)) fault_halt(regs_t *r, const char *tag)
         const uint64_t *fp = (const uint64_t *)r->rbp;
         for (int depth = 0; depth < 16 && fp; depth++) {
             const uint64_t *next = (const uint64_t *)fp[0];
-            uint64_t        frip  = fp[1];
+            uint64_t        frip = fp[1];
             if ((uintptr_t)next <= (uintptr_t)fp || ((uintptr_t)next & 7) || !frip)
                 break;
             dbg_puts("  #");
@@ -418,6 +418,11 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
 
 void isr_dispatch(regs_t *r)
 {
+    if (r->vector == NMI_VECTOR) {
+        smp_tlb_handle_nmi();
+        return;
+    }
+
     /* TEMPORARY Xorg debugging: an interrupt/fault must run on the current
      * task's slot (or outside the kstack array entirely). */
     proc_kstack_audit("IRQ");
@@ -450,7 +455,7 @@ void isr_dispatch(regs_t *r)
         if (r->rip == g_user_rsp_watch_rip) {
             extern uint64_t g_wp_benign_hits;
             g_wp_benign_hits++;
-            asm volatile("mov %0, %%dr6" :: "r"(0xFFFF0FF0UL));
+            asm volatile("mov %0, %%dr6" ::"r"(0xFFFF0FF0UL));
             goto out;
         }
         dbg_puts("WP-HIT rip=");
@@ -472,7 +477,7 @@ void isr_dispatch(regs_t *r)
         dbg_puts(" rdi=");
         dbg_puts_hex(r->rdi);
         dbg_puts("\r\n");
-        asm volatile("mov %0, %%dr6" :: "r"(0xFFFF0FF0UL));
+        asm volatile("mov %0, %%dr6" ::"r"(0xFFFF0FF0UL));
         goto out;
     }
 

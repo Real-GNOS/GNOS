@@ -964,7 +964,7 @@ int proc_spawn_init(const char *path)
     /* PID 1 lives in the root cgroup. */
     if (cg_attach_new(p, CG_ROOT) < 0) {
         vmm_destroy(p->as);
-        p->as    = NULL;
+        p->as = NULL;
         slot_release(p);
         return -E_AGAIN;
     }
@@ -1213,7 +1213,7 @@ static void inherit_creds(proc_t *child, const proc_t *parent)
     child->ngroups = parent->ngroups;
     for (uint32_t i = 0; i < parent->ngroups; i++)
         child->groups[i] = parent->groups[i];
-    child->ctty = parent->ctty;
+    child->ctty    = parent->ctty;
     child->nsproxy = nsproxy_get(parent->nsproxy ? parent->nsproxy : &init_nsproxy);
 }
 
@@ -1276,7 +1276,7 @@ int proc_fork(regs_t *r)
      * refuse (fork then fails with EAGAIN, exactly as on Linux). */
     if (cg_attach_new(child, parent->cg) < 0) {
         vmm_put(child->as);
-        child->as    = NULL;
+        child->as = NULL;
         slot_release(child);
         return -E_AGAIN;
     }
@@ -1400,7 +1400,7 @@ int proc_clone(regs_t *r)
      * refuse (clone then fails with EAGAIN, exactly as on Linux). */
     if (cg_attach_new(child, parent->cg) < 0) {
         vmm_put(child->as);
-        child->as    = NULL;
+        child->as = NULL;
         slot_release(child);
         return -E_AGAIN;
     }
@@ -2876,7 +2876,7 @@ void sched_block(wait_reason_t why)
          * core could resume this task from a stale saved_rsp and run two
          * cores on one kernel stack. */
         spin_lock_irq(&g_proc_lock);
-        cur->state       = PROC_BLOCKED;
+        cur->state = PROC_BLOCKED;
         schedule_locked();
         bkl_return_from_switch();
     }
@@ -2893,7 +2893,7 @@ void sched_block_irqoff(wait_reason_t why)
     cur->wait_reason = why;
     bkl_leave_for_switch(cur);
     spin_lock_irq(&g_proc_lock); /* state store inside the park lock: see sched_block */
-    cur->state       = PROC_BLOCKED;
+    cur->state = PROC_BLOCKED;
     schedule_locked();
     bkl_return_from_switch();
 }
@@ -2907,7 +2907,7 @@ void sched_block_timeout(wait_reason_t why, uint64_t ticks)
     p->wake_tick   = timer_ticks() + (ticks ? ticks : 1);
     bkl_leave_for_switch(p);
     spin_lock_irq(&g_proc_lock); /* state store inside the park lock: see sched_block */
-    p->state       = PROC_BLOCKED;
+    p->state = PROC_BLOCKED;
     schedule_locked();
     bkl_return_from_switch();
     p->wake_tick = 0;

@@ -11,6 +11,7 @@
 #define IRQ_BASE        0x20 /* PIC vectors are remapped to 0x20..0x2F */
 #define MSI_VECTOR_BASE 0xE0 /* dedicated MSI/MSI-X pool, 16 vectors    */
 #define SYSCALL_VECTOR  0x80
+#define NMI_VECTOR      2
 
 typedef void (*irq_handler_t)(regs_t *r);
 

@@ -99,14 +99,14 @@
 
 /* PORT_CMD bits.  FRE (enable FIS receive) and ST (start) must both be set
  * before a command may be issued; CR and FR report that the engine came up. */
-#define PORT_CMD_ST         (1u << 0)
-#define PORT_CMD_SPIN_UP    (1u << 1)
-#define PORT_CMD_POWER_ON   (1u << 2)
-#define PORT_CMD_FIS_RX     (1u << 4)
-#define PORT_CMD_ATAPI      (1u << 24)
-#define PORT_CMD_CR         (1u << 15)
-#define PORT_CMD_FR         (1u << 14)
-#define PORT_CMD_FRE        (1u << 4)
+#define PORT_CMD_ST       (1u << 0)
+#define PORT_CMD_SPIN_UP  (1u << 1)
+#define PORT_CMD_POWER_ON (1u << 2)
+#define PORT_CMD_FIS_RX   (1u << 4)
+#define PORT_CMD_ATAPI    (1u << 24)
+#define PORT_CMD_CR       (1u << 15)
+#define PORT_CMD_FR       (1u << 14)
+#define PORT_CMD_FRE      (1u << 4)
 
 /* PORT_IRQ_STAT bits (read for errors even though nothing is interrupted). */
 #define PORT_IRQ_TF_ERR      (1u << 30)
@@ -133,8 +133,8 @@
 typedef struct {
     uint8_t fis_type;
     uint8_t pmport : 4;
-    uint8_t rsv0   : 3;
-    uint8_t c      : 1;
+    uint8_t rsv0 : 3;
+    uint8_t c : 1;
     uint8_t command;
     uint8_t featurel;
     uint8_t lba0;
@@ -156,9 +156,9 @@ typedef struct {
 typedef struct {
     uint8_t fis_type;
     uint8_t pmport : 4;
-    uint8_t rsv0   : 2;
-    uint8_t i      : 1;
-    uint8_t rsv1   : 1;
+    uint8_t rsv0 : 2;
+    uint8_t i : 1;
+    uint8_t rsv1 : 1;
     uint8_t status;
     uint8_t error;
     uint8_t lba0;
@@ -180,9 +180,9 @@ typedef struct {
     uint32_t dba;
     uint32_t dbau;
     uint32_t rsv0;
-    uint32_t dbc  : 22;
+    uint32_t dbc : 22;
     uint32_t rsv1 : 9;
-    uint32_t i    : 1;
+    uint32_t i : 1;
 } __attribute__((packed)) hba_prdt_entry_t;
 
 /* Command table, one per command slot, in RAM: CFIS, ATAPI CDB, PRDT. */
@@ -197,15 +197,15 @@ typedef struct {
  * table.  cfl/a/w/p are the parts the driver sets; prdbc is written back by
  * the port with the number of bytes it actually moved. */
 typedef struct {
-    uint8_t           cfl  : 5;
-    uint8_t           a    : 1;
-    uint8_t           w    : 1;
-    uint8_t           p    : 1;
-    uint8_t           r    : 1;
-    uint8_t           b    : 1;
-    uint8_t           c    : 1;
+    uint8_t           cfl : 5;
+    uint8_t           a : 1;
+    uint8_t           w : 1;
+    uint8_t           p : 1;
+    uint8_t           r : 1;
+    uint8_t           b : 1;
+    uint8_t           c : 1;
     uint8_t           rsv0 : 1;
-    uint8_t           pmp  : 4;
+    uint8_t           pmp : 4;
     uint16_t          prdtl;
     volatile uint32_t prdbc;
     uint32_t          ctba;
@@ -250,8 +250,8 @@ typedef struct {
  * sector_size-byte sectors: 512-byte LBA sectors for ATA, 2048 for ATAPI. */
 typedef struct {
     uint8_t  reserved;
-    uint8_t  type;       /* AHCI_DEV_* */
-    uint8_t  port;       /* index into ahci_ports[] */
+    uint8_t  type; /* AHCI_DEV_* */
+    uint8_t  port; /* index into ahci_ports[] */
     uint64_t size;
     uint32_t sector_size;
     char     model[41];
@@ -271,7 +271,7 @@ void ahci_init(void);
 /* Read/write one 32-bit register at offset reg from base.  The port code
  * keeps its own base in port_mmio, the HBA code uses hba_mmio. */
 uint32_t ahci_read32(volatile uint8_t *base, uint32_t reg);
-void ahci_write32(volatile uint8_t *base, uint32_t reg, uint32_t val);
+void     ahci_write32(volatile uint8_t *base, uint32_t reg, uint32_t val);
 
 /* Free command slot on the port, or -E_BUSY when all HOST_CAP slots are
  * occupied. */
@@ -280,8 +280,7 @@ int ahci_find_slot(ahci_port_state_t *port);
 /* Move numsects 512-byte sectors to or from the drive.  Returns 0 or a
  * negative errno. */
 int ahci_read_sectors(uint8_t drive, uint8_t numsects, uint64_t lba, void *buffer);
-int ahci_write_sectors(uint8_t drive, uint8_t numsects, uint64_t lba,
-                       const void *buffer);
+int ahci_write_sectors(uint8_t drive, uint8_t numsects, uint64_t lba, const void *buffer);
 
 /* Push the drive's write cache to platter. */
 int ahci_flush_cache(uint8_t drive);

@@ -24,10 +24,11 @@
  * BSS: KSTACK_SIZE * MAX_PROCS (1 MiB) plus sizeof(proc_t) * MAX_PROCS
  * (~340 KiB), which is why the QEMU line went from -m 256M to -m 512M.
  */
-#define MAX_PROCS   64
-#define KSTACK_SIZE 0x8000 /* 32 KiB -- 16 KiB overflowed: an execve's deep
-                            * call chain spilled past its slot base and
-                            * trashed the neighbour slot's trap frame */
+#define MAX_PROCS 64
+#define KSTACK_SIZE                                         \
+    0x8000 /* 32 KiB -- 16 KiB overflowed: an execve's deep \
+            * call chain spilled past its slot base and     \
+            * trashed the neighbour slot's trap frame */
 
 /* A full libc program opens far more descriptors than the toy utilities did:
  * BusyBox's `cp -a` alone holds a source fd, a destination fd and a directory
@@ -135,9 +136,9 @@ typedef struct proc {
      * process is parked on, mutex_next its link in that mutex's FIFO.
      * Zeroed like the futex fields, so an idle process is "not waiting".
      */
-    struct proc *mutex_next;
+    struct proc  *mutex_next;
     struct mutex *wait_mutex;
-    int      pgid;         /* process group: the unit of job control */
+    int           pgid; /* process group: the unit of job control */
     /* Namespace bundle (namespace.h): which uts/ipc/mount/pid/net/user/
      * cgroup namespaces this process views the world through.  Fresh
      * processes start on init_nsproxy; fork refcounts the parent's bundle
