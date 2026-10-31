@@ -13,6 +13,7 @@
 
 #include "panic.h"
 #include "proc.h"
+#include "smp.h"
 #include "debugcon.h"
 #include "fbcon.h"
 
@@ -71,26 +72,46 @@ static void put_hex(uint64_t v)
     dbg_puts(buf);
 }
 
+/* Set by the first CPU that panics; every other core checks it on its way
+ * through the scheduler and parks itself, Linux-style, instead of running
+ * on alongside a dead kernel. */
+volatile int g_panicked;
+
 void panic_from_frame(const char *msg, const regs_t *r)
 {
+    /* A second core faulting *while* the panic is being printed must not
+     * garble the first core's dump: park it quietly instead. */
+    if (g_panicked) {
+        for (;;)
+            asm volatile("cli; hlt");
+    }
+
+    /* Freeze the other cores before anything else is printed: a second
+     * CPU walking into the scheduler mid-panic would only garble the dump. */
+    g_panicked = 1;
+
     /* Red screen so the crash is obvious on the framebuffer. */
     fbcon_panic();
 
-    dbg_puts("\r\n!!! KERNEL PANIC !!!\r\n");
+    /* Linux-style header: the message, then who was running. */
+    dbg_puts("\r\nKernel panic - not syncing: ");
     dbg_puts(msg);
     dbg_puts("\r\n");
 
     /* Which task was running when the kernel died.  proc_current() can be
      * nothing during early boot; say so rather than guess. */
     proc_t *p = proc_current();
+    dbg_puts("CPU: ");
+    dbg_puts_dec((uint32_t)cpu_self()->id);
+    dbg_puts(" PID: ");
     if (p) {
-        dbg_puts("pid=");
         dbg_puts_dec((uint32_t)p->pid);
-        dbg_puts(" tgid=");
-        dbg_puts_dec((uint32_t)p->tgid);
+        dbg_puts(" Comm: ");
+        dbg_puts(p->name);
         dbg_puts("\r\n");
     } else {
-        dbg_puts("pid=none (early boot or idle)\r\n");
+        dbg_puts_dec((uint32_t)-1);
+        dbg_puts(" Comm: swapper\r\n");
     }
 
     if (r) {
@@ -183,9 +204,15 @@ void panic_from_frame(const char *msg, const regs_t *r)
         fp = next;
     }
 
-    fbcon_puts("\n*** KERNEL PANIC ***\n");
+    fbcon_puts("\nKernel panic - not syncing\n");
     fbcon_puts(msg);
     fbcon_puts("\nsystem halted -- see debug console (port 0xE9)\n");
+
+    /* Linux-style close: the marker other tooling looks for, then the
+     * parking loop.  The other cores are already parked by g_panicked. */
+    dbg_puts("---[ end Kernel panic - not syncing: ");
+    dbg_puts(msg);
+    dbg_puts(" ]---\r\n");
 
     for (;;)
         asm volatile("cli; hlt");

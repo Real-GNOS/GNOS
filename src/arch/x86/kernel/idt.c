@@ -792,7 +792,7 @@ void isr_dispatch(regs_t *r)
         goto out;
     }
 
-out:
+out:;
     /* Release the big kernel lock on the way back to ring 3.  The check is
      * on the flag rather than the CS: an interrupt that pre-empted a ring-3
      * task and switched to another one leaves `r` describing the old frame,

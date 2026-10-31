@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * kernel.c — GNOS 64-bit kernel (GNOSKr.elf), booted by Limine. (GPLv2)
+ * main.c — GNOS 64-bit kernel (GNOSKr.elf), booted by Limine. (GPLv2)
  *
  * Limine enters kernel_entry() in long mode with paging already enabled:
  *   - the whole of physical RAM is direct-mapped at the HHDM offset
@@ -29,6 +29,8 @@
 
 #include "bootinfo.h"
 #include "fbcon.h"
+#include "console.h"
+#include "serial8250.h"
 #include "debugcon.h"
 #include "kaslr.h"
 #include "vfs.h"
@@ -82,10 +84,69 @@ typedef unsigned int ACPI_STATUS_K;
 #include "nvme.h"
 #include "drm.h"
 #include "drm_init.h"
+#include "drm_vsnprintf.h" /* plogk */
 /* chrdev.h pulls drm_devtmpfs.h, which redeclares the kobject structs this
  * file already has -- declare the two init hooks instead of including it. */
 void chrdev_init(void);
 int  chrdev_populate(void);
+
+/* When the boot command line carries `init=/path`, this holds that path and
+ * run_init_process() tries it before the built-in default list. */
+char g_init_path[256];
+
+/* run_init_process -- try each canonical init location in turn, the way
+ * Linux's init/main.c does: /sbin/init, /etc/init, /init, /bin/init.
+ * Returns the pid of the init that started, or a negative errno once a
+ * final retry of the whole set has also failed (the caller panics). */
+static int run_init_process(void)
+{
+    static const char *const init_paths[] = {
+        "/sbin/init",
+        "/etc/init",
+        "/init",
+        "/bin/init",
+    };
+
+    int pid = -E_NOENT;
+
+    /* An explicit init=PATH on the kernel command line is tried first, then
+     * we fall back to the built-in list (Linux does the same). */
+    if (g_init_path[0]) {
+        pid = proc_spawn_init(g_init_path);
+        if (pid >= 0) {
+            console_puts("Run ");
+            console_puts(g_init_path);
+            console_puts(" as init process (init=)\n");
+            return pid;
+        }
+        plogk("Failed to execute %s from init= (error %d)\n", g_init_path, -pid);
+        console_puts("Failed to execute ");
+        console_puts(g_init_path);
+        console_puts(" from init=\n");
+    }
+
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        for (unsigned i = 0; i < sizeof(init_paths) / sizeof(init_paths[0]); i++) {
+            pid = proc_spawn_init(init_paths[i]);
+            if (pid >= 0) {
+                console_puts("Run ");
+                console_puts(init_paths[i]);
+                console_puts(" as init process\n");
+                return pid;
+            }
+            plogk("Failed to execute %s (error %d)\n", init_paths[i], -pid);
+            console_puts("Failed to execute ");
+            console_puts(init_paths[i]);
+            console_puts("\n");
+        }
+        /* Linux retries after prepare_namespace mounts the real root; we
+         * have no late-mount step, so the retry is a short bounded settle
+         * pass before the final verdict. */
+        for (volatile unsigned spin = 0; spin < 20000000u; spin++)
+            __asm__ volatile("pause");
+    }
+    return pid;
+}
 #include "drm_svga.h"
 #include "procfs.h"
 #include "xhci.h"
@@ -104,6 +165,62 @@ extern volatile struct limine_executable_cmdline_request cmdline_request;
 /* The boot command line (limine.conf's `cmdline:` line), kept for
  * /proc/cmdline; its words are also handed to PID 1 as argv[1..]. */
 char g_boot_cmdline[256];
+
+/* When the boot command line carries `init=/path`, this holds that path and
+ * run_init_process() tries it before the built-in default list. */
+char g_init_path[256];
+
+/* Parse the Limine executable command line (cmdline_request.response->cmdline)
+ * into g_boot_cmdline, and pick out the kernel options we act on:
+ *   init=PATH    -> g_init_path
+ *   console=DEV  -> console_choose()
+ * The string lives in already-mapped higher-half memory, so we can read it
+ * straight away; anything we do not recognise is left in g_boot_cmdline for
+ * /proc/cmdline and for init's argv. */
+static void parse_boot_cmdline(void)
+{
+    if (cmdline_request.response && cmdline_request.response->cmdline) {
+        const char *src = (const char *)cmdline_request.response->cmdline;
+        int i = 0;
+        while (src[i] && i < (int)sizeof(g_boot_cmdline) - 1) {
+            g_boot_cmdline[i] = src[i];
+            i++;
+        }
+        g_boot_cmdline[i] = 0;
+    }
+
+    /* Built-in default command line from the kernel config (CONFIG_CMDLINE).
+     * Only used when Limine delivered no cmd: line.  The initrd /cmdline file
+     * remains a further fallback, handled later in proc_spawn_init(). */
+#ifdef CONFIG_CMDLINE
+    if (g_boot_cmdline[0] == 0 && (CONFIG_CMDLINE)[0]) {
+        strncpy(g_boot_cmdline, CONFIG_CMDLINE, sizeof(g_boot_cmdline) - 1);
+        g_boot_cmdline[sizeof(g_boot_cmdline) - 1] = 0;
+    }
+#endif
+
+    char *p = g_boot_cmdline;
+    while (*p) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p)
+            break;
+        char *tok = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        char saved = *p;
+        *p = 0;
+        if (!strncmp(tok, "init=", 5)) {
+            strncpy(g_init_path, tok + 5, sizeof(g_init_path) - 1);
+            g_init_path[sizeof(g_init_path) - 1] = 0;
+        } else if (!strncmp(tok, "console=", 8)) {
+            console_choose(tok + 8);
+        }
+        *p = saved;
+        if (*p)
+            p++;
+    }
+}
 
 /* How often the scheduler pre-empts a running user process: SCHED_HZ, which
  * timer.h owns because times(2) and AT_CLKTCK have to report the same rate. */
@@ -206,15 +323,22 @@ void kernel_main(void)
     gdt_init();
     idt_init();
 
+    /* Bring up the real 16550 UART early so console=ttyS0 has a sink ready
+     * before the first kernel message.  No-op on machines without one. */
+    serial8250_early_init();
+
     /* The driver registry has to exist before the first driver init runs,
      * because every one of them announces itself into it. */
     klog_init(); /* /dev-style kernel log ring */
     subsys_init();
     sysfs_init(); /* /sys built-in attributes */
 
-    /* ---- console ------------------------------------------------------ */
+    /* ---- console ------------------------------------------------------
+     * Read the Limine command line and act on init=/console= before we print
+     * the first boot message, so the chosen sink is in effect immediately. */
+    parse_boot_cmdline();
     fbcon_init(&g_bi);
-    fbcon_puts("GNOS (x86-64) booted via Limine\n");
+    console_puts("GNOS (x86-64) booted via Limine\n");
 
     /* ---- memory ------------------------------------------------------- */
     pmm_init();
@@ -382,7 +506,7 @@ void kernel_main(void)
      * fresh 48 MiB arena, which is the only way a mounted filesystem can
      * stay put under a kernel that keeps the whole image resident. */
     if (!root_img) {
-        fbcon_puts("no initrd module: reading root from disk 0 partition 1\n");
+        console_puts("no initrd module: reading root from disk 0 partition 1\n");
         ata_init();
 
         uint64_t frames = 16896; /* 66 MiB: the image is 64 MB plus
@@ -401,7 +525,7 @@ void kernel_main(void)
         dbg_puts(" bytes\r\n");
     }
 
-    fbcon_puts("initrd: mounting EXT2 filesystem...\n");
+    console_puts("initrd: mounting EXT2 filesystem...\n");
     if (!vfs_init(root_img, root_size))
         panic("initrd is not a mountable ext2 volume");
 
@@ -523,18 +647,22 @@ void kernel_main(void)
      * it first so proc_alloc() hands it pid 1, then kthreadd lands on
      * pid 2.  kthreadd will not run until sched_start(); any work queued
      * between now and then is processed once the scheduler is live. */
-    fbcon_puts("starting /sbin/init as pid 1...\n\n");
+    console_puts("Run /sbin/init as init process\n");
 
     /* The boot command line (an initrd-root /cmdline file, written by make
      * from KCMD=...) is spliced into PID 1's argv inside proc_spawn_init();
      * g_boot_cmdline is kept here for /proc/cmdline. */
-    int pid = proc_spawn_init("/sbin/init");
+    int pid = run_init_process();
     if (pid < 0)
-        panic("cannot start /sbin/init");
+        panic("No working init found.  Try passing init= bootarg.");
 
     int kd = proc_spawn_kthreadd();
     if (kd < 0)
         panic("cannot start kthreadd");
+
+    /* PID 0: the idle task, Linux's [swapper/0]. */
+    if (proc_spawn_swapper() < 0)
+        panic("cannot start swapper");
 
     /* init owns the terminal until it hands it to a child of its own. */
     tty_set_pgrp(pid);

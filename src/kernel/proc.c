@@ -896,13 +896,19 @@ int proc_spawn_init(const char *path)
     argv[argc++] = (char *)path;
 
     extern char g_boot_cmdline[256];
-    g_boot_cmdline[0] = 0;
-    uint32_t clen     = 0;
-    if (vfs_read_all("/cmdline", g_boot_cmdline, (uint32_t)sizeof(g_boot_cmdline) - 1, &clen)) {
-        g_boot_cmdline[clen] = 0;
-        while (clen > 0 && (g_boot_cmdline[clen - 1] == '\n' || g_boot_cmdline[clen - 1] == '\r' ||
-                            g_boot_cmdline[clen - 1] == ' '))
-            g_boot_cmdline[--clen] = 0;
+    /* The Limine command line (g_boot_cmdline, filled by main.c from
+     * cmdline_request) wins.  Only if it is empty do we fall back to the
+     * initrd /cmdline file written by make from KCMD=... */
+    if (g_boot_cmdline[0] == 0) {
+        uint32_t clen = 0;
+        if (vfs_read_all("/cmdline", g_boot_cmdline,
+                         (uint32_t)sizeof(g_boot_cmdline) - 1, &clen)) {
+            g_boot_cmdline[clen] = 0;
+            while (clen > 0 && (g_boot_cmdline[clen - 1] == '\n' ||
+                                g_boot_cmdline[clen - 1] == '\r' ||
+                                g_boot_cmdline[clen - 1] == ' '))
+                g_boot_cmdline[--clen] = 0;
+        }
     }
     if (g_boot_cmdline[0]) {
         char *p = g_boot_cmdline;
@@ -1158,10 +1164,91 @@ int proc_spawn_kthreadd(void)
     return p->pid;
 }
 
+/* ---- swapper (PID 0) ---------------------------------------------------
+ * The per-CPU idle task, Linux's [swapper/0].  It is the only process with
+ * pid 0 and it really runs: whenever no other task is runnable the idle
+ * loop re-enables interrupts (or the tick would never fire again -- hlt
+ * with IF=0 sleeps until an NMI and the scheduler dies in its sleep),
+ * drops the CPU into hlt, and wakes on the next interrupt, exactly like
+ * Linux's arch_cpu_idle(). */
+static void idle_main(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        __asm__ volatile("sti; hlt");
+    }
+}
+
+int proc_spawn_swapper(void)
+{
+    proc_t *p = proc_alloc();
+    if (!p) {
+        extern void dbg_puts(const char *);
+        dbg_puts("SWAP: proc_alloc failed\r\n");
+        return -1;
+    }
+
+    p->as      = vmm_kernel_as();
+    p->fs_base = 0;
+    p->uid = p->euid = p->suid = 0;
+    p->ppid                    = 0;
+    p->pgid                    = p->pid;
+    p->sid                     = p->pid;
+    strncpy(p->name, "swapper/0", sizeof(p->name) - 1);
+
+    /* The pid-0 reservation runs only when nothing else is runnable, so it
+     * never needs a fabricated trampoline frame: mark it runnable and let
+     * the scheduler pick it from the queue like any other kernel thread.
+     * The bootstrap block rides in R12 like every kthreadd child. */
+    kthread_bootstrap_t *b = kmalloc(sizeof(*b));
+    if (!b) {
+        slot_release(p);
+        return -1;
+    }
+    b->entry = idle_main;
+    b->arg   = NULL;
+
+    uint64_t sp = p->kstack_top;
+    sp -= 8;
+    *(uint64_t *)(uintptr_t)sp = (uint64_t)(uintptr_t)kthread_trampoline;
+    sp -= 6 * 8;
+    uint64_t *regs = (uint64_t *)(uintptr_t)sp;
+    regs[0]        = 0;                      /* r15 */
+    regs[1]        = 0;                      /* r14 */
+    regs[2]        = 0;                      /* r13 */
+    regs[3]        = (uint64_t)(uintptr_t)b; /* r12 */
+    regs[4]        = 0;                      /* rbx */
+    regs[5]        = 0;                      /* rbp */
+    p->saved_rsp   = sp;
+
+    if (cg_attach_new(p, CG_ROOT) < 0) {
+        kfree(b);
+        slot_release(p);
+        return -1;
+    }
+
+    proc_make_runnable(p);
+    return p->pid;
+}
+
 proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg)
 {
     if (!entry)
         return NULL;
+
+#ifdef SYSTRACE
+    { /* Name the creator: "KBOOT KBOOT" then silence used to be anonymous. */
+        extern void dbg_puts(const char *);
+        extern void dbg_puts_hex(uint64_t);
+        dbg_puts("KTHREAD-CREATE name=");
+        dbg_puts(name ? name : "?");
+        dbg_puts(" entry=");
+        dbg_puts_hex((uint64_t)(uintptr_t)entry);
+        dbg_puts(" caller=");
+        dbg_puts_hex((uint64_t)__builtin_return_address(0));
+        dbg_puts("\r\n");
+    }
+#endif
 
     proc_t *p = proc_alloc();
     if (!p)
@@ -2760,6 +2847,11 @@ static int schedule_locked(void)
 
 static int schedule(void)
 {
+    /* A core that wakes or time-slices after a panic must never resume
+     * scheduling on a dead kernel: park it, Linux-style, instead. */
+    if (g_panicked)
+        for (;;)
+            asm volatile("cli; hlt");
     spin_lock_irq(&g_proc_lock);
     return schedule_locked();
 }

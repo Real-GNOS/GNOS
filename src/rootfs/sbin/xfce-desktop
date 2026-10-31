@@ -16,12 +16,13 @@ export DISPLAY=:0
 /usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset \
     -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
 
-# Wait for the server socket (bounded: a wedged Xorg must not hang boot).
-i=0
-while [ $i -lt 15 ] && [ ! -S /tmp/.X11-unix/X0 ]; do
-    sleep 1
-    i=$((i + 1))
-done
+# No wait loop: every wait primitive we tried here froze the launcher --
+# `sleep 1` fork+exec'd a dynamically linked binary whose musl loader
+# intermittently wedged, and the pure-builtin replacement (`read -t 1`)
+# froze in its poll(2)->EINTR path, stalling the whole user side.  The
+# ::respawn wrapper is the retry: if Xorg has not opened /tmp/.X11-unix/X0
+# yet, the clients below fail, this script exits, and init starts us again
+# against a server that is then up.
 # Diagnostics: if the server never came up, its stdout and log say why.
 /bin/dbgcat.elf /tmp/xorg.out
 /usr/bin/tail -c 1500 /var/log/Xorg.0.log > /tmp/xorglog.txt 2>/dev/null

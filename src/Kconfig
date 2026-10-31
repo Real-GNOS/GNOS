@@ -579,3 +579,15 @@ config GNOS_LIMINE_UEFI
     default y
     help
       生成支持 UEFI 引导的混合 ISO 镜像。
+
+config CMDLINE
+    string "内置默认内核命令行 (built-in kernel command line)"
+    default ""
+    help
+      内核的内置默认命令行（Linux 同名选项 CONFIG_CMDLINE）。
+      优先级：Limine 启动项的 cmd: 行 > 本内置默认值 > initrd 的 /cmdline 文件。
+      即 Limine 提供了 cmd: 就以其为准；否则若本项非空则用之；否则回退到
+      initrd 的 /cmdline 文件（由 make KCMD=... 写入）。
+      多个选项用空格分隔，例如 "console=ttyS0 init=/sbin/init"。
+      留空表示不提供内置默认；此时若也无 cmd: 与 /cmdline 文件，内核回退到
+      console=tty0 与默认 init 列表（/sbin/init、/etc/init、/init、/bin/init）。

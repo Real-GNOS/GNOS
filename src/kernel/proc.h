@@ -507,6 +507,7 @@ typedef struct kthread_work {
 
 proc_t *kthread_create(const char *name, void (*entry)(void *), void *arg);
 int     proc_spawn_kthreadd(void);
+int     proc_spawn_swapper(void);
 void    kthread_wakeup(void);
 
 /* ---- signals ---------------------------------------------------------- */

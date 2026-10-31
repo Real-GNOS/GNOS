@@ -103,7 +103,10 @@ static int buf_ok(uint64_t p, uint64_t len, int writing)
  * component, and runs of slashes collapse.  There are no symlinks on this
  * filesystem, so a lexical walk and a real one cannot disagree.
  */
-static int path_norm(const char *base, const char *path, char *out)
+/* noinline: with GNUOS_PATH_MAX at Linux's 4096, the path scratch inside
+ * here would multiply every caller's stack frame; kept out-of-line its
+ * buffers live and die in this frame alone. */
+__attribute__((noinline)) static int path_norm(const char *base, const char *path, char *out)
 {
     if (!path)
         return -E_INVAL;
@@ -4043,6 +4046,14 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t fla
         uint64_t phys = 0, dsize = 0;
         if (ops->mmap((vfs_node_t *)vfs_file_node(h), off, &phys, &dsize) < 0)
             return -E_INVAL;
+        /* Device-backed frames (a DRM GEM buffer the kernel scans out of, a
+         * capture ring) are owned by the device's allocator, not by this
+         * mapping.  Mark the PTEs shared (PTE_AVL via VM_EXTSHM, the same
+         * treatment the file-mapping branch gives a shared mapping) so
+         * teardown never frees them and fork() never COWs them into a
+         * private copy the kernel side would never see. */
+        if (kind == VFS_CHARDEV)
+            vflags |= VM_EXTSHM;
         uint64_t drounded = (dsize + PAGE_SIZE - 1) & ~0xFFFULL;
         if (size > drounded)
             size = drounded;
@@ -6047,9 +6058,10 @@ void syscall_handler(regs_t *r)
         break;
 
     case SYS_vfork:
-        /* This teaching OS has no COW, so vfork behaves exactly like fork:
-         * the child gets its own address space and must execve() or _exit().
-         * That is what busybox ash needs vfork for (running external commands). */
+        /* vfork behaves like fork: the child gets a copy-on-write view of the
+         * parent's address space (vmm_clone marks the pages PTE_COW) and is
+         * expected to execve() or _exit() immediately.  That is what busybox
+         * ash needs vfork for (running external commands). */
         ret = proc_fork(r);
         break;
 
@@ -6107,6 +6119,27 @@ void syscall_handler(regs_t *r)
         break;
     case SYS_epoll_ctl:
         ret = sys_epoll_ctl((int)a1, (int)a2, (int)a3, r->r10);
+        break;
+
+    /* POSIX message queues (240-245): mq_open/unlink/timedsend/
+     * timedreceive/notify/getsetattr, same numbers as Linux x86-64. */
+    case SYS_mq_open:
+        ret = sys_mq_open(a1, a2, (uint32_t)a3, r->r10);
+        break;
+    case SYS_mq_unlink:
+        ret = sys_mq_unlink(a1);
+        break;
+    case SYS_mq_timedsend:
+        ret = sys_mq_timedsend((int)a1, a2, (uint64_t)(size_t)a3, (unsigned)r->r10, r->r8);
+        break;
+    case SYS_mq_timedreceive:
+        ret = sys_mq_timedreceive((int)a1, a2, (uint64_t)(size_t)a3, r->r10, r->r8);
+        break;
+    case SYS_mq_notify:
+        ret = sys_mq_notify((int)a1, a2);
+        break;
+    case SYS_mq_getsetattr:
+        ret = sys_mq_getsetattr((int)a1, a2, a3);
         break;
     case SYS_epoll_wait:
         ret = sys_epoll_wait((int)a1, a2, (int)a3, (int)r->r10);

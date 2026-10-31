@@ -1,21 +1,36 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * debugcon.c — QEMU debug console output (port 0xE9). (GPLv2)
+ *
+ * When the kernel command line selects console=ttyS0, every character this
+ * file emits to the QEMU debug port is also mirrored to the real 16550 UART
+ * at COM1, so panics and other diagnostics land on the serial console too.
  */
 #include <stdint.h>
 #include "debugcon.h"
 #include "klog.h"
+#include "console.h"
+#include "serial8250.h"
 
 static void outb(uint16_t port, uint8_t v)
 {
     asm volatile("outb %0, %1" : : "a"(v), "Nd"(port));
 }
 
+/* One character to the QEMU debug port, mirrored to the serial console when it
+ * is the selected kernel console. */
+static void debug_port_putc(char c)
+{
+    outb(0xE9, (uint8_t)c);
+    if (g_console == CONSOLE_TTYS0)
+        serial8250_putc(c);
+}
+
 void dbg_putc(char c)
 {
     if (c == '\n')
-        outb(0xE9, '\r');
-    outb(0xE9, (uint8_t)c);
+        debug_port_putc('\r');
+    debug_port_putc(c);
 }
 
 void dbg_puts(const char *s)
@@ -36,7 +51,7 @@ void dbg_puts_dec(uint32_t v)
         v /= 10;
     }
     while (i--)
-        outb(0xE9, (uint8_t)buf[i]);
+        debug_port_putc((char)buf[i]);
 }
 
 void dbg_puts_hex(uint64_t v)

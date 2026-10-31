@@ -297,6 +297,7 @@ void vmm_init(void)
  * load-bias arithmetic is needed here.
  */
 static uint64_t *walk(addrspace_t *as, uint64_t vaddr, int create, unsigned flags);
+static addrspace_t *kernel_space(void); /* defined with the module-loader helpers */
 void             vmm_map_kernel_bss(void)
 {
     extern char _bss_start[];
@@ -312,8 +313,9 @@ void             vmm_map_kernel_bss(void)
     dbg_puts(")\r\n");
 
     /* Same physical PML4 the running kernel uses; mapping through it means the
-     * new PTEs are live immediately. */
-    addrspace_t k    = {.pml4_phys = g_kernel_pml4_phys};
+     * new PTEs are live immediately.  The anchor is the shared static (see
+     * kernel_space below): a stack copy of addrspace_t is ~16 KiB. */
+    addrspace_t *k    = kernel_space();
     uint64_t    base = start & ~0xFFFULL;
     for (uint64_t va = base; va < end; va += PAGE_SIZE) {
         uint64_t *pte      = walk(&k, va, 0, 0); /* no allocate, just inspect */
@@ -664,24 +666,35 @@ int vmm_page_shared(addrspace_t *as, uint64_t vaddr)
 /* The kernel runs on a page table that is not one of the proc address
  * spaces, so all three wrap the walker with a space anchored at the
  * kernel PML4.  vmm_map_kernel is what maps module pages into the kernel
- * image's own higher-half. */
+ * image's own higher-half.
+ *
+ * The anchor is a static singleton, never a stack local: addrspace_t
+ * carries the full mmap-record table (mmaps[512], ~16 KiB) and a stack
+ * copy blew every frame that touched these helpers past the 32 KiB
+ * kernel stack.  Callers run under the BKL (or at early boot, single
+ * threaded), so one shared instance cannot race. */
+static addrspace_t g_kernel_space;
+
+static addrspace_t *kernel_space(void)
+{
+    g_kernel_space.pml4_phys = g_kernel_pml4_phys;
+    g_kernel_space.refs      = 1;
+    return &g_kernel_space;
+}
 
 int vmm_map_kernel(uint64_t vaddr, uint64_t paddr, unsigned flags)
 {
-    addrspace_t k = {.pml4_phys = g_kernel_pml4_phys};
-    return vmm_map(&k, vaddr, paddr, flags);
+    return vmm_map(kernel_space(), vaddr, paddr, flags);
 }
 
 int vmm_unmap_kernel(uint64_t vaddr, uint64_t size)
 {
-    addrspace_t k = {.pml4_phys = g_kernel_pml4_phys};
-    return vmm_unmap(&k, vaddr, size);
+    return vmm_unmap(kernel_space(), vaddr, size);
 }
 
 int vmm_kernel_present(uint64_t vaddr)
 {
-    addrspace_t k = {.pml4_phys = g_kernel_pml4_phys};
-    return vmm_resolve(&k, vaddr) != 0;
+    return vmm_resolve(kernel_space(), vaddr) != 0;
 }
 
 /* Page-fault forensics: print the four page-table entries for `va` in the

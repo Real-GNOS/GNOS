@@ -44,6 +44,10 @@ USERLAND ?= minirootfs
 # libcpp/lex.cc:1163) that randomly kills preprocessing of perfectly
 # ordinary files (getty.c, ncurses's make_hash.c, ...).
 CC      := gcc-13
+# C++ compiler for the host-side config tool (gnoscfg).  Override on the
+# command line, e.g. `make CXX=g++ ...`, since these lines used a literal
+# g++-13 before and ignored CXX=.
+CXX     ?= g++-13
 AS      := nasm
 LD      := ld
 OBJCOPY := objcopy
@@ -114,7 +118,7 @@ BASEFLAGS := -m64 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
 KCFLAGS := $(BASEFLAGS) -fpie -DSYSTRACE \
             $(shell if [ -f build/.config ]; then \
               sed -n 's/^CONFIG_\(.*\)=y/-DCONFIG_\1=1/p; s/^CONFIG_\(.*\)="\([^"]*\)"/-DCONFIG_\1=\"\2\"/p; s/^CONFIG_\(.*\)=\([0-9][0-9]*\)/-DCONFIG_\1=\2/p' build/.config; \
-            fi)
+            fi) $(KCFLAGS_EXTRA)
 # user programs: linked at a fixed address by $(USER_DIR)/user.ld
 UCFLAGS := $(BASEFLAGS) -I$(USER_DIR) -fno-pie -fno-pic
 
@@ -128,7 +132,7 @@ INITRD  := $(BUILD)/initrd.img
 ISO     := $(BUILD)/gnos.iso
 ISO_ROOT := $(BUILD)/iso
 
-KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
+KOBJS := $(BUILD)/main.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/fbdev.o \
          $(BUILD)/drm_drv.o $(BUILD)/drm_file.o $(BUILD)/drm_auth.o \
          $(BUILD)/drm_ioctl.o $(BUILD)/drm_init.o $(BUILD)/drm_devtmpfs.o \
@@ -155,7 +159,7 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/netlink.o \
          $(BUILD)/ipv6.o \
          $(BUILD)/gzip.o \
-         $(BUILD)/debugcon.o $(BUILD)/ext2.o $(BUILD)/panic.o \
+         $(BUILD)/debugcon.o $(BUILD)/printk_console.o $(BUILD)/ext2.o $(BUILD)/panic.o \
          $(BUILD)/gdt.o $(BUILD)/idt.o $(BUILD)/isr.o \
          $(BUILD)/kstring.o $(BUILD)/vfs.o $(BUILD)/procfs.o $(BUILD)/debugfs.o $(BUILD)/tmpfs.o $(BUILD)/tty_core.o $(BUILD)/tty_io.o $(BUILD)/console.o $(BUILD)/tty_kbd.o $(BUILD)/vt.o $(BUILD)/vt_ansi.o $(BUILD)/heap.o \
          $(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/slab.o $(BUILD)/proc.o $(BUILD)/cgroup.o $(BUILD)/cgroup_cpu.o $(BUILD)/cgroup_mem.o $(BUILD)/cgroup_fs.o $(BUILD)/ptrace.o \
@@ -172,11 +176,12 @@ KOBJS := $(BUILD)/kernel.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
         $(BUILD)/xhci.o $(BUILD)/usb_hid.o $(BUILD)/usb_msc.o \
         $(BUILD)/anonfd.o $(BUILD)/epoll.o $(BUILD)/inotify.o $(BUILD)/timerfd.o $(BUILD)/signalfd.o \
         $(BUILD)/mutex.o \
-        $(BUILD)/pty.o $(BUILD)/calsa.o $(BUILD)/klog.o $(BUILD)/cpuid.o $(BUILD)/pagecache.o \
+        $(BUILD)/pty.o $(BUILD)/serial8250.o $(BUILD)/calsa.o $(BUILD)/klog.o $(BUILD)/cpuid.o $(BUILD)/pagecache.o \
         $(BUILD)/pidfd.o $(BUILD)/process_vm_access.o $(BUILD)/quota.o $(BUILD)/ff.o $(BUILD)/diskio.o $(BUILD)/ffsystem.o $(BUILD)/fatfs_vfs.o \
         $(BUILD)/secretmem.o $(BUILD)/landlock.o \
         $(BUILD)/unix.o \
         $(BUILD)/sysvipc.o \
+        $(BUILD)/mqueue.o \
         $(BUILD)/seccomp.o \
         $(BUILD)/module.o $(BUILD)/module_elf.o $(BUILD)/exports.o \
         $(BUILD)/crypto.o \
@@ -644,16 +649,16 @@ NC_INC       := $(NC_STAGE)/include/ncursesw
 NC_LIBS      := $(NC_STAGE)/lib/libncursesw.a $(NC_STAGE)/lib/libtinfow.a
 
 $(BUILD)/gnoscfg_kconfig.o: $(GNOSCFG_SRC)/kconfig.cpp $(GNOSCFG_SRC)/kconfig.h | $(BUILD)
-	g++-13 -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
+	$(CXX) -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
 
 $(BUILD)/gnoscfg_menu.o: $(GNOSCFG_SRC)/menu.cpp $(GNOSCFG_SRC)/kconfig.h | $(BUILD)
-	g++-13 -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
+	$(CXX) -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
 
 $(BUILD)/gnoscfg_main.o: $(GNOSCFG_SRC)/main.cpp $(GNOSCFG_SRC)/kconfig.h | $(BUILD)
-	g++-13 -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
+	$(CXX) -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
 
 $(GNOSCFG_BIN): $(GNOSCFG_OBJS) $(NC_LIBS) | $(BUILD)
-	g++-13 -std=c++20 -static -no-pie -L$(NC_STAGE)/lib -o $@ $(GNOSCFG_OBJS) \
+	$(CXX) -std=c++20 -static -no-pie -L$(NC_STAGE)/lib -o $@ $(GNOSCFG_OBJS) \
 	  $(NC_LIBS) -ltinfow -lm
 
 config menuconfig: $(GNOSCFG_BIN) src/Kconfig
@@ -895,7 +900,7 @@ DEPS := $(KOBJS:.o=.d) $(UOBJS:.o=.d) $(MUSL_OBJS:.o=.d) $(UCRT:.o=.d) \
 # Excluded on purpose: the userland (its init.c would otherwise compete with
 # init/init.c for the bare name), the bootloader, the config tool and the
 # sample modules, all of which are built by their own explicit rules.  init/
-# itself stays in: kernel_entry (kernel.c) and the Limine request block live
+# itself stays in: kernel_entry (main.c) and the Limine request block live
 # there and are ordinary kernel objects.
 VPATH_SRC := $(filter-out src/usr/% src/bootloader/% \
                           src/scripts/kconfig/% src/samples/modules/%,$(KERNEL_DIRS))
@@ -1255,6 +1260,11 @@ $(BUILD)/acpica_osl.o: src/drivers/acpi/acpica_osl.c | $(BUILD)
 $(BUILD)/%.o: %.c | $(BUILD)
 	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<
 
+# printk/console.c shares its basename with drivers/tty/console.c; the vpath
+# rule would shadow the console router (g_console) with the tty one.  Own name.
+$(BUILD)/printk_console.o: src/kernel/printk/console.c | $(BUILD)
+	$(CC) $(KCFLAGS) $(DEPFLAGS) -c -o $@ $<
+
 $(BUILD)/%.o: %.asm | $(BUILD)
 	$(AS) -f elf64 -o $@ $<
 
@@ -1281,7 +1291,7 @@ cjkfont:
 
 $(KRNL): $(KOBJS) linker.ld
 	$(CC) $(KCFLAGS) -static-pie -Wl,-T,linker.ld -Wl,-z,max-page-size=0x1000 \
-	  -Wl,--build-id=none -o $@ $(KOBJS)
+	  -Wl,--build-id=none -Wl,-z,notext -o $@ $(KOBJS)
 
 # ---------- loadable kernel modules (.ko) ----------
 # src/samples/modules/*.c -> build/modules/*.ko.  These are plain ET_REL
@@ -1543,6 +1553,7 @@ endif
 	chmod 644 $(BUILD)/initrd-root/var/log/lastlog
 	cp $(BUILD)/bgidm.elf $(BUILD)/initrd-root/bin/bgidm
 	cp $(BUILD)/chvt.elf  $(BUILD)/initrd-root/usr/bin/chvt
+	cp $(BUILD)/spawntest.elf $(BUILD)/initrd-root/usr/bin/spawntest
 	# ---- loadable kernel modules: /lib/modules, like every Linux ---------
 	mkdir -p $(BUILD)/initrd-root/lib/modules
 	for k in $(KMODS); do \
@@ -1744,9 +1755,11 @@ endif  # USERLAND=src: busybox/bash/coreutils/binutils/fastfetch/curl/nano/pytho
 	    ln -sf ../../bin/$$c $(BUILD)/initrd-root/usr/bin/$$c; \
 	  fi; \
 	done
-	# Kernel command line carrier: `make KCMD="single"` drops the words into
-	# /cmdline at the initrd root; the kernel reads that file before PID 1
-	# (Limine does not forward conf cmdline: to direct-protocol kernels).
+	# Kernel command line carrier for DISK installs: `make KCMD="single"`
+	# drops the words into /cmdline at the initrd root; the kernel reads that
+	# file before PID 1 *only when* the Limine boot entry carries no cmd:
+	# line.  For the ISO and the QEMU limine.conf the cmd: line is the
+	# preferred source (see below); this file is the fallback.
 	@if [ -n "$(KCMD)" ]; then \
 	    echo "$(KCMD)" > $(BUILD)/initrd-root/cmdline; \
 	fi
@@ -1814,7 +1827,8 @@ endif
 # ---------- Limine hybrid ISO ----------
 # The bootloader config inside the ISO is generated from the same single
 # entry every time, plus an optional kernel command line.  `make KCMD=single
-# build/gnos.iso` (or any boot target) puts `cmdline: single` in the conf,
+# build/gnos.iso` (or any boot target) puts `cmd: single` in the conf
+# (the limine/executable protocol keyword, not the linux `cmdline:`),
 # Limine hands it to the kernel, and the kernel passes the word to /init.elf
 # -> single-user root bash.  The .kcmd stamp makes the ISO rebuild only when
 # KCMD actually changes value.
@@ -1838,7 +1852,7 @@ $(ISO): $(KRNL) $(INITRD) $(BUILD)/.kcmd $(LIMINE_BIOS) $(LIMINE_UEFI) | $(BUILD
 	# while the ISO holds a fraction of the ext2 image's size.
 	gzip -c $(INITRD) > $(ISO_ROOT)/initrd.img.gz
 	printf 'timeout: 1\n\n/GNOS\n    protocol: limine\n    kernel_path: boot():/GNOSKr.elf\n    module_path: boot():/initrd.img.gz\n' > $(ISO_ROOT)/limine.conf
-	@if [ -n "$(KCMD)" ]; then echo "    cmdline: $(KCMD)" >> $(ISO_ROOT)/limine.conf; fi
+	@if [ -n "$(KCMD)" ]; then echo "    cmd: $(KCMD)" >> $(ISO_ROOT)/limine.conf; fi
 	cp $(LIMINE_BIOS) $(ISO_ROOT)/limine-bios-cd.bin
 	cp $(LIMINE_UEFI) $(ISO_ROOT)/limine-uefi-cd.bin
 	cp limine/limine-bios.sys $(ISO_ROOT)/limine-bios.sys

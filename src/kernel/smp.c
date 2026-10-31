@@ -77,9 +77,16 @@ void smp_tlb_shootdown_all(void)
         uint64_t spin = 0;
         while (__atomic_load_n(&g_tlb_ack[i], __ATOMIC_ACQUIRE) != epoch) {
             if (++spin > 2000000000ULL) {
+                /* A straggler is not worth the kernel: it just keeps its
+                 * stale TLB until the next shootdown (Linux warns here,
+                 * it does not panic).  Clear the active flag first so the
+                 * late NMI handler discards the stale epoch. */
                 __atomic_store_n(&g_tlb_active, 0, __ATOMIC_RELEASE);
+                dbg_puts("smp_tlb: no ack from CPU ");
+                dbg_puts_dec((uint32_t)i);
+                dbg_puts(" (continuing)\r\n");
                 spin_unlock_irq(&g_tlb_lock);
-                panic("smp_tlb: no ack from CPU");
+                return;
             }
             cpu_relax();
         }

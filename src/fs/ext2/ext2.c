@@ -28,6 +28,7 @@
 #include "ext2.h"
 #include "pagecache.h"
 #include "kstring.h"
+#include "heap.h"
 
 /* ---- superblock field offsets ----------------------------------------- */
 #define SB_INODES_COUNT     0
@@ -1347,14 +1348,28 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow, uint32_t *paren
                 blk_put(fs, ip);
                 return 0; /* too many nested symlinks */
             }
-            char target[SYMLINK_MAX];
-            int  tlen = read_symlink_target(fs, ino, target, sizeof target);
-            blk_put(fs, ip);
-            if (tlen < 0)
+            /* SYMLINK_MAX plus two component tables no longer fit on a
+             * 32 KiB kernel stack beside comp[]: take them from the heap,
+             * in one block so the exits here need a single kfree. */
+            char *tgt_scratch = kmalloc(SYMLINK_MAX + 2 * PW_MAXCOMP * EXT2_NAME_MAX);
+            if (!tgt_scratch) {
+                blk_put(fs, ip);
                 return 0;
+            }
+            char *target = tgt_scratch;
+            char (*tcomp)[EXT2_NAME_MAX] =
+                (char (*)[EXT2_NAME_MAX])(void *)(tgt_scratch + SYMLINK_MAX);
+            char (*save)[EXT2_NAME_MAX] =
+                (char (*)[EXT2_NAME_MAX])(void *)(tgt_scratch + SYMLINK_MAX +
+                                                  PW_MAXCOMP * EXT2_NAME_MAX);
+            int tlen = read_symlink_target(fs, ino, target, SYMLINK_MAX);
+            blk_put(fs, ip);
+            if (tlen < 0) {
+                kfree(tgt_scratch);
+                return 0;
+            }
 
-            char tcomp[PW_MAXCOMP][EXT2_NAME_MAX];
-            int  nt = 0;
+            int nt = 0;
             {
                 const char *p = target;
                 while (*p) {
@@ -1362,8 +1377,10 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow, uint32_t *paren
                         p++;
                     if (!*p)
                         break;
-                    if (nt >= PW_MAXCOMP)
+                    if (nt >= PW_MAXCOMP) {
+                        kfree(tgt_scratch);
                         return 0;
+                    }
                     uint32_t l = 0;
                     while (*p && *p != '/') {
                         if (l < EXT2_NAME_MAX - 1)
@@ -1381,9 +1398,8 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow, uint32_t *paren
              * is a complete path of its own and must DISCARD everything
              * before the symlink, or we would end up with e.g.
              * "/a/b" -> "/c" walking as "/a/c". */
-            int  is_abs = (target[0] == '/');
-            char save[PW_MAXCOMP][EXT2_NAME_MAX];
-            memcpy(save, comp, sizeof save);
+            int is_abs = (target[0] == '/');
+            memcpy(save, comp, PW_MAXCOMP * EXT2_NAME_MAX);
             int sn = ncomp, k = 0;
             if (!is_abs)
                 for (int j = 0; j < i; j++) {
@@ -1410,6 +1426,7 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow, uint32_t *paren
             } else { /* relative: continue in cwd */
                 i = i - 1;
             }
+            kfree(tgt_scratch);
             continue;
         }
 

@@ -137,6 +137,19 @@ static const struct drm_ioctl_desc drm_dummy_ioctls[] = {
     {DRM_IOCTL_MODE_GETFB2, drm_mode_getfb2_ioctl, DRM_AUTH},
 };
 
+/* Dirty hook: a client that renders into a dumb buffer and presents with
+ * DRM_IOCTL_MODE_DIRTYFB (Xorg's modesetting driver in shadow mode does
+ * exactly that) needs the ioctl to succeed.  The pixels are already in the
+ * GEM backing the client mmap'd, and our software scanout copies that
+ * backing to the screen once per tick -- so the hook only forces one
+ * refresh now instead of waiting for the next tick. */
+static int drm_dummy_fb_dirty(struct drm_framebuffer *fb, struct drm_file *file_priv,
+                              unsigned int flags, unsigned int color, struct drm_clip_rect *clips,
+                              unsigned int num_clips);
+static const struct drm_framebuffer_funcs drm_dummy_fb_funcs = {
+    .dirty = drm_dummy_fb_dirty,
+};
+
 static struct drm_driver drm_dummy_driver = {
     .name             = "drm",
     .desc             = "GNOS software DRM",
@@ -155,6 +168,7 @@ static struct drm_driver drm_dummy_driver = {
     .dumb_destroy     = drm_gem_dumb_destroy,
     .ioctls           = drm_dummy_ioctls,
     .num_ioctls       = sizeof(drm_dummy_ioctls) / sizeof(drm_dummy_ioctls[0]),
+    .fb_funcs         = &drm_dummy_fb_funcs,
 };
 
 /* ---------------------------------------------------------- the pipeline */
@@ -284,6 +298,21 @@ void drm_dummy_refresh(void)
     }
 
     drm_dummy_draw_cursor(dst, dw, dh, dstep);
+}
+
+static int drm_dummy_fb_dirty(struct drm_framebuffer *fb, struct drm_file *file_priv,
+                              unsigned int flags, unsigned int color, struct drm_clip_rect *clips,
+                              unsigned int num_clips)
+{
+    (void)file_priv;
+    (void)flags;
+    (void)color;
+    (void)clips;
+    (void)num_clips;
+    if (fb != NULL && fb == g_scan_fb) {
+        drm_dummy_refresh();
+    }
+    return 0;
 }
 
 /*

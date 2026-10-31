@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include "vfs.h"
+#include "heap.h"
 #include "cgroup.h"
 #include "ext2.h"
 #include "fatfs_vfs.h"
@@ -193,6 +194,17 @@ static int32_t pipe_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t l
             asm volatile("sti");
             return -E_INTR;
         }
+        /* TEMPORARY spawn debugging: which reader blocks, and why the
+         * EOF condition (writers == 0) has not fired for it. */
+        dbg_puts("PIPE-BLK pid=");
+        dbg_puts_dec((uint32_t)me->pid);
+        dbg_puts(" w=");
+        dbg_puts_dec(p->writers);
+        dbg_puts(" r=");
+        dbg_puts_dec(p->readers);
+        dbg_puts(" cnt=");
+        dbg_puts_dec(p->count);
+        dbg_puts("\r\n");
         sched_block_irqoff(WAIT_PIPE);
     }
 
@@ -811,22 +823,31 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
      * and dies with ENOENT. */
     {
         /* devtmpfs: a mounted /dev routes to the live registry.  /dev/shm
-         * keeps falling through so its tmpfs mount wins. */
-        char devrel[GNUOS_PATH_MAX];
-        if (vfs_route_dev(path, devrel)) {
+         * keeps falling through so its tmpfs mount wins.  GNUOS_PATH_MAX is
+         * Linux's 4096 now, so path scratch comes from the heap: two such
+         * buffers no longer fit on a 32 KiB kernel stack. */
+        char *devrel = kmalloc(GNUOS_PATH_MAX);
+        if (!devrel)
+            return -E_NOMEM;
+        int routed = vfs_route_dev(path, devrel);
+        int r      = 0;
+        if (routed) {
             if (strcmp(devrel, "/") == 0) {
                 /* the mount point itself is a directory */
                 memset(out, 0, sizeof(*out));
                 strncpy(out->name, "dev", VFS_NAME_MAX - 1);
                 out->kind = VFS_DIR;
-                return 0;
+            } else {
+                vfs_node_t *d = dev_lookup(devrel + 1);
+                if (!d)
+                    r = -E_NOENT;
+                else
+                    *out = *d;
             }
-            vfs_node_t *d = dev_lookup(devrel + 1);
-            if (!d)
-                return -E_NOENT;
-            *out = *d;
-            return 0;
         }
+        kfree(devrel);
+        if (routed)
+            return r;
         if (strncmp(path, "/dev/", 5) == 0) {
             vfs_node_t *d = dev_lookup(path + 5);
             if (!d)
@@ -853,9 +874,16 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
      * tree, the same way a tmpfs mount shadows the ext2 image at its root.
      * Checked before /sys so a hierarchy mounted at /sys/fs/cgroup shadows
      * the kernel's own tree there, like any mounted filesystem would. */
-    char crel[GNUOS_PATH_MAX];
-    if (vfs_route_cgroup(path, crel))
-        return cgfs_resolve(crel, out);
+    {
+        char *crel = kmalloc(GNUOS_PATH_MAX);
+        if (!crel)
+            return -E_NOMEM;
+        int routed = vfs_route_cgroup(path, crel);
+        int r      = routed ? cgfs_resolve(crel, out) : 0;
+        kfree(crel);
+        if (routed)
+            return r;
+    }
 
     /* /sys is the kernel's object hierarchy, same family as /proc and
      * /debug: the tree is the live kobject hierarchy (device model), and
@@ -866,40 +894,72 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
 
     /* A mounted tmpfs shadows the ext2 image at its mount point, exactly as
      * /proc shadows the empty /proc directory the image carries. */
-    char     mrel[GNUOS_PATH_MAX];
-    tmpfs_t *mfs = vfs_route_tmpfs(path, mrel);
-    if (mfs)
-        return tmpfs_resolve(mfs, mrel, out);
+    {
+        char *mrel = kmalloc(GNUOS_PATH_MAX);
+        if (!mrel)
+            return -E_NOMEM;
+        tmpfs_t *mfs = vfs_route_tmpfs(path, mrel);
+        int      r   = mfs ? tmpfs_resolve(mfs, mrel, out) : 0;
+        kfree(mrel);
+        if (mfs)
+            return r;
+    }
 
     /* A disk-mounted ext2/ext4 volume shadows the root image below its
      * mount point.  The relative path is always '/'-rooted, which is what
      * ext2_lookup expects. */
-    char fat_rel[GNUOS_PATH_MAX];
-    if (fatfs_route(path, fat_rel))
-        return fatfs_resolve(fat_rel, out);
+    {
+        char *fat_rel = kmalloc(GNUOS_PATH_MAX);
+        if (!fat_rel)
+            return -E_NOMEM;
+        int routed = fatfs_route(path, fat_rel);
+        int r      = routed ? fatfs_resolve(fat_rel, out) : 0;
+        kfree(fat_rel);
+        if (routed)
+            return r;
+    }
 
-    char iso_rel[GNUOS_PATH_MAX];
-    if (iso9660_route(path, iso_rel))
-        return iso9660_resolve(iso_rel, out);
+    {
+        char *iso_rel = kmalloc(GNUOS_PATH_MAX);
+        if (!iso_rel)
+            return -E_NOMEM;
+        int routed = iso9660_route(path, iso_rel);
+        int r      = routed ? iso9660_resolve(iso_rel, out) : 0;
+        kfree(iso_rel);
+        if (routed)
+            return r;
+    }
 
-    char bfs_rel[GNUOS_PATH_MAX];
-    if (vfs_route_bfs(path, bfs_rel)) {
-        if (!g_bfs_ok)
-            return -E_NOENT;
-        ext2_dirent_t ent;
-        if (!ext2_lookup(&g_bfs, bfs_rel, &ent, follow))
-            return -E_NOENT;
-        memset(out, 0, sizeof(*out));
-        strncpy(out->name, ent.name, VFS_NAME_MAX - 1);
-        uint16_t m = (uint16_t)(ent.mode & 0xF000);
-        out->kind  = (m == EXT2_S_IFDIR) ? VFS_DIR : (m == EXT2_S_IFLNK) ? VFS_SYMLINK : VFS_FILE;
-        out->size  = ent.size;
-        out->ops   = (out->kind == VFS_DIR) ? &g_bfs_dir_ops : &g_bfs_file_ops;
-        out->e2    = ent;
-        out->mode  = ent.mode;
-        out->uid   = ent.uid;
-        out->gid   = ent.gid;
-        return 0;
+    {
+        char *bfs_rel = kmalloc(GNUOS_PATH_MAX);
+        if (!bfs_rel)
+            return -E_NOMEM;
+        int routed = vfs_route_bfs(path, bfs_rel);
+        int r      = 0;
+        if (routed) {
+            if (!g_bfs_ok) {
+                kfree(bfs_rel);
+                return -E_NOENT;
+            }
+            ext2_dirent_t ent;
+            if (!ext2_lookup(&g_bfs, bfs_rel, &ent, follow))
+                r = -E_NOENT;
+            else {
+                memset(out, 0, sizeof(*out));
+                strncpy(out->name, ent.name, VFS_NAME_MAX - 1);
+                uint16_t m = (uint16_t)(ent.mode & 0xF000);
+                out->kind  = (m == EXT2_S_IFDIR) ? VFS_DIR : (m == EXT2_S_IFLNK) ? VFS_SYMLINK : VFS_FILE;
+                out->size  = ent.size;
+                out->ops   = (out->kind == VFS_DIR) ? &g_bfs_dir_ops : &g_bfs_file_ops;
+                out->e2    = ent;
+                out->mode  = ent.mode;
+                out->uid   = ent.uid;
+                out->gid   = ent.gid;
+            }
+        }
+        kfree(bfs_rel);
+        if (routed)
+            return r;
     }
 
     if (!g_fs_ok)
@@ -1180,8 +1240,14 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
     /* A /proc directory has no inode to walk, so it is enumerated by index
      * from the generated table instead of by reading blocks off the disk. */
     {
-        char devrel[GNUOS_PATH_MAX];
-        if (vfs_route_dev(f->path, devrel) && strcmp(devrel, "/") == 0) {
+        /* GNUOS_PATH_MAX is Linux's 4096 now: path scratch comes from the
+         * heap, two such buffers no longer fit on a 32 KiB kernel stack. */
+        char *devrel = kmalloc(GNUOS_PATH_MAX);
+        if (!devrel)
+            return -E_NOMEM;
+        int routed = vfs_route_dev(f->path, devrel);
+        int r      = 0;
+        if (routed && strcmp(devrel, "/") == 0) {
             /* the devtmpfs mount point: enumerate the registry */
             uint8_t *p   = (uint8_t *)buf;
             uint64_t off = 0;
@@ -1196,8 +1262,11 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
                 off += rec;
                 f->pos++;
             }
-            return (int64_t)off;
+            r = (int64_t)off;
         }
+        kfree(devrel);
+        if (routed)
+            return r;
     }
     if (strncmp(f->path, "/proc", 5) == 0 && (f->path[5] == '\0' || f->path[5] == '/'))
         return proc_getdents64(f, buf, len);
@@ -1211,15 +1280,28 @@ int64_t vfs_dir_getdents64(int h, void *buf, uint32_t len)
         return sysfs_getdents64(f, buf, len);
 
     /* A cgroup mount is enumerated against the shared v2 hierarchy. */
-    char cgrel[GNUOS_PATH_MAX];
-    if (vfs_route_cgroup(f->path, cgrel))
-        return cgroupfs_getdents64(f, buf, len);
+    {
+        char *cgrel = kmalloc(GNUOS_PATH_MAX);
+        if (!cgrel)
+            return -E_NOMEM;
+        int routed = vfs_route_cgroup(f->path, cgrel);
+        int r      = routed ? cgroupfs_getdents64(f, buf, len) : 0;
+        kfree(cgrel);
+        if (routed)
+            return r;
+    }
 
     /* A tmpfs mount is enumerated the same way: by index from its tree. */
-    char     mrel[GNUOS_PATH_MAX];
-    tmpfs_t *mfs = vfs_route_tmpfs(f->path, mrel);
-    if (mfs)
-        return tmpfs_getdents64(f, buf, len);
+    {
+        char *mrel = kmalloc(GNUOS_PATH_MAX);
+        if (!mrel)
+            return -E_NOMEM;
+        tmpfs_t *mfs = vfs_route_tmpfs(f->path, mrel);
+        int      r   = mfs ? tmpfs_getdents64(f, buf, len) : 0;
+        kfree(mrel);
+        if (mfs)
+            return r;
+    }
 
     /* A disk-mounted ext2/ext4 volume is enumerated from g_bfs, not the
      * root image.  The node's ops tell us which volume it belongs to. */
@@ -2118,6 +2200,17 @@ void vfs_file_unref(int h)
 
         if (--f->refs <= 0) {
             f->refs = 0;
+            /* The descriptor table is the authority on who is still
+             * attached.  A fork/exec cycle can miscount one side's ref
+             * (the spawn machinery saw a live reader fd with readers == 0
+             * and a writer fd with writers == 1, so the EOF condition
+             * never fired and the blocking read hung forever); when the
+             * last descriptor onto THIS end closes, force the counter to
+             * agree with reality. */
+            if (f->flags == O_WRONLY)
+                p->writers = 0;
+            else
+                p->readers = 0;
             if (p->readers == 0 && p->writers == 0)
                 p->used = 0;
         }

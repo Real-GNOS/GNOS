@@ -26,6 +26,10 @@ void panic(const char *msg) __attribute__((noreturn));
 /* Exception entry point called from the ISR dispatcher. */
 void panic_from_frame(const char *msg, const regs_t *r) __attribute__((noreturn));
 
+/* Set while a panic is being printed: other cores check this from the
+ * scheduler and from second faults, and park instead of running on. */
+extern volatile int g_panicked;
+
 /* Hex/decimal helpers shared with the console. */
 void dbg_puts(const char *s);
 void dbg_puts_dec(uint32_t v);

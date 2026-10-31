@@ -15,10 +15,11 @@
 
 #include <stdint.h>
 
-/* Maximum length of a path the kernel will store or resolve.  Musl's own
- * PATH_MAX is 4096; 256 is plenty for a teaching OS and keeps per-open-file and
- * per-process cwd buffers small. */
-#define GNUOS_PATH_MAX 256
+/* Maximum length of a path the kernel will store or resolve.  Matches
+ * Linux's PATH_MAX so the ABI stops truncating real-world paths; kernel
+ * stack buffers sized by this must stay within KSTACK_SIZE (see the
+ * -Wframe-larger-than audit in the Makefile check target). */
+#define GNUOS_PATH_MAX 4096
 
 #define SYS_read            0
 #define SYS_write           1
@@ -211,6 +212,12 @@
 #define SYS_epoll_wait        232
 #define SYS_epoll_ctl         233
 #define SYS_epoll_pwait       281
+#define SYS_mq_open           240
+#define SYS_mq_unlink         241
+#define SYS_mq_timedsend      242
+#define SYS_mq_timedreceive   243
+#define SYS_mq_notify         244
+#define SYS_mq_getsetattr     245
 #define SYS_eventfd           284
 #define SYS_eventfd2          290
 #define SYS_epoll_create1     291

@@ -47,10 +47,13 @@ static void timer_irq(regs_t *r)
        * preemption, timeouts, the DRM refresh thread -- dies silently. */
         static unsigned long tk;
         if ((++tk & 1023) == 0) {
-            extern void dbg_puts(const char *);
-            extern void dbg_puts_hex(uint64_t);
+            extern void  dbg_puts(const char *);
+            extern void  dbg_puts_hex(uint64_t);
+            extern unsigned long pmm_free_frames(void);
             dbg_puts("TICK ");
             dbg_puts_hex((uint64_t)tk);
+            dbg_puts(" free=");
+            dbg_puts_hex((uint64_t)pmm_free_frames());
             dbg_puts("\n");
         }
     }
