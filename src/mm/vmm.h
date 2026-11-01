@@ -120,7 +120,6 @@ typedef struct addrspace {
         uint64_t base;
         uint64_t size;
         unsigned flags;
-        uint64_t cksum;
     } mmaps[512];
     int nmmaps;
 
@@ -245,6 +244,11 @@ uint32_t     vmm_frame_ref_slots(void);           /* live entries (self tests) *
  * there or a new frame could not be allocated. */
 int vmm_cow_break(addrspace_t *as, uint64_t va);
 
+/* Swap: evict a few anonymous user pages (tick callback under memory
+ * pressure) and restore a swapped page on fault (fault_back_lazy hook). */
+int vmm_swap_scan(void);
+int vmm_swap_restore(addrspace_t *as, uint64_t vaddr);
+
 /* True when the page holding `va` is a fork() page still being shared, i.e.
  * one vmm_cow_break() away from being this address space's own. */
 int vmm_page_is_cow(addrspace_t *as, uint64_t vaddr);
@@ -260,9 +264,6 @@ void vmm_switch_kernel(void);
  * kernel threads: vmm_switch() needs a valid addrspace_t and a kthread has
  * no user memory of its own, so it runs on the kernel PML4 instead. */
 addrspace_t *vmm_kernel_as(void);
-void         vmm_as_debug_dump(void);
-uint64_t     vmm_region_checksum(addrspace_t *as, uint64_t base, uint64_t size);
-void         vmm_alias_scan(uint64_t frame);
 
 /* Boot-time proof that sharing, separation and teardown leave nothing
  * behind; see the comment over its body. */

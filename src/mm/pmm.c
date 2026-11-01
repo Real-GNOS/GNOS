@@ -26,12 +26,6 @@ static uint8_t *g_bitmap; /* 1 = allocated, 0 = free */
 static uint64_t g_bitmap_bytes;
 static uint64_t g_total; /* frames covered by the bitmap */
 static uint64_t g_free;
-/* TEMPORARY Xorg debugging: release history ring. */
-static struct {
-    uint64_t frame;
-    uint64_t ra;
-} g_free_log[4096];
-static int      g_free_log_idx;
 static uint64_t g_next_hint; /* where the last search stopped */
 /* The physical allocator runs on every CPU (syscall paths hold the BKL, but
  * kernel threads -- the DRM refresh tick, for one -- allocate without it), so
@@ -202,35 +196,7 @@ void pmm_free(uint64_t phys)
     g_free++;
     if (f < g_next_hint)
         g_next_hint = f;
-    /* TEMPORARY Xorg debugging: ring-buffer the last frees so a
-     * freed-while-still-mapped frame can be traced to its release site. */
-    g_free_log[g_free_log_idx].frame = f;
-    g_free_log[g_free_log_idx].ra    = (uint64_t)__builtin_return_address(0);
-    g_free_log_idx = (g_free_log_idx + 1) % (int)(sizeof(g_free_log) / sizeof(g_free_log[0]));
     spin_unlock_irq(&pmm_lock);
-}
-
-/* TEMPORARY Xorg debugging: dump recent frees within [lo, hi). */
-void pmm_dump_free_log(uint64_t lo, uint64_t hi)
-{
-    int cap = (int)(sizeof(g_free_log) / sizeof(g_free_log[0]));
-
-    dbg_puts("  PMM-FREES in [");
-    dbg_puts_hex(lo);
-    dbg_puts(",");
-    dbg_puts_hex(hi);
-    dbg_puts("):\r\n");
-    for (int n = 0; n < cap; n++) {
-        int      idx   = (g_free_log_idx + n) % cap; /* oldest first */
-        uint64_t bytes = g_free_log[idx].frame * PAGE_SIZE;
-        if (bytes < lo || bytes >= hi)
-            continue;
-        dbg_puts("    frame=");
-        dbg_puts_hex(bytes);
-        dbg_puts(" from=");
-        dbg_puts_hex(g_free_log[idx].ra);
-        dbg_puts("\r\n");
-    }
 }
 
 uint64_t pmm_total_frames(void)

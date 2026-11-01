@@ -29,6 +29,7 @@
 #include "pagecache.h"
 #include "kstring.h"
 #include "heap.h"
+#include "dcache.h"
 
 /* ---- superblock field offsets ----------------------------------------- */
 #define SB_INODES_COUNT     0
@@ -1536,6 +1537,7 @@ uint32_t ext2_write(ext2_fs_t *fs, ext2_dirent_t *ent, uint32_t off, const void 
 
     ent->size = rd32(ip + I_SIZE);
     blk_put(fs, ip);
+    dcache_flush(); /* a write moved a file size; cached stats went stale */
     return done;
 }
 
@@ -1556,6 +1558,7 @@ int ext2_truncate(ext2_fs_t *fs, ext2_dirent_t *ent)
     wr32(ip + I_SIZE, 0);
     ent->size = 0;
     blk_put(fs, ip);
+    dcache_flush(); /* truncation invalidates every cached stat of the file */
     return EXT2_OK;
 }
 

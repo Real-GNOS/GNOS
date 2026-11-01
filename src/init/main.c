@@ -34,6 +34,7 @@
 #include "debugcon.h"
 #include "kaslr.h"
 #include "vfs.h"
+#include "swap.h"
 #include "cgroup.h"
 #include "panic.h"
 #include "gdt.h"
@@ -56,6 +57,8 @@
 #include "cpuid.h"
 #include "pagecache.h"
 #include "slab.h"
+#include "buddy.h"
+#include "dcache.h"
 #include "module.h"
 #include "acpi_drv.h"
 #include "../../crypto/crypto.h"
@@ -90,9 +93,11 @@ typedef unsigned int ACPI_STATUS_K;
 void chrdev_init(void);
 int  chrdev_populate(void);
 
-/* When the boot command line carries `init=/path`, this holds that path and
- * run_init_process() tries it before the built-in default list. */
+/* Boot command-line selections, filled by parse_boot_cmdline(): the init to
+ * prefer (init=PATH) and the real-disk root device (root=/dev/xxx).  Declared
+ * here, before run_init_process(), which reads g_init_path. */
 char g_init_path[256];
+char g_root_dev[64];
 
 /* run_init_process -- try each canonical init location in turn, the way
  * Linux's init/main.c does: /sbin/init, /etc/init, /init, /bin/init.
@@ -166,10 +171,6 @@ extern volatile struct limine_executable_cmdline_request cmdline_request;
  * /proc/cmdline; its words are also handed to PID 1 as argv[1..]. */
 char g_boot_cmdline[256];
 
-/* When the boot command line carries `init=/path`, this holds that path and
- * run_init_process() tries it before the built-in default list. */
-char g_init_path[256];
-
 /* Parse the Limine executable command line (cmdline_request.response->cmdline)
  * into g_boot_cmdline, and pick out the kernel options we act on:
  *   init=PATH    -> g_init_path
@@ -215,6 +216,9 @@ static void parse_boot_cmdline(void)
             g_init_path[sizeof(g_init_path) - 1] = 0;
         } else if (!strncmp(tok, "console=", 8)) {
             console_choose(tok + 8);
+        } else if (!strncmp(tok, "root=", 5)) {
+            strncpy(g_root_dev, tok + 5, sizeof(g_root_dev) - 1);
+            g_root_dev[sizeof(g_root_dev) - 1] = 0;
         }
         *p = saved;
         if (*p)
@@ -499,35 +503,69 @@ void kernel_main(void)
     netlink_init(); /* AF_NETLINK: uevent delivery to udev */
 
     /* ---- filesystem and drivers --------------------------------------- */
-    /* Resolve the root the allocator had no hand in earlier: a disk install
-     * arrives with no RAM module, and its root is partition 1 of the first
-     * ATA disk.  The driver names the disk /dev/sda while probing; the read
-     * below bypasses the node entirely and just copies the partition into a
-     * fresh 48 MiB arena, which is the only way a mounted filesystem can
-     * stay put under a kernel that keeps the whole image resident. */
-    if (!root_img) {
-        console_puts("no initrd module: reading root from disk 0 partition 1\n");
+    /* Resolve the root the allocator had no hand in earlier.  Two real-disk
+     * sources exist: an explicit 'root=/dev/xxx' on the kernel command line
+     * (a real partition, read whole into RAM), or the legacy fallback of
+     * "partition 1 of the first ATA disk" when no initrd module came in RAM.
+     * The driver names the disk /dev/sda (or nvme0n1p1) while probing; the
+     * read below copies the partition into a fresh arena, which is the only
+     * way a mounted filesystem can stay put under a kernel that keeps the
+     * whole image resident.  An initrd module in RAM still wins unless the
+     * user named a root device. */
+    int root_mounted = 0;
+    if (g_root_dev[0]) {
+        /* root= : mount a real disk partition as the root filesystem, named
+         * like /dev/sda1 or /dev/nvme0n1p1.  Overrides both the initrd
+         * module and the legacy disk0/partition1 default.  Writes go straight
+         * to the device, so the installed system survives reboots. */
+        const char *node = g_root_dev;
+        if (!strncmp(node, "/dev/", 5))
+            node += 5;
+        console_puts("root=");
+        console_puts(g_root_dev);
+        console_puts(": mounting real disk partition as root (persistent)\n");
+        ata_init();
+        nvme_init();
+
+        root_mounted = vfs_init_bdev(node);
+        if (!root_mounted)
+            panic("root=: cannot mount device (driver missing, or not an ext2/ext3 filesystem)");
+    } else if (!root_img) {
+        console_puts("no initrd module: mounting disk 0 partition 1 as root\n");
         ata_init();
 
-        uint64_t frames = 16896; /* 66 MiB: the image is 64 MB plus
-                                  * margin for a grown one later */
-        uint64_t phys = pmm_alloc_contiguous(frames);
-        if (!phys)
-            panic("disk root: no memory for the root filesystem");
-        root_img  = (uint8_t *)pmm_virt(phys);
-        root_size = (uint32_t)ata_read_boot_partition(root_img, (uint32_t)(frames * 4096));
-        if (!root_size)
-            panic("disk root: no root partition found on disk 0");
-        g_bi.initrd_addr = phys;
-        g_bi.initrd_size = root_size;
-        dbg_puts("GNOS: disk root = ");
-        dbg_puts_dec(root_size);
-        dbg_puts(" bytes\r\n");
+        /* Mount the first ATA disk first partition straight from the device
+         * when it holds an ext2 volume (writes persist); fall back to the
+         * legacy RAM copy only if that is not possible. */
+        root_mounted = vfs_init_bdev("sda1");
+        if (!root_mounted) {
+            console_puts("disk root: sda1 not mountable, falling back to RAM copy\n");
+            uint64_t frames = 16896; /* 66 MiB: the image is 64 MB plus
+                                      * margin for a grown one later */
+            uint64_t phys = pmm_alloc_contiguous(frames);
+            if (!phys)
+                panic("disk root: no memory for the root filesystem");
+            root_img  = (uint8_t *)pmm_virt(phys);
+            root_size = (uint32_t)ata_read_boot_partition(root_img, (uint32_t)(frames * 4096));
+            if (!root_size)
+                panic("disk root: no root partition found on disk 0");
+            g_bi.initrd_addr = phys;
+            g_bi.initrd_size = root_size;
+            dbg_puts("GNOS: disk root = ");
+            dbg_puts_dec(root_size);
+            dbg_puts(" bytes\r\n");
+        }
     }
 
-    console_puts("initrd: mounting EXT2 filesystem...\n");
-    if (!vfs_init(root_img, root_size))
-        panic("initrd is not a mountable ext2 volume");
+    if (!root_mounted) {
+        console_puts("initrd: mounting EXT2 filesystem...\n");
+        if (!vfs_init(root_img, root_size))
+            panic("initrd is not a mountable ext2 volume");
+    }
+
+    /* Swap backs onto /swapfile in the root image; needs the mount. */
+    swap_init();
+    swap_selftest();
 
     /* The tty, sound and pty drivers join the character-device registry.
      * Their /dev nodes appear when chrdev_populate() runs below. */
@@ -625,6 +663,8 @@ void kernel_main(void)
     pagecache_init();
     pagecache_selftest();
     slab_selftest();
+    buddy_selftest();
+    dcache_selftest();
     kheap_self_test();
     gfx_self_test();
     fbdev_self_test();
@@ -642,13 +682,7 @@ void kernel_main(void)
 
     subsys_dump();
 
-    /* PID 1 must be the real init: busybox init refuses to start if it
-     * is not, which is the whole point of the busybox userland.  Allocate
-     * it first so proc_alloc() hands it pid 1, then kthreadd lands on
-     * pid 2.  kthreadd will not run until sched_start(); any work queued
-     * between now and then is processed once the scheduler is live. */
-    console_puts("Run /sbin/init as init process\n");
-
+ 
     /* The boot command line (an initrd-root /cmdline file, written by make
      * from KCMD=...) is spliced into PID 1's argv inside proc_spawn_init();
      * g_boot_cmdline is kept here for /proc/cmdline. */

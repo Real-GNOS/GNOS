@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "timer.h"
+#include "swap.h"
 #include "timerfd.h"
 #include "idt.h"
 #include "net.h"
@@ -59,6 +60,17 @@ static void timer_irq(regs_t *r)
     }
 #endif
     g_ticks++;
+
+    /* Memory pressure: swap out a few anonymous pages when free frames dip
+     * under the low-water mark.  Checked every 64 ticks (~0.6 s), well off
+     * the fast path; vmm_swap_scan() itself no-ops when swap is disabled. */
+    if ((g_ticks & 63) == 0) {
+        extern int  vmm_swap_scan(void);
+        extern int  swap_ready(void);
+        extern unsigned long pmm_free_frames(void);
+        if (swap_ready() && (unsigned long)pmm_free_frames() < SWAP_LOWMARK_FRAMES)
+            vmm_swap_scan();
+    }
 
     /* Deadlines have to be checked even when the interrupt landed in kernel
      * mode: a VTIME sleeper is often the *only* thing on the machine, so the

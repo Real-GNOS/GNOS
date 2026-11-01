@@ -32,7 +32,7 @@
 
 /* One static address space object per possible process; the kernel has no
  * heap, and a fixed table keeps allocation honest. */
-#define MAX_ADDRSPACES 32
+#define MAX_ADDRSPACES 256
 static addrspace_t g_spaces[MAX_ADDRSPACES];
 static int         g_used[MAX_ADDRSPACES];
 
@@ -208,7 +208,6 @@ uint32_t vmm_frame_ref_slots(void)
 }
 
 static uint64_t g_kernel_pml4_phys;
-static int      g_watchmap_count; /* TEMPORARY Xorg debugging */
 
 static int vmm_tlb_needs_shootdown(addrspace_t *as)
 {
@@ -318,7 +317,7 @@ void             vmm_map_kernel_bss(void)
     addrspace_t *k    = kernel_space();
     uint64_t    base = start & ~0xFFFULL;
     for (uint64_t va = base; va < end; va += PAGE_SIZE) {
-        uint64_t *pte      = walk(&k, va, 0, 0); /* no allocate, just inspect */
+        uint64_t *pte      = walk(k, va, 0, 0); /* no allocate, just inspect */
         int       present  = pte && (*pte & PTE_P);
         int       writable = present && (*pte & PTE_RW);
 
@@ -336,7 +335,7 @@ void             vmm_map_kernel_bss(void)
                 dbg_puts("\r\n");
                 panic("vmm: failed to map kernel BSS (OOM)");
             }
-            if (!vmm_map(&k, va, frame, VM_WRITE)) {
+            if (!vmm_map(k, va, frame, VM_WRITE)) {
                 dbg_puts("VMM: bss map fail at ");
                 dbg_puts_hex(va);
                 dbg_puts("\r\n");
@@ -354,11 +353,11 @@ void             vmm_map_kernel_bss(void)
      * and removes that whole class of off-by-one. */
     {
         uint64_t  guard = end & ~0xFFFULL;
-        uint64_t *gpte  = walk(&k, guard, 0, 0);
+        uint64_t *gpte  = walk(k, guard, 0, 0);
         if (!gpte || !(*gpte & PTE_P)) {
             uint64_t gframe = pmm_alloc_zeroed();
             if (gframe)
-                vmm_map(&k, guard, gframe, VM_WRITE);
+                vmm_map(k, guard, gframe, VM_WRITE);
         }
     }
 
@@ -466,25 +465,6 @@ int vmm_map(addrspace_t *as, uint64_t vaddr, uint64_t paddr, unsigned flags)
     uint64_t *pte = walk(as, vaddr & ~0xFFFULL, 1, flags);
     if (!pte)
         return 0;
-    /* TEMPORARY Xorg debugging: a remap of an already-present page is the
-     * anomaly we are hunting (normal flow never does this). */
-    if ((*pte & PTE_P) && (vaddr >> 44) == 5) {
-        dbg_puts("REMAP: va=");
-        dbg_puts_hex(vaddr & ~0xFFFULL);
-        dbg_puts(" oldpte=");
-        dbg_puts_hex(*pte);
-        dbg_puts(" newframe=");
-        dbg_puts_hex(paddr);
-        dbg_puts(" caller=");
-        dbg_puts_hex((uint64_t)__builtin_return_address(0));
-        dbg_puts("\r\n");
-    }
-    if ((vaddr >> 44) == 5 && g_watchmap_count < 24) {
-        g_watchmap_count++;
-        dbg_puts("VMMA: va=");
-        dbg_puts_hex(vaddr);
-        dbg_puts("\r\n");
-    }
     uint64_t old     = *pte;
     int      had     = (old & PTE_P) != 0;
     int      release = had && (old & (PTE_COW | PTE_AVL)) && (old & PTE_ADDR) != (paddr & PTE_ADDR);
@@ -818,14 +798,6 @@ int vmm_unmap(addrspace_t *as, uint64_t vaddr, uint64_t size)
         uint64_t *pte = walk(as, va, 0, 0);
         if (!pte || !(*pte & PTE_P))
             continue; /* nothing mapped here */
-        /* TEMPORARY Xorg debugging: who clears the libpixman text page? */
-        if (va == 0x5000000047000ULL) {
-            dbg_puts("WATCH-UNMAP: va=0x5000000047000 oldpte=");
-            dbg_puts_hex(*pte);
-            dbg_puts(" caller=");
-            dbg_puts_hex((uint64_t)__builtin_return_address(0));
-            dbg_puts("\r\n");
-        }
         /* A frame somebody else still has a PTE pointing at is owned by the
          * refcount table, not by this address space: clear the PTE and let go
          * of one reference, and it is freed only when the last one leaves.
@@ -881,13 +853,6 @@ int vmm_alloc_range(addrspace_t *as, uint64_t vaddr, uint64_t size, unsigned fla
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
         if (vmm_resolve(as, va))
             continue; /* already backed */
-        /* TEMPORARY Xorg debugging: does alloc_range run at all? */
-        if ((start >> 44) == 5 && g_watchmap_count < 24) {
-            g_watchmap_count++;
-            dbg_puts("AR: va=");
-            dbg_puts_hex(va);
-            dbg_puts("\r\n");
-        }
         /* Charge the cgroup before allocating; reject if over memory.max. */
         if (as->cg >= 0 && cg_mem_charge(as->cg, PAGE_SIZE) < 0)
             return 0;
@@ -1104,10 +1069,21 @@ static int clone_level(addrspace_t *dst, uint64_t src_table, int level, uint64_t
             unsigned oflags = VM_USER | VM_EXTSHM;
             if (t[i] & PTE_RW)
                 oflags |= VM_WRITE;
-            if (vmm_share_ref(frame) < 0)
-                return 0;
+            /* PTE_AVL is one marker for two kinds of frame, and only one of
+             * them is refcounted here.  SysV shm and MAP_SHARED anonymous
+             * memory register their frames, so the child takes a reference.
+             * A device-backed mmap -- sys_mmap marks VFS_CHARDEV mappings
+             * (Xorg's /dev/dri/card0 scanout buffer, a capture ring) shared
+             * so teardown never frees them -- carries the same bit while its
+             * frames belong to the device allocator and are deliberately
+             * absent from the table.  For those an untracked frame is the
+             * normal case: hand the child the same frame with no reference
+             * to move.  Refusing to clone them is what made every fork out
+             * of Xorg fail, which is why its xkbcomp never ran. */
+            int tracked = (vmm_share_ref(frame) == 0);
             if (!vmm_map(dst, va, frame, oflags)) {
-                vmm_share_unref(frame);
+                if (tracked)
+                    vmm_share_unref(frame);
                 return 0;
             }
             continue;
@@ -1219,110 +1195,6 @@ addrspace_t *vmm_clone(addrspace_t *src)
     return dst;
 }
 
-/* TEMPORARY Xorg debugging: on an unbacked fault, dump every address space's
- * record head plus the raw words just below g_spaces, so whoever corrupts the
- * table can be recognised by what it writes. */
-void vmm_as_debug_dump(void)
-{
-    dbg_puts("ASDUMP:\r\n");
-    for (int i = 0; i < MAX_ADDRSPACES; i++) {
-        if (!g_used[i])
-            continue;
-        dbg_puts("  AS");
-        dbg_puts_dec(i);
-        dbg_puts(" nmmaps=");
-        dbg_puts_dec(g_spaces[i].nmmaps);
-        dbg_puts(" rec0=(");
-        dbg_puts_hex(g_spaces[i].mmaps[0].base);
-        dbg_puts(",");
-        dbg_puts_hex(g_spaces[i].mmaps[0].size);
-        dbg_puts(",f");
-        dbg_puts_hex(g_spaces[i].mmaps[0].flags);
-        dbg_puts(")\r\n");
-    }
-    dbg_puts("  pre: ");
-    uint64_t *pre = (uint64_t *)((uint8_t *)g_spaces - 64);
-    for (int i = 0; i < 8; i++) {
-        dbg_puts_hex(pre[i]);
-        dbg_puts(" ");
-    }
-    dbg_puts("\r\n");
-}
-
-/* TEMPORARY Xorg debugging: byte-sum a mapped region (0 for pages that are
- * not present).  Used to detect whether a mapping's content changed after
- * the copy-in. */
-uint64_t vmm_region_checksum(addrspace_t *as, uint64_t base, uint64_t size)
-{
-    uint64_t sum = 0;
-    uint64_t end = base + size;
-
-    for (uint64_t va = base & ~0xFFFULL; va < end; va += PAGE_SIZE) {
-        uint64_t phys = vmm_resolve(as, va);
-        if (!phys)
-            continue;
-        uint8_t *p = (uint8_t *)pmm_virt(phys);
-        for (uint64_t o = 0; o < PAGE_SIZE && va + o < end; o++)
-            sum += p[o];
-    }
-    return sum;
-}
-
-/* TEMPORARY Xorg debugging: walk every address space's page tables and print
- * each VA whose PTE maps @frame -- the frame-alias detector.  The kernel half
- * (level-4 entries 256..511) is shared by all address spaces, so it is scanned
- * once. */
-void vmm_alias_scan(uint64_t frame)
-{
-    int kernel_half_done = 0;
-
-    for (int s = 0; s < MAX_ADDRSPACES; s++) {
-        if (!g_used[s])
-            continue;
-        addrspace_t *as = &g_spaces[s];
-        if (!as->pml4_phys)
-            continue;
-        uint64_t *p4 = table(as->pml4_phys);
-        for (int a = 0; a < 512; a++) {
-            int kern = a >= 256;
-            if (kern && kernel_half_done)
-                continue;
-            if (!(p4[a] & PTE_P))
-                continue;
-            uint64_t *p3 = table(p4[a] & PTE_ADDR);
-            for (int b = 0; b < 512; b++) {
-                if (!(p3[b] & PTE_P))
-                    continue;
-                uint64_t *p2 = table(p3[b] & PTE_ADDR);
-                for (int c = 0; c < 512; c++) {
-                    if (!(p2[c] & PTE_P))
-                        continue;
-                    uint64_t *p1 = table(p2[c] & PTE_ADDR);
-                    for (int d = 0; d < 512; d++) {
-                        if (!(p1[d] & PTE_P))
-                            continue;
-                        if ((p1[d] & PTE_ADDR) == frame) {
-                            uint64_t va = ((uint64_t)a << 39) | ((uint64_t)b << 30) |
-                                          ((uint64_t)c << 21) | ((uint64_t)d << 12);
-                            dbg_puts("  ALIAS: ");
-                            dbg_puts(kern ? "KERN" : "as");
-                            if (!kern)
-                                dbg_puts_dec(s);
-                            dbg_puts(" va=");
-                            dbg_puts_hex(va);
-                            dbg_puts(" pte=");
-                            dbg_puts_hex(p1[d]);
-                            dbg_puts("\r\n");
-                        }
-                    }
-                }
-            }
-            if (kern)
-                kernel_half_done = 1;
-        }
-    }
-}
-
 void vmm_switch(addrspace_t *as)
 {
     uint64_t cr3;
@@ -1422,4 +1294,103 @@ void vmm_cow_self_test(void)
         return;
     }
     dbg_puts(ok_msg);
+}
+
+/* ---- swap: eviction scan and fault-in restoration ---------------------- */
+/* A swapped-out page is remembered in its PTE: PTE_P clear, the AVL bit set
+ * as the swap marker, the slot number in the address field, and the R/W,
+ * user and NX protection bits preserved so the restore re-arms exactly the
+ * mapping that was evicted.  Eviction only ever touches anonymous lazy
+ * pages: COW-shared frames would need per-frame refcounts, and device/GEM
+ * backings carry VM_EXTSHM on their mmap records -- those frames are DMA
+ * targets (scanout, rings) and must never be written through the block
+ * layer or freed under their owner. */
+#include "swap.h"
+
+#define SWAP_PTE_MARKER PTE_AVL
+
+static int pte_is_swapped(uint64_t pte)
+{
+    return !(pte & PTE_P) && (pte & SWAP_PTE_MARKER) && (pte & PTE_ADDR);
+}
+
+static uint64_t swap_encode(uint64_t old_pte, uint32_t slot)
+{
+    return ((uint64_t)slot << 12) | (old_pte & ~(PTE_P | PTE_ADDR)) | SWAP_PTE_MARKER;
+}
+
+/* Restore a swapped page on fault.  Returns 1 when the page is back and
+ * the faulting access may retry, 0 when the PTE is not a swap entry (the
+ * caller falls through to its own diagnostics) or the I/O failed. */
+int vmm_swap_restore(addrspace_t *as, uint64_t vaddr)
+{
+    if (!as || !swap_ready())
+        return 0;
+    uint64_t *pte = walk(as, vaddr & ~0xFFFULL, 0, 0);
+    if (!pte || !pte_is_swapped(*pte))
+        return 0;
+    uint32_t slot = (uint32_t)((*pte & PTE_ADDR) >> 12);
+    if (slot >= swap_slots())
+        return 0; /* corrupt entry: let the fault path report it */
+    uint64_t frame = pmm_alloc_zeroed();
+    if (!frame)
+        return 0; /* OOM: retry the fault when memory eases */
+    if (swap_read_frame(slot, frame) < 0) {
+        pmm_free(frame);
+        return 0;
+    }
+    *pte = (frame) | (*pte & ~(PTE_ADDR | SWAP_PTE_MARKER)) | PTE_P;
+    asm volatile("invlpg (%0)" ::"r"(vaddr) : "memory");
+    swap_free_slot(slot);
+    return 1;
+}
+
+/* Evict a few anonymous user pages.  Called from the tick when free memory
+ * dips under SWAP_LOWMARK_FRAMES.  One pass touches one address space
+ * (round robin) and evicts at most a handful of pages, so the tick never
+ * stalls behind block I/O.  Returns the number of pages evicted. */
+int vmm_swap_scan(void)
+{
+    if (!swap_ready())
+        return 0;
+
+    static unsigned cursor;
+    int             evicted = 0;
+
+    for (unsigned n = 0; n < MAX_ADDRSPACES && evicted < 8; n++) {
+        unsigned     slot = (cursor + n) % MAX_ADDRSPACES;
+        addrspace_t *as   = &g_spaces[slot];
+        if (!as->refs || !as->pml4_phys)
+            continue;
+
+        for (int r = 0; r < as->nmmaps && evicted < 8; r++) {
+            uint64_t mb = as->mmaps[r].base;
+            uint64_t ms = as->mmaps[r].size;
+            unsigned vf = as->mmaps[r].flags;
+            if (!(vf & VM_USER) || !(vf & VM_WRITE) || (vf & VM_EXTSHM))
+                continue;
+
+            for (uint64_t va = mb; va < mb + ms && evicted < 8; va += PAGE_SIZE) {
+                uint64_t *pte = walk(as, va, 0, 0);
+                if (!pte || !(*pte & PTE_P) || !(*pte & PTE_RW) || !(*pte & PTE_U))
+                    continue;
+                if (*pte & PTE_COW) /* shared frame: needs refcounts first */
+                    continue;
+                uint32_t s = swap_alloc_slot();
+                if (s == (uint32_t)-1)
+                    return evicted; /* swap full */
+                uint64_t frame = *pte & PTE_ADDR;
+                if (swap_write_frame(frame, s) < 0) {
+                    swap_free_slot(s);
+                    return evicted; /* backing store I/O trouble: back off */
+                }
+                *pte = swap_encode(*pte, s);
+                asm volatile("invlpg (%0)" ::"r"(va) : "memory");
+                pmm_free(frame);
+                evicted++;
+            }
+        }
+        cursor = (cursor + 1) % MAX_ADDRSPACES;
+    }
+    return evicted;
 }

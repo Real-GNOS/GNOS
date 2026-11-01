@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * secretmem.c — memfd_secret(447). (GPLv2)
  *

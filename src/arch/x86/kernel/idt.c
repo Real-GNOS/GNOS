@@ -264,20 +264,6 @@ static void __attribute__((noreturn)) fault_halt(regs_t *r, const char *tag)
             dbg_puts("\r\n");
         }
         {
-            /* The user-RSP stash and how many benign watchpoint hits we
-             * saw: distinguishes "the stash was corrupted" (stash differs
-             * from the frame slot) from "the frame was overwritten" (they
-             * match, both bad) -- and confirms DR watchpoints actually
-             * fire on this machine. */
-            uint64_t stash;
-            asm volatile("movq %%gs:0x28, %0" : "=r"(stash));
-            dbg_puts("user_rsp stash=");
-            dbg_puts_hex(stash);
-            dbg_puts(" benign-hits=");
-            dbg_puts_hex(g_wp_benign_hits);
-            dbg_puts("\r\n");
-        }
-        {
             const uint64_t *sp = (const uint64_t *)r->rsp;
             for (int i = -2; i < 8; i++) {
                 dbg_puts(i < 0 ? "  frame[-" : "  frame[");
@@ -315,6 +301,11 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
         return 0;
     int is_write = (int)(errcode & 2);
     int is_fetch = (int)(errcode & 16);
+    /* A page evicted to swap: its PTE is not present but carries the swap
+     * marker and slot.  Restore before anything else interprets the fault
+     * -- reads fault on swapped pages just as writes do. */
+    if (vmm_swap_restore(as, cr2))
+        return 1;
     /* A fork() shared page: fork shares parent and child frames read-only
      * (PTE_COW), and the faulting write is the cashing-in.  This has to be
      * settled before the record lookup below, or the mmaps list (which
@@ -334,11 +325,6 @@ static int fault_back_lazy(addrspace_t *as, uint64_t cr2, int errcode)
             hit = i;
     }
     if (hit < 0) {
-        /* TEMPORARY Xorg debugging: the address is in nobody's business. */
-        dbg_puts("LAZY: no record covers cr2=");
-        dbg_puts_hex(cr2);
-        dbg_puts("\r\n");
-        vmm_as_debug_dump();
         return 0;
     }
     {
@@ -444,41 +430,6 @@ void isr_dispatch(regs_t *r)
      * and park the CPU instead of letting it escalate to a triple fault. */
     if (r->vector == 8) {
         fault_halt(r, "GNOS: DOUBLE FAULT");
-    }
-
-    /* #DB: a hardware watchpoint (DR0) fired.  The user-RSP stash watch
-     * waves through syscall_entry's own write (rip == the recorded benign
-     * return) and dumps any other writer in the act. */
-    if (r->vector == 1) {
-        uint64_t dr6;
-        asm volatile("mov %%dr6, %0" : "=r"(dr6));
-        if (r->rip == g_user_rsp_watch_rip) {
-            extern uint64_t g_wp_benign_hits;
-            g_wp_benign_hits++;
-            asm volatile("mov %0, %%dr6" ::"r"(0xFFFF0FF0UL));
-            goto out;
-        }
-        dbg_puts("WP-HIT rip=");
-        dbg_puts_hex(r->rip);
-        dbg_puts(" rsp=");
-        dbg_puts_hex(r->rsp);
-        dbg_puts(" dr6=");
-        dbg_puts_hex(dr6);
-        dbg_puts(" rax=");
-        dbg_puts_hex(r->rax);
-        dbg_puts(" rbx=");
-        dbg_puts_hex(r->rbx);
-        dbg_puts(" rcx=");
-        dbg_puts_hex(r->rcx);
-        dbg_puts(" rdx=");
-        dbg_puts_hex(r->rdx);
-        dbg_puts(" rsi=");
-        dbg_puts_hex(r->rsi);
-        dbg_puts(" rdi=");
-        dbg_puts_hex(r->rdi);
-        dbg_puts("\r\n");
-        asm volatile("mov %0, %%dr6" ::"r"(0xFFFF0FF0UL));
-        goto out;
     }
 
     if (r->vector < 32) {
@@ -628,94 +579,6 @@ void isr_dispatch(regs_t *r)
                     dbg_puts(" ");
                 }
                 dbg_puts("\r\n");
-            }
-            /* TEMPORARY Xorg debugging: identify where user programs die. */
-            {
-                uint64_t ucr2;
-                asm volatile("mov %%cr2, %0" : "=r"(ucr2));
-                dbg_puts("USERFAULT: vec=");
-                dbg_puts_dec(r->vector);
-                dbg_puts(" rip=");
-                dbg_puts_hex(r->rip);
-                dbg_puts(" cr2=");
-                dbg_puts_hex(ucr2);
-                dbg_puts(" rsp=");
-                dbg_puts_hex(r->rsp);
-                dbg_puts("\r\n");
-                /* TEMPORARY Xorg debugging: re-verify the checksum of every
-                 * record covering rip or cr2, and scan for frame aliases of
-                 * cr2. */
-                {
-                    addrspace_t *uas = proc_current()->as;
-                    for (int i = 0; i < uas->nmmaps; i++) {
-                        uint64_t mb = uas->mmaps[i].base;
-                        uint64_t ms = uas->mmaps[i].size;
-                        if ((r->rip < mb || r->rip >= mb + ms) && (ucr2 < mb || ucr2 >= mb + ms))
-                            continue;
-                        uint64_t now = vmm_region_checksum(uas, mb, ms);
-                        dbg_puts("  REC cksum base=");
-                        dbg_puts_hex(mb);
-                        dbg_puts(" stored=");
-                        dbg_puts_hex(uas->mmaps[i].cksum);
-                        dbg_puts(" now=");
-                        dbg_puts_hex(now);
-                        dbg_puts(uas->mmaps[i].cksum == now ? " OK" : " CHANGED");
-                        dbg_puts("\r\n");
-                        /* TEMPORARY: per-page zero/nonzero map. */
-                        dbg_puts("  pagemap: ");
-                        for (uint64_t va = mb; va < mb + ms; va += PAGE_SIZE) {
-                            uint64_t ph = vmm_resolve(uas, va);
-                            if (!ph) {
-                                dbg_puts("?");
-                                continue;
-                            }
-                            uint8_t *p = (uint8_t *)pmm_virt(ph);
-                            int      z = 1;
-                            for (uint64_t o = 0; o < PAGE_SIZE; o++)
-                                if (p[o]) {
-                                    z = 0;
-                                    break;
-                                }
-                            dbg_puts(z ? "0" : "X");
-                        }
-                        dbg_puts("\r\n");
-                    }
-                    uint64_t cr2phys = vmm_resolve(uas, ucr2 & ~0xFFFULL);
-                    if (cr2phys) {
-                        dbg_puts("  ALIAS SCAN for frame ");
-                        dbg_puts_hex(cr2phys);
-                        dbg_puts("\r\n");
-                        vmm_alias_scan(cr2phys);
-                    }
-                    /* TEMPORARY Xorg debugging: who else maps the faulting
-                     * code page? */
-                    uint64_t ripphys = vmm_resolve(uas, r->rip & ~0xFFFULL);
-                    dbg_puts("  rip page frame=");
-                    dbg_puts_hex(ripphys);
-                    dbg_puts("\r\n");
-                    if (ripphys) {
-                        dbg_puts("  ALIAS SCAN for rip frame\r\n");
-                        vmm_alias_scan(ripphys);
-                        pmm_dump_free_log(ripphys, ripphys + PAGE_SIZE);
-                    }
-                }
-                /* TEMPORARY: dump the faulting instruction bytes so the
-                 * crashing operation can be disassembled offline. */
-                {
-                    dbg_puts("  code: ");
-                    for (int b = -8; b < 16; b++) {
-                        uint64_t ua   = r->rip + (uint64_t)b;
-                        uint64_t phys = vmm_resolve(proc_current()->as, ua & ~0xFFFULL);
-                        if (!phys) {
-                            dbg_puts("?? ");
-                            continue;
-                        }
-                        uint8_t *kp = (uint8_t *)pmm_virt(phys);
-                        dbg_puts_hex(kp[ua & 0xFFF]);
-                        dbg_puts(" ");
-                    }
-                    dbg_puts("\r\n");
-                }
             }
             proc_signal(proc_current(), SIGSEGV);
             proc_check_signals(r);

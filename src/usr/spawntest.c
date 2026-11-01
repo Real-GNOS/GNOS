@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * spawntest.c — probe the fork+pipe handshake the spawn machinery needs.
  * (GPL-2.0)

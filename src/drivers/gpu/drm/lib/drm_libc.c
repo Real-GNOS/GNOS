@@ -24,6 +24,7 @@
 #include "kstring.h"
 #include "heap.h"
 #include "pmm.h"
+#include "buddy.h"
 #include "vmm.h"      /* user_ptr_ok */
 #include "timer.h"    /* timer_ticks */
 #include "drm_port.h" /* errno maps */
@@ -72,6 +73,7 @@ uint64_t nano_time(void)
 struct align_slot {
     void    *v;
     uint64_t nframes;
+    unsigned order; /* nonzero: span came from the buddy allocator */
 };
 
 static struct align_slot g_align[ALIGN_SLOTS];
@@ -85,21 +87,39 @@ void *aligned_alloc(size_t align, size_t size)
         return NULL;
     nframes = ((uint64_t)size + 0xFFF) >> 12;
 
-    uint64_t phys = pmm_alloc_contiguous(nframes);
+    /* Multi-frame spans go through the buddy allocator (O(log) split/merge
+     * instead of the bitmap's O(total frames) first-fit scan); single frames
+     * and buddy-pool exhaustion fall back to the bitmap path. */
+    uint64_t phys = 0;
+    unsigned order = 0;
+    while ((1u << order) < nframes)
+        order++;
+    if (nframes > 1)
+        phys = buddy_alloc(order);
+    if (!phys)
+        phys = pmm_alloc_contiguous(nframes);
     if (!phys)
         return NULL;
+    if (nframes > 1 && phys && !buddy_owns(phys))
+        order = 0; /* came from the bitmap fallback */
+    else if (nframes > 1)
+        ; /* order records the buddy span for the matching free */
 
     void *v = pmm_virt(phys);
     for (int i = 0; i < ALIGN_SLOTS; i++) {
         if (!g_align[i].v) {
             g_align[i].v       = v;
             g_align[i].nframes = nframes;
+            g_align[i].order   = order;
             return v;
         }
     }
     /* Table full: give the frames back rather than leak them. */
-    for (uint64_t i = 0; i < nframes; i++)
-        pmm_free(phys + (i << 12));
+    if (order)
+        buddy_free(phys, order);
+    else
+        for (uint64_t i = 0; i < nframes; i++)
+            pmm_free(phys + (i << 12));
     return NULL;
 }
 
@@ -112,10 +132,14 @@ void aligned_free(void *p)
         if (g_align[i].v != p)
             continue;
         uint64_t phys = (uint64_t)(uintptr_t)p - g_hhdm;
-        for (uint64_t f = 0; f < g_align[i].nframes; f++)
-            pmm_free(phys + (f << 12));
+        if (g_align[i].order)
+            buddy_free(phys, g_align[i].order);
+        else
+            for (uint64_t f = 0; f < g_align[i].nframes; f++)
+                pmm_free(phys + (f << 12));
         g_align[i].v       = NULL;
         g_align[i].nframes = 0;
+        g_align[i].order   = 0;
         return;
     }
 }

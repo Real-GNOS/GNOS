@@ -15,6 +15,15 @@ fi
 
 mkdir -p $X11RUN
 
+# Root window paint, before any client: a client-free X screen is just the
+# black root window (-br), indistinguishable from a dead pipeline, and the
+# left_ptr sprite makes pointer motion visible before any client window is
+# under it.  Bounded: Xlib spins forever without re-issuing a syscall when
+# the connection-setup reply is late (EAGAIN), so an unbounded xsetroot
+# dead-locks the launch.  5 s is plenty for a root-window paint.
+/usr/bin/timeout 5 /usr/bin/xsetroot -solid gray40 -cursor_name left_ptr \
+    >/tmp/xsetroot.out 2>&1
+
 # Session bus: the address lands in a file and in the environment of
 # everything we start afterwards.
 if [ ! -f $X11RUN/session-bus ]; then
@@ -60,15 +69,32 @@ SESS_PID=$!
 # stays an empty root window.  Launch the desktop pieces directly; the
 # session manager keeps running for session/dbus housekeeping.
 sleep 3
-/usr/bin/xfsettingsd >/dev/null 2>&1 &
-/usr/bin/xfwm4 >/dev/null 2>&1 &
-/usr/bin/xfdesktop >/dev/null 2>&1 &
-/usr/bin/xfce4-panel >/dev/null 2>&1 &
+/usr/bin/xfsettingsd >/tmp/xfsettingsd.out 2>&1 &
+/usr/bin/xfwm4 >/tmp/xfwm4.out 2>&1 &
+/usr/bin/xfdesktop >/tmp/xfdesktop.out 2>&1 &
+/usr/bin/xfce4-panel >/tmp/xfce4-panel.out 2>&1 &
 
 # XDG autostart entry (xfce4-terminal) until xfce4-session's autostart
 # machinery runs on its own.
 sleep 3
-/usr/bin/xfce4-terminal >/dev/null 2>&1 &
+/usr/bin/xfce4-terminal >/tmp/xfce4-terminal.out 2>&1 &
+
+# DIAGNOSTIC: capture what each component actually said, so a missing
+# window has a reason in the log instead of silence.  Also snapshot the
+# live process table and the Xorg log, so we can tell a crashed component
+# (gone from /proc) from a hung one (present but silent).
+( sleep 30;
+  for f in xfsettingsd xfwm4 xfdesktop xfce4-panel xfce4-terminal; do
+      /bin/dbgcat.elf /tmp/$f.out
+  done
+  /bin/dbgcat.elf /var/log/Xorg.0.log
+  echo "=== live processes ===" > /tmp/ps.out
+  for p in /proc/[0-9]*; do
+      cmd=$(tr '\0' ' ' < $p/cmdline 2>/dev/null)
+      [ -n "$cmd" ] && echo "$(basename $p) $cmd" >> /tmp/ps.out
+  done
+  /bin/dbgcat.elf /tmp/ps.out
+) &
 
 wait $SESS_PID
 /bin/dbgcat.elf /tmp/xfce.out

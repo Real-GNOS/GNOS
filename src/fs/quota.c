@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * quota.c — quotactl_fd(443). (GPLv2)
  *

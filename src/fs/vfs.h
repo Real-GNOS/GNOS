@@ -187,6 +187,16 @@ typedef struct vfs_node {
 /* Mount the ext2 image at `img` on "/".  Returns 1 on success. */
 int vfs_init(uint8_t *img, uint32_t img_size);
 
+/* Load an entire registered block device (e.g. "sda1", "nvme0n1p1") into a
+ * RAM buffer, for use as the root filesystem.  Returns bytes copied, or 0 on
+ * error / when the device is larger than `cap`.  Backs the `root=` option. */
+uint32_t vfs_load_blockdev(const char *name, uint8_t *dst, uint32_t cap);
+
+/* Mount the root filesystem directly from a block device node (e.g. "sda1"),
+ * so writes persist to disk.  Returns 1 on success.  Backs the `root=` option
+ * and the legacy disk0/partition1 fallback. */
+int vfs_init_bdev(const char *name);
+
 /* Publish a character device as "/dev/<name>". */
 int vfs_register_dev(const char *name, const vfs_ops_t *ops, void *priv);
 
@@ -297,6 +307,12 @@ int vfs_pread_fd(int h, uint64_t off, void *buf, uint32_t len);
 
 /* Change the permission bits (low 12) of a path's inode; returns 0 or errno. */
 int vfs_chmod(const char *path, uint32_t mode);
+
+/* Public path → node resolution (mm/swap.c finds /swapfile with it). */
+int vfs_resolve_node(const char *path, vfs_node_t *out, int follow);
+
+/* Root-image filesystem for the swap backing file; NULL when unmounted. */
+void *vfs_root_image(void);
 
 /* chown(2) family.  (uint32_t)-1 leaves a component alone. */
 int vfs_chown(const char *path, uint32_t uid, uint32_t gid, int follow);

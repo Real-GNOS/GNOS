@@ -202,16 +202,6 @@ static int64_t epoll_wait_common(int epfd, uint64_t uevents, int maxevents, int6
 {
     epoll_inst_t *inst;
     int           e = inst_of(epfd, &inst);
-    /* TEMPORARY Xorg debugging: who hands us this buffer, and is it real? */
-    dbg_puts("EPOLLW pid=");
-    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
-    dbg_puts(" epfd=");
-    dbg_puts_dec((uint32_t)epfd);
-    dbg_puts(" uevents=");
-    dbg_puts_hex(uevents);
-    dbg_puts(" maxevents=");
-    dbg_puts_dec((uint32_t)maxevents);
-    dbg_puts("\r\n");
     if (e < 0)
         return e;
     if (maxevents <= 0 || maxevents > EPOLL_MAX_ENTRIES)
@@ -236,13 +226,6 @@ static int64_t epoll_wait_common(int epfd, uint64_t uevents, int maxevents, int6
             pf[want].revents = 0;
             want++;
         }
-    /* TEMPORARY Xorg debugging: where the kernel-side pollfd array lives
-     * (it sits on this task's stack) and how many entries were filled. */
-    dbg_puts("EPW2 pf=");
-    dbg_puts_hex((uint64_t)(uintptr_t)pf);
-    dbg_puts(" want=");
-    dbg_puts_dec((uint32_t)want);
-    dbg_puts("\r\n");
 
     int64_t n = do_ppoll((uint8_t *)pf, (uint64_t)want, ticks);
     if (n <= 0)

@@ -280,8 +280,14 @@ typedef struct proc {
     struct proc *tl, *tr;       /* runqueue treap links                */
     uint64_t     sched_pad;     /* keep the block 16-aligned (fpu)     */
     int          bkl_held;      /* this kernel execution owns the BKL  */
-    int          on_cpu;        /* core this process runs on, or -1    */
-    int          rsvd;
+    int          on_cpu;        /* core this process runs on, or -1.
+                                 * Invariant: a task on a run queue always
+                                 * has on_cpu == -1; a task that is running
+                                 * has on_cpu == the core and is NOT on any
+                                 * queue.  See schedule_locked().          */
+    int          ever_saved;    /* has been saved as a ctx-switch prev at
+                                 * least once (so its resume frame returns
+                                 * into schedule(), not ret_to_user)       */
 
     /* ---- cgroup membership -------------------------------------------
      * Leaf cgroup slot in the v2 hierarchy (cgroup.h), or -1 while the

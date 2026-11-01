@@ -1,35 +1,51 @@
 #!/bin/sh
-# xfce-desktop -- bring up the Xfce desktop on Xorg :0, then run the
-# session in the foreground. (GPLv2)
+# xfce-desktop -- bring up the Xfce desktop on Xorg :0 through xinit. (GPLv2)
 #
 # Spawned by /etc/inittab with ::respawn:, so a crashed session comes back
 # the way a display manager would.  All the environment work Xfce needs
-# (runtime dirs, dbus, machine-id) lives in /usr/bin/startxfce's sibling
-# /sbin/start-xfce; this wrapper only owns the X server lifecycle.
+# (runtime dirs, dbus, machine-id, the root-window paint) lives in
+# /sbin/start-xfce; this wrapper only owns the X server lifecycle -- and it
+# hands even that to xinit(1).
+#
+# xinit is the one piece of X11 that knows what "the server is up" means: it
+# starts the server, waits until it actually accepts a connection, runs the
+# client with DISPLAY and XAUTHORITY set, and shuts the server down when the
+# client exits.  This script used to do that by hand -- background Xorg,
+# sleep a while, hope -- which is where every "the session ran before the
+# server was ready" failure in the debug log came from.
 
 export HOME=/root
 export PATH=/usr/bin:/bin:/sbin:/usr/sbin
 export DISPLAY=:0
 
-# Xorg takes a free VT on its own; the config drives the in-kernel KMS
-# device.  Backgrounded here, watched for readiness below.
-/usr/libexec/Xorg -config /etc/X11/xorg.conf -noreset \
-    -logfile /var/log/Xorg.0.log :0 >/tmp/xorg.out 2>&1 &
+# xinit writes its cookie to $HOME/.Xauthority (or $XAUTHORITY when it is
+# set), so HOME has to be exported and writable before xinit runs; the
+# client inherits the XAUTHORITY xinit then exports.
+mkdir -p /var/log /tmp/run
 
-# No wait loop: every wait primitive we tried here froze the launcher --
-# `sleep 1` fork+exec'd a dynamically linked binary whose musl loader
-# intermittently wedged, and the pure-builtin replacement (`read -t 1`)
-# froze in its poll(2)->EINTR path, stalling the whole user side.  The
-# ::respawn wrapper is the retry: if Xorg has not opened /tmp/.X11-unix/X0
-# yet, the clients below fail, this script exits, and init starts us again
-# against a server that is then up.
-# Diagnostics: if the server never came up, its stdout and log say why.
-/bin/dbgcat.elf /tmp/xorg.out
-/usr/bin/tail -c 1500 /var/log/Xorg.0.log > /tmp/xorglog.txt 2>/dev/null
-/bin/dbgcat.elf /tmp/xorglog.txt
+# --- the session ---------------------------------------------------------
+# Argument order is xinit's: the client and its options, then `--`, then the
+# server, the display, and the server's options.  Both program names start
+# with a slash, which is what tells xinit they are programs rather than
+# extra arguments to append to the default startup lines.
+#
+# Xorg takes over vt1 (the visible console), so boot lands directly on the
+# desktop; the agetty that still respawns on tty1 redraws the login prompt if
+# the server ever exits -- the no-display-manager rescue path.  xinit's stdout
+# carries Xorg's, which is the only place a server that dies before it has
+# opened its log says anything at all.
+/usr/bin/xinit /sbin/start-xfce -- \
+    /usr/libexec/Xorg :0 vt1 -config /etc/X11/xorg.conf -noreset \
+    -logfile /var/log/Xorg.0.log >/tmp/xinit.out 2>&1
 
-# Paint the root window before any client so a client-free screen is
-# visibly the desktop's, not a dead pipeline.
-/usr/bin/xsetroot -solid gray40 -cursor_name left_ptr >/tmp/xsetroot.out 2>&1
+# --- post-mortem ---------------------------------------------------------
+# xinit returns once the client has exited, whether that was a clean logout
+# or the session losing its X connection after a server fatal.  The log on
+# disk is final by then, so push it to the debugcon where the host can grep
+# it; the session's own output is in /tmp/xfce.out (see start-xfce).
+/bin/dbgcat.elf /var/log/Xorg.0.log
+/bin/dbgcat.elf /tmp/xinit.out
+/bin/dbgcat.elf /tmp/xfce.out
+/bin/dbgcat.elf /tmp/xsetroot.out 2>/dev/null
 
-exec /sbin/start-xfce >/tmp/xfce.out 2>&1
+exit 0

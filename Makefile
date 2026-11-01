@@ -109,7 +109,7 @@ USER_DIR   := src/usr
 BASEFLAGS := -m64 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
              -nostdinc -std=gnu11 -mno-red-zone -mgeneral-regs-only \
              -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fvisibility=hidden \
-             -fno-omit-frame-pointer \
+             -fno-omit-frame-pointer -Werror=incompatible-pointer-types \
              -Wall -Wextra -O2 -g $(KINCS)
 
 # kernel: PIE so Limine can relocate it into the higher half
@@ -162,7 +162,7 @@ KOBJS := $(BUILD)/main.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/debugcon.o $(BUILD)/printk_console.o $(BUILD)/ext2.o $(BUILD)/panic.o \
          $(BUILD)/gdt.o $(BUILD)/idt.o $(BUILD)/isr.o \
          $(BUILD)/kstring.o $(BUILD)/vfs.o $(BUILD)/procfs.o $(BUILD)/debugfs.o $(BUILD)/tmpfs.o $(BUILD)/tty_core.o $(BUILD)/tty_io.o $(BUILD)/console.o $(BUILD)/tty_kbd.o $(BUILD)/vt.o $(BUILD)/vt_ansi.o $(BUILD)/heap.o \
-         $(BUILD)/pmm.o $(BUILD)/vmm.o $(BUILD)/slab.o $(BUILD)/proc.o $(BUILD)/cgroup.o $(BUILD)/cgroup_cpu.o $(BUILD)/cgroup_mem.o $(BUILD)/cgroup_fs.o $(BUILD)/ptrace.o \
+         $(BUILD)/pmm.o $(BUILD)/buddy.o $(BUILD)/dcache.o $(BUILD)/swap.o $(BUILD)/vmm.o $(BUILD)/slab.o $(BUILD)/proc.o $(BUILD)/cgroup.o $(BUILD)/cgroup_cpu.o $(BUILD)/cgroup_mem.o $(BUILD)/cgroup_fs.o $(BUILD)/ptrace.o \
         $(BUILD)/signal.o $(BUILD)/switch.o $(BUILD)/timer.o \
         $(BUILD)/syscall.o \
         $(BUILD)/smp.o $(BUILD)/ap_trampoline.o \
@@ -624,6 +624,15 @@ QEMU_SVGA ?= -device vmware-svga
 
 QEMU_DEVICES := $(QEMU_NET) $(QEMU_AUDIO) $(QEMU_DISK) $(QEMU_SMP) $(QEMU_SVGA)
 
+# Hardware acceleration.  KVM hands the guest the host's real CPU and runs it
+# at near-native speed; without it (or on a host where /dev/kvm is missing,
+# e.g. a VM without nested virtualization) QEMU falls back to TCG emulation.
+# Pass KVM=0 to force the slow path.  KVM needs a concrete CPU model, so it
+# also selects -cpu host; the TCG fallback gets a generic -cpu qemu64.
+KVM ?= 1
+QEMU_KVM := $(if $(filter 1,$(KVM)),-enable-kvm,)
+QEMU_CPU := $(if $(filter 1,$(KVM)),-cpu host,-cpu qemu64)
+
 # The same hardware, but with a backend you can actually hear.  Override on
 # the command line if PulseAudio is not what your desktop runs, e.g.
 #   make guistart AUDIO_BACKEND=pipewire
@@ -686,9 +695,12 @@ ALPINE_ROOT := $(BUILD)/alpine-root
 #                 brings up at boot, terminfo is what xterm/TERM=xterm asks for
 #   X set         xorg-server, its evdev input driver, twm, xterm, xeyes,
 #                 xsetroot and mkfontscale (fonts.dir), the session /usr/rc runs
+#   xinit         /sbin/xfce-desktop hands the X server lifecycle to it
+#                 (start the server, wait until it accepts a connection,
+#                 run the client, tear the server down when it exits)
 ALPINE_PKGS ?= musl musl-dev busybox busybox-binsh bash coreutils binutils \
                curl nano python3 fastfetch openrc ncurses-terminfo \
-               xorg-server xf86-input-evdev xkbcomp xkeyboard-config \
+               xorg-server xf86-input-evdev xkbcomp xkeyboard-config xinit \
                twm xterm xeyes xsetroot mkfontscale
 
 # The X clients and fastfetch live in community rather than main.  Override on
@@ -1380,7 +1392,7 @@ INITRD_ULDEPS := $(BB_BIN) $(BASH_BIN) $(CC_BIN) $(FF_BIN) $(CURL_BIN) \
 endif
 
 $(INITRD): $(UELFS) $(MUSL_ELFS) $(KRNL) $(KMODS) $(INITRD_ULDEPS) \
-           $(BUILD)/.kcmd src/etc/inittab | $(BUILD)
+           $(BUILD)/.kcmd src/etc/inittab src/rootfs | $(BUILD)
 	rm -rf $(BUILD)/initrd-root
 	mkdir -p $(BUILD)/initrd-root
 	# ---- FHS skeleton (empty dirs are harmless placeholders for now) ----
@@ -1700,10 +1712,11 @@ ifeq ($(USERLAND),src)
 	   $(BUILD)/initrd-root/usr/lib/python3.12/lib-dynload/
 endif  # USERLAND=src: busybox/bash/coreutils/binutils/fastfetch/curl/nano/python
 	# ---- desktop stack: Xfce on Xorg :0 --------------------------------
-	# Xorg (modesetting on the in-kernel KMS device) comes up in /usr/rc;
-	# the xfce4 session packages (xfwm4, xfce4-panel, xfdesktop,
-	# xfce4-terminal) come from build-alpine-rootfs.sh, and /sbin/start-xfce
-	# (installed from src/rootfs/sbin below) starts the session components.
+	# /sbin/xfce-desktop (installed from src/rootfs/sbin below, respawned by
+	# /etc/inittab) hands the X server lifecycle to xinit(1); the xfce4
+	# session packages (xfwm4, xfce4-panel, xfdesktop, xfce4-terminal) come
+	# from build-alpine-rootfs.sh, and /sbin/start-xfce -- the client xinit
+	# runs -- is what brings the session components up.
 	
 	cp src/etc/inittab $(BUILD)/initrd-root/etc/inittab  # busybox init rewires openrc
 	# init-early.sh stub: upstream sets a console font/keymap via tty ioctls
@@ -1739,6 +1752,10 @@ endif  # USERLAND=src: busybox/bash/coreutils/binutils/fastfetch/curl/nano/pytho
 	# C resolver actually work: ping/wget do DNS via /etc/resolv.conf, getent
 	# reads /etc/passwd, and `hostname` uses /etc/hostname.
 	cp -a src/rootfs/etc/. $(BUILD)/initrd-root/etc/
+	# Pre-compiled XKB keymap cache: Xorg loads /var/lib/xkb/server-0.xkm
+	# directly instead of forking/exec'ing xkbcomp, which currently fails at
+	# runtime and fatals the server ("Could not invoke xkbcomp").
+	cp -a src/rootfs/var/lib/xkb/. $(BUILD)/initrd-root/var/lib/xkb/
 	# Guest-side helper scripts (start-xfce, ...).
 	cp -a src/rootfs/sbin/. $(BUILD)/initrd-root/sbin/
 	cp -a src/rootfs/bin/. $(BUILD)/initrd-root/bin/
@@ -1757,9 +1774,9 @@ endif  # USERLAND=src: busybox/bash/coreutils/binutils/fastfetch/curl/nano/pytho
 	done
 	# Kernel command line carrier for DISK installs: `make KCMD="single"`
 	# drops the words into /cmdline at the initrd root; the kernel reads that
-	# file before PID 1 *only when* the Limine boot entry carries no cmd:
-	# line.  For the ISO and the QEMU limine.conf the cmd: line is the
-	# preferred source (see below); this file is the fallback.
+	# file before PID 1 *only when* the Limine boot entry carries no
+	# cmdline: line.  For the ISO and the QEMU limine.conf the cmdline: line is
+	# the preferred source (see below); this file is the fallback.
 	@if [ -n "$(KCMD)" ]; then \
 	    echo "$(KCMD)" > $(BUILD)/initrd-root/cmdline; \
 	fi
@@ -1827,9 +1844,10 @@ endif
 # ---------- Limine hybrid ISO ----------
 # The bootloader config inside the ISO is generated from the same single
 # entry every time, plus an optional kernel command line.  `make KCMD=single
-# build/gnos.iso` (or any boot target) puts `cmd: single` in the conf
-# (the limine/executable protocol keyword, not the linux `cmdline:`),
-# Limine hands it to the kernel, and the kernel passes the word to /init.elf
+# build/gnos.iso (or any boot target) puts 'cmdline: single' in the conf
+# (the limine/executable protocol uses 'cmdline:' for the kernel command line,
+# same keyword as the linux protocol), Limine hands it to the kernel, and the
+# kernel passes the word to /init.elf
 # -> single-user root bash.  The .kcmd stamp makes the ISO rebuild only when
 # KCMD actually changes value.
 KCMD ?=
@@ -1852,7 +1870,7 @@ $(ISO): $(KRNL) $(INITRD) $(BUILD)/.kcmd $(LIMINE_BIOS) $(LIMINE_UEFI) | $(BUILD
 	# while the ISO holds a fraction of the ext2 image's size.
 	gzip -c $(INITRD) > $(ISO_ROOT)/initrd.img.gz
 	printf 'timeout: 1\n\n/GNOS\n    protocol: limine\n    kernel_path: boot():/GNOSKr.elf\n    module_path: boot():/initrd.img.gz\n' > $(ISO_ROOT)/limine.conf
-	@if [ -n "$(KCMD)" ]; then echo "    cmd: $(KCMD)" >> $(ISO_ROOT)/limine.conf; fi
+	@if [ -n "$(KCMD)" ]; then echo "    cmdline: $(KCMD)" >> $(ISO_ROOT)/limine.conf; fi
 	cp $(LIMINE_BIOS) $(ISO_ROOT)/limine-bios-cd.bin
 	cp $(LIMINE_UEFI) $(ISO_ROOT)/limine-uefi-cd.bin
 	cp limine/limine-bios.sys $(ISO_ROOT)/limine-bios.sys
@@ -1872,11 +1890,12 @@ $(DISK):
 	qemu-img create -f raw $@ $(DISK_MB)M
 
 run: $(ISO) $(DISK)
-	qemu-system-x86_64 -cdrom $(ISO) $(QEMU_MEM_ARG) -display gtk $(QEMU_DEVICES)
+	qemu-system-x86_64 -cdrom $(ISO) $(QEMU_MEM_ARG) -display gtk \
+	  $(QEMU_KVM) $(QEMU_CPU) $(QEMU_DEVICES)
 
 run-uefi: $(ISO) $(DISK)
 	qemu-system-x86_64 -cdrom $(ISO) $(QEMU_MEM_ARG) -bios $(OVMF) -display gtk \
-	  $(QEMU_DEVICES)
+	  $(QEMU_KVM) $(QEMU_CPU) $(QEMU_DEVICES)
 
 # guistart — the "just show me the OS" target.
 #
@@ -1892,6 +1911,7 @@ guistart: $(ISO) $(DISK)
 	@echo "GNOS: booting in a window (audio backend: $(AUDIO_BACKEND));"
 	@echo "      boot log is also being written to $(BUILD)/dbg.log"
 	qemu-system-x86_64 -cdrom $(ISO) $(QEMU_MEM_ARG) \
+	  $(QEMU_KVM) $(QEMU_CPU) \
 	  $(QEMU_NET) $(GUI_AUDIO) $(QEMU_DISK) $(QEMU_SMP) \
 	  -device isa-debugcon,chardev=dbg -chardev file,id=dbg,path=$(BUILD)/dbg.log \
 	  -display gtk -no-reboot
@@ -1965,6 +1985,7 @@ check: check-format check-hdrs test
 headless: $(ISO) $(DISK)
 	@echo "GNOS: booting headless; log is $(BUILD)/dbg.log"
 	qemu-system-x86_64 -cdrom $(ISO) $(QEMU_MEM_ARG) \
+	  $(QEMU_KVM) $(QEMU_CPU) \
 	  $(QEMU_NET) $(QEMU_DISK) \
 	  -device isa-debugcon,chardev=dbg -chardev file,id=dbg,path=$(BUILD)/dbg.log \
 	  -display none -no-reboot -smp 4

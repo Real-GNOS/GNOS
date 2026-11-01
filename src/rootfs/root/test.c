@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * test.c — the shell-side smoke program for the guest toolchain. (GPLv2)
  *

@@ -2965,74 +2965,12 @@ static int64_t sys_tgkill(int tgid, int tid, int sig)
  * `ticks` is the timeout in timer ticks; -1 means wait forever, 0 means probe
  * and return immediately.
  */
-/* TEMPORARY Xorg debugging: offsets from do_ppoll's post-prologue rsp to the
- * caller's saved registers.  Prologue = push r15,r14,r13,r12,rbp,rbx then
- * `sub $SAVED_RBX_OFF`; rbx lands at rsp+SAVED_RBX_OFF, rbp 8 bytes above.
- * Verified against `objdump -d` of the built kernel; the watchdog below
- * prints when either slot changes while the call runs. */
-/* VERIFIED against `objdump -d` of the built kernel: prologue = push
- * r15,r14,r13,r12,rbp,rbx then `sub $0x68`; rbx lands at rsp+0x68, rbp 8
- * bytes above.  The watchdog below prints when either slot changes. */
-#define SAVED_RBX_OFF 0x68
-#define SAVED_RBP_OFF 0x70
-
-static void ppoll_slot_watch(const char *phase, uint64_t rsp_me, uint64_t o_bx, uint64_t o_bp)
-{
-    uint64_t bx = *(volatile uint64_t *)(rsp_me + SAVED_RBX_OFF);
-    uint64_t bp = *(volatile uint64_t *)(rsp_me + SAVED_RBP_OFF);
-    if (bx == o_bx && bp == o_bp)
-        return;
-    dbg_puts("PPCORR pid=");
-    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
-    dbg_puts(" phase=");
-    dbg_puts(phase);
-    dbg_puts(" rsp=");
-    dbg_puts_hex(rsp_me);
-    dbg_puts(" ent_bx=");
-    dbg_puts_hex(o_bx);
-    dbg_puts(" ent_bp=");
-    dbg_puts_hex(o_bp);
-    dbg_puts(" now_bx=");
-    dbg_puts_hex(bx);
-    dbg_puts(" now_bp=");
-    dbg_puts_hex(bp);
-    dbg_puts("\r\n");
-    /* One-shot hardware watchpoint: DR0 on the watched slot, write, 4 bytes
-     * (DR7 L0 | R/W0=01 | LEN0=11).  The corruption is deterministic, so
-     * whoever writes again after this print lands in the #DB dump. */
-    static int wp_armed;
-    if (!wp_armed) {
-        wp_armed = 1;
-        asm volatile("mov %0, %%dr0" ::"r"(rsp_me + SAVED_RBX_OFF));
-        asm volatile("mov %0, %%dr7" ::"r"((uint64_t)0xD0001));
-        dbg_puts("WP-ARM addr=");
-        dbg_puts_hex(rsp_me + SAVED_RBX_OFF);
-        dbg_puts("\r\n");
-    }
-}
-
 int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
 {
     if (nfds > 4096)
         nfds = 4096;
     if (nfds == 0)
         return 0;
-
-    /* TEMPORARY Xorg debugging: snapshot the caller's saved registers right
-     * after the prologue (they are, by construction, still correct here). */
-    uint64_t rsp_me, o_bx, o_bp;
-    asm volatile("mov %%rsp, %0" : "=r"(rsp_me));
-    o_bx = *(volatile uint64_t *)(rsp_me + SAVED_RBX_OFF);
-    o_bp = *(volatile uint64_t *)(rsp_me + SAVED_RBP_OFF);
-    dbg_puts("PPENT pid=");
-    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
-    dbg_puts(" rsp=");
-    dbg_puts_hex(rsp_me);
-    dbg_puts(" bx=");
-    dbg_puts_hex(o_bx);
-    dbg_puts(" bp=");
-    dbg_puts_hex(o_bp);
-    dbg_puts("\r\n");
 
     int64_t  ready         = 0;
     uint64_t deadline      = 0;
@@ -3104,25 +3042,6 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
                             int u = -2 - s;
                             if ((ev & POLLIN) && unix_readable(u)) {
                                 r |= POLLIN;
-                                /* TEMPORARY xfce debugging: which condition
-                                 * makes an idle X11/dbus socket report
-                                 * readable while recvmsg returns EAGAIN? */
-                                uint32_t rused;
-                                int      pc, nf, lst, hp;
-                                unix_readable_detail(u, &rused, &pc, &nf, &lst, &hp);
-                                dbg_puts("POLL-U u=");
-                                dbg_puts_dec((uint32_t)u);
-                                dbg_puts(" rused=");
-                                dbg_puts_dec(rused);
-                                dbg_puts(" pc=");
-                                dbg_puts_dec((uint32_t)pc);
-                                dbg_puts(" nf=");
-                                dbg_puts_dec((uint32_t)nf);
-                                dbg_puts(" lst=");
-                                dbg_puts_dec((uint32_t)lst);
-                                dbg_puts(" peer=");
-                                dbg_puts_dec((uint32_t)hp);
-                                dbg_puts("\r\n");
                             }
                             if ((ev & POLLOUT) && unix_writable(u))
                                 r |= POLLOUT;
@@ -3139,9 +3058,6 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
                 ready++;
         }
 
-        /* TEMPORARY Xorg debugging: did anything change the saved slots
-         * during net_poll() + the scan? */
-        ppoll_slot_watch("scan", rsp_me, o_bx, o_bp);
 
         if (ready > 0 || ticks == 0)
             break;
@@ -3177,15 +3093,10 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
             sched_block_timeout(WAIT_PIPE, sleep_for);
         (void)wait_pipe;
 
-        /* TEMPORARY Xorg debugging: and across the sleep? */
-        ppoll_slot_watch("wake", rsp_me, o_bx, o_bp);
-
         if (proc_pending_signals(cur))
             return -E_INTR;
     }
 
-    /* TEMPORARY Xorg debugging: final check before handing back. */
-    ppoll_slot_watch("ret", rsp_me, o_bx, o_bp);
     return ready;
 }
 
@@ -3948,93 +3859,14 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t fla
                 uint32_t chunk = (to_copy - o < PAGE_SIZE) ? (uint32_t)(to_copy - o) : PAGE_SIZE;
                 int32_t  got   = vfs_pread_fd(h, foff + o, g_mmap_bounce, chunk);
                 if (got > 0) {
-                    /* TEMPORARY Xorg debugging: verify every page write. */
-                    if (!vmm_copy_to_user(p->as, base + o, g_mmap_bounce, (uint64_t)got)) {
-                        dbg_puts("COPYFAIL: base=");
-                        dbg_puts_hex(base + o);
-                        dbg_puts("\r\n");
-                    } else {
-                        /* TEMPORARY Xorg debugging: full-page byte sum, not
-                         * just the first byte -- the earlier first-byte check
-                         * missed partial-zero pages. */
-                        uint64_t       chk = vmm_resolve(p->as, base + o);
-                        const uint8_t *kp  = (const uint8_t *)pmm_virt(chk);
-                        uint32_t       sum = 0;
-                        for (uint32_t b = 0; b < got; b++)
-                            sum += kp[b];
-                        uint32_t wsum = 0;
-                        for (uint32_t b = 0; b < (uint32_t)got; b++)
-                            wsum += g_mmap_bounce[b];
-                        if (sum != wsum) {
-                            dbg_puts("VERIFY-MISMATCH: va=");
-                            dbg_puts_hex(base + o);
-                            dbg_puts(" frame=");
-                            dbg_puts_hex(chk);
-                            dbg_puts(" sum=");
-                            dbg_puts_hex(sum);
-                            dbg_puts(" want=");
-                            dbg_puts_hex(wsum);
-                            dbg_puts("\r\n");
-                        }
-                        /* TEMPORARY Xorg debugging: log the frame each page
-                         * landed in, so the fault path can compare the
-                         * copy-time frame with the fault-time frame. */
-                        dbg_puts("MMPG: va=");
-                        dbg_puts_hex(base + o);
-                        dbg_puts(" frame=");
-                        dbg_puts_hex(chk);
-                        dbg_puts("\r\n");
-                    }
+                    vmm_copy_to_user(p->as, base + o, g_mmap_bounce, (uint64_t)got);
                     copied += (uint64_t)got;
-                } else if (copied == 0 || o + PAGE_SIZE >= to_copy) {
-                    /* TEMPORARY Xorg debugging: show every pread hiccup. */
-                    dbg_puts("MMCOPY: FAIL off=");
-                    dbg_puts_hex(foff + o);
-                    dbg_puts(" got=");
-                    dbg_puts_dec((uint32_t)got);
-                    dbg_puts("\r\n");
                 }
             }
-            /* TEMPORARY Xorg debugging */
-            dbg_puts("MMCOPY: base=");
-            dbg_puts_hex(base);
-            dbg_puts(" fsize=");
-            dbg_puts_hex(fsize);
-            dbg_puts(" foff=");
-            dbg_puts_hex(foff);
-            dbg_puts(" to_copy=");
-            dbg_puts_hex(to_copy);
-            dbg_puts(" copied=");
-            dbg_puts_hex(copied);
-            dbg_puts("\r\n");
-            /* TEMPORARY Xorg debugging: watch library mappings and their
-             * records. */
-            {
-                int rec_ok = mmap_record(p, base, mapsize, vflags);
-                dbg_puts("FMMAP: base=");
-                dbg_puts_hex(base);
-                dbg_puts(" size=");
-                dbg_puts_hex(mapsize);
-                dbg_puts(" vf=");
-                dbg_puts_hex(vflags);
-                dbg_puts(" rec=");
-                dbg_puts_dec((uint32_t)rec_ok);
-                dbg_puts("\r\n");
-                if (!rec_ok) {
-                    vmm_unmap(p->as, base, mapsize);
-                    return -ENOMEM;
-                }
-                {
-                    /* TEMPORARY Xorg debugging: store the copy's checksum on
-                     * the EXACT record (base must match exactly -- a contain
-                     * match would hit the overlapping whole-file record). */
-                    for (int i = 0; i < p->as->nmmaps; i++) {
-                        if (p->as->mmaps[i].base == base) {
-                            p->as->mmaps[i].cksum = vmm_region_checksum(p->as, base, mapsize);
-                            break;
-                        }
-                    }
-                }
+            int rec_ok = mmap_record(p, base, mapsize, vflags);
+            if (!rec_ok) {
+                vmm_unmap(p->as, base, mapsize);
+                return -ENOMEM;
             }
             return (int64_t)base;
         }
@@ -6055,6 +5887,13 @@ void syscall_handler(regs_t *r)
 
     case SYS_fork:
         ret = proc_fork(r);
+        if (ret < 0) {
+            dbg_puts("FORK-FAIL p=");
+            dbg_puts_dec((uint32_t)(p ? p->pid : 0));
+            dbg_puts(" errno=");
+            dbg_puts_dec((uint32_t)-ret);
+            dbg_puts("\n");
+        }
         break;
 
     case SYS_vfork:
@@ -6284,6 +6123,22 @@ void syscall_handler(regs_t *r)
                 dbg_puts(" path=");
                 dbg_puts(abs);
                 dbg_puts("\n");
+            }
+        }
+        /* Any other failure (EACCES/E2BIG/ENOEXEC/ENOMEM/...): the generic
+         * SY trace shows a bare number, and the musl-side error message
+         * dies in the parent's pipe -- e.g. Xorg's xkbcomp fork.  Name the
+         * binary and the errno so the failing exec is locatable. */
+        else if (ret < 0 && ret != -E_NOENT) {
+            static unsigned ef;
+            if (++ef < 64) {
+                dbg_puts("EXEC-FAIL p=");
+                dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
+                dbg_puts(" path=");
+                dbg_puts(abs);
+                dbg_puts(" errno=");
+                dbg_puts_dec((uint32_t)(-ret));
+                dbg_puts("\r\n");
             }
         }
 #endif

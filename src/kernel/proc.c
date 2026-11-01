@@ -381,6 +381,7 @@ static proc_t *proc_alloc(void)
         p->tl = p->tr = NULL;
         p->bkl_held   = 0;
         p->on_cpu     = -1;
+        p->ever_saved = 0;
         p->slice      = EEVDF_SLICE_TICKS * VIRT_UNIT;
         for (int f = 0; f < PROC_MAX_FD; f++)
             p->fds[f] = -1;
@@ -2055,10 +2056,11 @@ typedef struct {
     uint64_t uaddr, key;
     int      shared;
 } wv_ent_t;
-static struct {
+typedef struct {
     wv_ent_t *v;
     uint32_t  n;
-} g_futex_waitv[MAX_PROCS];
+} futex_waitv_t;
+static futex_waitv_t g_futex_waitv[MAX_PROCS];
 
 int proc_futex_waitv_arm(const uint64_t *uaddr, uint32_t n)
 {
@@ -2097,10 +2099,7 @@ void proc_futex_waitv_disarm(void)
 static int proc_futex_waitv_matches(int slot, addrspace_t *as, uint64_t addr, int shared,
                                     uint64_t key)
 {
-    struct {
-        wv_ent_t *v;
-        uint32_t  n;
-    } *s = &g_futex_waitv[slot];
+    futex_waitv_t *s = &g_futex_waitv[slot];
     if (!s->v || !s->n)
         return 0;
     proc_t *q = &g_procs[slot];
@@ -2628,6 +2627,15 @@ static void enqueue_fresh(proc_t *p)
         dbg_puts("\n");
     }
 #endif
+    /* A task already sitting on a run queue (PROC_READY) must never be
+     * inserted a second time: rq_enqueue is a treap insert, so a double
+     * insert would leave the node in two places and let two cores pick it
+     * from two queues -- running the same kernel stack on two cores at
+     * once and clobbering its switch_context return slot.  Wake paths
+     * (sched_wake, SIGCONT, SIGKILL) only call here for BLOCKED/STOPPED
+     * tasks, so this guard never swallows a legitimate first enqueue. */
+    if (p->state == PROC_READY)
+        return;
     if (cg_chain_throttled(p)) {
         cg_park(p);
         return;
@@ -2637,6 +2645,8 @@ static void enqueue_fresh(proc_t *p)
         p->rq_cpu = want;
     if (!p->tprio)
         p->tprio = (uint32_t)(p->pid * 0x9E3779B9u) ^ 0x85EBCA6Bu;
+    /* Queued ⟺ not running: drop any stale "on a cpu" label. */
+    p->on_cpu = -1;
     rq_enqueue(&g_rqs[p->rq_cpu], p);
     p->state = PROC_READY;
 }
@@ -2720,7 +2730,9 @@ static int schedule_locked(void)
     if (prev) {
         uint64_t now  = timer_ticks();
         uint64_t used = now - prev->last_run_tick;
-        int      pc   = (prev->on_cpu >= 0 && prev->on_cpu < NR_RQ) ? prev->on_cpu : 0;
+        /* prev is cpu_self()->current, so it ran on THIS core; charge its
+         * time to that core's queue (not to a stale on_cpu label). */
+        int      pc   = (int)cpu_self()->id % NR_RQ;
         rq_t    *pq   = &g_rqs[pc];
         uint64_t dv   = virt_delta(used, proc_eff_weight(prev));
         prev->vruntime += dv;
@@ -2738,10 +2750,19 @@ static int schedule_locked(void)
              * the queue; the cpu.max period rollover releases it. */
             if (cg_charge_runtime(prev, used) || cg_chain_throttled(prev))
                 cg_park(prev);
-            else
+            else {
+                /* Queued ⟺ not running: drop the "on a cpu" label so the
+                 * invariant holds and the picker can never run a task that
+                 * is already running on another core. */
+                prev->on_cpu = -1;
                 rq_enqueue(pq, prev);
+            }
         }
     }
+    /* prev (if any) is no longer running on this core regardless of whether
+     * it was re-queued or parked: clear its "on a cpu" label. */
+    if (prev)
+        prev->on_cpu = -1;
 
     /* Pick from this core's queue; an idle queue steals from the fullest
      * other one (per-CPU queues, work-stealing fallback). */
@@ -2768,6 +2789,31 @@ static int schedule_locked(void)
         }
     }
 #ifdef SYSTRACE
+    /* Guard: a task whose saved return slot is 0 would make switch_context
+     * ret into the null page (RING0 #PF at rip=0).  Catch it here and park
+     * the task instead of crashing the kernel.
+     *
+     * Only a REAL switch (next != prev) actually resumes next's frame, so the
+     * guard is skipped on a self-repick (next == prev): there the saved frame
+     * is never read, and openrc's frame is routinely clobbered in place by its
+     * own deep syscalls -- blocking it there would hang init and stop the
+     * desktop from ever coming up. */
+    if (next && next != prev) {
+        uint64_t *sp     = (uint64_t *)(uintptr_t)next->saved_rsp;
+        uint64_t  retrip = sp[6]; /* 6 callee-saved regs above saved_rsp */
+        if (retrip == 0) {
+            dbg_puts("BADSW next='");
+            dbg_puts(next->name);
+            dbg_puts("' pid=");
+            dbg_puts_dec((uint32_t)next->pid);
+            dbg_puts(" saved_rsp=");
+            dbg_puts_hex(next->saved_rsp);
+            dbg_puts("\r\n");
+            next->state = PROC_BLOCKED; /* don't re-pick a dead frame */
+            spin_unlock_irq(&g_proc_lock);
+            return 0;
+        }
+    }
     if (next && next->name[0] == 'd' && next->name[1] == 'r' && next->name[2] == 'm') {
         extern void dbg_puts(const char *);
         dbg_puts("PICK drm-refresh\n");
@@ -2787,6 +2833,7 @@ static int schedule_locked(void)
         }
         cpu_self()->current = NULL;
         vmm_switch_kernel();
+        prev->ever_saved = 1; /* resume returns into schedule() (spin_unlock) */
         switch_context(&prev->saved_rsp, cpu_self()->sched_rsp);
         spin_unlock_irq(&g_proc_lock); /* resumed: we are the idle context */
         return 1;
@@ -2799,6 +2846,7 @@ static int schedule_locked(void)
          * interrupt entry (isr_dispatch) or was dropped by bkl_leave_for_switch;
          * either way the caller's bkl_return_from_switch() will re-take it, so
          * hand it back here instead of deadlocking on our own acquisition. */
+        next->on_cpu = cpu_self()->id; /* keep the running-core label honest */
         if (prev && prev->bkl_held) {
             prev->bkl_held = 0;
             bkl_release();
@@ -2809,7 +2857,12 @@ static int schedule_locked(void)
 
     next->deadline      = next->vruntime + next->slice; /* fresh slice */
     next->last_run_tick = timer_ticks();
-    int fresh           = (next->on_cpu == -1); /* never ran: fabricated stack */
+    /* A task that has never been saved as a ctx-switch prev (ever_saved==0)
+     * resumes into its fabricated frame (ret_to_user / kthread_trampoline),
+     * which has no schedule() frame to drop g_proc_lock -- so the lock must
+     * be released before the switch.  A re-run task resumes into schedule()
+     * and drops it itself; carrying the lock across would double-unlock. */
+    int fresh           = (next->ever_saved == 0);
     next->on_cpu        = cpu_self()->id;
     cpu_self()->current = next;
 
@@ -2840,6 +2893,11 @@ static int schedule_locked(void)
         spin_unlock_irq(&g_proc_lock);
 
     uint64_t *save = prev ? &prev->saved_rsp : &cpu_self()->sched_rsp;
+    /* prev is about to be parked: its resume will return into this very
+     * schedule() (the spin_unlock just below), so it now owns a schedule()
+     * frame and is no longer "fresh". */
+    if (prev)
+        prev->ever_saved = 1;
     switch_context(save, next->saved_rsp);
     spin_unlock_irq(&g_proc_lock); /* resumed: inherit this core's lock */
     return 1;
@@ -2924,7 +2982,9 @@ void sched_tick(void)
     spin_lock_irq(&g_proc_lock);
     uint64_t now  = timer_ticks();
     uint64_t used = now - cur->last_run_tick;
-    int      tc   = (cur->on_cpu >= 0 && cur->on_cpu < NR_RQ) ? cur->on_cpu : 0;
+    /* cur is cpu_self()->current, so it ran on THIS core; charge its queue
+     * directly rather than trusting a possibly-stale on_cpu label. */
+    int      tc   = (int)cpu_self()->id % NR_RQ;
     rq_t    *tq   = &g_rqs[tc];
     cur->vruntime += virt_delta(used, proc_eff_weight(cur));
     tq->vtime += used * VIRT_UNIT;

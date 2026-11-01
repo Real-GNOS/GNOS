@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * landlock.c — landlock_create_ruleset(444) / landlock_add_rule(445) /
  * landlock_restrict_self(446) and process_mrelease(448). (GPLv2)

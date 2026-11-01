@@ -25,6 +25,8 @@
 
 #include "vfs.h"
 #include "heap.h"
+#include "smp.h"
+#include "dcache.h"
 #include "cgroup.h"
 #include "ext2.h"
 #include "fatfs_vfs.h"
@@ -60,6 +62,13 @@ typedef struct {
 
 static ext2_fs_t g_fs;
 static int       g_fs_ok;
+
+/* Root-image filesystem for the swap backing file (mm/swap.c).  NULL when
+ * the image is not mounted. */
+void *vfs_root_image(void)
+{
+    return g_fs_ok ? &g_fs : NULL;
+}
 
 static vfs_node_t g_dev[VFS_MAX_DEV];
 static unsigned   g_dev_count;
@@ -194,17 +203,6 @@ static int32_t pipe_node_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t l
             asm volatile("sti");
             return -E_INTR;
         }
-        /* TEMPORARY spawn debugging: which reader blocks, and why the
-         * EOF condition (writers == 0) has not fired for it. */
-        dbg_puts("PIPE-BLK pid=");
-        dbg_puts_dec((uint32_t)me->pid);
-        dbg_puts(" w=");
-        dbg_puts_dec(p->writers);
-        dbg_puts(" r=");
-        dbg_puts_dec(p->readers);
-        dbg_puts(" cnt=");
-        dbg_puts_dec(p->count);
-        dbg_puts("\r\n");
         sched_block_irqoff(WAIT_PIPE);
     }
 
@@ -415,18 +413,21 @@ int g_mount_count = 0;
  */
 static ext2_fs_t  g_bfs;
 static int        g_bfs_ok;
-static vfs_node_t g_bfs_dev; /* the block device the volume rides on */
 
+/* Block I/O shims for a disk-mounted volume.  The device node travels in the
+ * blkio ctx (a vfs_node_t *), so the same pair serves the root volume (g_fs,
+ * mounted straight from a block device by vfs_init_bdev) and any secondary
+ * mount (g_bfs) -- no global "current device" to keep in sync. */
 static int32_t bfs_blk_read(void *ctx, uint64_t off, void *buf, uint32_t len)
 {
-    (void)ctx;
-    return g_bfs_dev.ops->read(&g_bfs_dev, off, buf, len);
+    vfs_node_t *d = (vfs_node_t *)ctx;
+    return d->ops->read(d, off, buf, len);
 }
 
 static int32_t bfs_blk_write(void *ctx, uint64_t off, const void *buf, uint32_t len)
 {
-    (void)ctx;
-    return g_bfs_dev.ops->write(&g_bfs_dev, off, buf, len);
+    vfs_node_t *d = (vfs_node_t *)ctx;
+    return d->ops->write(d, off, buf, len);
 }
 
 /* Reads and writes through the disk-mounted volume (g_bfs), reached via
@@ -659,6 +660,67 @@ int vfs_mount_cgroupfs(const char *path)
  * first, unmounting it implicitly -- the installer is the only caller
  * that needs more, and it mounts one volume per run.
  */
+/* Pull an entire registered block device -- a real disk partition named like
+ * "sda1" or "nvme0n1p1" -- into a RAM buffer so it can be mounted as the root
+ * filesystem through vfs_init().  This is what `root=/dev/sda1` uses: instead
+ * of the hardcoded disk0/partition1 the legacy disk-root path reads, the
+ * kernel loads whatever device the boot command line named.  Returns the
+ * number of bytes copied, or 0 on error or when the device exceeds `cap`. */
+uint32_t vfs_load_blockdev(const char *name, uint8_t *dst, uint32_t cap)
+{
+    vfs_node_t *d = dev_lookup(name);
+    if (!d || d->kind != VFS_BLOCKDEV)
+        return 0;
+    uint64_t total = d->size;
+    if (total == 0 || total > cap)
+        return 0;
+
+    uint64_t off = 0;
+    while (off < total) {
+        uint32_t chunk = (uint32_t)(total - off);
+        if (chunk > 65536)
+            chunk = 65536;
+        int32_t r = d->ops->read(d, off, dst + off, chunk);
+        if (r < 0)
+            return 0;
+        off += (uint64_t)r;
+        if ((uint32_t)r < chunk)
+            break;
+    }
+    return (uint32_t)off;
+}
+
+/* Mount the root filesystem straight from a block device -- /dev/sda1,
+ * nvme0n1p1, ... -- instead of a RAM image.  This is what the kernel's
+ * root= option uses, and it is what makes root writes persistent: every
+ * ext2 read and write goes through the device's own blkio, so the on-disk
+ * filesystem is the live one.  Returns 1 on success.  Only ext2/ext3/ext4 is
+ * accepted (the root must be a real filesystem, not a FAT stick). */
+int vfs_init_bdev(const char *name)
+{
+    vfs_node_t *d = dev_lookup(name);
+    if (!d || d->kind != VFS_BLOCKDEV)
+        return 0;
+
+    memset(&g_fs, 0, sizeof(g_fs));
+    ext2_blkio_t blkio = {
+        .read  = bfs_blk_read,
+        .write = bfs_blk_write,
+        .ctx   = d,
+    };
+    g_fs_ok = ext2_mount_bdev(&g_fs, &blkio);
+    if (!g_fs_ok) {
+        dbg_puts("VFS: root device ");
+        dbg_puts(name);
+        dbg_puts(" is not a mountable ext2/ext3 volume\r\n");
+        return 0;
+    }
+    dbg_puts("VFS: mounted ext2 read/write on / (device ");
+    dbg_puts(name);
+    dbg_puts(")\r\n");
+    return 1;
+}
+
 int vfs_mount_bdev(const char *path, const char *devname)
 {
     if (g_mount_count >= MAX_MOUNTS)
@@ -674,10 +736,9 @@ int vfs_mount_bdev(const char *path, const char *devname)
     ext2_blkio_t blkio = {
         .read  = bfs_blk_read,
         .write = bfs_blk_write,
-        .ctx   = NULL,
+        .ctx   = d,
     };
     memset(&g_bfs, 0, sizeof(g_bfs));
-    g_bfs_dev = *d;
     if (!ext2_mount_bdev(&g_bfs, &blkio)) {
         /* Not ext2.  Try FAT before giving up: a USB stick is far more
          * likely to be FAT32 than anything else, and the same block
@@ -814,8 +875,23 @@ static int umount_rest(const char *path)
 /* ---- path resolution -------------------------------------------------- */
 static int resolve(const char *path, vfs_node_t *out, int follow)
 {
+    /* The dentry cache serves static-tree lookups without re-walking the
+     * ext2 directory blocks; dynamic pseudo-filesystems refuse to be
+     * cached inside dcache itself. */
+    if (dcache_lookup(path, follow, out))
+        return 0;
     if (!path || path[0] != '/')
         return -E_INVAL;
+
+    /* One shared 4 KiB scratch per CPU for the route checks below: each
+     * check only needs it synchronously.  Running six kmalloc(4096)/kfree
+     * pairs on every resolve turned path resolution into heap churn, and
+     * the first-fit allocator started failing those 4096 requests
+     * randomly (open/stat ENOMEM).  All callers run in syscall context
+     * under the BKL, so a function-local static is safe; it is per-CPU
+     * anyway so a pre-empting context on another core cannot stomp it. */
+    static char route_scratch[MAX_CPUS][GNUOS_PATH_MAX];
+    char       *rel = route_scratch[cpu_self()->id];
 
     /* /dev/shm is a real tmpfs mount, not a synthetic device node: POSIX
      * shared memory (shm_open) creates files in it.  It must fall through to
@@ -823,29 +899,23 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
      * and dies with ENOENT. */
     {
         /* devtmpfs: a mounted /dev routes to the live registry.  /dev/shm
-         * keeps falling through so its tmpfs mount wins.  GNUOS_PATH_MAX is
-         * Linux's 4096 now, so path scratch comes from the heap: two such
-         * buffers no longer fit on a 32 KiB kernel stack. */
-        char *devrel = kmalloc(GNUOS_PATH_MAX);
-        if (!devrel)
-            return -E_NOMEM;
-        int routed = vfs_route_dev(path, devrel);
+         * keeps falling through so its tmpfs mount wins. */
+        int routed = vfs_route_dev(path, rel);
         int r      = 0;
         if (routed) {
-            if (strcmp(devrel, "/") == 0) {
+            if (strcmp(rel, "/") == 0) {
                 /* the mount point itself is a directory */
                 memset(out, 0, sizeof(*out));
                 strncpy(out->name, "dev", VFS_NAME_MAX - 1);
                 out->kind = VFS_DIR;
             } else {
-                vfs_node_t *d = dev_lookup(devrel + 1);
+                vfs_node_t *d = dev_lookup(rel + 1);
                 if (!d)
                     r = -E_NOENT;
                 else
                     *out = *d;
             }
         }
-        kfree(devrel);
         if (routed)
             return r;
         if (strncmp(path, "/dev/", 5) == 0) {
@@ -875,12 +945,8 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
      * Checked before /sys so a hierarchy mounted at /sys/fs/cgroup shadows
      * the kernel's own tree there, like any mounted filesystem would. */
     {
-        char *crel = kmalloc(GNUOS_PATH_MAX);
-        if (!crel)
-            return -E_NOMEM;
-        int routed = vfs_route_cgroup(path, crel);
-        int r      = routed ? cgfs_resolve(crel, out) : 0;
-        kfree(crel);
+        int routed = vfs_route_cgroup(path, rel);
+        int r      = routed ? cgfs_resolve(rel, out) : 0;
         if (routed)
             return r;
     }
@@ -895,12 +961,8 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     /* A mounted tmpfs shadows the ext2 image at its mount point, exactly as
      * /proc shadows the empty /proc directory the image carries. */
     {
-        char *mrel = kmalloc(GNUOS_PATH_MAX);
-        if (!mrel)
-            return -E_NOMEM;
-        tmpfs_t *mfs = vfs_route_tmpfs(path, mrel);
-        int      r   = mfs ? tmpfs_resolve(mfs, mrel, out) : 0;
-        kfree(mrel);
+        tmpfs_t *mfs = vfs_route_tmpfs(path, rel);
+        int      r   = mfs ? tmpfs_resolve(mfs, rel, out) : 0;
         if (mfs)
             return r;
     }
@@ -909,40 +971,27 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
      * mount point.  The relative path is always '/'-rooted, which is what
      * ext2_lookup expects. */
     {
-        char *fat_rel = kmalloc(GNUOS_PATH_MAX);
-        if (!fat_rel)
-            return -E_NOMEM;
-        int routed = fatfs_route(path, fat_rel);
-        int r      = routed ? fatfs_resolve(fat_rel, out) : 0;
-        kfree(fat_rel);
+        int routed = fatfs_route(path, rel);
+        int r      = routed ? fatfs_resolve(rel, out) : 0;
         if (routed)
             return r;
     }
 
     {
-        char *iso_rel = kmalloc(GNUOS_PATH_MAX);
-        if (!iso_rel)
-            return -E_NOMEM;
-        int routed = iso9660_route(path, iso_rel);
-        int r      = routed ? iso9660_resolve(iso_rel, out) : 0;
-        kfree(iso_rel);
+        int routed = iso9660_route(path, rel);
+        int r      = routed ? iso9660_resolve(rel, out) : 0;
         if (routed)
             return r;
     }
 
     {
-        char *bfs_rel = kmalloc(GNUOS_PATH_MAX);
-        if (!bfs_rel)
-            return -E_NOMEM;
-        int routed = vfs_route_bfs(path, bfs_rel);
+        int routed = vfs_route_bfs(path, rel);
         int r      = 0;
         if (routed) {
-            if (!g_bfs_ok) {
-                kfree(bfs_rel);
+            if (!g_bfs_ok)
                 return -E_NOENT;
-            }
             ext2_dirent_t ent;
-            if (!ext2_lookup(&g_bfs, bfs_rel, &ent, follow))
+            if (!ext2_lookup(&g_bfs, rel, &ent, follow))
                 r = -E_NOENT;
             else {
                 memset(out, 0, sizeof(*out));
@@ -957,7 +1006,6 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
                 out->gid   = ent.gid;
             }
         }
-        kfree(bfs_rel);
         if (routed)
             return r;
     }
@@ -979,6 +1027,7 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
     out->mode  = ent.mode;
     out->uid   = ent.uid;
     out->gid   = ent.gid;
+    dcache_fill(path, follow, out); /* static tree: worth remembering */
     return 0;
 }
 
@@ -1453,6 +1502,7 @@ static const char *dirname_of(const char *path)
 
 int vfs_unlink(const char *path)
 {
+    dcache_flush(); /* namespace or metadata is about to change */
     /* /dev/shm holds real tmpfs files; shm_unlink() must be able to remove
      * them even though other /dev paths are synthetic device nodes. */
     if (strncmp(path, "/dev/", 5) == 0 && strncmp(path, "/dev/shm/", 9) != 0)
@@ -1490,6 +1540,7 @@ int vfs_unlink(const char *path)
  */
 int vfs_rmdir(const char *path)
 {
+    dcache_flush(); /* namespace or metadata is about to change */
     if (strncmp(path, "/dev/", 5) == 0)
         return -E_PERM;
     int g = may_mutate_dir(path, path);
@@ -1520,6 +1571,7 @@ int vfs_rmdir(const char *path)
 
 int vfs_mkdir(const char *path)
 {
+    dcache_flush(); /* namespace or metadata is about to change */
     if (strncmp(path, "/dev/", 5) == 0)
         return -E_PERM;
     int g = may_mutate_dir(path, NULL);
@@ -1574,6 +1626,7 @@ int vfs_symlink(const char *target, const char *path)
 
 int vfs_link(const char *oldpath, const char *newpath)
 {
+    dcache_flush(); /* namespace or metadata is about to change */
     if (strncmp(oldpath, "/dev/", 5) == 0 || strncmp(newpath, "/dev/", 5) == 0)
         return -E_PERM;
     int g = may_mutate_dir(newpath, NULL);
@@ -1660,6 +1713,7 @@ int vfs_readlink(const char *path, char *buf, uint32_t cap)
 
 int vfs_rename(const char *src, const char *dst)
 {
+    dcache_flush(); /* namespace or metadata is about to change */
     if (strncmp(src, "/dev/", 5) == 0 || strncmp(dst, "/dev/", 5) == 0)
         return -E_PERM;
     /* cgroup names are fixed by the hierarchy; rename is refused (Linux
@@ -1720,6 +1774,7 @@ int vfs_rename(const char *src, const char *dst)
  */
 int vfs_truncate(const char *path, uint64_t len)
 {
+    dcache_flush(); /* namespace or metadata is about to change */
     /* /dev/shm is a tmpfs mount, not a synthetic device, so truncating a
      * shared-memory file must reach the tmpfs routing below. */
     if (strncmp(path, "/dev/", 5) == 0 && strncmp(path, "/dev/shm/", 9) != 0)
@@ -1764,6 +1819,12 @@ static int slot_alloc(void)
         if (!g_files[h].refs)
             return h;
     return -E_MFILE;
+}
+
+/* Public path → node resolution (mm/swap.c uses it to find /swapfile). */
+int vfs_resolve_node(const char *path, vfs_node_t *out, int follow)
+{
+    return resolve(path, out, follow);
 }
 
 int vfs_file_open(const char *path, int flags)
@@ -1924,6 +1985,7 @@ void vfs_file_setfl(int h, int nonblock)
 
 int vfs_chmod(const char *path, uint32_t mode)
 {
+    dcache_flush(); /* namespace or metadata is about to change */
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
         return -E_PERM; /* cgroupfs modes are fixed */
@@ -1955,6 +2017,7 @@ int vfs_chmod(const char *path, uint32_t mode)
  */
 int vfs_chown(const char *path, uint32_t uid, uint32_t gid, int follow)
 {
+    dcache_flush(); /* namespace or metadata is about to change */
     char crel[GNUOS_PATH_MAX];
     if (vfs_route_cgroup(path, crel))
         return -E_PERM; /* cgroupfs keeps no owners */

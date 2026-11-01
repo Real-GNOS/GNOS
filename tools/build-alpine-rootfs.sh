@@ -54,6 +54,8 @@ PKGS=${ALPINE_PKGS:-"musl-dev openrc bash coreutils curl nano python3 \
                      fastfetch ncurses-terminfo \
                      file util-linux-login linux-pam \
                      xorg-server xf86-input-evdev xkbcomp xkeyboard-config \
+                     xinit \
+                     mesa mesa-dri-gallium \
                      twm xterm xeyes xsetroot mkfontscale \
                      agetty dbus xfce4 xfce4-terminal"}
 
@@ -165,6 +167,40 @@ fi
 # GTK reads compiled GSettings schemas; apk --root skips the compile trigger.
 if [ -d "$ROOTFS/usr/share/glib-2.0/schemas" ] && [ ! -f "$ROOTFS/usr/share/glib-2.0/schemas/gschemas.compiled" ]; then
     chroot "$ROOTFS" /usr/bin/glib-compile-schemas /usr/share/glib-2.0/schemas/ >/dev/null 2>&1 || true
+fi
+
+# ---- xkbcomp diagnostic wrapper (TEMPORARY) ----------------------------
+# On GNOS, Xorg invokes xkbcomp to compile the keyboard keymap and it exits
+# non-zero with no visible reason, which fatals the server (Fatal server
+# error: Failed to activate virtual core keyboard) and stops Xfce from
+# connecting.  Swap in a wrapper that proxies to the real binary and appends
+# its stderr to /tmp/xkbcomp.err (a tmpfs, so it is writable even if the
+# root were read-only) so the next boot exposes the true error.  Delete this
+# block once the underlying cause is fixed and the wrapper is no longer
+# needed.
+if [ -x "$ROOTFS/usr/bin/xkbcomp" ]; then
+    mv "$ROOTFS/usr/bin/xkbcomp" "$ROOTFS/usr/bin/xkbcomp.real"
+    cat > "$ROOTFS/usr/bin/xkbcomp" <<'XKBCOMP_WRAPPER'
+#!/bin/sh
+# xkbcomp diagnostic wrapper -- proxies to xkbcomp.real, logs stderr.
+REAL=/usr/bin/xkbcomp.real
+LOG=/tmp/xkbcomp.err
+{
+    echo "=== xkbcomp wrapper ($(date -u 2>/dev/null || echo 'no-date')) ==="
+    echo "pid=$$ args: $@"
+} >> "$LOG" 2>/dev/null
+"$REAL" "$@" 2>> "$LOG"
+ec=$?
+echo "xkbcomp exit=$ec" >> "$LOG" 2>/dev/null
+# Push the captured error to the debug console (serial) so it shows up in the
+# captured build/dbg.log even when the login prompt is unreachable.
+if [ -x /bin/dbgcat.elf ]; then
+    /bin/dbgcat.elf "$LOG"
+fi
+exit $ec
+XKBCOMP_WRAPPER
+    chmod +x "$ROOTFS/usr/bin/xkbcomp"
+    echo "=== xkbcomp diagnostic wrapper installed (logs to /tmp/xkbcomp.err) ==="
 fi
 
 echo "=== Alpine rootfs ready at $ROOTFS ==="

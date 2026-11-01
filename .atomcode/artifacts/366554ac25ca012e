@@ -1,0 +1,61 @@
+[user] init: 17592-byte LGY, entry 0x0000000000400000, stack 0x00007fffffefffa8, pml4 0x000000000032a000, pid 6
+[sched] starting kernel threads (RR, 5 ms quantum)
+[sched] alpha: iteration 0
+[sched] beta: iteration 0
+[sched] gamma: iteration 0
+hello from user mode
+user init pid 6
+USER_EFAULT_OK
+USER_EINVAL_OK
+USER_VFS_OK: hello from FAT32
+  /EFI
+  /BIN
+  /MODELS
+  /KERNEL.ELF
+  /INITRD.IMG
+  /TEST.TXT
+USER_DIR_OK
+USER_STAT_OK
+USER_TTY_OK
+[sched] alpha: iteration 1
+[sched] beta: iteration 1
+[sched] gamma: iteration 1
+[sched] alpha: iteration 2
+[sched] beta: iteration 2
+[sched] gamma: iteration 2
+[sched] alpha: iteration 3
+[sched] beta: iteration 3
+[sched] gamma: iteration 3
+[sched] alpha: exiting
+[sched] beta: exiting
+[sched] gamma: exiting
+USER_NET_OK
+[user] pid 8 (init) exited, status 0
+[user] pid 7 (init) exited, status 0
+9
+[user] pid 9 (init) exited, status 0
+USER_SHELL_OK
+[user] pid 10 (init) exited, status 0
+USER_REDIR_OK
+AI_MODEL_OK mcube-tiny-bigram vocab=256 embd=256 layer=1 ctx=512
+AI_DAEMON_OK pid=11
+[sched] demo threads finished, task count 6
+[sched] tasks:
+  pid 0   idle         state 0 prio 0 ticks 68 switches 37 syscalls 0
+  pid 5   monitor      state 1 prio 1 ticks 0 switches 2 syscalls 0
+  pid 6   init         state 0 prio 1 ticks 8 switches 32 syscalls 71
+  pid 9   init         state 3 prio 1 ticks 2 switches 11 syscalls 17
+  pid 11  init         state 0 prio 1 ticks 40 switches 10 syscalls 31
+  pid 12  init         state 0 prio 1 ticks 2 switches 9 syscalls 34
+SCHED_TEST_OK
+[user] pid 12 (init) exited, status 0
+AI_TOOL_OK
+[user] pid 13 (init) exited, status 0
+AI_CHAT_OK
+HWINFO_OK: QEMU TCG CPU version 2.5+ | QEMU Standard PC (i440FX + PIIX, 1996) | 512 MiB | 7 pci
+USER_INIT_OK
+USER_DESKTOP_OK: 1280x800 BGRA
+MCubeAIOS shell 0.1 -- type 'help' for builtins
+mcube$ USER_GUI_OK: 7 windows ready
+TEST PASS: boot + scheduler + VFS + net + user/syscall + AI + GUI markers found
+status: running

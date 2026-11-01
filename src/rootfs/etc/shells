@@ -1,0 +1,4 @@
+# valid login shells (GPLv2)
+/bin/sh
+/bin/ash
+/bin/bash

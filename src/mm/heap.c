@@ -139,6 +139,39 @@ void kheap_init(void)
     dbg_puts("\r\n");
 }
 
+/* Diagnostics for the ENOMEM path: when kmalloc fails, dump the free-list
+ * state at that instant to the serial log.  free_total ~= 0 means the heap
+ * is genuinely exhausted; free_total large while largest < need means
+ * fragmentation; a walk that ends suspiciously early means free-list
+ * corruption.  Throttled: the first 8 failures dump, then every 64th. */
+static uint64_t g_alloc_failures;
+
+static void kheap_fail_dump(uint64_t size)
+{
+    g_alloc_failures++;
+    if (g_alloc_failures > 8 && (g_alloc_failures & 0x3F) != 0)
+        return;
+
+    uint64_t free_total = 0, largest = 0, blocks = 0;
+    for (kheap_hdr_t *b = g_free_head; b; b = b->next) {
+        free_total += b->size;
+        if (b->size > largest)
+            largest = b->size;
+        blocks++;
+    }
+    dbg_puts("KHEAP: alloc FAIL size=0x");
+    dbg_puts_hex(size);
+    dbg_puts(" free=0x");
+    dbg_puts_hex(free_total);
+    dbg_puts(" largest=0x");
+    dbg_puts_hex(largest);
+    dbg_puts(" blocks=");
+    dbg_puts_dec((uint32_t)blocks);
+    dbg_puts(" fails=");
+    dbg_puts_dec((uint32_t)g_alloc_failures);
+    dbg_puts("\r\n");
+}
+
 void *kmalloc(size_t size)
 {
     if (!size)
@@ -182,6 +215,7 @@ void *kmalloc(size_t size)
         return (void *)((uint8_t *)b + HDR_SIZE);
     }
 
+    kheap_fail_dump(size);
     return NULL;
 }
 
