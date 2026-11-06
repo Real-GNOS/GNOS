@@ -53,11 +53,14 @@ static int menu_width, item_x;
 static void do_print_item(WINDOW * win, const char *item, int line_y,
 			  int selected, int hotkey)
 {
-	int j;
-	char *menu_item = malloc(menu_width + 1);
+	int    j;
+	size_t fit;
+	char  *menu_item = malloc(menu_width + 1);
 
-	strncpy(menu_item, item, menu_width - item_x);
-	menu_item[menu_width - item_x] = '\0';
+	/* Cut on a UTF-8 character boundary, not at an arbitrary byte. */
+	fit = dlg_strfit(item, menu_width - item_x);
+	memcpy(menu_item, item, fit);
+	menu_item[fit] = '\0';
 	j = first_alpha(menu_item, "YyNnMmHh");
 
 	/* Clear 'residue' of last item */
@@ -66,10 +69,11 @@ static void do_print_item(WINDOW * win, const char *item, int line_y,
 	wclrtoeol(win);
 	wattrset(win, selected ? dlg.item_selected.atr : dlg.item.atr);
 	mvwaddstr(win, line_y, item_x, menu_item);
-	if (hotkey) {
+	if (hotkey && (unsigned char)menu_item[j] < 0x80) {
 		wattrset(win, selected ? dlg.tag_key_selected.atr
 			 : dlg.tag_key.atr);
-		mvwaddch(win, line_y, item_x + j, menu_item[j]);
+		mvwaddch(win, line_y, item_x + dlg_width_n(menu_item, j),
+			 (unsigned char)menu_item[j]);
 	}
 	if (selected) {
 		wmove(win, line_y, item_x + 1);

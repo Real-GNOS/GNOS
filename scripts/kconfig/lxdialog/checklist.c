@@ -17,11 +17,13 @@ static int list_width, check_x, item_x;
  */
 static void print_item(WINDOW * win, int choice, int selected)
 {
-	int i;
-	char *list_item = malloc(list_width + 1);
+	int    i;
+	size_t fit;
+	char  *list_item = malloc(list_width + 1);
 
-	strncpy(list_item, item_str(), list_width - item_x);
-	list_item[list_width - item_x] = '\0';
+	fit = dlg_strfit(item_str(), list_width - item_x);
+	memcpy(list_item, item_str(), fit);
+	list_item[fit] = '\0';
 
 	/* Clear 'residue' of last item */
 	wattrset(win, dlg.menubox.atr);

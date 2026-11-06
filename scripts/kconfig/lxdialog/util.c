@@ -7,6 +7,8 @@
  */
 
 #include <stdarg.h>
+#include <locale.h>
+#include <wchar.h>
 
 #include "dialog.h"
 
@@ -14,6 +16,85 @@
 int saved_x, saved_y;
 
 struct dialog_info dlg;
+
+/* ------------------------------------------------------------- UTF-8 ----
+ * With setlocale(LC_ALL, "") ncurses decodes multibyte strings and lays out
+ * wide (2-column) CJK characters by itself.  The layout arithmetic in
+ * lxdialog, however, still measures strings in bytes: cutting with
+ * strncpy() at an arbitrary byte can split a UTF-8 sequence and reproduce
+ * the same "~X" garbage as a wrong locale.  These helpers work in columns.
+ */
+static void dlg_char_info(const char *s, size_t *bytes, int *cols)
+{
+	mbstate_t st;
+	wchar_t   wc;
+	size_t    n;
+	int       w;
+
+	memset(&st, 0, sizeof(st));
+	n = mbrtowc(&wc, s, MB_CUR_MAX, &st);
+	if (n == (size_t)-1 || n == (size_t)-2 || n == 0) {
+		*bytes = 1;
+		*cols  = 1;
+		return;
+	}
+	w = wcwidth(wc);
+	*bytes = n;
+	*cols  = w > 0 ? w : 1;
+}
+
+/* Display columns occupied by s. */
+int dlg_strwidth(const char *s)
+{
+	int cols = 0;
+
+	while (*s) {
+		size_t n;
+		int    w;
+
+		dlg_char_info(s, &n, &w);
+		cols += w;
+		s    += n;
+	}
+	return cols;
+}
+
+/* Bytes of s that fit in maxcols columns; never splits a character. */
+size_t dlg_strfit(const char *s, int maxcols)
+{
+	const char *p = s;
+
+	while (*p && maxcols > 0) {
+		size_t n;
+		int    w;
+
+		dlg_char_info(p, &n, &w);
+		if (w > maxcols)
+			break;
+		maxcols -= w;
+		p       += n;
+	}
+	return (size_t)(p - s);
+}
+
+/* Display columns of the first nbytes bytes of s (byte offset -> column). */
+int dlg_width_n(const char *s, size_t nbytes)
+{
+	const char *end = s + nbytes;
+	int cols = 0;
+
+	while (*s && s < end) {
+		size_t n;
+		int    w;
+
+		dlg_char_info(s, &n, &w);
+		if ((size_t)(end - s) < n)
+			break;
+		cols += w;
+		s    += n;
+	}
+	return cols;
+}
 
 static void set_mono_theme(void)
 {
@@ -230,14 +311,14 @@ void dialog_clear(void)
 
 		for (pos = dlg.subtitles; pos != NULL; pos = pos->next) {
 			/* 3 is for the arrow and spaces */
-			len += strlen(pos->text) + 3;
+			len += dlg_strwidth(pos->text) + 3;
 		}
 
 		wmove(stdscr, 1, 1);
 		if (len > columns - 2) {
 			const char *ellipsis = "[...] ";
 			waddstr(stdscr, ellipsis);
-			skip = len - (columns - 2 - strlen(ellipsis));
+			skip = len - (columns - 2 - dlg_strwidth(ellipsis));
 		}
 
 		for (pos = dlg.subtitles; pos != NULL; pos = pos->next) {
@@ -251,11 +332,23 @@ void dialog_clear(void)
 			else
 				skip--;
 
-			if (skip < strlen(pos->text)) {
-				waddstr(stdscr, pos->text + skip);
+			/* Skip whole characters so the remaining text still starts
+			 * on a valid UTF-8 boundary. */
+			size_t off = 0;
+			while (pos->text[off] && skip > 0) {
+				size_t n;
+				int    w;
+
+				dlg_char_info(pos->text + off, &n, &w);
+				if (w > skip)
+					break;
+				skip -= w;
+				off  += n;
+			}
+			if (pos->text[off]) {
+				waddstr(stdscr, pos->text + off);
 				skip = 0;
-			} else
-				skip -= strlen(pos->text);
+			}
 
 			if (skip == 0)
 				waddch(stdscr, ' ');
@@ -275,6 +368,10 @@ void dialog_clear(void)
 int init_dialog(const char *backtitle)
 {
 	int height, width;
+
+	/* Trust the user's locale: in the C locale ncurses prints each
+	 * UTF-8 byte through unctrl() as "~X". */
+	setlocale(LC_ALL, "");
 
 	initscr();		/* Init curses */
 
@@ -325,10 +422,15 @@ void end_dialog(int x, int y)
 void print_title(WINDOW *dialog, const char *title, int width)
 {
 	if (title) {
-		int tlen = MIN(width - 2, strlen(title));
+		int    tlen = MIN(width - 2, dlg_strwidth(title));
+		size_t n    = dlg_strfit(title, tlen);
+		char   buf[MAX_LEN + 1];
+
+		memcpy(buf, title, n);
+		buf[n] = '\0';
 		wattrset(dialog, dlg.title.atr);
 		mvwaddch(dialog, 0, (width - tlen) / 2 - 1, ' ');
-		mvwaddnstr(dialog, 0, (width - tlen)/2, title, tlen);
+		mvwaddstr(dialog, 0, (width - tlen) / 2, buf);
 		waddch(dialog, ' ');
 	}
 }
@@ -347,7 +449,7 @@ void print_autowrap(WINDOW * win, const char *prompt, int width, int y, int x)
 
 	strcpy(tempstr, prompt);
 
-	prompt_len = strlen(tempstr);
+	prompt_len = dlg_strwidth(tempstr);
 
 	if (prompt_len <= width - x * 2) {	/* If prompt is short */
 		wmove(win, y, (width - prompt_len) / 2);
@@ -369,12 +471,12 @@ void print_autowrap(WINDOW * win, const char *prompt, int width, int y, int x)
 			   or it is the first word of a new sentence, and it is
 			   short, and the next word does not fit. */
 			room = width - cur_x;
-			wlen = strlen(word);
+			wlen = dlg_strwidth(word);
 			if (wlen > room ||
 			    (newl && wlen < 4 && sp
-			     && wlen + 1 + strlen(sp) > room
+			     && wlen + 1 + dlg_strwidth(sp) > room
 			     && (!(sp2 = strpbrk(sp, "\n "))
-				 || wlen + 1 + (sp2 - sp) > room))) {
+				 || wlen + 1 + dlg_width_n(sp, (size_t)(sp2 - sp)) > room))) {
 				cur_y++;
 				cur_x = x;
 			}
@@ -491,10 +593,15 @@ void draw_shadow(WINDOW * win, int y, int x, int height, int width)
  */
 int first_alpha(const char *string, const char *exempt)
 {
-	int i, in_paren = 0, c;
+	int i, in_paren = 0;
 
-	for (i = 0; i < strlen(string); i++) {
-		c = tolower(string[i]);
+	for (i = 0; string[i]; i++) {
+		unsigned char c = (unsigned char)string[i];
+
+		/* A byte of a multibyte sequence is never a hotkey. */
+		if (c >= 0x80)
+			continue;
+		c = (unsigned char)tolower(c);
 
 		if (strchr("<[(", c))
 			++in_paren;

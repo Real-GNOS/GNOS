@@ -189,6 +189,11 @@ void draw_box(WINDOW * win, int y, int x, int height, int width, chtype box,
 void draw_shadow(WINDOW * win, int y, int x, int height, int width);
 
 int first_alpha(const char *string, const char *exempt);
+
+/* UTF-8 display-width helpers (implemented in util.c). */
+int    dlg_strwidth(const char *s);
+size_t dlg_strfit(const char *s, int maxcols);
+int    dlg_width_n(const char *s, size_t nbytes);
 int dialog_yesno(const char *title, const char *prompt, int height, int width);
 int dialog_msgbox(const char *title, const char *prompt, int height,
 		  int width, int pause);
