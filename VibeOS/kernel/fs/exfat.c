@@ -1,0 +1,566 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* exFAT, read-only.
+ *
+ * The node identity here is the first cluster plus a contiguity flag, and both
+ * are needed to read the file - so unlike ext2 a lookup result is enough on its
+ * own, and unlike FAT it is not just a cluster number. That is the third
+ * different answer three drivers have given to the same question, which is
+ * worth noticing: the interface's node is carrying more meaning each time.
+ */
+
+#include "vibeos/storage.h"
+#include "vibeos/exfat.h"
+#include "vibeos/mbz.h"
+#include "vibeos/abi_linux.h"
+
+static uint16_t rd16(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t rd64(const uint8_t *p) {
+    return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4) << 32);
+}
+
+#define EXFAT_MAX_CLUSTER_BYTES 4096u
+#define EXFAT_ENTRY_FILE   0x85u
+#define EXFAT_ENTRY_STREAM 0xC0u
+#define EXFAT_ENTRY_NAME   0xC1u
+#define EXFAT_ATTR_DIRECTORY 0x0010u
+/* Bit 1 of the stream entry's flags: the file occupies consecutive clusters
+ * and the allocation table says nothing about it. */
+#define EXFAT_FLAG_NO_FAT_CHAIN 0x02u
+
+/* The node id packs the first cluster and the contiguity flag, because reading
+ * needs both and the interface gives a node one number. */
+#define EXFAT_ID(cluster, contig) (((uint64_t)(cluster)) | ((uint64_t)((contig) ? 1u : 0u) << 32))
+#define EXFAT_ID_CLUSTER(id) ((uint32_t)((id) & 0xFFFFFFFFull))
+#define EXFAT_ID_CONTIG(id) (((id) >> 32) & 1ull)
+
+static int exfat_read_sector(vibeos_exfat_t *fs, uint64_t sector, uint8_t *out) {
+    /* Bounded by the partition, not just the device (H-029). The block cache
+     * checks only the whole disk, so without this an image whose cluster heap
+     * or an extent points past its own partition reads a neighbour's sectors.
+     * 0 means no partition table, so unbounded. */
+    if (fs->part_sectors != 0u && sector >= fs->part_sectors) {
+        return -1;
+    }
+    return vibeos_blockcache_read(fs->cache, fs->part_lba + sector, out);
+}
+
+static uint64_t exfat_cluster_sector(vibeos_exfat_t *fs, uint32_t cluster) {
+    /* Cluster numbering starts at 2, and the heap starts where the first one
+     * would be - so the arithmetic is offset by two, not by zero. */
+    return (uint64_t)fs->cluster_heap +
+           (uint64_t)(cluster - 2u) * fs->sectors_per_cluster;
+}
+
+static int exfat_read_cluster(vibeos_exfat_t *fs, uint32_t cluster, uint8_t *out) {
+    uint32_t i;
+    if (cluster < 2u || cluster - 2u >= fs->cluster_count) {
+        vibeos_mbz_hit(VIBEOS_MBZ_EXFAT_BAD_METADATA, cluster);
+        return -1;
+    }
+    for (i = 0; i < fs->sectors_per_cluster; i++) {
+        if (exfat_read_sector(fs, exfat_cluster_sector(fs, cluster) + i,
+                              out + i * fs->bytes_per_sector) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* The next cluster in a chain, or 0 to stop. */
+static uint32_t exfat_next_cluster(vibeos_exfat_t *fs, uint32_t cluster) {
+    uint8_t sec[VIBEOS_BLOCK_SIZE];
+    uint64_t byte = (uint64_t)cluster * 4u;
+    uint32_t next;
+
+    if (exfat_read_sector(fs, fs->fat_offset + byte / fs->bytes_per_sector, sec) != 0) {
+        return 0;
+    }
+    next = rd32(sec + (byte % fs->bytes_per_sector));
+    /* Anything at or above 0xFFFFFFF7 is a marker, not a cluster, and anything
+     * below 2 is not one either.
+     *
+     * No test turns red when this is removed, and that is worth saying rather
+     * than leaving to be rediscovered: exfat_read_cluster already rejects both
+     * ranges, so the effect is identical either way. It is kept because the two
+     * checks answer different questions - this one says "the chain ended", that
+     * one says "that is not a readable cluster" - and a reader who deletes this
+     * has to work out that the other one exists. Defence in depth, labelled as
+     * such instead of masquerading as load-bearing. */
+    if (next >= 0xFFFFFFF7u || next < 2u) {
+        return 0;
+    }
+    return next;
+}
+
+/* The cluster holding a file's block `index`. */
+static uint32_t exfat_nth_cluster(vibeos_exfat_t *fs, uint32_t first, int contiguous,
+                                  uint32_t index) {
+    uint32_t c = first;
+    uint32_t i;
+
+    if (contiguous) {
+        /* The first cluster comes from the stream entry and the index from the
+         * caller; `first + index` in 32 bits wrapped onto a real cluster -
+         * 0xFFFFFFFE + 4 is 2 - and exfat_read_cluster only ever saw the wrapped
+         * value (M-009). Both are checked against the volume before the sum. */
+        if (first < 2u || first - 2u >= fs->cluster_count ||
+            index > (fs->cluster_count - 1u) - (first - 2u)) {
+            vibeos_mbz_hit(VIBEOS_MBZ_EXFAT_BAD_METADATA, first);
+            return 0;
+        }
+        return first + index;
+    }
+    /* A chain has at most as many links as the volume has clusters; an index
+     * past that can only be reached round a cycle (M-098). */
+    if (index >= fs->cluster_count) {
+        vibeos_mbz_hit(VIBEOS_MBZ_EXFAT_BAD_METADATA, index);
+        return 0;
+    }
+    i = 0;
+    {
+        uint32_t s1 = __atomic_load_n(&fs->cur_seq, __ATOMIC_ACQUIRE);
+        uint32_t f = __atomic_load_n(&fs->cur_first, __ATOMIC_RELAXED);
+        uint32_t at = __atomic_load_n(&fs->cur_index, __ATOMIC_RELAXED);
+        uint32_t cl = __atomic_load_n(&fs->cur_cluster, __ATOMIC_RELAXED);
+
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if ((s1 & 1u) == 0u && s1 == __atomic_load_n(&fs->cur_seq, __ATOMIC_RELAXED) &&
+            f == first && first != 0u && at <= index && cl != 0u) {
+            i = at;
+            c = cl;
+        }
+    }
+    for (; i < index; i++) {
+        c = exfat_next_cluster(fs, c);
+        if (c == 0u) {
+            return 0;
+        }
+    }
+    {
+        uint32_t s = __atomic_load_n(&fs->cur_seq, __ATOMIC_RELAXED);
+
+        if ((s & 1u) == 0u &&
+            __atomic_compare_exchange_n(&fs->cur_seq, &s, s + 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            __atomic_store_n(&fs->cur_first, first, __ATOMIC_RELAXED);
+            __atomic_store_n(&fs->cur_index, index, __ATOMIC_RELAXED);
+            __atomic_store_n(&fs->cur_cluster, c, __ATOMIC_RELAXED);
+            __atomic_store_n(&fs->cur_seq, s + 2u, __ATOMIC_RELEASE);
+        }
+    }
+    return c;
+}
+
+/* Following a directory's chain one link at a time, and knowing when it has
+ * gone round (M-098). A directory with no end-of-directory entry was read until
+ * its chain ended - so a chain that looped back on itself, 50 to 51 to 50, was
+ * read for ever, each turn walked again from the first cluster. Brent's cycle
+ * check finds a loop in about as many steps as the loop is long; the volume's
+ * cluster count bounds whatever it does not. */
+typedef struct {
+    uint32_t c;          /* the cluster being read                      */
+    uint32_t steps;      /* links followed                              */
+    uint32_t mark;       /* a cluster remembered, Brent's tortoise      */
+    uint32_t power;      /* when the tortoise moves next                */
+    uint32_t since;      /* links since it last moved                   */
+} exfat_walk_t;
+
+static void exfat_walk_start(exfat_walk_t *w, uint32_t first) {
+    w->c = first;
+    w->steps = 0;
+    w->mark = first;
+    w->power = 1;
+    w->since = 0;
+}
+
+/* The next cluster of the chain: 1 and w->c, 0 at its end, -1 for a chain that
+ * loops or is longer than the volume - metadata nobody can trust. */
+static int exfat_walk_next(vibeos_exfat_t *fs, exfat_walk_t *w, int contiguous) {
+    uint32_t next;
+
+    if (++w->steps >= fs->cluster_count) {
+        vibeos_mbz_hit(VIBEOS_MBZ_EXFAT_BAD_METADATA, w->c);
+        return -1;
+    }
+    if (contiguous) {
+        next = w->c + 1u;
+        if (next < 2u || next - 2u >= fs->cluster_count) {
+            return 0;
+        }
+        w->c = next;
+        return 1;
+    }
+    next = exfat_next_cluster(fs, w->c);
+    if (next == 0u) {
+        return 0;
+    }
+    if (next == w->mark) {
+        vibeos_mbz_hit(VIBEOS_MBZ_EXFAT_BAD_METADATA, next);
+        return -1;   /* round to a cluster already read: a loop */
+    }
+    if (++w->since == w->power) {
+        w->mark = next;
+        w->power <<= 1;
+        w->since = 0;
+    }
+    w->c = next;
+    return 1;
+}
+
+int vibeos_exfat_mount(vibeos_exfat_t *fs, vibeos_blockcache_t *cache,
+                       uint64_t part_lba) {
+    uint8_t sec[VIBEOS_BLOCK_SIZE];
+    uint8_t bps_shift, spc_shift;
+
+    if (!fs || !cache) {
+        return -1;
+    }
+    fs->cache = cache;
+    fs->part_lba = part_lba;
+    fs->part_sectors = 0u;   /* set by the storage layer after mount */
+    fs->mounted = 0;
+    fs->cur_first = 0;
+    fs->cur_seq = 0;
+
+    if (vibeos_blockcache_read(cache, part_lba, sec) != 0) {
+        return -1;
+    }
+    if (sec[3] != 'E' || sec[4] != 'X' || sec[5] != 'F' || sec[6] != 'A' ||
+        sec[7] != 'T' || sec[8] != ' ' || sec[9] != ' ' || sec[10] != ' ') {
+        return -1;
+    }
+    bps_shift = sec[108];
+    spc_shift = sec[109];
+    /* This driver reads through a 512-byte block cache, so a volume with a
+     * different sector size would need the cache to agree. Refusing is honest;
+     * pretending would read at the wrong offsets from the first cluster on. */
+    if (bps_shift != 9u) {
+        return -1;
+    }
+    if (spc_shift > 3u) {
+        return -1;   /* clusters above EXFAT_MAX_CLUSTER_BYTES */
+    }
+    fs->bytes_per_sector = 1u << bps_shift;
+    fs->sectors_per_cluster = 1u << spc_shift;
+    fs->cluster_bytes = fs->bytes_per_sector * fs->sectors_per_cluster;
+    fs->fat_offset = rd32(sec + 80);
+    fs->cluster_heap = rd32(sec + 88);
+    fs->cluster_count = rd32(sec + 92);
+    fs->root_cluster = rd32(sec + 96);
+    if (fs->cluster_count == 0u || fs->root_cluster < 2u) {
+        return -1;
+    }
+    fs->mounted = 1;
+    return 0;
+}
+
+static char exfat_upper(char c) {
+    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
+/* One directory entry set, decoded. */
+typedef struct {
+    uint32_t first_cluster;
+    uint64_t size;
+    int is_dir;
+    int contiguous;
+    char name[VIBEOS_FS_NAME_MAX + 1];
+} exfat_dirent_t;
+
+/* Walk a directory's clusters, decoding entry sets. Returns 1 when the entry
+ * at `want_index` was decoded, or when `want_name` matched; 0 when the
+ * directory ended first; -1 when its chain loops or outruns the volume. */
+static int exfat_dir_scan(vibeos_exfat_t *fs, uint32_t dir_cluster, int dir_contig,
+                          const char *want_name, uint32_t want_name_len,
+                          uint32_t want_index, exfat_dirent_t *out) {
+    uint8_t cluster[EXFAT_MAX_CLUSTER_BYTES];
+    uint32_t seen = 0;
+    exfat_walk_t walk;
+    int more = 1;
+
+    if (dir_contig && (dir_cluster < 2u || dir_cluster - 2u >= fs->cluster_count)) {
+        vibeos_mbz_hit(VIBEOS_MBZ_EXFAT_BAD_METADATA, dir_cluster);
+        return -1;
+    }
+    exfat_walk_start(&walk, dir_cluster);
+    for (;;) {
+        uint32_t c = walk.c;
+        uint32_t off;
+
+        if (more <= 0 || exfat_read_cluster(fs, c, cluster) != 0) {
+            return more < 0 ? -1 : 0;
+        }
+        for (off = 0; off + 32u <= fs->cluster_bytes; off += 32u) {
+            const uint8_t *e = cluster + off;
+            uint8_t type = e[0];
+            uint8_t secondary;
+            uint32_t name_pos = 0;
+            uint32_t k;
+
+            if (type == 0x00u) {
+                return 0;   /* end of the directory */
+            }
+            if (type != EXFAT_ENTRY_FILE) {
+                continue;   /* deleted, or a bitmap/upcase entry */
+            }
+            /* A file is a set: this entry, a stream entry, and name entries.
+             * They must be read together or the file has no name and no size. */
+            secondary = e[1];
+            if (secondary < 1u || off + 32u * (secondary + 1u) > fs->cluster_bytes) {
+                /* A set straddling the end of a cluster is legal exFAT; this
+                 * driver does not handle it, and stopping is better than
+                 * decoding half a set into a plausible wrong file. */
+                return 0;
+            }
+            {
+                const uint8_t *stream = cluster + off + 32u;
+                uint16_t attrs = rd16(e + 4);
+                uint8_t name_len;
+
+                if (stream[0] != EXFAT_ENTRY_STREAM) {
+                    continue;
+                }
+                name_len = stream[3];
+                out->is_dir = (attrs & EXFAT_ATTR_DIRECTORY) ? 1 : 0;
+                out->contiguous = (stream[1] & EXFAT_FLAG_NO_FAT_CHAIN) ? 1 : 0;
+                out->first_cluster = rd32(stream + 20);
+                out->size = rd64(stream + 24);
+
+                for (k = 1; k <= secondary && name_pos < VIBEOS_FS_NAME_MAX; k++) {
+                    const uint8_t *ne = cluster + off + 32u * (k + 1u);
+                    uint32_t j;
+                    if (ne[0] != EXFAT_ENTRY_NAME) {
+                        continue;
+                    }
+                    for (j = 0; j < 15u && name_pos < name_len &&
+                                name_pos < VIBEOS_FS_NAME_MAX; j++) {
+                        uint16_t wc = rd16(ne + 2u + j * 2u);
+                        /* Names are UTF-16. Anything outside ASCII becomes a
+                         * marker rather than being truncated at the first wide
+                         * character: half a name is worse than a marked one. */
+                        out->name[name_pos++] = (wc < 0x80u) ? (char)wc : '?';
+                    }
+                }
+                out->name[name_pos] = 0;
+            }
+            off += 32u * secondary;   /* skip the rest of the set */
+
+            if (want_name) {
+                uint32_t i;
+                if (name_pos != want_name_len) {
+                    goto next;
+                }
+                for (i = 0; i < name_pos; i++) {
+                    if (exfat_upper(out->name[i]) != exfat_upper(want_name[i])) {
+                        goto next;
+                    }
+                }
+                return 1;
+            } else if (seen == want_index) {
+                return 1;
+            }
+            seen++;
+        next:
+            continue;
+        }
+        more = exfat_walk_next(fs, &walk, dir_contig);
+    }
+}
+
+static int exfat_resolve(vibeos_exfat_t *fs, const char *path, exfat_dirent_t *out) {
+    uint32_t cluster = fs->root_cluster;
+    int contig = 0;   /* the root's chain is in the table unless said otherwise */
+    uint32_t i = 0;
+    int is_dir = 1;
+
+    out->first_cluster = cluster;
+    out->size = 0;
+    out->is_dir = 1;
+    out->contiguous = 0;
+    out->name[0] = 0;
+
+    while (path[i] == '/') {
+        i++;
+    }
+    while (path[i]) {
+        uint32_t start = i, seg;
+        while (path[i] && path[i] != '/') {
+            i++;
+        }
+        seg = i - start;
+        if (seg > 0u) {
+            if (!is_dir) {
+                return -1;
+            }
+            int found = exfat_dir_scan(fs, cluster, contig, path + start, seg, 0, out);
+
+            if (found != 1) {
+                return found < 0 ? -2 : -1;   /* -2: the volume's metadata is bad */
+            }
+            cluster = out->first_cluster;
+            contig = out->contiguous;
+            is_dir = out->is_dir;
+        }
+        while (path[i] == '/') {
+            i++;
+        }
+    }
+    out->first_cluster = cluster;
+    out->contiguous = contig;
+    out->is_dir = is_dir;
+    return 0;
+}
+
+/* ---- the filesystem interface --------------------------------------------*/
+
+static int exfat_op_lookup(void *fsv, const char *path, vibeos_fs_node_t *out) {
+    vibeos_exfat_t *fs = (vibeos_exfat_t *)fsv;
+    exfat_dirent_t ent;
+
+    int r;
+
+    if (!fs || !fs->mounted) {
+        return -1;
+    }
+    if ((r = exfat_resolve(fs, path, &ent)) != 0) {
+        return r == -2 ? -VIBEOS_EIO : -1;
+    }
+    out->id = EXFAT_ID(ent.first_cluster, ent.contiguous);
+    out->size = ent.size;
+    out->is_dir = ent.is_dir;
+    return 0;
+}
+
+static long exfat_op_read_at(void *fsv, const vibeos_fs_node_t *node,
+                             uint64_t offset, void *buf, uint32_t len) {
+    vibeos_exfat_t *fs = (vibeos_exfat_t *)fsv;
+    uint8_t cluster[EXFAT_MAX_CLUSTER_BYTES];
+    uint8_t *dst = (uint8_t *)buf;
+    uint32_t done = 0;
+
+    if (!fs || !fs->mounted || node->is_dir) {
+        return -1;
+    }
+    if (offset >= node->size) {
+        return 0;
+    }
+    /* Not offset + len > size: offset is below size here, but a size near
+     * 2^64 from the volume makes the sum wrap and the length stay untrimmed
+     * (found by the H-011 audit). The difference cannot wrap. */
+    if (len > node->size - offset) {
+        len = (uint32_t)(node->size - offset);
+    }
+    while (done < len) {
+        uint64_t index64 = (offset + done) / fs->cluster_bytes;
+        uint32_t index;
+        uint32_t within = (uint32_t)((offset + done) % fs->cluster_bytes);
+        uint32_t chunk = fs->cluster_bytes - within;
+        uint32_t c, i;
+
+        if (chunk > len - done) {
+            chunk = len - done;
+        }
+        /* The index was truncated to 32 bits, so a declared size past 2^32
+         * clusters read the file's own first clusters again (M-009). A volume
+         * has at most 2^32 clusters; an index past that is not in it. */
+        if (index64 > 0xFFFFFFFFull) {
+            return (done > 0u) ? (long)done : -1;
+        }
+        index = (uint32_t)index64;
+        c = exfat_nth_cluster(fs, EXFAT_ID_CLUSTER(node->id),
+                              (int)EXFAT_ID_CONTIG(node->id), index);
+        if (c == 0u || exfat_read_cluster(fs, c, cluster) != 0) {
+            return (done > 0u) ? (long)done : -1;
+        }
+        for (i = 0; i < chunk; i++) {
+            dst[done + i] = cluster[within + i];
+        }
+        done += chunk;
+    }
+    return (long)done;
+}
+
+static int exfat_op_list(void *fsv, const char *path, uint32_t index, char *name,
+                         uint32_t name_cap, uint64_t *out_size, int *out_is_dir) {
+    vibeos_exfat_t *fs = (vibeos_exfat_t *)fsv;
+    exfat_dirent_t dir, ent;
+    uint32_t i;
+
+    if (!fs || !fs->mounted || name_cap == 0u) {
+        return -1;
+    }
+    {
+        int r = exfat_resolve(fs, path, &dir);
+
+        if (r != 0 || !dir.is_dir) {
+            return r == -2 ? -VIBEOS_EIO : -1;
+        }
+        r = exfat_dir_scan(fs, dir.first_cluster, dir.contiguous, 0, 0, index, &ent);
+        if (r != 1) {
+            return r < 0 ? -VIBEOS_EIO : -1;
+        }
+    }
+    for (i = 0; i + 1u < name_cap && ent.name[i]; i++) {
+        name[i] = ent.name[i];
+    }
+    name[i] = 0;
+    if (out_size) {
+        *out_size = ent.size;
+    }
+    if (out_is_dir) {
+        *out_is_dir = ent.is_dir;
+    }
+    return 0;
+}
+
+/* Read-only: every writing operation is absent, and the wrappers say EROFS. */
+static const vibeos_fs_ops_t g_exfat_ops = {
+    .lookup = exfat_op_lookup,
+    .read_at = exfat_op_read_at,
+    .list = exfat_op_list,
+};
+
+const vibeos_fs_ops_t *vibeos_exfat_ops(void) {
+    return &g_exfat_ops;
+}
+
+/* ---- the storage scan's view of this driver (C7) -------------------------
+ *
+ * This file is the whole of what adding exfat cost: the scan used to name it
+ * in a probe table of its own, with a mount wrapper and a member of
+ * vibeos_volume_t for its state. Now it declares itself, the volume supplies
+ * the state, and the order it is tried in is the number below. */
+_Static_assert(sizeof(vibeos_exfat_t) <= VIBEOS_FS_STATE_BYTES,
+               "exfat's state must fit the storage a volume supplies");
+
+static int exfat_driver_mount(vibeos_fsmount_t *out, vibeos_blockcache_t *bc,
+                              uint64_t first_lba, uint64_t sectors, void *state)
+{
+    vibeos_exfat_t *fs = (vibeos_exfat_t *)state;
+
+    if (fs == 0 || vibeos_exfat_mount(fs, bc, first_lba) != 0) {
+        return -1;
+    }
+    fs->part_sectors = sectors;   /* the authoritative bound (H-029) */
+    return vibeos_fs_mount(out, vibeos_exfat_ops(), fs, "exfat");
+}
+
+static const vibeos_fs_driver_t g_exfat_driver = {
+    "exfat", 0, exfat_driver_mount, 0, 20u
+};
+VIBEOS_FS_DRIVER(g_exfat_driver);
+
+/* For a host test, which does not walk the linker section and registers the
+ * drivers itself. A function rather than an exported object, so the
+ * descriptor stays this file's own state. */
+const vibeos_fs_driver_t *vibeos_exfat_fs_driver(void)
+{
+    return &g_exfat_driver;
+}

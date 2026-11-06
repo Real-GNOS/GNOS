@@ -1,0 +1,251 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: VibeOS CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vibeos-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-build-test:
+    name: Linux ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    # Pinned, in every workflow, rather than ubuntu-latest: that label moves to
+    # Ubuntu 26 from 2026-10-19, and with it clang, gcc, QEMU, OVMF and the
+    # glibc the corpus copies from the host - every gate's toolchain at once,
+    # on whichever day GitHub's rollout reaches a job. Moving is a decision,
+    # made in its own commit with a run to compare against.
+    runs-on: ubuntu-24.04
+    # Ten minutes is the slowest job's normal run. Without a bound a hung step
+    # holds the run for GitHub's six hours, as one did (2026-10-07).
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+
+    steps:
+      - name: Harden The Runner
+        # Every outbound connection and process this job makes, recorded:
+        # the jobs a pull request triggers run code somebody else wrote, and
+        # what that code does is the one thing a scan of its text cannot
+        # tell. Audit, not block, until a few runs say which endpoints are
+        # this build's own (2026-11-05).
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # The audited TLS dependency is a submodule; Linux is where it gets
+          # built and tested, so it has to be fetched here.
+          submodules: recursive
+
+      - name: Host Tests Under Sanitizers
+        # The protocol code parses input an attacker controls, so the host
+        # tests are also run with the address and undefined-behaviour
+        # sanitizers. Cheap - it is the same tests, no emulation - and it is
+        # the only gate that sees memory errors at all.
+        if: matrix.compiler == 'clang' && matrix.build_type == 'Debug'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DVIBEOS_BUILD_TESTS=ON \
+            -DVIBEOS_BUILD_KERNEL_IMAGE=OFF \
+            -DVIBEOS_ENABLE_TLS=OFF \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build-asan --parallel
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+            ctest --test-dir build-asan --output-on-failure
+
+      # The packages below are 164 MB, fetched from Azure's Ubuntu mirror on
+      # every run. On 2026-10-26 it served them at tens of KB/s - 35 MB of
+      # mingw in over two minutes - and two jobs ran out of the step's fifteen
+      # minutes with nothing wrong in the code. The .debs are kept between runs
+      # instead, keyed by the list, so a slow mirror costs the first run only.
+      - name: Restore Downloaded Packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-${{ runner.os }}-24.04-${{ hashFiles('.github/workflows/cmake-multi-platform.yml') }}
+          restore-keys: apt-${{ runner.os }}-24.04-
+
+      - name: Install Dependencies
+        # A mirror that stops answering held the clang Debug job here for six
+        # hours, until GitHub cancelled the whole run (2026-10-07). It takes
+        # under two minutes when it works.
+        timeout-minutes: 15
+        run: |
+          # A stalled connection is dropped and retried rather than waited on.
+          APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives=$HOME/apt-archives"
+          mkdir -p "$HOME/apt-archives/partial"
+          sudo apt-get $APT update
+          # musl-tools builds the unmodified static Linux binary the boot gate
+          # runs. Without it that check silently does not happen, which is the
+          # kind of gap that turns a gate into decoration.
+          # ntfs-3g, exfatprogs and mtools build the NTFS, exFAT and long-name FAT images the boot
+          # mounts and the gate asserts; without them both report "no image".
+          sudo apt-get $APT install -y qemu-system-x86 qemu-utils ninja-build build-essential clang ovmf xorriso musl-tools ntfs-3g exfatprogs mtools gcc-mingw-w64-x86-64
+          # The cache action runs as the runner user; apt left these root's.
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/apt-archives"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_C_COMPILER=${{ matrix.compiler }}
+          -DVIBEOS_BUILD_TESTS=ON
+          -DVIBEOS_BUILD_KERNEL_IMAGE=ON
+          -DVIBEOS_REQUIRE_TLS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run Host Tests
+        run: ctest --test-dir build --output-on-failure
+
+      # The repository's own checks - layering, user access, Linux layouts,
+      # sabotage anchors, the checks on the checks. They ran only from a
+      # developer's check.sh, so a change that broke one merged green (external
+      # review, 2026-10-07). Same file check.sh calls; once, since none of them
+      # depends on the compiler.
+      - name: Repository Checks
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Release'
+        run: bash scripts/dev/static-checks.sh build
+
+      - name: Build Boot Artifacts
+        run: cmake --build build --target vibeos_image
+
+      # Both toolchains now produce a bootable image: GCC via ELF->objcopy PE,
+      # Clang via a native LLD PE link. Boot-gate both.
+      # Generous timeouts: GitHub runners emulate with TCG (no KVM), so OVMF
+      # boot plus the on-metal bring-up demos are much slower than on a dev box.
+      - name: QEMU OVMF Smoke (Required Gate)
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          chmod +x scripts/qemu-smoke-ovmf-linux.sh
+          ./scripts/qemu-smoke-ovmf-linux.sh build "BOOT_OK" 150
+
+      # This one runs the guest with 4 vCPUs so the SMP path (AP startup, the
+      # per-CPU LAPIC timers, the shared run queue) is actually exercised.
+      # Four TCG cores are several times slower than one, hence the budget.
+      - name: QEMU Boot-to-CLI Smoke (Required Gate)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          chmod +x scripts/qemu-smoke-cli-linux.sh
+          # The budget is generous on purpose: four TCG cores, a full shell
+          # session and a TCP exchange, on a runner that also builds the TLS
+          # dependency. A failure now reports whether the guest went quiet or
+          # was still making progress, so an undersized budget is not mistaken
+          # for a hang.
+          ./scripts/qemu-smoke-cli-linux.sh build 900
+
+      - name: Build Importable VM Images (esp.img/.vdi/.vmdk/.iso, GCC)
+        if: matrix.compiler == 'gcc'
+        run: |
+          set -euo pipefail
+          chmod +x scripts/make-vm-images-linux.sh
+          ./scripts/make-vm-images-linux.sh build
+
+      - name: QEMU Boot-Test Generated ISO (Required Gate, GCC)
+        if: matrix.compiler == 'gcc'
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          python3 scripts/qemu-boot-image-linux.py build/artifacts/vibeos.iso BOOT_OK 180 cdrom raw
+
+      - name: QEMU OVMF Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -f qemu-ovmf-summary.txt ]]; then
+            cat qemu-ovmf-summary.txt
+            status="$(grep '^status=' qemu-ovmf-summary.txt | cut -d= -f2- || true)"
+            reason="$(grep '^reason=' qemu-ovmf-summary.txt | cut -d= -f2- || true)"
+            profile="$(grep '^profile_used=' qemu-ovmf-summary.txt | cut -d= -f2- || true)"
+            phase="$(grep '^last_boot_phase=' qemu-ovmf-summary.txt | cut -d= -f2- || true)"
+            echo "OVMF status=${status} reason=${reason} profile=${profile} phase=${phase}"
+          fi
+
+      - name: QEMU Direct-Loader Probe (Informational)
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          chmod +x scripts/qemu-smoke-linux.sh
+          ./scripts/qemu-smoke-linux.sh build
+
+      - name: Upload Linux Artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: linux-${{ matrix.compiler }}-${{ matrix.build_type }}-artifacts
+          path: |
+            build/artifacts/**
+            build/artifacts/vibeos_esp.img
+            build/artifacts/vibeos.vdi
+            build/artifacts/vibeos.vmdk
+            build/artifacts/vibeos.iso
+            build/Testing/**/Test.xml
+            qemu-serial-*.log
+            qemu-err-*.log
+            qemu-ovmf-serial-*.log
+            qemu-ovmf-err-*.log
+            qemu-ovmf-serial.log
+            qemu-ovmf-err.log
+            qemu-ovmf-summary.txt
+            qemu-cli-serial.log
+            qemu-cli-err.log
+            qemu-cli-summary.txt
+            qemu-smoke-summary.txt
+          if-no-files-found: warn
+
+  windows-build-test:
+    name: Windows Host Tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run PowerShell Test Pipeline
+        shell: pwsh
+        run: |
+          # Host tests only. The bootable image is a freestanding ELF for the
+          # VibeOS target and its user programs assume LP64; building them with
+          # a Windows-hosted toolchain produces something that could never run,
+          # and only surfaces LLP64 noise. Linux builds and boot-gates the image.
+          #
+          # The TLS submodule is deliberately not fetched here: this job checks
+          # the portable core, and the adapter builds and tests its
+          # dependency-absent contract. Linux is the gate that requires TLS.
+          ./scripts/run-tests.ps1 -BuildDir build -Generator Ninja -Profile ci -SkipImageBuild
+
+      - name: Upload Windows Artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-host-artifacts
+          path: |
+            artifacts/**
+            build/artifacts/**
+          if-no-files-found: warn

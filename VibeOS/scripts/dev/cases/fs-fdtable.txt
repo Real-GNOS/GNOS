@@ -1,0 +1,73 @@
+# The descriptor table (kernel/fs/fdtable.c), rebuilt around open file
+# descriptions in docs/abi/ A3, proved by the host test (tests/kernel/fdtable_tests.c).
+#
+# Each case breaks one rule the table states once, and the run must go red on the
+# host test that names it:
+#  1. install does not take the lowest free number: closing stdout and opening a
+#     file no longer gives the file 1. Expect "a closed number is the next one
+#     handed out".
+#  2. a fresh page is not cleared: the kernel's free pages carry a poison
+#     pattern, read as descriptors. Expect "descriptor 1 was not the next free
+#     one" - and then a crash in a later group, on the same garbage. The first
+#     run of this case showed only the crash, because the test runner's stdout
+#     was buffered and the line naming the defect died in the buffer; the
+#     runner is unbuffered now.
+#  3. a copy takes no reference: fork's child and its parent then release one
+#     description twice. Expect "a copied table holds a reference".
+#  4. exec closes every descriptor, not only the close-on-exec ones. Expect "exec
+#     closes only its own close-on-exec numbers".
+#
+# The three cases C5 had - an off-by-one bound, a claim that did not clear, a copy
+# that left the redirections behind - named code A3 removed: there is no bound
+# but the table's own size, no entry holding a file to clear, and no redirections.
+#
+# Target source: kernel/fs/fdtable.c
+# Run: SABOTAGE_VERIFY="bash scripts/dev/verify-host.sh build-gcc-Release" python3 scripts/dev/sabotage.py kernel/fs/fdtable.c scripts/dev/cases/fs-fdtable.txt
+
+### install does not take the lowest free number
+--- old
+        fd = (fd / 64u) * 64u + (uint32_t)__builtin_ctzll(free_bits);
++++ new
+        fd = (fd / 64u) * 64u + 63u - (uint32_t)__builtin_clzll(free_bits);
+
+### a fresh page is not cleared
+--- old
+        for (i = 0; i < VIBEOS_FD_PER_PAGE; i++) {
+            p[i].file = 0;
+            p[i].flags = 0;
+            p[i].access = 0;
+        }
++++ new
+
+### a copy takes no reference
+--- old
+            vibeos_file_get(s->file);
+            d->file = s->file;
++++ new
+            d->file = s->file;
+
+### exec closes every descriptor
+--- old
+            if (e->file && (e->flags & VIBEOS_FD_CLOEXEC)) {
++++ new
+            if (e->file) {
+
+### a number used again keeps its last tenant's access mask (W2)
+--- old
+        e->access = 0;   /* a new entry grants nothing until it is told what */
++++ new
+
+### install_at leaves its number clear in the bitmap (#96)
+--- old
+    e->access = 0;
+    mark(t, fd, 1);
+    return 0;
++++ new
+    e->access = 0;
+    return 0;
+
+### a copy does not carry the bitmap (#96)
+--- old
+            mark(dst, (uint64_t)pg * VIBEOS_FD_PER_PAGE + i, 1);
++++ new
+            (void)0;

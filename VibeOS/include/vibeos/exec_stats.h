@@ -1,0 +1,116 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef VIBEOS_EXEC_STATS_H
+#define VIBEOS_EXEC_STATS_H
+
+#include <stdint.h>
+
+/* Why an exec was refused. Phase X-P0 of docs/exec/.
+ *
+ * The whole point of this enum is that "cannot load" is not a diagnosis. The
+ * loader had fourteen `return -1` sites and a single message for all of them,
+ * so a program that failed to start told you only that it had failed to start -
+ * and the difference between "the file is not there", "the file is there and
+ * short", and "the file is fine and there was no memory" is the difference
+ * between three unrelated investigations.
+ *
+ * This mattered more than it sounds. A failed FAT lookup used to look like the
+ * end of a file, so a flaky sector produced a short image that claimed to be
+ * complete; the loader then parsed whatever the previous program had left in
+ * the shared staging buffer. That defect is fixed, but nothing in the exec path
+ * would have *said* so, because every one of those outcomes printed the same
+ * sentence.
+ *
+ * Kept portable and separate from the architecture layer so the counters can be
+ * asserted by a host test as well as by the boot gate.
+ */
+typedef enum vibeos_exec_fail {
+    VIBEOS_EXEC_OK = 0,
+    VIBEOS_EXEC_NOT_FOUND,        /* the path did not resolve                 */
+    VIBEOS_EXEC_SHORT_READ,       /* fewer bytes than the directory claimed   */
+    VIBEOS_EXEC_BAD_HEADER,       /* the parser refused the image             */
+    VIBEOS_EXEC_BAD_WINDOW,       /* it does not fit either user window       */
+    VIBEOS_EXEC_NO_INTERP,        /* named an interpreter that is not there   */
+    VIBEOS_EXEC_INTERP_CHAIN,     /* an interpreter that needs an interpreter */
+    VIBEOS_EXEC_NO_STAGING,       /* no staging buffer for the image          */
+    VIBEOS_EXEC_TOO_LARGE,        /* larger than the staging buffer           */
+    VIBEOS_EXEC_NO_MEMORY,        /* an allocation or a mapping failed        */
+    VIBEOS_EXEC_ARGS_TOO_LARGE,   /* argv and envp exceed the stack mapped    */
+    VIBEOS_EXEC_NO_ASPACE,        /* could not create an address space        */
+    /* The kernel could not read the path, the argv vector or a string in it.
+     *
+     * Added because these were the exec failures that said *nothing*. Every
+     * other refusal here prints a line and lands in this tally; the three
+     * paths that copy from user memory returned a bare -EFAULT or -E2BIG, so
+     * an execve that failed on one of them left a child exiting 127 and a log
+     * with no reason in it anywhere. That is how a service failed to start on
+     * two boots out of six with the whole memory subsystem reporting clean. */
+    VIBEOS_EXEC_BAD_ARGS,
+    VIBEOS_EXEC_REASON_COUNT
+} vibeos_exec_fail_t;
+
+/* One counter per reason, indexed by the enum. A boot asserts the shape of this
+ * array rather than a total: the gate knows which refusals a boot is supposed
+ * to perform (a service that is meant to fail to start is a test, not a bug),
+ * and any other reason appearing is the failure. */
+typedef struct vibeos_exec_stats {
+    uint64_t refused[VIBEOS_EXEC_REASON_COUNT];
+    uint64_t loaded;              /* images that started                      */
+
+    /* How image pages were obtained. The ratio is the measurement X-P2 exists
+     * to move: a page mapped from the cache is the file's own page, and a page
+     * copied is a second frame holding the same bytes. Both are printed
+     * because a ratio with one half missing is a number nobody can act on. */
+    uint64_t pages_from_cache;
+    uint64_t pages_copied;
+    /* Pages of zero-fill .bss left to the page fault (W3 step 4): neither
+     * mapped nor copied at exec, made when first touched. A boot that defers
+     * none has lost the mechanism, and the gate says so. */
+    uint64_t pages_deferred;
+
+    /* Resident cache pages compared against the file they came from, and how
+     * many no longer matched. Once image pages are shared rather than copied,
+     * one frame is the text of every process running that program, so a stray
+     * write reaches all of them - and reaches them as a program misbehaving
+     * somewhere far from the write. The gate asserts changed == 0. */
+    uint64_t cache_audit_checked;
+    uint64_t cache_audit_changed;
+
+    /* The page cache's file identities (M-081): taken back from the least
+     * recently used file once the table was full, and dropped because the
+     * file at a path was no longer the one the identity was given for.
+     * Printed so a boot that reused one says so; the table is large enough
+     * that an ordinary boot reuses none. */
+    uint64_t file_ids_reused;
+    uint64_t file_ids_replaced;
+} vibeos_exec_stats_t;
+
+vibeos_exec_stats_t *vibeos_exec_stats(void);
+void vibeos_exec_stats_reset(void);
+
+/* The name printed in the log and in the summary. Stable text: the boot gate
+ * matches on it, so it is part of the interface rather than prose. */
+const char *vibeos_exec_fail_name(vibeos_exec_fail_t why);
+
+/* Count a refusal and hand back its name, so a caller can do both in the one
+ * expression that precedes its `return`. Returns "?" for a value outside the
+ * enum rather than reading past the array. */
+const char *vibeos_exec_refuse(vibeos_exec_fail_t why);
+
+/* Print the counters. Lives in kernel/exec/view.c; declared here so the CLI
+ * does not have to know which file answers. */
+void vibeos_exec_print_stats(void);
+
+/* Compare every resident cache page against the file it came from, filling the
+ * two counters above. Supplied by whoever owns a page cache; a build without
+ * one leaves the counters at zero, which the gate reads as "not exercised"
+ * rather than as "clean". */
+void vibeos_exec_audit_cache(void);
+
+/* Who answers it. Registered rather than defined across objects: the host tests
+ * link kmain without the architecture layer, and PE/COFF will not resolve a
+ * definition living in a different object from its caller - a rule this project
+ * has already paid for once. A build with nothing registered audits nothing and
+ * says so through the counters. */
+void vibeos_exec_set_auditor(void (*fn)(uint64_t *checked, uint64_t *changed));
+
+#endif /* VIBEOS_EXEC_STATS_H */

@@ -1,0 +1,12 @@
+# Target source: user/prog/init.c
+
+### init never announces itself
+--- old
+    say("NATIVE_INIT_READY", 0, -1, -1);
++++ new
+
+### init runs a service in place instead of supervising it
+--- old
+    int64_t child = sys3(SYS_fork, 0, 0, 0);
++++ new
+    int64_t child = 0;

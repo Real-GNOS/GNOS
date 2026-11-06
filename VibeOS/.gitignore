@@ -1,0 +1,85 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# debug information files
+*.dwo
+
+# Build and test artifacts
+build/
+build-*/
+artifacts/*.log
+artifacts/*.json
+artifacts/*.txt
+artifacts/*.efi
+qemu-*.log
+qemu-*-summary.txt
+qemu-ovmf-vars*.fd
+
+# CMake generated files
+build-wsl/
+
+# Python bytecode from the test harness scripts
+__pycache__/
+*.pyc
+vibeos-screen.ppm
+vibeos-screen.png
+.claude/
+build-fuzz/
+qemu-cli-summary-*.txt
+qemu-cli-serial-*.log
+qemu-cli-err-*.log
+qemu-cli-gate*.out
+wedge-serial*.log
+SUMMARY.md
+build-asan/
+repeat-fail-*
+
+# Soak run output (scripts/dev/soak.sh, and the nightly).
+soak-low.log
+soak-high.log
+qemu-cli-logdisk.img
+qemu-cli-logdisk-*.img
+wedge-summary-*.txt
+argv-hunt/
+.boot-evidence/
+
+# Rebuilt by the boot gate on every run (make_esp_image.py).
+qemu-cli-esp.img
+qemu-cli-esp-*.img
+qemu-cli-*.prev.*

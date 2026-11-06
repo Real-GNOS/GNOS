@@ -1,0 +1,120 @@
+# Sabotage cases for volumes and partition tables (I4b).
+#
+# Run: apply the edit, bash scripts/dev/check.sh build <dir>, then
+#      python3 scripts/qemu-cli-smoke-linux.py <dir> 300
+
+case: the protective MBR is accepted as a real table
+  in vibeos_partition_parse_mbr, treat type 0xEE as an ordinary partition
+  instead of setting out_protective
+  expect: on a GPT disk, [IO] VOLUMES table=mbr with one huge partition, and
+    the GPT never read
+  environment: NOT OBSERVABLE ON THIS MEDIUM, which is MBR-partitioned. It is
+    the single most dangerous case in this layer and this boot cannot reach it:
+    a GPT disk parses as a perfectly valid MBR describing one partition
+    covering the whole disk, so a reader that tries MBR first and stops on
+    success gets a *plausible wrong answer* rather than an error - and nothing
+    reports it. The host tests cover it; reproduce end to end with a
+    GPT-partitioned image.
+
+case: the volume scan is never called
+  in arch_hw.c, delete the hw_volumes_bringup call
+  expect: volume_scan_missing
+  why it matters: this is the state the code was in before I4b - written,
+    host-tested, sabotage-verified, and called by nobody. The gate asserts it
+    runs precisely because that is how it got there and stayed there.
+
+case: a partition that extends past the end of the disk is accepted
+  in vibeos_partition_parse_mbr, drop the check of first_lba + sector_count
+  against disk_sectors
+  expect: the host tests go red (test_partition)
+  why it matters: a partition table's whole job is to say where other people's
+    data begins. Being wrong about that writes over it, and a slice that runs
+    past the medium takes the block layer's bounds check with it - the volume's
+    own arithmetic is what turns an in-range device access into an out-of-range
+    one.
+
+case: the disk size is not passed to the scan
+  in hw_volumes_bringup, pass 0 for disk_sectors
+  expect: volume_scan_saw_a_disk_of_unknown_size
+  why it matters: zero means "unknown" and the scan then declines to parse a
+    GPT at all, because every one of its checks is against a size. A machine
+    that quietly fell back to MBR on a GPT disk would mount the protective
+    entry - see the first case.
+
+case: the scan runs and reports no volumes at all
+  in vibeos_storage_scan, return 0 before examining anything
+  expect: volume_scan_found_nothing
+  why it matters: "the scan ran" and "the scan found something" are different
+    facts, and a scan that completes over an empty result is exactly what a
+    silently-broken table reader looks like from outside. A disk with no
+    partition table is still one volume at LBA 0, so zero is never the honest
+    answer for a disk that mounted.
+
+# ---- I4b steps 3 and 4: the probe, and the mount table --------------------
+
+case: the FAT probe says yes to an exFAT volume
+  in fat_probe (fat.c), delete the sec[13] and sec[16] checks, keeping only
+  the 0xAA55 signature
+  expect: NOT OBSERVABLE ON THIS MEDIUM, which holds no exFAT volume.
+    It is the reason the probe exists. exFAT's boot sector *is* a FAT boot
+    sector with different fields: the jump and the signature match, and
+    sectors-per-cluster and the FAT count are zero precisely so a FAT driver
+    does not claim it. A FAT driver that mounts an exFAT volume does not fail -
+    it produces files full of nonsense. exFAT and NTFS are probed first for the
+    same reason; reproduce with an exFAT image.
+
+case: nothing is mounted through the table
+  in hw_volumes_bringup, delete the vibeos_fs_attach loop
+  expect: nothing_was_mounted_through_the_table
+  why it matters: the boot mounting a volume and the boot being able to *say*
+    it mounted one are different facts, and the second is what a machine with
+    one global mount could not do at all.
+
+case: the resolver takes the first match instead of the longest
+  in vibeos_fs_resolve, change "if (best < 0 || n > best_len)" to "if (best < 0)"
+  expect: FAIL:test_mounttab
+  why it matters: it makes resolution depend on the order things happened to
+    mount in, so the same path answers differently on two boots. That is the
+    kind of defect that appears months later on the first machine with an extra
+    volume.
+
+case: a prefix matches without a boundary
+  in vibeos_fs_resolve, delete the "path[n] != '/'" guard
+  expect: FAIL:test_mounttab
+  why it matters: "/usrlocal" then resolves to a mount at "/usr". The answer is
+    wrong and reads perfectly reasonably in a log, which is the worst
+    combination this project knows.
+
+case: a second claim on one path overwrites the first
+  in vibeos_fs_attach, replace the refusal with an assignment
+  expect: FAIL:test_mounttab
+  why it matters: the first filesystem stays mounted and becomes unreachable -
+    files open, blocks dirty, and nothing able to name it to unmount it.
+
+case: the first mount is not the root
+  in hw_volumes_bringup, always generate /volN and never "/"
+  expect: first_mount_is_not_the_root:/vol0
+  why it matters: everything above still resolves through g_rootfs, so a boot
+    whose first mount is not "/" has a table that disagrees with the syscalls -
+    two answers to "where is the filesystem", which is the shape of defect the
+    mount table exists to remove rather than create.
+
+# ---- the FAT driver stops being a singleton -------------------------------
+
+case: an entry point forgets to select its volume
+  in vibeos_fat_file_extent, delete the fat_select(0) call
+  expect: invariant_failed:swap_area_not_configured
+  why it matters: THIS HAPPENED. With a current-volume pointer, an entry point
+    that does not select operates on whatever the previous caller left - and
+    the first time a second volume existed, file_extent read the scratch volume
+    and the swap area reported that this medium has no swap file. Nothing about
+    that failure points at FAT: it looks like a swap problem. Every public
+    entry point that takes fs_lock must select, and the check for it is one
+    grep over the file.
+
+case: only one volume can be mounted
+  in fat_mount_volume, return 0 unconditionally
+  expect: only_one_mount:1
+  why it matters: this is the phase's own "done when", and it was unreachable
+    until the driver stopped being a singleton. Before that, mounting a second
+    volume would have unmounted the one the machine was running from.

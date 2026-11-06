@@ -1,0 +1,1175 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+cmake_minimum_required(VERSION 3.21)
+project(VibeOS C ASM)
+
+# Enable ASM language for assembly sources
+enable_language(ASM)
+set(CMAKE_ASM_COMPILE_OBJECT "<CMAKE_C_COMPILER> <DEFINES> <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+# Build options
+option(VIBEOS_BUILD_TESTS "Build VibeOS host-side tests" ON)
+option(VIBEOS_BUILD_KERNEL_IMAGE "Build bootable kernel image for emulator/hardware" ON)
+option(VIBEOS_KERNEL_ONLY "Build kernel only (no user-space)" OFF)
+# On by default now that init supervises the bring-up workload instead of
+# replacing it: switching this off returns to the old arrangement, where
+# PID 1 was the workload itself.
+option(VIBEOS_USE_NATIVE_INIT "Select the native ring-3 init for EFI media" ON)
+option(VIBEOS_ENABLE_TLS "Build the hosted Mbed TLS adapter" ON)
+# The Windows personality (docs/abi/windows.md W8 step 1): its kernel half, its
+# DLLs and its programs. Off builds and boots a kernel with Linux alone, which
+# check.sh does every time so that "optional" stays true.
+option(VIBEOS_PERSONALITY_NT "Build the NT (Windows) personality" ON)
+# The audited TLS dependency lives in a git submodule. A plain `git clone`
+# does not fetch it, so a missing submodule degrades to a build without TLS
+# rather than refusing to configure at all. Builds that must ship TLS (release
+# gates, the Linux CI matrix) set VIBEOS_REQUIRE_TLS and fail loudly instead.
+option(VIBEOS_REQUIRE_TLS "Fail configuration when the TLS dependency is unavailable" OFF)
+# libFuzzer target over the network receive path. Clang only.
+option(VIBEOS_BUILD_FUZZERS "Build the protocol fuzz targets (clang + libFuzzer)" OFF)
+
+# Artifact directories
+set(VIBEOS_ARTIFACTS_DIR "${CMAKE_BINARY_DIR}/artifacts" CACHE PATH "Artifacts output directory")
+file(MAKE_DIRECTORY "${VIBEOS_ARTIFACTS_DIR}")
+
+# Compiler and target configuration
+set(VIBEOS_TARGET_ARCH "x86_64" CACHE STRING "Target architecture")
+set(VIBEOS_BUILD_TYPE "debug" CACHE STRING "Build type: debug, release, hardened")
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/core_sources.cmake)
+
+add_library(vibeos_kernel_core STATIC ${VIBEOS_KERNEL_CORE_SOURCES}
+    ${VIBEOS_KERNEL_DRIVER_SOURCES})
+
+target_include_directories(vibeos_kernel_core
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(vibeos_kernel_core PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -ffreestanding
+    -fno-stack-protector
+    -mno-red-zone
+)
+
+# The same sources again, compiled for the machine rather than for the host.
+#
+# The image links the portable half, so every function in kernel/core,
+# kernel/mm, kernel/io and kernel/fs runs in the kernel and shares the register
+# file with whatever ring-3 task it interrupted. Putting -mno-sse only on the
+# arch target took the corruption from three boots in ten to one in twelve and
+# stopped there - a large improvement that is not a fix, and the number that
+# would have been reported as one had the sweep been five boots instead of
+# twelve.
+#
+# A second library rather than a flag on the first, because the first is linked
+# into the host tests, where it becomes part of an ordinary Linux binary whose
+# ABI passes floating point in XMM. Disabling SSE there is not a safety measure,
+# it is a different ABI.
+#
+# The first attempt at this was one library with `if(IMAGE AND NOT TESTS)`
+# around the flags - and both are on in every real build, so it would have
+# compiled to nothing while looking like a fix. That is this project's most
+# repeated defect and it very nearly went in.
+add_library(vibeos_kernel_core_image STATIC ${VIBEOS_KERNEL_CORE_SOURCES})
+target_include_directories(vibeos_kernel_core_image PUBLIC
+    $<TARGET_PROPERTY:vibeos_kernel_core,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_options(vibeos_kernel_core_image PRIVATE
+    -Wall -Wextra -Wpedantic -ffreestanding -fno-stack-protector -mno-red-zone
+    -mno-sse -mno-sse2 -mno-mmx -mno-80387)
+
+
+
+set(VIBEOS_TLS_ACTIVE OFF)
+if(VIBEOS_ENABLE_TLS)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt")
+        set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+        set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+        add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
+        set(VIBEOS_TLS_ACTIVE ON)
+    elseif(VIBEOS_REQUIRE_TLS)
+        message(FATAL_ERROR
+            "VIBEOS_REQUIRE_TLS is set but third_party/mbedtls is missing. "
+            "Run: git submodule update --init --recursive")
+    else()
+        message(WARNING
+            "third_party/mbedtls not present: building without TLS. "
+            "Run: git submodule update --init --recursive")
+    endif()
+endif()
+
+add_library(vibeos_user_core STATIC ${VIBEOS_USER_CORE_SOURCES})
+
+target_include_directories(vibeos_user_core
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(vibeos_user_core PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    # This library is linked into the freestanding kernel image, so it has to
+    # be built like the kernel is. Without this a function with a large enough
+    # frame gets a stack-protector prologue and the image fails to link on
+    # __stack_chk_fail - which does not exist there, and which nothing in the
+    # library asked for. It surfaced the first time a change forced the kernel
+    # to relink, not when the code was written, so it is the kind of breakage
+    # that arrives long after its cause.
+    -fno-stack-protector
+)
+
+# The TLS adapter is a HOSTED component and lives in its own target, never in
+# vibeos_user_core. The kernel image links vibeos_user_core; keeping Mbed TLS
+# out of that library is what guarantees a hosted crypto stack can never be
+# dragged into the freestanding image by a future reference.
+add_library(vibeos_tls STATIC ${VIBEOS_TLS_SOURCES})
+target_include_directories(vibeos_tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_options(vibeos_tls PRIVATE -Wall -Wextra -Wpedantic)
+if(VIBEOS_TLS_ACTIVE)
+    # PUBLIC so anything linking the adapter compiles against the same view of
+    # whether the audited dependency is present.
+    target_compile_definitions(vibeos_tls PUBLIC VIBEOS_TLS_MBEDTLS=1)
+    # The crypto library was renamed across the dependency's major versions:
+    # Mbed TLS 3.x builds `mbedcrypto`, 4.x moved it into TF-PSA-Crypto and
+    # builds `tfpsacrypto`. Ask which target actually exists instead of naming
+    # one - CMake silently turns an unknown target name into a raw -l flag, so
+    # a wrong guess is not a configure error but a link failure much later.
+    if(TARGET tfpsacrypto)
+        set(VIBEOS_TLS_CRYPTO_TARGET tfpsacrypto)
+    else()
+        set(VIBEOS_TLS_CRYPTO_TARGET mbedcrypto)
+    endif()
+    target_link_libraries(vibeos_tls PUBLIC mbedtls mbedx509 ${VIBEOS_TLS_CRYPTO_TARGET})
+    message(STATUS "TLS: linking ${VIBEOS_TLS_CRYPTO_TARGET} from third_party/mbedtls")
+endif()
+
+if(VIBEOS_BUILD_FUZZERS)
+    # The receive path is the only code fed bytes an attacker chooses, so it is
+    # the one place a fuzzer earns its keep.
+    add_executable(fuzz_inet_input ${VIBEOS_FUZZ_INET_SOURCES})
+    target_include_directories(fuzz_inet_input PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_options(fuzz_inet_input PRIVATE
+        -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g
+        -Wall -Wextra -Wpedantic
+    )
+    target_link_options(fuzz_inet_input PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()
+
+# The Rtl runtime of our ntdll (docs/abi/windows.md W2): the files that are
+# compiled both into ntdll.dll and, for the tests, into a host executable. The
+# platform hooks (platform_win.c) and the memory routines a -nostdlib DLL needs
+# (mem.c) belong to the DLL alone.
+set(VIBEOS_NTRTL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/user/win/ntdll/rtl")
+set(VIBEOS_NTRTL_CORE
+    ${VIBEOS_NTRTL_DIR}/heap.c ${VIBEOS_NTRTL_DIR}/string.c ${VIBEOS_NTRTL_DIR}/unicode.c
+    ${VIBEOS_NTRTL_DIR}/misc.c ${VIBEOS_NTRTL_DIR}/critsec.c ${VIBEOS_NTRTL_DIR}/ip.c
+    ${VIBEOS_NTRTL_DIR}/handle.c ${VIBEOS_NTRTL_DIR}/image.c ${VIBEOS_NTRTL_DIR}/env.c
+    ${VIBEOS_NTRTL_DIR}/path.c ${VIBEOS_NTRTL_DIR}/printf.c ${VIBEOS_NTRTL_DIR}/dbgprint.c
+    ${VIBEOS_NTRTL_DIR}/process.c)
+
+if(VIBEOS_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(vibeos_kernel_tests
+        tests/kernel/kernel_tests.c
+        tests/kernel/mm_stats_tests.c
+        tests/kernel/frame_tests.c
+        tests/kernel/vmspace_tests.c
+        tests/kernel/vma_tests.c
+        tests/kernel/backing_tests.c
+        tests/kernel/rmap_tests.c
+        tests/kernel/reclaim_tests.c
+        tests/kernel/compact_tests.c
+        tests/kernel/swap_tests.c
+        tests/kernel/acceptance_tests.c
+        tests/kernel/swaparea_tests.c
+        tests/kernel/blkdev_tests.c
+        tests/kernel/mounttab_tests.c
+        tests/kernel/parttab_tests.c
+        tests/kernel/logsink_tests.c
+        tests/kernel/gpt_tests.c
+        tests/kernel/blkfail_tests.c
+        tests/kernel/blkqueue_tests.c
+        tests/kernel/task_tests.c
+        tests/kernel/task_ident_tests.c
+        tests/kernel/fdtable_tests.c
+        tests/kernel/path_tests.c
+        tests/kernel/tmpfs_tests.c
+        tests/kernel/filelock_tests.c
+        tests/kernel/ptimer_tests.c
+        tests/kernel/random_tests.c
+        tests/kernel/fat_tests.c
+        tests/kernel/pipe_tests.c
+        tests/kernel/klog_tests.c
+        tests/kernel/crash_tests.c
+        tests/kernel/device_tests.c
+        tests/kernel/gui_tests.c
+        tests/kernel/runq_tests.c
+        tests/kernel/lifetime_tests.c
+        tests/kernel/loader_tests.c
+        tests/kernel/account_tests.c
+        tests/kernel/sched_policy_tests.c
+        tests/kernel/forkguard_tests.c
+        tests/kernel/pe_tests.c
+        # The Linux personality, on the services' host implementation (A2).
+        tests/kernel/linux_abi_tests.c
+        tests/kernel/ksvc_fake.c
+        # Its layouts and numbers against the host's Linux headers (A5).
+        tests/kernel/linux_layout_tests.c
+        tests/kernel/linux_layout_libc.c
+        ${VIBEOS_LINUX_ABI_SOURCES}
+        # The NT personality, on the same fake (docs/abi/windows.md W1).
+        tests/kernel/nt_abi_tests.c
+        tests/kernel/reg_tests.c
+        ${VIBEOS_NT_ABI_SOURCES}
+    )
+    target_link_libraries(vibeos_kernel_tests PRIVATE vibeos_kernel_core vibeos_user_core vibeos_tls)
+    target_include_directories(vibeos_kernel_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # A PE32+ image mingw-w64 linked, and what mingw's objdump says of it, for the
+    # PE parser's test (docs/abi/windows.md W1): the artefact and the description
+    # neither the parser nor its test wrote. Optional like musl-gcc; the test
+    # prints that it is absent rather than passing quietly.
+    find_program(VIBEOS_MINGW_GCC x86_64-w64-mingw32-gcc)
+    find_program(VIBEOS_MINGW_OBJDUMP x86_64-w64-mingw32-objdump)
+    if(VIBEOS_MINGW_GCC AND VIBEOS_MINGW_OBJDUMP)
+        set(VIBEOS_PE_FX_DIR "${CMAKE_BINARY_DIR}/pe_fixture")
+        set(VIBEOS_PE_FX_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/win/pe_fixture.c")
+        add_custom_command(
+            OUTPUT "${VIBEOS_PE_FX_DIR}/pe_fixture.exe" "${VIBEOS_PE_FX_DIR}/pe_fixture.h.txt"
+                   "${VIBEOS_PE_FX_DIR}/pe_fixture.p.txt"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${VIBEOS_PE_FX_DIR}"
+            COMMAND "${VIBEOS_MINGW_GCC}" -O1 -nostdlib -ffreestanding -e fixture_start
+                    -Wl,--image-base=0x8000000000 -Wl,--dynamicbase
+                    -o "${VIBEOS_PE_FX_DIR}/pe_fixture.exe"
+                    "${VIBEOS_PE_FX_SRC}"
+            COMMAND "${VIBEOS_MINGW_OBJDUMP}" -h "${VIBEOS_PE_FX_DIR}/pe_fixture.exe"
+                    > "${VIBEOS_PE_FX_DIR}/pe_fixture.h.txt"
+            COMMAND "${VIBEOS_MINGW_OBJDUMP}" -p "${VIBEOS_PE_FX_DIR}/pe_fixture.exe"
+                    > "${VIBEOS_PE_FX_DIR}/pe_fixture.p.txt"
+            DEPENDS "${VIBEOS_PE_FX_SRC}"
+            COMMENT "Building a PE32+ image with mingw-w64 for the PE parser's test"
+        )
+        add_custom_target(vibeos_pe_fixture DEPENDS "${VIBEOS_PE_FX_DIR}/pe_fixture.exe")
+        add_dependencies(vibeos_kernel_tests vibeos_pe_fixture)
+        target_compile_definitions(vibeos_kernel_tests PRIVATE
+            VIBEOS_PE_FIXTURE_DIR="${VIBEOS_PE_FX_DIR}")
+    endif()
+    add_test(NAME vibeos-kernel-host COMMAND vibeos_kernel_tests)
+
+    # The Rtl runtime of our ntdll (docs/abi/windows.md W2), compiled for the host
+    # from the same files the DLL is built from, behind the five hooks
+    # tests/win/ntrtl_host.c answers. -Wall -Werror as ntdll is: a warning the DLL
+    # would refuse is refused here too. The PE fixture is the image RtlImageNtHeader
+    # and RtlImageDirectoryEntryToData are checked against, with objdump's account
+    # of it; absent without mingw-w64, and the test says so.
+    add_executable(vibeos_ntrtl_tests
+        tests/win/ntrtl_tests.c
+        tests/win/ntrtl_tests_ip.c
+        tests/win/ntrtl_tests_sys.c
+        tests/win/ntrtl_host.c
+        ${VIBEOS_NTRTL_CORE})
+    target_include_directories(vibeos_ntrtl_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/user/win/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/user/win/ntdll/rtl)
+    target_compile_options(vibeos_ntrtl_tests PRIVATE -Wall -Werror -fno-builtin)
+    if(TARGET vibeos_pe_fixture)
+        add_dependencies(vibeos_ntrtl_tests vibeos_pe_fixture)
+        target_compile_definitions(vibeos_ntrtl_tests PRIVATE
+            VIBEOS_PE_FIXTURE_DIR="${VIBEOS_PE_FX_DIR}")
+    endif()
+    add_test(NAME vibeos-ntrtl-host COMMAND vibeos_ntrtl_tests)
+
+    # Randomised torture for the memory manager, checked against a reference
+    # model kept in plain arrays. Its own executable rather than a test case
+    # because it takes a seed and a round count: the nightly runs many seeds
+    # under a sanitizer, and a failure is replayed by passing its seed back.
+    # Randomised torture for the scheduler's policy, against a reference model
+    # in plain arrays. Same argument as the memory manager's: a scheduler asked
+    # whether it is being fair answers from the numbers it used to decide, so
+    # the defects that matter are the self-consistent ones. This kernel has had
+    # exactly that - a task's class was derived from is_idle, collapsing KERNEL
+    # into NORMAL, and stayed self-consistent for months.
+    add_executable(vibeos_sched_torture tests/kernel/sched_torture.c)
+    target_link_libraries(vibeos_sched_torture PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_sched_torture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME vibeos-sched-torture COMMAND vibeos_sched_torture 1 4000)
+
+    # The on-disk log against an independent account of what the medium ought
+    # to hold. The ring here is deliberately tiny, so a run wraps thousands of
+    # times: a torture on a ring big enough never to wrap tortures nothing.
+    add_executable(vibeos_logsink_torture tests/kernel/logsink_torture.c)
+    target_link_libraries(vibeos_logsink_torture PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_logsink_torture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME vibeos-logsink-torture COMMAND vibeos_logsink_torture 1 4000)
+
+    # The kernel log and the crash records against a model that formats every
+    # expected line itself, with snprintf: a log asked whether it wrote the right
+    # line answers from the code that wrote it, so the model shares none of it.
+    add_executable(vibeos_diag_torture tests/kernel/diag_torture.c)
+    target_link_libraries(vibeos_diag_torture PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_diag_torture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME vibeos-diag-torture COMMAND vibeos_diag_torture 1 4000)
+
+    # The graphical shell against a model of its terminal, with every buffer it
+    # is given fenced, and then under real threads. The threads are the point:
+    # before C7 the GUI had no lock and two of its callers ran on any core. Not
+    # on Windows, where the tests are built with no pthreads to hand; the
+    # single-threaded model runs everywhere.
+    add_executable(vibeos_gui_torture tests/kernel/gui_torture.c)
+    target_link_libraries(vibeos_gui_torture PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_gui_torture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(NOT WIN32)
+        find_package(Threads REQUIRED)
+        target_link_libraries(vibeos_gui_torture PRIVATE Threads::Threads)
+    endif()
+    add_test(NAME vibeos-gui-torture COMMAND vibeos_gui_torture 1 400 4)
+
+    # tmpfs against a model of its own (docs/abi/ L1): names, links, renames,
+    # sparse pages and the count of pages it holds, round by round.
+    add_executable(vibeos_tmpfs_torture tests/kernel/tmpfs_torture.c)
+    target_link_libraries(vibeos_tmpfs_torture PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_tmpfs_torture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME vibeos-tmpfs-torture COMMAND vibeos_tmpfs_torture 1 3000)
+
+    # The file-lock table against a model with no ranges in it (docs/abi/ L1
+    # step 6): every request, every byte probed, and the number of locks held.
+    add_executable(vibeos_filelock_torture tests/kernel/filelock_torture.c)
+    target_link_libraries(vibeos_filelock_torture PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_filelock_torture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME vibeos-filelock-torture COMMAND vibeos_filelock_torture 1 3000)
+
+    # The registry's core against a flat model of paths and seeded values
+    # (docs/abi/windows.md W8 step 2), saved and loaded back as it goes. It
+    # links the one file it tortures: the NT sources are not in the core.
+    add_executable(vibeos_reg_torture tests/kernel/reg_torture.c kernel/abi/nt/registry/reg.c)
+    target_include_directories(vibeos_reg_torture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME vibeos-reg-torture COMMAND vibeos_reg_torture 1 3000)
+
+    # msvcrt.dll's portable core (docs/abi/windows.md W2) on the host: printf
+    # held against glibc's and against msvcrt's documented differences, the heap
+    # against a model, the argv rules against Microsoft's own examples. The DLL
+    # is built from the same crt_core.c by mingw-w64 (vibeos_win, below). A
+    # failure prints the seed; pass it back as the first argument to replay.
+    # Unix hosts only: the comparison is with glibc, and the harness leans on
+    # signals and aligned_alloc that the Windows CI job's mingw does not have.
+    if(UNIX)
+        add_executable(vibeos_msvcrt_tests
+            tests/win/msvcrt_tests.c
+            user/win/msvcrt/crt_core.c
+        )
+        target_include_directories(vibeos_msvcrt_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/user/win/msvcrt)
+        # The core's own memcpy and memset must not become calls to themselves:
+        # gcc spells that -fno-tree-loop-distribute-patterns, which clang - the
+        # CI's other compiler - rejects outright; clang's nearest is
+        # -fno-builtin.
+        target_compile_options(vibeos_msvcrt_tests PRIVATE -Wall -Wextra)
+        if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(vibeos_msvcrt_tests PRIVATE -fno-tree-loop-distribute-patterns)
+        else()
+            target_compile_options(vibeos_msvcrt_tests PRIVATE -fno-builtin)
+        endif()
+        target_link_libraries(vibeos_msvcrt_tests PRIVATE m)
+        add_test(NAME vibeos-msvcrt-host COMMAND vibeos_msvcrt_tests)
+    endif()
+
+    # The FAT writer on a volume mformat made, for mdir and mcopy to read back
+    # (scripts/dev/verify-fat-mtools.sh): the artefact neither side of the host
+    # tests controls.
+    add_executable(vibeos_fat_exercise tests/kernel/fat_exercise.c)
+    target_link_libraries(vibeos_fat_exercise PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_fat_exercise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # The ext4 reader on volumes mkfs.ext4 made (scripts/dev/verify-ext4.sh,
+    # docs/filesystem-design/ext4.md step 1).
+    add_executable(vibeos_ext4_exercise tests/kernel/ext4_exercise.c)
+    target_link_libraries(vibeos_ext4_exercise PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_ext4_exercise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    add_executable(vibeos_mm_torture tests/kernel/mm_torture.c)
+    target_link_libraries(vibeos_mm_torture PRIVATE vibeos_kernel_core)
+    target_include_directories(vibeos_mm_torture PRIVATE /include)
+    # One short run in the ordinary suite, so a change that breaks it is caught
+    # before the nightly rather than by it.
+    add_test(NAME vibeos-mm-torture COMMAND vibeos_mm_torture 1 2000)
+
+    add_executable(vibeos_bootloader_tests
+        tests/bootloader/uefi_bootloader_tests.c
+        boot/bootloader_core.c
+        boot/uefi_file_io.c
+        boot/uefi_memory.c
+        boot/uefi_boot_info.c
+        boot/uefi_boot_handoff.c
+        boot/uefi_firmware.c
+    )
+    target_include_directories(vibeos_bootloader_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/boot
+    )
+    target_compile_options(vibeos_bootloader_tests PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+    add_test(NAME vibeos-bootloader-host COMMAND vibeos_bootloader_tests)
+endif()
+
+# The personalities the image is built with, and the one file that names them:
+# hw_personalities_init calls each one's init in this order. Generated, so that
+# no source the core compiles has to know which were chosen.
+set(VIBEOS_IMAGE_PERSONALITY_SOURCES "")
+set(VIBEOS_PERSONALITY_INITS "")
+if(VIBEOS_PERSONALITY_NT)
+    list(APPEND VIBEOS_IMAGE_PERSONALITY_SOURCES ${VIBEOS_ARCH_NT_SOURCES})
+    list(APPEND VIBEOS_PERSONALITY_INITS nt)
+endif()
+set(VIBEOS_PERSONALITIES_C "/* Generated by CMakeLists.txt: the personalities this image has. */\n")
+foreach(p IN LISTS VIBEOS_PERSONALITY_INITS)
+    string(APPEND VIBEOS_PERSONALITIES_C "void hw_personality_${p}_init(void);\n")
+endforeach()
+string(APPEND VIBEOS_PERSONALITIES_C "void hw_personalities_init(void);\nvoid hw_personalities_init(void) {\n")
+foreach(p IN LISTS VIBEOS_PERSONALITY_INITS)
+    string(APPEND VIBEOS_PERSONALITIES_C "    hw_personality_${p}_init();\n")
+endforeach()
+string(APPEND VIBEOS_PERSONALITIES_C "}\n")
+file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/generated/personalities.c"
+     CONTENT "${VIBEOS_PERSONALITIES_C}" @ONLY)
+list(APPEND VIBEOS_IMAGE_PERSONALITY_SOURCES "${CMAKE_BINARY_DIR}/generated/personalities.c")
+
+# Image and boot artifact generation
+if(VIBEOS_BUILD_KERNEL_IMAGE)
+    # Kernel executable ELF (bootable by QEMU/hardware bootloader)
+    # Links entry.s + kernel_core + user_core into a single executable
+    add_executable(vibeos_kernel
+        kernel/arch/x86_64/entry.s
+        kernel/arch/x86_64/isr.S
+        kernel/arch/x86_64/ap_boot.S
+        kernel/arch/x86_64/uaccess.S
+        ${VIBEOS_ARCH_X86_64_SOURCES}
+        ${VIBEOS_IMAGE_PERSONALITY_SOURCES}
+        # Registered drivers, compiled in rather than archived - see the list.
+        ${VIBEOS_KERNEL_DRIVER_SOURCES}
+        # Freestanding mem* runtime: the kernel image links -nostdlib, and some
+        # compilers (notably Clang) lower struct copies to memcpy/memset calls
+        # that GCC inlines. Provide the implementations so the image links on
+        # every toolchain, not just the one that happened to inline them.
+        boot/freestanding_runtime.c
+    )
+
+    # Real hardware bring-up sources (image-only, never linked into host tests).
+    target_compile_options(vibeos_kernel PRIVATE
+        -ffreestanding
+        -fno-stack-protector
+        -mno-red-zone
+        # No vector registers in the kernel, which is what Linux does and for
+        # the same reason. The kernel shares the register file with whatever
+        # ring-3 task it interrupted, so every XMM instruction it executes
+        # destroys that task's state unless something saves it - and for a
+        # syscall that does not switch tasks, nothing does. The context switch
+        # now saves and restores, and that closed the scheduler half; this
+        # closes the other one, which is every kernel entry.
+        #
+        # It was found by measurement rather than by review: with the context
+        # switch fixed and this flag absent, the corruption dropped from three
+        # boots in ten to one in five and did not stop. Two criteria were
+        # checked and only one had gone green, which is the whole reason the
+        # deterministic test was written before the fix.
+        #
+        # The cost is that memcpy and memset lose their vector forms. The
+        # alternative is saving 512 bytes on every kernel entry, which is far
+        # worse on a path that runs thousands of times a boot.
+        -mno-sse
+        -mno-sse2
+        -mno-mmx
+        -mno-80387
+        # Keep the frame pointer. A release build drops it, and without the
+        # chain a panic can report where the machine stopped but nothing about
+        # how it got there - which for a fault inside one of two hundred static
+        # helpers is most of the question. One register is a cheap price for a
+        # backtrace on a kernel nobody can attach a debugger to.
+        -fno-omit-frame-pointer
+        # Debug info in the image on disk, never loaded at runtime: it costs
+        # nothing to the guest and is what turns a panic's addresses into a
+        # file and a line number through scripts/dev/symbolize.py.
+        -g
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+
+    # --- User program: a standalone freestanding ELF embedded into the kernel ---
+    # Built as a static, position-dependent ELF64 (linked at a fixed low vaddr),
+    # then turned into a C byte array the kernel's ELF loader parses at runtime.
+    add_executable(vibeos_user_hello user/prog/hello.c user/prog/crt0.S)
+    target_compile_options(vibeos_user_hello PRIVATE
+        -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone
+        -mcmodel=large   # user space is linked above 4 GiB (its own PML4 slot)
+        -fno-strict-aliasing -Wall -Wextra
+    )
+    target_compile_definitions(vibeos_user_hello PRIVATE VIBEOS_USE_SYSCALL_INSN=1)
+    target_link_options(vibeos_user_hello PRIVATE
+        -nostdlib -no-pie
+        -Wl,-e,_start
+        -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld
+    )
+    set_target_properties(vibeos_user_hello PROPERTIES
+        LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld"
+    )
+
+    # Native init candidate. It is staged separately from the compatibility
+    # bring-up program until the runtime acceptance gate selects it as PID 1.
+    # Two supervised services, so the supervisor has something real to
+    # supervise: one that finishes cleanly and one that fails every time.
+    foreach(svc svc_ok svc_flap svc_crash svc_stress svc_bomb svc_press svc_reclaim)
+        add_executable(vibeos_user_${svc} user/prog/${svc}.c user/prog/crt0.S)
+        target_compile_options(vibeos_user_${svc} PRIVATE
+            -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone
+            -mcmodel=large -fno-strict-aliasing -Wall -Wextra
+        )
+        target_link_options(vibeos_user_${svc} PRIVATE
+            -nostdlib -no-pie -Wl,-e,_start
+            -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld
+        )
+        set_target_properties(vibeos_user_${svc} PROPERTIES
+            LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld"
+        )
+    endforeach()
+
+    # The soak run of the plan's P7, which is the ordinary stress service with
+    # its round count raised by two orders of magnitude. A cache variable rather
+    # than a separate program, so the soak exercises exactly the code a normal
+    # boot does - a second copy would be a second thing to keep true.
+    if(VIBEOS_STRESS_ROUNDS)
+        target_compile_definitions(vibeos_user_svc_stress PRIVATE
+            VIBEOS_STRESS_ROUNDS=${VIBEOS_STRESS_ROUNDS}u)
+    endif()
+
+    add_executable(vibeos_user_init user/prog/init.c user/prog/crt0.S)
+    target_compile_options(vibeos_user_init PRIVATE
+        -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone
+        -mcmodel=large -fno-strict-aliasing -Wall -Wextra
+    )
+    target_link_options(vibeos_user_init PRIVATE
+        -nostdlib -no-pie -Wl,-e,_start
+        -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld
+    )
+    set_target_properties(vibeos_user_init PROPERTIES
+        LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld"
+    )
+
+    # An unmodified static Linux binary, built by a real Linux toolchain against
+    # a real libc, staged on the boot media as MUSL.ELF.
+    #
+    # This is the honest test of Linux compatibility: nothing about it knows
+    # VibeOS exists. It is optional because musl-gcc is not present everywhere -
+    # where it is missing the media simply lacks the file and the shell reports
+    # that it cannot find it, which is a clear result rather than a build break.
+    find_program(VIBEOS_MUSL_GCC musl-gcc)
+    if(VIBEOS_MUSL_GCC)
+        set(VIBEOS_MUSL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_hello.c")
+        set(VIBEOS_MUSL_BIN "${CMAKE_BINARY_DIR}/musl_hello")
+        add_custom_command(
+            OUTPUT "${VIBEOS_MUSL_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -static -O2 -o "${VIBEOS_MUSL_BIN}" "${VIBEOS_MUSL_SRC}"
+            DEPENDS "${VIBEOS_MUSL_SRC}"
+            COMMENT "Building an unmodified static Linux binary with musl"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_hello ALL DEPENDS "${VIBEOS_MUSL_BIN}")
+
+        # Signals, exercised by a program written against Linux rather than
+        # against this kernel - the trampoline a handler returns through comes
+        # from the C library, so only a real one tests the real path.
+        set(VIBEOS_SIG_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_signal.c")
+        set(VIBEOS_SIG_BIN "${CMAKE_BINARY_DIR}/musl_signal")
+        add_custom_command(
+            OUTPUT "${VIBEOS_SIG_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -static -O2 -o "${VIBEOS_SIG_BIN}" "${VIBEOS_SIG_SRC}"
+            DEPENDS "${VIBEOS_SIG_SRC}"
+            COMMENT "Building the signal test as a static Linux binary"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_signal ALL DEPENDS "${VIBEOS_SIG_BIN}")
+
+        # The event loops (docs/abi/ L4), one program grown a step at a time as
+        # the signal test was for L2.
+        set(VIBEOS_EVENTS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_events.c")
+        set(VIBEOS_EVENTS_BIN "${CMAKE_BINARY_DIR}/musl_events")
+        add_custom_command(
+            OUTPUT "${VIBEOS_EVENTS_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -static -O2 -o "${VIBEOS_EVENTS_BIN}" "${VIBEOS_EVENTS_SRC}"
+            DEPENDS "${VIBEOS_EVENTS_SRC}"
+            COMMENT "Building the event-loop test as a static Linux binary"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_events ALL DEPENDS "${VIBEOS_EVENTS_BIN}")
+
+        # The sockets (docs/abi/ L5): local and IP, run by /corpus/progs5.sh.
+        set(VIBEOS_SOCKETS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_sockets.c")
+        set(VIBEOS_SOCKETS_BIN "${CMAKE_BINARY_DIR}/musl_sockets")
+        add_custom_command(
+            OUTPUT "${VIBEOS_SOCKETS_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -static -O2 -o "${VIBEOS_SOCKETS_BIN}" "${VIBEOS_SOCKETS_SRC}"
+            DEPENDS "${VIBEOS_SOCKETS_SRC}"
+            COMMENT "Building the sockets test as a static Linux binary"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_sockets ALL DEPENDS "${VIBEOS_SOCKETS_BIN}")
+
+        # A position-independent executable. Same compiler, same library, one
+        # linker flag apart - which is the point: the difference under test is
+        # the loading, not the program.
+        set(VIBEOS_PIE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_pie.c")
+        set(VIBEOS_PIE_BIN "${CMAKE_BINARY_DIR}/musl_pie")
+        add_custom_command(
+            OUTPUT "${VIBEOS_PIE_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -static-pie -O2 -o "${VIBEOS_PIE_BIN}" "${VIBEOS_PIE_SRC}"
+            DEPENDS "${VIBEOS_PIE_SRC}"
+            COMMENT "Building a position-independent Linux binary with musl"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_pie ALL DEPENDS "${VIBEOS_PIE_BIN}")
+
+        # And a dynamically linked one. This is the kind that needs an
+        # interpreter loaded alongside it, which is the last step in running
+        # ordinary Linux software rather than specially built software.
+        set(VIBEOS_DYN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_dynamic.c")
+        set(VIBEOS_DYN_BIN "${CMAKE_BINARY_DIR}/musl_dynamic")
+        add_custom_command(
+            OUTPUT "${VIBEOS_DYN_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -O2 -o "${VIBEOS_DYN_BIN}" "${VIBEOS_DYN_SRC}"
+            DEPENDS "${VIBEOS_DYN_SRC}"
+            COMMENT "Building a dynamically linked Linux binary with musl"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_dynamic ALL DEPENDS "${VIBEOS_DYN_BIN}")
+
+        # Threads, through the library's own pthread implementation. Static so
+        # that a failure is about clone and futex rather than about loading.
+        set(VIBEOS_THR_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_threads.c")
+        set(VIBEOS_THR_BIN "${CMAKE_BINARY_DIR}/musl_threads")
+        add_custom_command(
+            OUTPUT "${VIBEOS_THR_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -static -O2 -o "${VIBEOS_THR_BIN}" "${VIBEOS_THR_SRC}"
+            DEPENDS "${VIBEOS_THR_SRC}"
+            COMMENT "Building a threaded Linux binary with musl"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_threads ALL DEPENDS "${VIBEOS_THR_BIN}")
+
+        # fork() from a process that still has a thread running: the one shape
+        # that needs a TLB shootdown, and the only thing in the boot that
+        # produces it.
+        set(VIBEOS_TFORK_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_tfork.c")
+        set(VIBEOS_TFORK_BIN "${CMAKE_BINARY_DIR}/musl_tfork")
+        add_custom_command(
+            OUTPUT "${VIBEOS_TFORK_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -static -O2 -o "${VIBEOS_TFORK_BIN}" "${VIBEOS_TFORK_SRC}"
+            DEPENDS "${VIBEOS_TFORK_SRC}"
+            COMMENT "Building a threaded-fork Linux binary with musl"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_tfork ALL DEPENDS "${VIBEOS_TFORK_BIN}")
+
+        # Threads created and joined while children of the process exec: the
+        # other half of the combination that produced the execve defect, and
+        # the half nothing exercised. execve destroys the outgoing address
+        # space, and for a long time it did so without asking whether a sibling
+        # thread was still running on it.
+        set(VIBEOS_TEXEC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux/musl_texec.c")
+        set(VIBEOS_TEXEC_BIN "${CMAKE_BINARY_DIR}/musl_texec")
+        add_custom_command(
+            OUTPUT "${VIBEOS_TEXEC_BIN}"
+            COMMAND "${VIBEOS_MUSL_GCC}" -static -O2 -o "${VIBEOS_TEXEC_BIN}" "${VIBEOS_TEXEC_SRC}" -lpthread
+            DEPENDS "${VIBEOS_TEXEC_SRC}"
+            COMMENT "Building a thread-and-exec Linux binary with musl"
+            VERBATIM
+        )
+        add_custom_target(vibeos_musl_texec ALL DEPENDS "${VIBEOS_TEXEC_BIN}")
+    else()
+        message(STATUS "musl-gcc not found: the boot media will carry no unmodified Linux binary")
+    endif()
+
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(VIBEOS_USER_BLOB "${CMAKE_BINARY_DIR}/generated/user_hello_elf.c")
+    add_custom_command(
+        OUTPUT "${VIBEOS_USER_BLOB}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/generated"
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/bin2c.py"
+            $<TARGET_FILE:vibeos_user_hello>
+            "${VIBEOS_USER_BLOB}"
+            vibeos_user_hello_elf
+        DEPENDS vibeos_user_hello "${CMAKE_CURRENT_SOURCE_DIR}/tools/bin2c.py"
+        COMMENT "Embedding user program ELF into the kernel image"
+        VERBATIM
+    )
+    target_sources(vibeos_kernel PRIVATE "${VIBEOS_USER_BLOB}")
+
+    # Third user program: the shell (staged on media, exec-ed by init).
+    add_executable(vibeos_user_sh user/prog/sh.c user/prog/crt0.S)
+    target_compile_options(vibeos_user_sh PRIVATE
+        -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone
+        -mcmodel=large
+        -fno-strict-aliasing -Wall -Wextra
+    )
+    target_link_options(vibeos_user_sh PRIVATE
+        -nostdlib -no-pie
+        -Wl,-e,_start
+        -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld
+    )
+    set_target_properties(vibeos_user_sh PROPERTIES
+        LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld"
+    )
+
+    # Fourth user program: a TCP client, staged on media as NET.ELF.
+    add_executable(vibeos_user_net user/prog/net.c user/prog/crt0.S)
+    target_compile_options(vibeos_user_net PRIVATE
+        -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone
+        -mcmodel=large
+        -fno-strict-aliasing -Wall -Wextra
+    )
+    target_link_options(vibeos_user_net PRIVATE
+        -nostdlib -no-pie
+        -Wl,-e,_start
+        -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld
+    )
+    set_target_properties(vibeos_user_net PROPERTIES
+        LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld"
+    )
+
+    # Second user program: a looping task for the preemptive scheduler demo.
+    add_executable(vibeos_user_task user/prog/task.c user/prog/crt0.S)
+    target_compile_options(vibeos_user_task PRIVATE
+        -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone
+        -mcmodel=large   # user space is linked above 4 GiB (its own PML4 slot)
+        -fno-strict-aliasing -Wall -Wextra
+    )
+    target_compile_definitions(vibeos_user_task PRIVATE VIBEOS_USE_SYSCALL_INSN=1)
+    target_link_options(vibeos_user_task PRIVATE
+        -nostdlib -no-pie
+        -Wl,-e,_start
+        -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld
+    )
+    set_target_properties(vibeos_user_task PROPERTIES
+        LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/user/prog/user.ld"
+    )
+    set(VIBEOS_TASK_BLOB "${CMAKE_BINARY_DIR}/generated/user_task_elf.c")
+    add_custom_command(
+        OUTPUT "${VIBEOS_TASK_BLOB}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/generated"
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/bin2c.py"
+            $<TARGET_FILE:vibeos_user_task>
+            "${VIBEOS_TASK_BLOB}"
+            vibeos_user_task_elf
+        DEPENDS vibeos_user_task "${CMAKE_CURRENT_SOURCE_DIR}/tools/bin2c.py"
+        COMMENT "Embedding scheduler task ELF into the kernel image"
+        VERBATIM
+    )
+    target_sources(vibeos_kernel PRIVATE "${VIBEOS_TASK_BLOB}")
+
+    target_link_libraries(vibeos_kernel PRIVATE vibeos_kernel_core_image vibeos_user_core)
+    
+    # Linker settings for kernel executable
+    target_link_options(vibeos_kernel PRIVATE
+        -no-pie             # Disable Position Independent Executable
+        -nostdlib           # No standard library
+        -Wl,--entry=_start  # Entry point is _start from entry.s
+        -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/kernel/arch/x86_64/kernel.ld
+    )
+    set_target_properties(vibeos_kernel PROPERTIES
+        LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernel/arch/x86_64/kernel.ld"
+    )
+    
+    # Copy kernel ELF to artifacts directory
+    add_custom_target(vibeos_kernel_elf
+        COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_FILE:vibeos_kernel>
+            ${VIBEOS_ARTIFACTS_DIR}/vibeos_kernel.elf
+        DEPENDS vibeos_kernel
+        COMMENT "Copying kernel ELF image to artifacts/"
+    )
+    
+    # UEFI Bootloader (M2 bring-up)
+    add_executable(vibeos_bootloader_uefi
+        boot/uefi_main.c
+        boot/uefi_protocol.c
+        boot/uefi_file_io.c
+        boot/uefi_serial.c
+        boot/uefi_memory.c
+        boot/uefi_firmware.c
+        boot/uefi_pe_loader.c
+        boot/uefi_boot_info.c
+        boot/uefi_boot_handoff.c
+        boot/freestanding_runtime.c
+        boot/bootloader_core.c
+    )
+    
+    target_include_directories(vibeos_bootloader_uefi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/boot
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    # UEFI freestanding compilation and EFI production. GCC builds a freestanding
+    # shared ELF and converts it to PE with objcopy; Clang emits a native UEFI PE
+    # directly via the Windows target + LLD, because the objcopy ELF->PE path
+    # produces a Clang image OVMF rejects at LoadImage (see
+    # docs/implementation_progress/bootloader.md).
+    set(VIBEOS_BOOTLOADER_EFI "${VIBEOS_ARTIFACTS_DIR}/bootloader.efi")
+
+    if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        target_compile_options(vibeos_bootloader_uefi PRIVATE
+            --target=x86_64-unknown-windows-msvc  # MS x64 ABI matches UEFI; emits COFF
+            -ffreestanding
+            -fno-omit-frame-pointer   # see the GCC branch below
+            -fno-stack-protector
+            -mno-red-zone
+            -mno-stack-arg-probe   # avoid MSVC __chkstk probes under -nostdlib
+            -fno-strict-aliasing
+            -Wall
+            -Wextra
+        )
+        target_link_options(vibeos_bootloader_uefi PRIVATE
+            --target=x86_64-unknown-windows-msvc
+            -fuse-ld=lld
+            -nostdlib
+            -Wl,-subsystem:efi_application
+            -Wl,-entry:efi_main
+            -Wl,-nodefaultlib
+        )
+        # LLD emits a valid PE32+ directly; drop it straight into artifacts/ as
+        # bootloader.efi (no objcopy conversion needed).
+        set_target_properties(vibeos_bootloader_uefi PROPERTIES
+            OUTPUT_NAME bootloader
+            SUFFIX .efi
+            RUNTIME_OUTPUT_DIRECTORY "${VIBEOS_ARTIFACTS_DIR}"
+        )
+        add_custom_target(vibeos_bootloader_efi DEPENDS vibeos_bootloader_uefi)
+    else()
+        target_compile_options(vibeos_bootloader_uefi PRIVATE
+            -ffreestanding      # No hosted libs
+            -fno-stack-protector
+            -fshort-wchar       # UEFI uses 16-bit wchar
+            -fPIC               # Relocatable image for UEFI loader
+            -fno-plt
+            -mno-red-zone
+            -fno-strict-aliasing # UEFI compatibility
+            # Frame pointers and debug info, for the same reason the kernel has
+            # them: this code runs before any kernel diagnostics exist, so if it
+            # ever stops quietly the only things to work with are an address
+            # from the emulator and whatever can resolve it. They cost nothing
+            # in the shipped image - the objcopy step below copies an explicit
+            # list of sections and .debug_* is not on it, so the debug info
+            # stays in the intermediate ELF where addr2line can read it.
+            -fno-omit-frame-pointer
+            -g
+            -Wall
+            -Wextra
+            -Wpedantic
+        )
+
+        # UEFI linker options for the intermediate image.
+        # Final BOOTX64.EFI is generated via objcopy conversion+validation step below.
+        # GNU ld (Linux) doesn't support --subsystem; objcopy handles PE subsystem.
+        if(MINGW)
+            target_link_options(vibeos_bootloader_uefi PRIVATE
+                -nostdlib
+                -Wl,--entry=efi_main
+                -Wl,--subsystem,10
+            )
+        else()
+            # Linux/WSL: build a freestanding shared ELF with relocations for objcopy -> EFI.
+            target_link_options(vibeos_bootloader_uefi PRIVATE
+                -nostdlib
+                -Wl,--entry=efi_main
+                -Wl,-shared
+                -Wl,-Bsymbolic
+                -Wl,-znocombreloc
+                -Wl,--emit-relocs
+            )
+        endif()
+
+        target_link_libraries(vibeos_bootloader_uefi PRIVATE gcc)
+
+        find_program(VIBEOS_OBJCOPY_TOOL
+            NAMES llvm-objcopy objcopy x86_64-w64-mingw32-objcopy
+        )
+        if(NOT VIBEOS_OBJCOPY_TOOL)
+            message(FATAL_ERROR "objcopy-compatible tool not found (required for EFI bootloader conversion)")
+        endif()
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+        set(VIBEOS_BOOTLOADER_ELF "${VIBEOS_ARTIFACTS_DIR}/bootloader.elf")
+
+        add_custom_command(
+            OUTPUT "${VIBEOS_BOOTLOADER_ELF}"
+            COMMAND ${CMAKE_COMMAND} -E copy
+                $<TARGET_FILE:vibeos_bootloader_uefi>
+                "${VIBEOS_BOOTLOADER_ELF}"
+            DEPENDS vibeos_bootloader_uefi
+            COMMENT "Staging UEFI bootloader intermediate image"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${VIBEOS_BOOTLOADER_EFI}"
+            COMMAND ${CMAKE_COMMAND}
+                "-DINPUT_ELF=${VIBEOS_BOOTLOADER_ELF}"
+                "-DOUTPUT_EFI=${VIBEOS_BOOTLOADER_EFI}"
+                "-DOBJCOPY_TOOL=${VIBEOS_OBJCOPY_TOOL}"
+                "-DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}"
+                "-DEFI_PE_FIXUP=${CMAKE_CURRENT_SOURCE_DIR}/tools/efi_pe_fixup.py"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/convert_efi_image.cmake"
+            DEPENDS
+                "${VIBEOS_BOOTLOADER_ELF}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/convert_efi_image.cmake"
+            COMMENT "Converting bootloader intermediate image to validated EFI application"
+            VERBATIM
+        )
+
+        add_custom_target(vibeos_bootloader_efi
+            DEPENDS "${VIBEOS_BOOTLOADER_EFI}"
+        )
+    endif()
+
+    # The NT personality's user side (docs/abi/windows.md W1): our ntdll, built
+    # from the same service list the kernel's table is checked against, and the
+    # first Windows program, both PE32+ images from mingw-w64. Optional as
+    # musl-gcc is: without the cross compiler the media lacks /win and the gate
+    # says nt_absent rather than passing quietly.
+    find_program(VIBEOS_MINGW_GCC x86_64-w64-mingw32-gcc)
+    if(VIBEOS_MINGW_GCC AND VIBEOS_PERSONALITY_NT)
+        set(VIBEOS_WIN_DIR "${CMAKE_BINARY_DIR}/win")
+        set(VIBEOS_WIN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/user/win")
+        set(VIBEOS_WIN_FLAGS -O2 -nostdlib -ffreestanding -fno-stack-protector
+            -fno-asynchronous-unwind-tables -mno-red-zone -Wall -Werror
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include -I${VIBEOS_WIN_SRC}/include
+            -I${CMAKE_CURRENT_SOURCE_DIR}/kernel/abi)
+        # ntdll.dll at its own base, its entry the process start, and the import
+        # library programs link against. layout_check.c holds nt_layout.h against
+        # mingw-w64's headers and contributes nothing but the check.
+        add_custom_command(
+            OUTPUT "${VIBEOS_WIN_DIR}/ntdll.dll" "${VIBEOS_WIN_DIR}/libntdll.a"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${VIBEOS_WIN_DIR}"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS} -fsyntax-only
+                    "${VIBEOS_WIN_SRC}/ntdll/layout_check.c"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS} -fsyntax-only
+                    "${VIBEOS_NTRTL_DIR}/layout_check.c"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS} -shared
+                    -o "${VIBEOS_WIN_DIR}/ntdll.dll"
+                    "${VIBEOS_WIN_SRC}/ntdll/stubs.S" "${VIBEOS_WIN_SRC}/ntdll/start.c"
+                    "${VIBEOS_WIN_SRC}/ntdll/except.c"
+                    ${VIBEOS_NTRTL_CORE} "${VIBEOS_NTRTL_DIR}/platform_win.c"
+                    "${VIBEOS_NTRTL_DIR}/registry.c"
+                    "${VIBEOS_NTRTL_DIR}/mem.c"
+                    -e vibeos_nt_process_start -Wl,--image-base=0x8002000000
+                    -Wl,--out-implib=${VIBEOS_WIN_DIR}/libntdll.a
+            DEPENDS "${VIBEOS_WIN_SRC}/ntdll/stubs.S" "${VIBEOS_WIN_SRC}/ntdll/start.c"
+                    "${VIBEOS_WIN_SRC}/ntdll/except.c"
+                    "${VIBEOS_WIN_SRC}/ntdll/layout_check.c"
+                    ${VIBEOS_NTRTL_CORE} "${VIBEOS_NTRTL_DIR}/platform_win.c"
+                    "${VIBEOS_NTRTL_DIR}/registry.c"
+                    "${VIBEOS_NTRTL_DIR}/mem.c" "${VIBEOS_NTRTL_DIR}/layout_check.c"
+                    "${VIBEOS_NTRTL_DIR}/rtl_internal.h"
+                    "${VIBEOS_WIN_SRC}/include/vibeos_ntrtl.h"
+                    "${VIBEOS_WIN_SRC}/include/vibeos_ntdll.h"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/include/vibeos/nt_layout.h"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/kernel/abi/nt_services.def"
+            COMMENT "Building our ntdll.dll with mingw-w64"
+            VERBATIM
+        )
+        # msvcrt.dll: the C runtime Wine's tests import (W2), at its own base. The
+        # core is the file the host tests compile too. -fno-tree-loop-distribute-
+        # patterns keeps gcc from turning memcpy's loop into a call to memcpy,
+        # which is this DLL's own export; -fno-math-errno lets sqrt be one
+        # instruction instead of a call to a function that is not here.
+        # layout_check.c is compiled hosted: it needs mingw-w64's float.h and
+        # stdio.h, which -ffreestanding would hide.
+        add_custom_command(
+            OUTPUT "${VIBEOS_WIN_DIR}/msvcrt.dll"
+            COMMAND "${VIBEOS_MINGW_GCC}" -O2 -Wall -Werror -fsyntax-only
+                    "${VIBEOS_WIN_SRC}/msvcrt/layout_check.c"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS}
+                    -fno-tree-loop-distribute-patterns -fno-math-errno -shared
+                    -o "${VIBEOS_WIN_DIR}/msvcrt.dll"
+                    "${VIBEOS_WIN_SRC}/msvcrt/msvcrt.c" "${VIBEOS_WIN_SRC}/msvcrt/crt_core.c"
+                    "${VIBEOS_WIN_SRC}/msvcrt/msvcrt.def"
+                    -e vibeos_msvcrt_entry -Wl,--image-base=0x8004000000
+                    -L${VIBEOS_WIN_DIR} -lntdll
+            DEPENDS "${VIBEOS_WIN_SRC}/msvcrt/msvcrt.c" "${VIBEOS_WIN_SRC}/msvcrt/crt_core.c"
+                    "${VIBEOS_WIN_SRC}/msvcrt/crt_core.h" "${VIBEOS_WIN_SRC}/msvcrt/crt_file.h"
+                    "${VIBEOS_WIN_SRC}/msvcrt/layout_check.c" "${VIBEOS_WIN_SRC}/msvcrt/msvcrt.def"
+                    "${VIBEOS_WIN_SRC}/include/vibeos_ntdll.h" "${VIBEOS_WIN_DIR}/libntdll.a"
+            COMMENT "Building our msvcrt.dll with mingw-w64"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${VIBEOS_WIN_DIR}/hello.exe"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS}
+                    -o "${VIBEOS_WIN_DIR}/hello.exe" "${VIBEOS_WIN_SRC}/hello/hello.c"
+                    -L${VIBEOS_WIN_DIR} -lntdll -l:libmsvcrt.a -l:libvibeos_advapi32.a
+                    -l:libvibeos_user32.a -l:libvibeos_gdi32.a
+                    -e nt_hello_start -Wl,--dynamicbase
+            DEPENDS "${VIBEOS_WIN_SRC}/hello/hello.c" "${VIBEOS_WIN_DIR}/libntdll.a"
+                    "${VIBEOS_WIN_DIR}/libvibeos_advapi32.a" "${VIBEOS_WIN_DIR}/libvibeos_user32.a"
+                    "${VIBEOS_WIN_DIR}/libvibeos_gdi32.a"
+            COMMENT "Building the first Windows program with mingw-w64"
+            VERBATIM
+        )
+        # kernel32.dll (W2): the Win32 calls as Nt calls, written in the order
+        # Wine's tests reach them. Its exports are kernel32.def's, checked against
+        # the built DLL as msvcrt's are.
+        add_custom_command(
+            OUTPUT "${VIBEOS_WIN_DIR}/kernel32.dll"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS} -shared
+                    -o "${VIBEOS_WIN_DIR}/kernel32.dll"
+                    "${VIBEOS_WIN_SRC}/kernel32/kernel32.c" "${VIBEOS_WIN_SRC}/kernel32/kernel32.def"
+                    -e vibeos_kernel32_main -Wl,--image-base=0x8006000000
+                    -L${VIBEOS_WIN_DIR} -lntdll
+            DEPENDS "${VIBEOS_WIN_SRC}/kernel32/kernel32.c" "${VIBEOS_WIN_SRC}/kernel32/kernel32.def"
+                    "${VIBEOS_WIN_SRC}/include/vibeos_ntdll.h" "${VIBEOS_WIN_DIR}/libntdll.a"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/include/vibeos/nt_layout.h"
+            COMMENT "Building our kernel32.dll with mingw-w64"
+            VERBATIM
+        )
+        # advapi32.dll (docs/abi/windows.md W8 step 4): the registry's Win32 face
+        # over the Nt*Key services. Its import library has a name of its own, so
+        # that -l never finds mingw's advapi32 for it.
+        add_custom_command(
+            OUTPUT "${VIBEOS_WIN_DIR}/advapi32.dll" "${VIBEOS_WIN_DIR}/libvibeos_advapi32.a"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS} -shared
+                    -o "${VIBEOS_WIN_DIR}/advapi32.dll"
+                    "${VIBEOS_WIN_SRC}/advapi32/advapi32.c" "${VIBEOS_WIN_SRC}/advapi32/advapi32.def"
+                    -e vibeos_advapi32_main -Wl,--image-base=0x8007000000
+                    -L${VIBEOS_WIN_DIR} -lntdll
+                    -Wl,--out-implib=${VIBEOS_WIN_DIR}/libvibeos_advapi32.a
+            DEPENDS "${VIBEOS_WIN_SRC}/advapi32/advapi32.c" "${VIBEOS_WIN_SRC}/advapi32/advapi32.def"
+                    "${VIBEOS_WIN_SRC}/include/vibeos_ntdll.h" "${VIBEOS_WIN_DIR}/libntdll.a"
+            COMMENT "Building our advapi32.dll with mingw-w64"
+            VERBATIM
+        )
+        # gdi32.dll and user32.dll (docs/abi/windows.md W8 steps 5 and 6): GDI's
+        # objects without a display, and the part of user32 that needs no
+        # window system. user32 imports gdi32 for the screen's DC.
+        add_custom_command(
+            OUTPUT "${VIBEOS_WIN_DIR}/gdi32.dll" "${VIBEOS_WIN_DIR}/libvibeos_gdi32.a"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS} -shared
+                    -o "${VIBEOS_WIN_DIR}/gdi32.dll"
+                    "${VIBEOS_WIN_SRC}/gdi32/gdi32.c" "${VIBEOS_WIN_SRC}/gdi32/gdi32.def"
+                    -e vibeos_gdi32_main -Wl,--image-base=0x8008000000
+                    -L${VIBEOS_WIN_DIR} -lntdll
+                    -Wl,--out-implib=${VIBEOS_WIN_DIR}/libvibeos_gdi32.a
+            DEPENDS "${VIBEOS_WIN_SRC}/gdi32/gdi32.c" "${VIBEOS_WIN_SRC}/gdi32/gdi32.def"
+                    "${VIBEOS_WIN_SRC}/include/vibeos_ntdll.h" "${VIBEOS_WIN_DIR}/libntdll.a"
+            COMMENT "Building our gdi32.dll with mingw-w64"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${VIBEOS_WIN_DIR}/user32.dll" "${VIBEOS_WIN_DIR}/libvibeos_user32.a"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS} -shared
+                    -o "${VIBEOS_WIN_DIR}/user32.dll"
+                    "${VIBEOS_WIN_SRC}/user32/user32.c" "${VIBEOS_WIN_SRC}/user32/user32.def"
+                    -e vibeos_user32_main -Wl,--image-base=0x8009000000
+                    -L${VIBEOS_WIN_DIR} -lntdll -l:libvibeos_gdi32.a
+                    -Wl,--out-implib=${VIBEOS_WIN_DIR}/libvibeos_user32.a
+            DEPENDS "${VIBEOS_WIN_SRC}/user32/user32.c" "${VIBEOS_WIN_SRC}/user32/user32.def"
+                    "${VIBEOS_WIN_SRC}/include/vibeos_ntdll.h" "${VIBEOS_WIN_DIR}/libntdll.a"
+                    "${VIBEOS_WIN_DIR}/libvibeos_gdi32.a"
+            COMMENT "Building our user32.dll with mingw-w64"
+            VERBATIM
+        )
+        # The rest as placeholders that load and export nothing (W2): every
+        # import from one binds to one of ntdll's named stubs, so a program runs
+        # until the first it calls, and says which.
+        foreach(VIBEOS_PH hid imm32 setupapi)
+            add_custom_command(
+                OUTPUT "${VIBEOS_WIN_DIR}/${VIBEOS_PH}.dll"
+                COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS} -shared
+                        -o "${VIBEOS_WIN_DIR}/${VIBEOS_PH}.dll"
+                        "${VIBEOS_WIN_SRC}/placeholder/placeholder.c"
+                        -e vibeos_placeholder_main -Wl,--dynamicbase
+                DEPENDS "${VIBEOS_WIN_SRC}/placeholder/placeholder.c"
+                COMMENT "Building the placeholder ${VIBEOS_PH}.dll"
+                VERBATIM
+            )
+        endforeach()
+        # What calling a function nobody wrote looks like (W2). mingw's import
+        # libraries by file name: ld for PE also links against a DLL, and
+        # -lkernel32 found the placeholder kernel32.dll in this directory first -
+        # which exports nothing, so the link failed on every import.
+        add_custom_command(
+            OUTPUT "${VIBEOS_WIN_DIR}/stubcall.exe"
+            COMMAND "${VIBEOS_MINGW_GCC}" ${VIBEOS_WIN_FLAGS}
+                    -o "${VIBEOS_WIN_DIR}/stubcall.exe" "${VIBEOS_WIN_SRC}/stubcall/stubcall.c"
+                    -L${VIBEOS_WIN_DIR} -lntdll -l:libmsvcrt.a -l:libkernel32.a -e nt_stubcall_start
+                    -Wl,--dynamicbase
+            DEPENDS "${VIBEOS_WIN_SRC}/stubcall/stubcall.c" "${VIBEOS_WIN_DIR}/libntdll.a"
+            COMMENT "Building stubcall.exe with mingw-w64"
+            VERBATIM
+        )
+        add_custom_target(vibeos_win ALL
+            DEPENDS "${VIBEOS_WIN_DIR}/ntdll.dll" "${VIBEOS_WIN_DIR}/msvcrt.dll"
+                    "${VIBEOS_WIN_DIR}/hello.exe" "${VIBEOS_WIN_DIR}/stubcall.exe"
+                    "${VIBEOS_WIN_DIR}/kernel32.dll" "${VIBEOS_WIN_DIR}/user32.dll"
+                    "${VIBEOS_WIN_DIR}/gdi32.dll" "${VIBEOS_WIN_DIR}/hid.dll"
+                    "${VIBEOS_WIN_DIR}/imm32.dll" "${VIBEOS_WIN_DIR}/setupapi.dll"
+                    "${VIBEOS_WIN_DIR}/advapi32.dll")
+        find_program(VIBEOS_MINGW_OBJDUMP_WIN x86_64-w64-mingw32-objdump)
+        if(VIBEOS_BUILD_TESTS AND VIBEOS_MINGW_OBJDUMP_WIN AND Python3_EXECUTABLE)
+            add_test(NAME vibeos-msvcrt-exports
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/dev/check-msvcrt-exports.py
+                        "${VIBEOS_WIN_DIR}/msvcrt.dll" "${VIBEOS_WIN_SRC}/msvcrt/msvcrt.def"
+                        "${VIBEOS_MINGW_OBJDUMP_WIN}")
+            add_test(NAME vibeos-kernel32-exports
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/dev/check-msvcrt-exports.py
+                        "${VIBEOS_WIN_DIR}/kernel32.dll" "${VIBEOS_WIN_SRC}/kernel32/kernel32.def"
+                        "${VIBEOS_MINGW_OBJDUMP_WIN}")
+        endif()
+    endif()
+
+    # Build EFI media layout in artifacts/efi_root with BOOTX64.EFI + kernel payload.
+    add_custom_target(vibeos_boot_image
+        COMMAND ${CMAKE_COMMAND} -E echo "Creating EFI media layout..."
+        COMMAND ${CMAKE_COMMAND}
+            -DVIBEOS_USE_NATIVE_INIT=${VIBEOS_USE_NATIVE_INIT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/create_boot_image.cmake
+        DEPENDS vibeos_kernel_elf vibeos_bootloader_efi vibeos_user_hello vibeos_user_init vibeos_user_task vibeos_user_sh vibeos_user_net
+        COMMENT "Generating bootable kernel image"
+    )
+    if(TARGET vibeos_win)
+        add_dependencies(vibeos_boot_image vibeos_win)
+    endif()
+    
+    # Consolidated target: build all boot artifacts
+    add_custom_target(vibeos_image ALL DEPENDS vibeos_boot_image vibeos_kernel_elf vibeos_bootloader_efi)
+
+    # Optional: importable VM images (esp.img/.vdi/.vmdk/.iso). Not part of ALL;
+    # build explicitly with `cmake --build <dir> --target vibeos_vm_images`.
+    # Linux/WSL only (uses qemu-img and, for the .iso, xorriso).
+    if(CMAKE_HOST_UNIX)
+        add_custom_target(vibeos_vm_images
+            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/make-vm-images-linux.sh ${CMAKE_BINARY_DIR}
+            DEPENDS vibeos_image
+            COMMENT "Building importable VM images (esp.img/.vdi/.vmdk/.iso)"
+            USES_TERMINAL
+        )
+    endif()
+endif()
+
+# Export toolchain information for scripts
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/vibeos_toolchain_info.cmake.in
+    ${VIBEOS_ARTIFACTS_DIR}/vibeos_toolchain_info.cmake
+    @ONLY
+)

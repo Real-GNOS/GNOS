@@ -1,0 +1,65 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* The exec refusal counters, printed. Phase X-P0 of docs/exec/.
+ *
+ * Deciding what to say is portable; only reaching the serial port is not. The
+ * same split as kernel/sched/view.c, and for the same reason: every loader
+ * defect this project has had was diagnosed by adding a print statement to an
+ * 8000-line file and reading serial output.
+ */
+
+#include "vibeos/exec_stats.h"
+#include "vibeos/arch_x86_64.h"
+
+void vibeos_exec_print_stats(void) {
+    const vibeos_exec_stats_t *s = vibeos_exec_stats();
+    uint32_t i;
+
+    /* One line, one critical section. A summary assembled from a dozen
+     * serial_puts calls is a dozen of them, and the boot gate parses this. */
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[EXEC] loaded=0x");
+    vibeos_x86_64_serial_print_hex(s->loaded);
+    vibeos_x86_64_serial_puts(" pages_from_cache=0x");
+    vibeos_x86_64_serial_print_hex(s->pages_from_cache);
+    vibeos_x86_64_serial_puts(" pages_copied=0x");
+    vibeos_x86_64_serial_print_hex(s->pages_copied);
+    vibeos_x86_64_serial_puts(" pages_deferred=0x");
+    vibeos_x86_64_serial_print_hex(s->pages_deferred);
+    vibeos_x86_64_serial_puts(" cache_audit_checked=0x");
+    vibeos_x86_64_serial_print_hex(s->cache_audit_checked);
+    /* MUSTBEZERO, and carrying the word on purpose.
+     *
+     * It was a plain counter for as long as the audit existed, printed every
+     * boot and read by nobody, while a comment above hw_cache_audit claimed
+     * the gate asserted it. check-mustbezero-asserted.py only sees counters
+     * that carry this word, so the word is what puts this one under a check
+     * rather than under a sentence somebody wrote once. */
+    vibeos_x86_64_serial_puts(" MUSTBEZERO cache_audit_changed=0x");
+    vibeos_x86_64_serial_print_hex(s->cache_audit_changed);
+    vibeos_x86_64_serial_puts(" file_ids_reused=0x");
+    vibeos_x86_64_serial_print_hex(s->file_ids_reused);
+    vibeos_x86_64_serial_puts(" file_ids_replaced=0x");
+    vibeos_x86_64_serial_print_hex(s->file_ids_replaced);
+    /* The refusals are announced, not just appended.
+     *
+     * The gate matched them with a bare `name=0x...` pattern, which worked
+     * only while nothing else on the line had that shape. Adding two counters
+     * broke it silently - `pages_from_cache=0x..` would have been read as a
+     * refusal called "cache". A marker costs six characters and makes the
+     * boundary a fact rather than a coincidence. */
+    vibeos_x86_64_serial_puts(" refused:");
+    for (i = 1; i < (uint32_t)VIBEOS_EXEC_REASON_COUNT; i++) {
+        /* Only the reasons that fired. A row of zeroes is noise, and the gate
+         * asserts on which names are present rather than on their values -
+         * so a reason that never happened must not appear at all. */
+        if (s->refused[i] == 0ull) {
+            continue;
+        }
+        vibeos_x86_64_serial_puts(" ");
+        vibeos_x86_64_serial_puts(vibeos_exec_fail_name((vibeos_exec_fail_t)i));
+        vibeos_x86_64_serial_puts("=0x");
+        vibeos_x86_64_serial_print_hex(s->refused[i]);
+    }
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}

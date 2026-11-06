@@ -1,0 +1,2560 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Ethernet / ARP / IPv4 / ICMP / UDP / TCP, with a DHCP client and a DNS
+ * resolver on top.
+ *
+ * No hardware here: frames come in through vibeos_inet_input(), go out through
+ * the transmit callback, and time advances through vibeos_inet_poll(). The same
+ * object runs under host tests and behind the virtio-net driver on metal.
+ *
+ * Wire formats are read and written byte by byte rather than through packed
+ * structs, so nothing depends on the compiler's struct layout or on the
+ * alignment of a received frame.
+ */
+
+#include "vibeos/inet.h"
+
+/* ---- byte order helpers -------------------------------------------------- */
+
+static uint16_t rd16(const uint8_t *p) {
+    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+
+static uint32_t rd32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static void wr16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)(v & 0xFFu);
+}
+
+static void wr32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)((v >> 16) & 0xFFu);
+    p[2] = (uint8_t)((v >> 8) & 0xFFu);
+    p[3] = (uint8_t)(v & 0xFFu);
+}
+
+static void bcopy_n(uint8_t *dst, const uint8_t *src, uint32_t n) {
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        dst[i] = src[i];
+    }
+}
+
+static void bzero_n(uint8_t *dst, uint32_t n) {
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        dst[i] = 0;
+    }
+}
+
+static int beq_n(const uint8_t *a, const uint8_t *b, uint32_t n) {
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ---- checksums ----------------------------------------------------------- */
+
+static uint32_t sum16(const uint8_t *d, uint32_t len, uint32_t acc) {
+    uint32_t i;
+    for (i = 0; i + 1u < len; i += 2u) {
+        acc += ((uint32_t)d[i] << 8) | d[i + 1u];
+    }
+    if (i < len) {
+        acc += (uint32_t)d[i] << 8;   /* odd trailing byte, zero padded */
+    }
+    return acc;
+}
+
+static uint16_t fold(uint32_t acc) {
+    while (acc >> 16) {
+        acc = (acc & 0xFFFFu) + (acc >> 16);
+    }
+    return (uint16_t)(~acc & 0xFFFFu);
+}
+
+uint16_t vibeos_inet_checksum(const void *data, uint32_t len) {
+    return fold(sum16((const uint8_t *)data, len, 0));
+}
+
+/* Checksum over the TCP/UDP pseudo-header plus the segment. */
+static uint16_t l4_checksum(uint32_t src, uint32_t dst, uint8_t proto,
+                            const uint8_t *seg, uint32_t len) {
+    uint32_t acc = 0;
+    acc += (src >> 16) & 0xFFFFu;
+    acc += src & 0xFFFFu;
+    acc += (dst >> 16) & 0xFFFFu;
+    acc += dst & 0xFFFFu;
+    acc += proto;
+    acc += len;
+    acc = sum16(seg, len, acc);
+    return fold(acc);
+}
+
+/* ---- protocol constants -------------------------------------------------- */
+
+#define ETH_HDR 14u
+#define ETH_TYPE_IP 0x0800u
+#define ETH_TYPE_ARP 0x0806u
+
+#define IP_HDR 20u
+#define IP_PROTO_ICMP 1u
+#define IP_PROTO_TCP 6u
+#define IP_PROTO_UDP 17u
+
+#define TCP_FIN 0x01u
+#define TCP_SYN 0x02u
+#define TCP_RST 0x04u
+#define TCP_PSH 0x08u
+#define TCP_ACK 0x10u
+
+#define TCP_MSS 1024u
+#define TCP_RTO_MIN 400u
+#define TCP_RTO_MAX 6400u
+#define TCP_MAX_RETRIES 6u
+
+#define DHCP_LOCAL_PORT 68u
+#define DHCP_SERVER_PORT 67u
+#define DNS_PORT 53u
+
+/* A queued UDP datagram is framed [len:2][src ip:4][src port:2] then payload,
+ * so one receive buffer can hold several datagrams without a second array. */
+#define UDP_FRAME_HDR 8u
+
+static const uint8_t g_broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+/* ---- initialization ------------------------------------------------------ */
+
+int vibeos_inet_init(vibeos_inet_t *net, const uint8_t mac[6],
+                     vibeos_inet_tx_fn tx, void *tx_ctx) {
+    uint32_t i;
+    if (!net || !mac || !tx) {
+        return -1;
+    }
+    bzero_n((uint8_t *)net, (uint32_t)sizeof(*net));
+    bcopy_n(net->mac, mac, 6);
+    net->tx = tx;
+    net->tx_ctx = tx_ctx;
+    net->next_ephemeral = 49152u;
+    net->ip_id = 1u;
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        net->sockets[i].parent = -1;
+    }
+    return 0;
+}
+
+void vibeos_inet_set_addr(vibeos_inet_t *net, uint32_t ip, uint32_t netmask,
+                          uint32_t gateway, uint32_t dns) {
+    if (!net) {
+        return;
+    }
+    net->ip = ip;
+    net->netmask = netmask;
+    net->gateway = gateway;
+    net->dns = dns;
+}
+
+void vibeos_inet_set_secret(vibeos_inet_t *net, uint64_t k0, uint64_t k1) {
+    if (!net) {
+        return;
+    }
+    net->secret[0] = k0;
+    net->secret[1] = k1;
+}
+
+/* SipHash-2-4: a keyed hash, so an identifier derived from it cannot be computed
+ * by anybody who does not hold the secret. Chosen because it is small, has no
+ * tables, and is what the RFCs that want "a keyed pseudorandom function" in a
+ * network stack are usually given. */
+static uint64_t sip_rotl(uint64_t x, unsigned b) {
+    return (x << b) | (x >> (64u - b));
+}
+
+static uint64_t siphash24(uint64_t k0, uint64_t k1, const uint8_t *m, uint32_t len) {
+    uint64_t v0 = 0x736f6d6570736575ull ^ k0;
+    uint64_t v1 = 0x646f72616e646f6dull ^ k1;
+    uint64_t v2 = 0x6c7967656e657261ull ^ k0;
+    uint64_t v3 = 0x7465646279746573ull ^ k1;
+    uint64_t b = (uint64_t)len << 56;
+    uint32_t i, r, full = len - (len % 8u);
+
+#define SIPROUND do { \
+        v0 += v1; v1 = sip_rotl(v1, 13); v1 ^= v0; v0 = sip_rotl(v0, 32); \
+        v2 += v3; v3 = sip_rotl(v3, 16); v3 ^= v2; \
+        v0 += v3; v3 = sip_rotl(v3, 21); v3 ^= v0; \
+        v2 += v1; v1 = sip_rotl(v1, 17); v1 ^= v2; v2 = sip_rotl(v2, 32); \
+    } while (0)
+    for (i = 0; i < full; i += 8u) {
+        uint64_t mi = 0;
+        for (r = 0; r < 8u; r++) {
+            mi |= (uint64_t)m[i + r] << (8u * r);
+        }
+        v3 ^= mi;
+        SIPROUND;
+        SIPROUND;
+        v0 ^= mi;
+    }
+    for (r = 0; i + r < len; r++) {
+        b |= (uint64_t)m[i + r] << (8u * r);
+    }
+    v3 ^= b;
+    SIPROUND;
+    SIPROUND;
+    v0 ^= b;
+    v2 ^= 0xFFu;
+    SIPROUND;
+    SIPROUND;
+    SIPROUND;
+    SIPROUND;
+#undef SIPROUND
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+/* A TCP initial sequence number (H-008, verified).
+ *
+ * It was 0x1000 + now_ms for connect and 0x2000 + now_ms for a listening
+ * socket, so anybody who could forge a packet could also forge the ACK that
+ * completes the handshake, and then knew the sequence number data would be
+ * accepted at. RFC 6528: ISN = M + F(4-tuple, secret), M a timer so a reused
+ * tuple still moves forward, F a keyed hash so the offset cannot be computed.
+ *
+ * What this does not do: an attacker who can *see* the traffic reads the ISN
+ * off the wire whatever it is. This closes the off-path guess, which is the
+ * attack the finding describes; on-path needs authentication above TCP. And it
+ * is exactly as strong as the secret, which the platform supplies - see where
+ * vibeos_inet_set_secret is called for what that source is on this machine. */
+static uint32_t tcp_isn(const vibeos_inet_t *net, uint16_t local_port,
+                        uint32_t remote_ip, uint16_t remote_port) {
+    uint8_t m[12];
+    uint32_t lip = net->ip;
+
+    m[0] = (uint8_t)(lip >> 24); m[1] = (uint8_t)(lip >> 16);
+    m[2] = (uint8_t)(lip >> 8);  m[3] = (uint8_t)lip;
+    m[4] = (uint8_t)(remote_ip >> 24); m[5] = (uint8_t)(remote_ip >> 16);
+    m[6] = (uint8_t)(remote_ip >> 8);  m[7] = (uint8_t)remote_ip;
+    m[8] = (uint8_t)(local_port >> 8);  m[9] = (uint8_t)local_port;
+    m[10] = (uint8_t)(remote_port >> 8); m[11] = (uint8_t)remote_port;
+    return (uint32_t)(net->now_ms / 4u) +
+           (uint32_t)siphash24(net->secret[0], net->secret[1], m, 12u);
+}
+
+void vibeos_inet_set_policy(vibeos_inet_t *net, vibeos_net_policy_t *policy) {
+    if (net) {
+        net->policy = policy;
+    }
+}
+
+uint32_t vibeos_inet_parse_ip(const char *s) {
+    uint32_t v = 0;
+    uint32_t part = 0;
+    uint32_t seen = 0;
+    uint32_t digits = 0;
+    if (!s) {
+        return 0;
+    }
+    for (;;) {
+        char c = *s++;
+        if (c >= '0' && c <= '9') {
+            part = part * 10u + (uint32_t)(c - '0');
+            if (part > 255u) {
+                return 0;
+            }
+            digits++;
+        } else if (c == '.' || c == 0) {
+            if (digits == 0) {
+                return 0;
+            }
+            v = (v << 8) | part;
+            part = 0;
+            digits = 0;
+            seen++;
+            if (c == 0) {
+                break;
+            }
+            if (seen > 3u) {
+                return 0;
+            }
+        } else {
+            return 0;
+        }
+    }
+    return (seen == 4u) ? v : 0;
+}
+
+/* ---- ARP ----------------------------------------------------------------- */
+
+static void arp_insert(vibeos_inet_t *net, uint32_t ip, const uint8_t *mac) {
+    uint32_t i;
+    uint32_t victim = 0;
+    for (i = 0; i < VIBEOS_INET_ARP_ENTRIES; i++) {
+        if (net->arp[i].valid && net->arp[i].ip == ip) {
+            bcopy_n(net->arp[i].mac, mac, 6);
+            net->arp[i].expires_ms = net->now_ms + 60000ull;
+            return;
+        }
+        if (!net->arp[i].valid) {
+            victim = i;
+        }
+    }
+    if (net->arp[victim].valid) {
+        victim = 0; /* nothing free: evict the first slot */
+    }
+    net->arp[victim].ip = ip;
+    bcopy_n(net->arp[victim].mac, mac, 6);
+    net->arp[victim].valid = 1;
+    net->arp[victim].expires_ms = net->now_ms + 60000ull;
+}
+
+static const uint8_t *arp_find(vibeos_inet_t *net, uint32_t ip) {
+    uint32_t i;
+    for (i = 0; i < VIBEOS_INET_ARP_ENTRIES; i++) {
+        if (net->arp[i].valid && net->arp[i].ip == ip) {
+            return net->arp[i].mac;
+        }
+    }
+    return 0;
+}
+
+static int eth_send(vibeos_inet_t *net, const uint8_t *dst_mac, uint16_t type,
+                    uint32_t payload_len) {
+    uint8_t *f = net->scratch;
+    if (payload_len + ETH_HDR > VIBEOS_INET_MTU) {
+        return -1;
+    }
+    bcopy_n(f, dst_mac, 6);
+    bcopy_n(f + 6, net->mac, 6);
+    wr16(f + 12, type);
+    net->tx_frames++;
+    return net->tx(net->tx_ctx, f, payload_len + ETH_HDR);
+}
+
+static void arp_request(vibeos_inet_t *net, uint32_t target) {
+    uint8_t *a = net->scratch + ETH_HDR;
+    wr16(a + 0, 1u);            /* Ethernet          */
+    wr16(a + 2, ETH_TYPE_IP);
+    a[4] = 6;
+    a[5] = 4;
+    wr16(a + 6, 1u);            /* request           */
+    bcopy_n(a + 8, net->mac, 6);
+    wr32(a + 14, net->ip);
+    bzero_n(a + 18, 6);
+    wr32(a + 24, target);
+    net->arp_pending_ip = target;
+    net->arp_pending_until_ms = net->now_ms + 2000ull;
+    (void)eth_send(net, g_broadcast_mac, ETH_TYPE_ARP, 28u);
+}
+
+/* Next hop for a destination: the host itself if on-link, else the gateway. */
+static uint32_t next_hop(const vibeos_inet_t *net, uint32_t dst) {
+    if (net->netmask != 0u && ((dst ^ net->ip) & net->netmask) == 0u) {
+        return dst;
+    }
+    if (dst == 0xFFFFFFFFu) {
+        return dst;
+    }
+    return (net->gateway != 0u) ? net->gateway : dst;
+}
+
+/* Loopback (docs/abi/ L5): 127.0.0.0/8, and this machine's own address. Every
+ * program that talks to itself over TCP - and LTP's socket tests all do -
+ * connects to one of these, and without this the SYN went to the gateway and
+ * the answer was ECONNREFUSED. */
+static int is_loopback(const vibeos_inet_t *net, uint32_t dst) {
+    return (dst >> 24) == 127u || (net->ip != 0u && dst == net->ip);
+}
+
+int vibeos_inet_on_link(const vibeos_inet_t *net, uint32_t dst) {
+    return is_loopback(net, dst) || dst == 0xFFFFFFFFu ||
+           (net->netmask != 0u && ((dst ^ net->ip) & net->netmask) == 0u);
+}
+
+/* The address a packet to `dst` leaves from: 127.0.0.1 for the loopback
+ * network, as Linux chooses it, and the interface's otherwise. */
+static uint32_t src_for(const vibeos_inet_t *net, uint32_t dst) {
+    return (dst >> 24) == 127u ? 0x7F000001u : net->ip;
+}
+
+/* A loopback packet waits for the next poll (see vibeos_inet_t's ring). */
+static int loop_queue(vibeos_inet_t *net, const uint8_t *ip, uint32_t len) {
+    uint32_t slot;
+
+    if (net->loop_count >= VIBEOS_INET_LOOP_SLOTS) {
+        net->loop_dropped++;
+        return 0;   /* lost, as on a wire; TCP sends it again */
+    }
+    slot = (net->loop_head + net->loop_count) % VIBEOS_INET_LOOP_SLOTS;
+    bcopy_n(net->loop[slot].pkt, ip, len);
+    net->loop[slot].len = (uint16_t)len;
+    net->loop_count++;
+    net->loop_frames++;
+    return 0;
+}
+
+/* ---- IPv4 output --------------------------------------------------------- */
+
+/* Build an IPv4 packet in the scratch buffer and transmit it. The payload must
+ * already be at scratch + ETH_HDR + IP_HDR. Returns -VIBEOS_INET_EAGAIN if the
+ * destination MAC is not known yet (an ARP request is sent). */
+/* The source address is an explicit argument rather than always net->ip.
+ *
+ * A DHCP client has to source from 0.0.0.0 before it holds a lease. Doing that
+ * by blanking net->ip around the send and restoring it afterwards is a trap:
+ * the restore writes back a value captured before the transmit, so anything
+ * that assigns the lease while the send is in progress gets silently undone.
+ * Passing the source down removes the mutable-global step entirely. */
+static int ip_send_from(vibeos_inet_t *net, uint32_t src, uint32_t dst, uint8_t proto,
+                        uint16_t local_port, uint16_t remote_port,
+                        uint32_t payload_len) {
+    uint8_t *ip = net->scratch + ETH_HDR;
+    uint32_t hop;
+    const uint8_t *mac;
+    uint16_t total = (uint16_t)(IP_HDR + payload_len);
+
+    if (net->policy) {
+        vibeos_net_route_t route;
+        if (vibeos_net_route_lookup(net->policy, dst, &route) != 0 ||
+            vibeos_net_policy_check(net->policy, VIBEOS_NET_DIR_EGRESS, proto,
+                                     src, local_port, dst, remote_port, net->now_ms) != 1) {
+            return -VIBEOS_INET_EINVAL;
+        }
+    }
+
+    ip[0] = 0x45;                       /* IPv4, 20-byte header */
+    ip[1] = 0;
+    wr16(ip + 2, total);
+    wr16(ip + 4, net->ip_id++);
+    wr16(ip + 6, 0x4000u);              /* don't fragment */
+    ip[8] = 64;                         /* TTL */
+    ip[9] = proto;
+    wr16(ip + 10, 0);
+    wr32(ip + 12, src);
+    wr32(ip + 16, dst);
+    wr16(ip + 10, vibeos_inet_checksum(ip, IP_HDR));
+
+    if (is_loopback(net, dst)) {
+        return loop_queue(net, ip, total);
+    }
+    if (dst == 0xFFFFFFFFu) {
+        mac = g_broadcast_mac;
+    } else {
+        hop = next_hop(net, dst);
+        mac = arp_find(net, hop);
+        if (!mac) {
+            arp_request(net, hop);
+            return -VIBEOS_INET_EAGAIN;
+        }
+        /* A stale entry is used and refreshed at once, not dropped: the reply to
+         * this request is the only thing that may change it now (M-008), so a
+         * neighbour whose hardware address really changed is still relearned,
+         * and traffic never waits for it. One request per pending window. */
+        {
+            uint32_t i;
+            for (i = 0; i < VIBEOS_INET_ARP_ENTRIES; i++) {
+                if (net->arp[i].valid && net->arp[i].ip == hop &&
+                    net->now_ms >= net->arp[i].expires_ms &&
+                    !(net->arp_pending_ip == hop && net->now_ms < net->arp_pending_until_ms)) {
+                    arp_request(net, hop);
+                    break;
+                }
+            }
+        }
+    }
+    return eth_send(net, mac, ETH_TYPE_IP, total);
+}
+
+/* Ordinary traffic sources from the interface address. */
+static int ip_send(vibeos_inet_t *net, uint32_t dst, uint8_t proto, uint32_t payload_len) {
+    return ip_send_from(net, net->ip, dst, proto, 0u, 0u, payload_len);
+}
+
+/* ---- ICMP ---------------------------------------------------------------- */
+
+static int icmp_echo_send(vibeos_inet_t *net, uint32_t dst, uint16_t id, uint16_t seq) {
+    uint8_t *p = net->scratch + ETH_HDR + IP_HDR;
+    uint32_t len = 8u + 16u;
+    uint32_t i;
+    p[0] = 8;   /* echo request */
+    p[1] = 0;
+    wr16(p + 2, 0);
+    wr16(p + 4, id);
+    wr16(p + 6, seq);
+    for (i = 0; i < 16u; i++) {
+        p[8 + i] = (uint8_t)('a' + (i % 26u));
+    }
+    wr16(p + 2, vibeos_inet_checksum(p, len));
+    return ip_send(net, dst, IP_PROTO_ICMP, len);
+}
+
+int vibeos_inet_ping(vibeos_inet_t *net, uint32_t ip) {
+    if (!net || ip == 0u) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    net->ping_id = (uint16_t)(net->ping_id + 1u);
+    net->ping_seq = 1u;
+    net->ping_peer = ip;
+    net->ping_pending = 1;
+    net->ping_replied = 0;
+    net->ping_sent_ms = net->now_ms;
+    net->ping_rtt_ms = 0;
+    (void)icmp_echo_send(net, ip, net->ping_id, net->ping_seq);
+    return 0;
+}
+
+int vibeos_inet_ping_result(const vibeos_inet_t *net, uint64_t *out_rtt_ms) {
+    if (!net || !net->ping_replied) {
+        return -VIBEOS_INET_EAGAIN;
+    }
+    if (out_rtt_ms) {
+        *out_rtt_ms = net->ping_rtt_ms;
+    }
+    return 0;
+}
+
+static void icmp_input(vibeos_inet_t *net, uint32_t src, const uint8_t *p, uint32_t len) {
+    /* A message whose checksum is wrong is dropped, as TCP's and UDP's are:
+     * it was answered, and a corrupt reply completed a ping (#62). */
+    if (len < 8u || vibeos_inet_checksum(p, len) != 0u) {
+        return;
+    }
+    if (p[0] == 8u) { /* echo request: answer it */
+        uint8_t *o = net->scratch + ETH_HDR + IP_HDR;
+        uint32_t n = (len > (VIBEOS_INET_MTU - ETH_HDR - IP_HDR)) ?
+                     (VIBEOS_INET_MTU - ETH_HDR - IP_HDR) : len;
+        uint32_t i;
+        for (i = 0; i < n; i++) {
+            o[i] = p[i];
+        }
+        o[0] = 0;   /* echo reply */
+        wr16(o + 2, 0);
+        wr16(o + 2, vibeos_inet_checksum(o, n));
+        (void)ip_send(net, src, IP_PROTO_ICMP, n);
+        return;
+    }
+    if (p[0] == 0u && net->ping_pending) { /* echo reply */
+        /* The reply to the probe last sent, not to an earlier retry: the
+         * time is measured from the last send (#63). */
+        if (rd16(p + 4) == net->ping_id && rd16(p + 6) == net->ping_seq && src == net->ping_peer) {
+            net->ping_pending = 0;
+            net->ping_replied = 1;
+            net->ping_rtt_ms = net->now_ms - net->ping_sent_ms;
+        }
+    }
+}
+
+/* ---- socket table -------------------------------------------------------- */
+
+static vibeos_inet_socket_t *sock_at(vibeos_inet_t *net, int s) {
+    if (!net || s < 0 || (uint32_t)s >= VIBEOS_INET_MAX_SOCKETS) {
+        return 0;
+    }
+    return net->sockets[s].used ? &net->sockets[s] : 0;
+}
+
+static int sock_alloc(vibeos_inet_t *net, int type) {
+    uint32_t i;
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        if (!net->sockets[i].used) {
+            vibeos_inet_socket_t *s = &net->sockets[i];
+            bzero_n((uint8_t *)s, (uint32_t)sizeof(*s));
+            s->used = 1;
+            s->type = (uint8_t)type;
+            s->state = VIBEOS_TCP_CLOSED;
+            s->parent = -1;
+            s->snd_wnd = 4096u;
+            s->rto_ms = TCP_RTO_MIN;
+            /* Stamp after the bzero so a recycled slot never keeps the previous
+             * tenant's generation; start at 1 so 0 stays "never allocated". */
+            s->gen = ++net->sock_gen_seq;
+            return (int)i;
+        }
+    }
+    return -VIBEOS_INET_ENOBUFS;
+}
+
+int vibeos_inet_socket(vibeos_inet_t *net, int type) {
+    if (!net || (type != VIBEOS_INET_SOCK_UDP && type != VIBEOS_INET_SOCK_TCP)) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    return sock_alloc(net, type);
+}
+
+int vibeos_inet_socket_set_owner(vibeos_inet_t *net, int sock, uint32_t owner_pid) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    if (!s || owner_pid == 0u) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    s->owner_pid = owner_pid;
+    return 0;
+}
+
+int vibeos_inet_socket_owner(const vibeos_inet_t *net, int sock, uint32_t *out_owner_pid) {
+    if (!net || !out_owner_pid || sock < 0 || (uint32_t)sock >= VIBEOS_INET_MAX_SOCKETS ||
+        !net->sockets[sock].used) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    *out_owner_pid = net->sockets[sock].owner_pid;
+    return 0;
+}
+
+/* Does another socket of this type hold `port` on an address that overlaps
+ * `ip`? Reuse lets two through when both asked for it and neither listens -
+ * Linux's SO_REUSEADDR rule for TCP; for datagrams, both asking is enough. */
+static int port_taken(const vibeos_inet_t *net, const vibeos_inet_socket_t *s, uint32_t ip, uint16_t port) {
+    uint32_t i;
+
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        const vibeos_inet_socket_t *o = &net->sockets[i];
+
+        if (o == s || !o->used || !o->bound || o->type != s->type || o->local_port != port ||
+            o->parent >= 0) {
+            continue;   /* an accepted connection shares its listener's port */
+        }
+        if (o->local_ip != 0u && ip != 0u && o->local_ip != ip) {
+            continue;
+        }
+        if ((s->reuse & o->reuse & VIBEOS_INET_REUSE_ADDR) &&
+            (s->type == VIBEOS_INET_SOCK_UDP || (o->state != VIBEOS_TCP_LISTEN))) {
+            continue;
+        }
+        if ((s->reuse & o->reuse & VIBEOS_INET_REUSE_PORT) && s->reuse_uid == o->reuse_uid) {
+            continue;   /* both asked to share it, and both are one user's: another
+                         * user's socket would take half the port's traffic (M-130) */
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* A port nobody holds, from the ephemeral range. */
+static uint16_t ephemeral_free(vibeos_inet_t *net, const vibeos_inet_socket_t *s) {
+    uint32_t tries;
+
+    for (tries = 0; tries < 16384u; tries++) {
+        uint16_t p = net->next_ephemeral++;
+
+        if (net->next_ephemeral == 0u || net->next_ephemeral < 49152u) {
+            net->next_ephemeral = 49152u;
+        }
+        if (p >= 49152u && !port_taken(net, s, 0, p)) {
+            return p;
+        }
+    }
+    return 0;
+}
+
+int vibeos_inet_bind(vibeos_inet_t *net, int sock, uint16_t port) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    if (!s) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    s->local_port = port;
+    s->bound = 1;
+    return 0;
+}
+
+int vibeos_inet_bind_addr(vibeos_inet_t *net, int sock, uint32_t ip, uint16_t port) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+
+    if (!s || s->bound) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (port == 0u) {
+        if ((port = ephemeral_free(net, s)) == 0u) {
+            return -VIBEOS_INET_EADDRINUSE;
+        }
+    } else if (port_taken(net, s, ip, port)) {
+        return -VIBEOS_INET_EADDRINUSE;
+    }
+    s->local_port = port;
+    s->local_ip = ip;
+    s->bound = 1;
+    return 0;
+}
+
+int vibeos_inet_set_reuse(vibeos_inet_t *net, int sock, int how, uint32_t uid) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+
+    if (!s) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    s->reuse = (uint8_t)((uint32_t)how & (VIBEOS_INET_REUSE_ADDR | VIBEOS_INET_REUSE_PORT));
+    s->reuse_uid = uid;
+    return 0;
+}
+
+int vibeos_inet_names(const vibeos_inet_t *net, int sock, uint32_t *lip, uint16_t *lport,
+                      uint32_t *rip, uint16_t *rport) {
+    const vibeos_inet_socket_t *s;
+    int peer;
+
+    if (!net || sock < 0 || (uint32_t)sock >= VIBEOS_INET_MAX_SOCKETS || !net->sockets[sock].used) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    s = &net->sockets[sock];
+    peer = s->type == VIBEOS_INET_SOCK_UDP ? s->udp_peer
+                                          : (s->state != VIBEOS_TCP_CLOSED && s->state != VIBEOS_TCP_LISTEN &&
+                                             s->state != VIBEOS_TCP_SYN_SENT);
+    *lport = s->local_port;
+    /* A connected socket is on the address its packets leave from, whatever it
+     * was bound to: 127.0.0.1 for the loopback network. */
+    *lip = (peer || (s->type == VIBEOS_INET_SOCK_TCP && s->state == VIBEOS_TCP_SYN_SENT))
+               ? src_for(net, s->remote_ip) : s->local_ip;
+    *rip = peer ? s->remote_ip : 0u;
+    *rport = peer ? s->remote_port : 0u;
+    return peer;
+}
+
+int vibeos_inet_socket_state(const vibeos_inet_t *net, int sock) {
+    if (!net || sock < 0 || (uint32_t)sock >= VIBEOS_INET_MAX_SOCKETS) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (!net->sockets[sock].used) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    return (int)net->sockets[sock].state;
+}
+
+/* What poll says of a socket, as Linux's tcp_poll and udp_poll do. The cases
+ * that are not obvious are Linux's, not choices: a TCP socket nobody connected is
+ * writable and hung up (state CLOSE), a reset one is everything - readable for
+ * the error, writable because a send fails at once, errored and hung up - and a
+ * connection whose peer sent its FIN is readable, for the end of the stream. One
+ * still being made says nothing until it is made. */
+uint32_t vibeos_inet_ready(const vibeos_inet_t *net, int sock) {
+    const vibeos_inet_socket_t *s;
+    uint32_t r = 0;
+
+    if (!net || sock < 0 || (uint32_t)sock >= VIBEOS_INET_MAX_SOCKETS || !net->sockets[sock].used) {
+        return 0;
+    }
+    s = &net->sockets[sock];
+    if (s->type == VIBEOS_INET_SOCK_UDP) {
+        return VIBEOS_INET_READY_OUT | (s->rx_len > 0u ? VIBEOS_INET_READY_IN : 0u);
+    }
+    if (s->type != VIBEOS_INET_SOCK_TCP) {
+        return 0;
+    }
+    if (s->reset) {
+        return VIBEOS_INET_READY_IN | VIBEOS_INET_READY_OUT | VIBEOS_INET_READY_ERR |
+               VIBEOS_INET_READY_HUP | VIBEOS_INET_READY_RDHUP;
+    }
+    switch (s->state) {
+        case VIBEOS_TCP_CLOSED:
+            return VIBEOS_INET_READY_OUT | VIBEOS_INET_READY_HUP;
+        case VIBEOS_TCP_LISTEN:
+            return s->backlog_len > 0u ? VIBEOS_INET_READY_IN : 0u;
+        case VIBEOS_TCP_SYN_SENT:
+        case VIBEOS_TCP_SYN_RECEIVED:
+            return 0;
+        default:
+            break;
+    }
+    if (s->rx_len > 0u) {
+        r |= VIBEOS_INET_READY_IN;
+    }
+    if (s->fin_received || s->shut_rd) {
+        r |= VIBEOS_INET_READY_IN | VIBEOS_INET_READY_RDHUP;
+    }
+    /* Room to send while this side is open; once its FIN is out a send fails at
+     * once, which is writable to poll as well (Linux sets POLLOUT on a socket
+     * shut for writing). */
+    if (s->fin_queued || s->tx_len < VIBEOS_INET_TXBUF) {
+        r |= VIBEOS_INET_READY_OUT;
+    }
+    if (s->fin_sent && s->fin_received) {
+        r |= VIBEOS_INET_READY_HUP;
+    }
+    return r;
+}
+
+/* ---- UDP ----------------------------------------------------------------- */
+
+static int udp_send_from(vibeos_inet_t *net, uint32_t src, uint32_t dst,
+                         uint16_t sport, uint16_t dport,
+                         const uint8_t *data, uint32_t len) {
+    uint8_t *u = net->scratch + ETH_HDR + IP_HDR;
+    uint32_t i;
+    uint16_t ck;
+
+    if (len + 8u + IP_HDR + ETH_HDR > VIBEOS_INET_MTU) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    wr16(u + 0, sport);
+    wr16(u + 2, dport);
+    wr16(u + 4, (uint16_t)(len + 8u));
+    wr16(u + 6, 0);
+    for (i = 0; i < len; i++) {
+        u[8 + i] = data[i];
+    }
+    ck = l4_checksum(src, dst, IP_PROTO_UDP, u, len + 8u);
+    if (ck == 0u) {
+        ck = 0xFFFFu;   /* 0 means "no checksum" on the wire */
+    }
+    wr16(u + 6, ck);
+    return ip_send_from(net, src, dst, IP_PROTO_UDP, sport, dport, len + 8u);
+}
+
+static int udp_send(vibeos_inet_t *net, uint32_t dst, uint16_t sport, uint16_t dport,
+                    const uint8_t *data, uint32_t len) {
+    return udp_send_from(net, src_for(net, dst), dst, sport, dport, data, len);
+}
+
+long vibeos_inet_sendto(vibeos_inet_t *net, int sock, const void *buf, uint32_t len,
+                        uint32_t ip, uint16_t port) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    int r;
+    if (!s || s->type != VIBEOS_INET_SOCK_UDP || !buf) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (s->local_port == 0u) {
+        if ((s->local_port = ephemeral_free(net, s)) == 0u) {
+            return -VIBEOS_INET_EADDRINUSE;
+        }
+        s->bound = 1;
+    }
+    if (ip == 0u && port == 0u) {
+        if (!s->udp_peer) {
+            return -VIBEOS_INET_ENOTCONN;   /* no address, and no peer to send to */
+        }
+        ip = s->remote_ip;
+        port = s->remote_port;
+    } else if (ip == 0u) {
+        ip = 0x7F000001u;   /* as connect: "any" is this machine */
+    }
+    r = udp_send(net, ip, s->local_port, port, (const uint8_t *)buf, len);
+    if (r != 0) {
+        return r;
+    }
+    return (long)len;
+}
+
+long vibeos_inet_recvfrom(vibeos_inet_t *net, int sock, void *buf, uint32_t len,
+                          uint32_t *out_ip, uint16_t *out_port) {
+    return vibeos_inet_recvfrom_ex(net, sock, buf, len, 0, out_ip, out_port, 0);
+}
+
+long vibeos_inet_recvfrom_ex(vibeos_inet_t *net, int sock, void *buf, uint32_t len, uint32_t flags,
+                             uint32_t *out_ip, uint16_t *out_port, uint32_t *full_len) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    uint32_t n, i;
+    if (!s || (!buf && len != 0u)) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (s->rx_len < UDP_FRAME_HDR) {
+        return -VIBEOS_INET_EAGAIN;
+    }
+    /* One call drains exactly one queued datagram, header and all. */
+    {
+        uint32_t dlen = rd16(s->rx);
+        uint32_t src_ip = rd32(s->rx + 2);
+        uint16_t src_port = rd16(s->rx + 6);
+        uint32_t total = UDP_FRAME_HDR + dlen;
+        uint32_t copied;
+
+        if (total > s->rx_len) {
+            s->rx_len = 0;             /* corrupt framing: drop the queue */
+            return -VIBEOS_INET_EAGAIN;
+        }
+        /* A datagram larger than the caller's buffer is truncated, and the
+         * remainder discarded - datagram semantics, not stream semantics. */
+        copied = (dlen < len) ? dlen : len;
+        for (i = 0; i < copied; i++) {
+            ((uint8_t *)buf)[i] = s->rx[UDP_FRAME_HDR + i];
+        }
+        if (full_len) {
+            *full_len = dlen;
+        }
+        /* MSG_PEEK: the same datagram is there for the next call. */
+        if (!(flags & VIBEOS_INET_PEEK)) {
+            for (i = total; i < s->rx_len; i++) {
+                s->rx[i - total] = s->rx[i];
+            }
+            s->rx_len -= total;
+        }
+        s->last_src_ip = src_ip;
+        s->last_src_port = src_port;
+        if (out_ip) {
+            *out_ip = src_ip;
+        }
+        if (out_port) {
+            *out_port = src_port;
+        }
+        n = copied;
+    }
+    return (long)n;
+}
+
+/* ---- DHCP client --------------------------------------------------------- */
+
+static uint32_t dhcp_build(vibeos_inet_t *net, uint8_t *b, uint8_t msg_type,
+                           uint32_t requested_ip, uint32_t server_ip, uint32_t ciaddr) {
+    uint32_t o;
+    bzero_n(b, 300u);
+    b[0] = 1;                       /* BOOTREQUEST                     */
+    b[1] = 1;                       /* Ethernet                        */
+    b[2] = 6;                       /* hardware address length         */
+    b[3] = 0;
+    wr32(b + 4, net->dhcp_xid);
+    wr16(b + 8, 0);
+    /* A client with a lease has an address a reply can be sent to: it says
+     * so in ciaddr and asks for no broadcast (RFC 2131 4.3.2, 4.4.5). */
+    wr16(b + 10, ciaddr != 0u ? 0u : 0x8000u);
+    wr32(b + 12, ciaddr);
+    bcopy_n(b + 28, net->mac, 6);
+    wr32(b + 236, 0x63825363u);     /* magic cookie                    */
+
+    o = 240u;
+    b[o++] = 53; b[o++] = 1; b[o++] = msg_type;
+    if (requested_ip != 0u) {
+        b[o++] = 50; b[o++] = 4; wr32(b + o, requested_ip); o += 4u;
+    }
+    if (server_ip != 0u) {
+        b[o++] = 54; b[o++] = 4; wr32(b + o, server_ip); o += 4u;
+    }
+    b[o++] = 55; b[o++] = 3; b[o++] = 1; b[o++] = 3; b[o++] = 6;  /* mask, router, dns */
+    b[o++] = 255;                   /* end                             */
+    while (o < 300u) {
+        b[o++] = 0;
+    }
+    return o;
+}
+
+static void dhcp_send(vibeos_inet_t *net, uint8_t msg_type, uint32_t req, uint32_t srv) {
+    uint8_t body[300];
+    uint32_t n = dhcp_build(net, body, msg_type, req, srv, 0u);
+    /* A client without a lease sources from 0.0.0.0. Passing that explicitly
+     * leaves net->ip untouched, so a lease assigned while this send is in
+     * flight cannot be undone by a restore. */
+    (void)udp_send_from(net, 0u, 0xFFFFFFFFu, DHCP_LOCAL_PORT, DHCP_SERVER_PORT, body, n);
+    net->dhcp_retry_ms = net->now_ms + 1000ull;
+}
+
+/* Renewing (`to` the server that granted the lease) or rebinding (`to`
+ * 255.255.255.255): a REQUEST from the leased address with it in ciaddr and
+ * neither a requested address nor a server identifier, which RFC 2131 4.3.2
+ * forbids in these states. They used to go out as a client without a lease's
+ * would, from 0.0.0.0 and broadcast (#64). */
+static void dhcp_send_lease(vibeos_inet_t *net, uint32_t to) {
+    uint8_t body[300];
+    uint32_t n = dhcp_build(net, body, 3 /* REQUEST */, 0u, 0u, net->ip);
+
+    (void)udp_send_from(net, net->ip, to, DHCP_LOCAL_PORT, DHCP_SERVER_PORT, body, n);
+    net->dhcp_retry_ms = net->now_ms + 1000ull;
+}
+
+/* A new DHCP transaction id, from the stack secret over the MAC, the previous
+ * id and the time (H-009). It was 0x56494245 mixed with two bytes of the MAC:
+ * the same for this machine on every boot and computable by anyone who had
+ * seen its address. A hidden xid does not stop an attacker on the segment, who
+ * sees the broadcast DISCOVER - it stops everyone else. */
+static uint32_t dhcp_new_xid(const vibeos_inet_t *net) {
+    uint8_t m[18];
+    uint32_t i;
+
+    for (i = 0; i < 6u; i++) {
+        m[i] = net->mac[i];
+    }
+    for (i = 0; i < 4u; i++) {
+        m[6u + i] = (uint8_t)(net->dhcp_xid >> (8u * i));
+    }
+    for (i = 0; i < 8u; i++) {
+        m[10u + i] = (uint8_t)(net->now_ms >> (8u * i));
+    }
+    return (uint32_t)siphash24(net->secret[0], net->secret[1], m, 18u);
+}
+
+int vibeos_inet_dhcp_start(vibeos_inet_t *net) {
+    if (!net) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    net->dhcp_xid = dhcp_new_xid(net);
+    net->dhcp_state = 1;
+    net->ip = 0;
+    net->netmask = 0;
+    net->gateway = 0;
+    dhcp_send(net, 1 /* DISCOVER */, 0, 0);
+    return 0;
+}
+
+int vibeos_inet_dhcp_bound(const vibeos_inet_t *net) {
+    return (net && net->dhcp_state == 3u) ? 1 : 0;
+}
+
+/* A DHCP reply is believed only if it belongs to this client's transaction with
+ * the server it is dealing with (H-009).
+ *
+ * This checked the xid - which was predictable - the cookie and the state, and
+ * nothing else: any host that could put a datagram on the segment set the
+ * address, gateway and DNS, or dropped the lease with a NAK. Now:
+ *   - from the server port, a reply, carrying this client's hardware address;
+ *   - an OFFER only while discovering, and only naming its server;
+ *   - the ACK to a REQUEST only from the server chosen, for the address offered;
+ *   - a renewal ACK from the server holding the lease (any server while
+ *     rebinding, as RFC 2131 has it), and only for the address in use;
+ *   - a NAK only from the server being dealt with.
+ * What remains is what DHCP cannot close without authentication: an attacker on
+ * the segment answering the broadcast DISCOVER first with a well-formed OFFER. */
+static void dhcp_input(vibeos_inet_t *net, uint16_t sport, const uint8_t *b, uint32_t len) {
+    uint32_t o = 240u;
+    uint8_t msg_type = 0;
+    uint32_t mask = 0, router = 0, dns = 0, server = 0;
+    uint32_t lease = 0, t1 = 0, t2 = 0;
+    uint32_t i;
+
+    if (sport != DHCP_SERVER_PORT || len < 241u || b[0] != 2u ||
+        rd32(b + 4) != net->dhcp_xid) {
+        return;
+    }
+    for (i = 0; i < 6u; i++) {
+        if (b[28u + i] != net->mac[i]) {
+            return;   /* chaddr: an answer to somebody else */
+        }
+    }
+    if (rd32(b + 236) != 0x63825363u) {
+        return;
+    }
+    while (o + 1u < len) {
+        uint8_t code = b[o];
+        uint8_t olen;
+        if (code == 255u) {
+            break;
+        }
+        if (code == 0u) {
+            o++;
+            continue;
+        }
+        olen = b[o + 1u];
+        if (o + 2u + olen > len) {
+            break;
+        }
+        switch (code) {
+            case 1:  if (olen == 4u) { mask = rd32(b + o + 2u); } break;
+            case 3:  if (olen >= 4u) { router = rd32(b + o + 2u); } break;
+            case 6:  if (olen >= 4u) { dns = rd32(b + o + 2u); } break;
+            case 51: if (olen == 4u) { lease = rd32(b + o + 2u); } break;
+            case 53: if (olen == 1u) { msg_type = b[o + 2u]; } break;
+            case 54: if (olen == 4u) { server = rd32(b + o + 2u); } break;
+            case 58: if (olen == 4u) { t1 = rd32(b + o + 2u); } break;
+            case 59: if (olen == 4u) { t2 = rd32(b + o + 2u); } break;
+            default: break;
+        }
+        o += 2u + olen;
+    }
+
+    if (msg_type == 2u && net->dhcp_state == 1u && server != 0u) {   /* OFFER */
+        net->dhcp_offer_ip = rd32(b + 16);                  /* yiaddr */
+        net->dhcp_server = server;
+        net->dhcp_state = 2;
+        dhcp_send(net, 3 /* REQUEST */, net->dhcp_offer_ip, server);
+    } else if (msg_type == 5u && server != 0u &&
+               ((net->dhcp_state == 2u && server == net->dhcp_server &&
+                 rd32(b + 16) == net->dhcp_offer_ip) ||
+                (net->dhcp_state == 4u && server == net->dhcp_server &&
+                 rd32(b + 16) == net->ip) ||
+                (net->dhcp_state == 5u && rd32(b + 16) == net->ip))) {
+        /* ACK: a fresh lease, or a renewal of the one we hold - each from the
+         * server it may come from, for the address it may name. */
+        uint32_t yiaddr = rd32(b + 16);
+        if (net->dhcp_state != 2u) {
+            net->dhcp_renewals++;
+        }
+        if (yiaddr != 0u) {
+            net->ip = yiaddr;
+        }
+        net->netmask = mask ? mask : 0xFFFFFF00u;
+        if (router) {
+            net->gateway = router;
+        }
+        if (dns) {
+            net->dns = dns;
+        } else if (router && net->dns == 0u) {
+            net->dns = router;
+        }
+        if (server) {
+            net->dhcp_server = server;
+        }
+        /* A lease is finite. Default to an hour when the server omits it, and
+         * derive the standard renew/rebind points when it omits those too. */
+        net->dhcp_lease_secs = lease ? lease : 3600u;
+        if (t1 == 0u) {
+            t1 = net->dhcp_lease_secs / 2u;
+        }
+        if (t2 == 0u) {
+            t2 = (net->dhcp_lease_secs * 7u) / 8u;
+        }
+        net->dhcp_t1_ms = net->now_ms + (uint64_t)t1 * 1000ull;
+        net->dhcp_t2_ms = net->now_ms + (uint64_t)t2 * 1000ull;
+        net->dhcp_expire_ms = net->now_ms + (uint64_t)net->dhcp_lease_secs * 1000ull;
+        net->dhcp_state = 3;
+    } else if (msg_type == 6u && net->dhcp_state != 0u &&
+               (net->dhcp_state == 1u || server == net->dhcp_server)) {   /* NAK */
+        /* The server refused: drop everything and start over rather than keep
+         * using an address it does not agree we hold. */
+        net->ip = 0;
+        net->netmask = 0;
+        net->gateway = 0;
+        net->dhcp_offer_ip = 0;
+        net->dhcp_state = 1;
+        net->dhcp_xid = dhcp_new_xid(net);   /* a new transaction */
+        dhcp_send(net, 1 /* DISCOVER */, 0, 0);
+    }
+}
+
+/* ---- DNS ----------------------------------------------------------------- */
+
+static uint32_t dns_encode_name(uint8_t *out, const char *name) {
+    uint32_t o = 0;
+    uint32_t label_start = 0;
+    uint32_t i = 0;
+    for (;;) {
+        char c = name[i];
+        if (c == '.' || c == 0) {
+            uint32_t label_len = i - label_start;
+            if (label_len == 0u || label_len > 63u) {
+                if (c == 0 && label_len == 0u) {
+                    break;
+                }
+                return 0;
+            }
+            out[o++] = (uint8_t)label_len;
+            {
+                uint32_t k;
+                for (k = 0; k < label_len; k++) {
+                    out[o++] = (uint8_t)name[label_start + k];
+                }
+            }
+            label_start = i + 1u;
+            if (c == 0) {
+                break;
+            }
+        }
+        if (c == 0) {
+            break;
+        }
+        i++;
+        if (i > 200u) {
+            return 0;
+        }
+    }
+    out[o++] = 0;
+    return o;
+}
+
+static int dns_name_equal(const char *a, const char *b) {
+    uint32_t i;
+    for (i = 0; i < 64u; i++) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+        if (a[i] == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void dns_cache_store(vibeos_inet_t *net, uint32_t ip, uint32_t ttl_seconds) {
+    uint32_t i;
+    uint32_t slot = 0;
+    uint64_t ttl_ms;
+
+    /* Keep cache residency bounded even when an upstream response advertises
+     * an unrealistic TTL. */
+    if (ttl_seconds == 0u) {
+        return;
+    }
+    if (ttl_seconds > 86400u) {
+        ttl_seconds = 86400u;
+    }
+    for (i = 0; i < VIBEOS_INET_DNS_CACHE_ENTRIES; i++) {
+        if (net->dns_cache[i].valid && dns_name_equal(net->dns_cache[i].name, net->dns_name)) {
+            slot = i;
+            break;
+        }
+        if (!net->dns_cache[i].valid || net->dns_cache[i].expires_ms <= net->now_ms) {
+            slot = i;
+            break;
+        }
+    }
+    ttl_ms = (uint64_t)ttl_seconds * 1000ull;
+    for (i = 0; i < sizeof(net->dns_cache[slot].name) - 1u && net->dns_name[i]; i++) {
+        net->dns_cache[slot].name[i] = net->dns_name[i];
+    }
+    net->dns_cache[slot].name[i] = 0;
+    net->dns_cache[slot].ip = ip;
+    net->dns_cache[slot].expires_ms = net->now_ms + ttl_ms;
+    net->dns_cache[slot].valid = 1;
+}
+
+/* Build and transmit the query for the name currently being resolved. Split out
+ * so a retry re-sends exactly the same question with the same id. */
+static int dns_send_query(vibeos_inet_t *net) {
+    uint8_t q[300];
+    uint32_t n;
+
+    wr16(q + 0, net->dns_id);
+    wr16(q + 2, 0x0100u);   /* standard query, recursion desired */
+    wr16(q + 4, 1u);        /* one question                      */
+    wr16(q + 6, 0);
+    wr16(q + 8, 0);
+    wr16(q + 10, 0);
+    n = dns_encode_name(q + 12, net->dns_name);
+    if (n == 0u) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    n += 12u;
+    wr16(q + n, 1u);        /* A     */
+    wr16(q + n + 2u, 1u);   /* IN    */
+    n += 4u;
+    net->dns_retry_ms = net->now_ms + 1000ull;
+    (void)udp_send(net, net->dns, net->dns_port, DNS_PORT, q, n);
+    return 0;
+}
+
+/* Is a UDP socket bound to this local port? A query must not be sent from one:
+ * its replies would be taken by the resolver before the socket saw them. */
+static int udp_port_bound(const vibeos_inet_t *net, uint16_t port) {
+    uint32_t i;
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        if (net->sockets[i].used && net->sockets[i].type == VIBEOS_INET_SOCK_UDP &&
+            net->sockets[i].local_port == port) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The id and source port for a new query, from the stack secret over the name,
+ * a query counter and the time. The old id advanced by 0x1235 from the same
+ * start every boot and the port was always 0xC353 - nothing to guess. Two
+ * unguessable fields give a blind spoofer about 30 bits to hit instead of 0. */
+static void dns_new_query_ids(vibeos_inet_t *net) {
+    uint8_t m[72];
+    uint32_t i, n = 0;
+    uint64_t h;
+    uint16_t port;
+
+    for (i = 0; i < 64u && net->dns_name[i]; i++) {
+        m[n++] = (uint8_t)net->dns_name[i];
+    }
+    m[n++] = (uint8_t)(net->dns_query_seq >> 24); m[n++] = (uint8_t)(net->dns_query_seq >> 16);
+    m[n++] = (uint8_t)(net->dns_query_seq >> 8);  m[n++] = (uint8_t)net->dns_query_seq;
+    m[n++] = (uint8_t)(net->now_ms >> 24); m[n++] = (uint8_t)(net->now_ms >> 16);
+    m[n++] = (uint8_t)(net->now_ms >> 8);  m[n++] = (uint8_t)net->now_ms;
+    net->dns_query_seq++;
+    h = siphash24(net->secret[0], net->secret[1], m, n);
+    net->dns_id = (uint16_t)h;
+    port = (uint16_t)(49152u + (uint32_t)((h >> 16) % 16384u));
+    for (i = 0; i < 16u && udp_port_bound(net, port); i++) {
+        port = (port == 65535u) ? 49152u : (uint16_t)(port + 1u);
+    }
+    net->dns_port = port;
+}
+
+int vibeos_inet_resolve(vibeos_inet_t *net, const char *name) {
+    uint32_t i;
+
+    if (!net || !name || net->dns == 0u) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    for (i = 0; i < sizeof(net->dns_name) - 1u && name[i]; i++) {
+        net->dns_name[i] = name[i];
+    }
+    net->dns_name[i] = 0;
+    for (i = 0; i < VIBEOS_INET_DNS_CACHE_ENTRIES; i++) {
+        vibeos_dns_cache_entry_t *entry = &net->dns_cache[i];
+        if (entry->valid && entry->expires_ms > net->now_ms &&
+            dns_name_equal(entry->name, net->dns_name)) {
+            net->dns_pending = 0;
+            net->dns_done = 1;
+            net->dns_result = entry->ip;
+            return 0;
+        }
+    }
+
+    dns_new_query_ids(net);
+    net->dns_pending = 1;
+    net->dns_done = 0;
+    net->dns_result = 0;
+    net->dns_retries = 0;
+
+    if (dns_send_query(net) != 0) {
+        net->dns_pending = 0;
+        return -VIBEOS_INET_EINVAL;
+    }
+    return 0;
+}
+
+int vibeos_inet_resolve_result(const vibeos_inet_t *net, uint32_t *out_ip) {
+    if (!net || !net->dns_done) {
+        return -VIBEOS_INET_EAGAIN;
+    }
+    if (out_ip) {
+        *out_ip = net->dns_result;
+    }
+    return net->dns_result ? 0 : -VIBEOS_INET_ETIMEDOUT;
+}
+
+/* Skip a (possibly compressed) name; returns the offset just past it. */
+static uint32_t dns_skip_name(const uint8_t *b, uint32_t len, uint32_t o) {
+    while (o < len) {
+        uint8_t l = b[o];
+        if (l == 0u) {
+            return o + 1u;
+        }
+        if ((l & 0xC0u) == 0xC0u) {
+            return o + 2u;   /* pointer: two bytes, name continues elsewhere */
+        }
+        o += 1u + l;
+    }
+    return len;
+}
+
+/* Offset just past the question if it is exactly the one sent - the name being
+ * resolved, type A, class IN - or 0. Labels are compared case-insensitively, as
+ * names are. The question is what the server echoes back, so it is not
+ * compressed; a pointer there is refused rather than followed. */
+static uint32_t dns_question_matches(const vibeos_inet_t *net, const uint8_t *b,
+                                     uint32_t len) {
+    uint32_t o = 12u, n = 0, k;
+
+    for (;;) {
+        uint8_t l;
+        if (o >= len) {
+            return 0;
+        }
+        l = b[o++];
+        if (l == 0u) {
+            break;
+        }
+        if ((l & 0xC0u) != 0u || o + l > len) {
+            return 0;
+        }
+        if (n != 0u) {
+            if (n >= sizeof(net->dns_name) - 1u || net->dns_name[n] != '.') {
+                return 0;
+            }
+            n++;
+        }
+        for (k = 0; k < l; k++, n++) {
+            char c = (char)b[o + k];
+            char d;
+            if (n >= sizeof(net->dns_name) - 1u) {
+                return 0;
+            }
+            d = net->dns_name[n];
+            if (c >= 'A' && c <= 'Z') {
+                c = (char)(c + 32);
+            }
+            if (d >= 'A' && d <= 'Z') {
+                d = (char)(d + 32);
+            }
+            if (d == 0 || c != d) {
+                return 0;
+            }
+        }
+        o += l;
+    }
+    if (n >= sizeof(net->dns_name) || net->dns_name[n] != 0) {
+        return 0;
+    }
+    if (o + 4u > len || rd16(b + o) != 1u || rd16(b + o + 2u) != 1u) {
+        return 0;
+    }
+    return o + 4u;
+}
+
+/* Whether the names at offsets `x` and `y` of a message are one name, labels
+ * compared without case, compression followed - a bounded number of times,
+ * since a pointer can point at itself. */
+static int dns_names_equal(const uint8_t *b, uint32_t len, uint32_t x, uint32_t y) {
+    uint32_t hops = 0;
+
+    for (;;) {
+        uint8_t lx, ly, k;
+
+        while (x < len && (b[x] & 0xC0u) == 0xC0u && x + 1u < len && hops < 32u) {
+            x = ((uint32_t)(b[x] & 0x3Fu) << 8) | b[x + 1u];
+            hops++;
+        }
+        while (y < len && (b[y] & 0xC0u) == 0xC0u && y + 1u < len && hops < 32u) {
+            y = ((uint32_t)(b[y] & 0x3Fu) << 8) | b[y + 1u];
+            hops++;
+        }
+        if (x >= len || y >= len || hops >= 32u) {
+            return 0;
+        }
+        lx = b[x];
+        ly = b[y];
+        if (lx != ly || (lx & 0xC0u) != 0u || x + 1u + lx > len || y + 1u + ly > len) {
+            return 0;
+        }
+        if (lx == 0u) {
+            return 1;
+        }
+        for (k = 1; k <= lx; k++) {
+            uint8_t c = b[x + k], d = b[y + k];
+
+            c = (c >= 'A' && c <= 'Z') ? (uint8_t)(c + 32u) : c;
+            d = (d >= 'A' && d <= 'Z') ? (uint8_t)(d + 32u) : d;
+            if (c != d) {
+                return 0;
+            }
+        }
+        x += 1u + lx;
+        y += 1u + ly;
+    }
+}
+
+/* A DNS answer is believed only if it answers the query that was sent (M-007).
+ *
+ * This accepted any datagram to the fixed local port whose id matched, from any
+ * sender, for any question, with the id advancing by a constant: an attacker who
+ * could put one packet on the path answered first and the address was cached.
+ * Now the sender must be the configured server, from port 53, the datagram must
+ * be a response, the id must match, and the single question must be the name
+ * asked. The id and the source port are drawn from the stack secret per query -
+ * see dns_new_query_ids - so a blind attacker has both to guess. */
+static void dns_input(vibeos_inet_t *net, uint32_t src, uint16_t sport,
+                      const uint8_t *b, uint32_t len) {
+    uint32_t qd, an, o, i, wanted;
+
+    if (!net->dns_pending || len < 12u || src != net->dns || sport != DNS_PORT ||
+        rd16(b) != net->dns_id || (b[2] & 0x80u) == 0u) {
+        return;
+    }
+    qd = rd16(b + 4);
+    an = rd16(b + 6);
+    if (qd != 1u) {
+        return;
+    }
+    o = dns_question_matches(net, b, len);
+    if (o == 0u) {
+        return;
+    }
+    /* A truncated answer is not the whole answer, and one with an error code
+     * answers nothing, whatever records it carries (#69). Answered, with
+     * nothing usable. */
+    if ((b[2] & 0x02u) != 0u || (b[3] & 0x0Fu) != 0u) {
+        net->dns_pending = 0;
+        net->dns_done = 1;
+        return;
+    }
+    /* A record is the answer only if it is about the name asked, in class IN
+     * - or about the name a CNAME for it named, which is how an alias is
+     * answered (#16). The question's name, at 12, is the first one sought. */
+    wanted = 12u;
+    for (i = 0; i < an && o + 10u <= len; i++) {
+        uint16_t rtype, rclass, rdlen;
+        uint32_t ttl, owner = o;
+        o = dns_skip_name(b, len, o);
+        if (o + 10u > len) {
+            break;
+        }
+        rtype = rd16(b + o);
+        rclass = rd16(b + o + 2u);
+        ttl = rd32(b + o + 4u);
+        rdlen = rd16(b + o + 8u);
+        o += 10u;
+        if (o + rdlen > len) {
+            break;
+        }
+        if (rclass != 1u || !dns_names_equal(b, len, owner, wanted)) {
+            o += rdlen;
+            continue;
+        }
+        if (rtype == 5u) {
+            wanted = o;   /* CNAME: the answer is about its target from here */
+            o += rdlen;
+            continue;
+        }
+        if (rtype == 1u && rdlen == 4u) {
+            net->dns_result = rd32(b + o);
+            dns_cache_store(net, net->dns_result, ttl);
+            net->dns_pending = 0;
+            net->dns_done = 1;
+            return;
+        }
+        o += rdlen;
+    }
+    /* Answered, but with nothing usable. */
+    net->dns_pending = 0;
+    net->dns_done = 1;
+}
+
+/* ---- UDP input ----------------------------------------------------------- */
+
+static void udp_input(vibeos_inet_t *net, uint32_t src, uint32_t dst,
+                      const uint8_t *u, uint32_t len) {
+    uint16_t sport, dport;
+    const uint8_t *data;
+    uint32_t dlen;
+    uint32_t i;
+
+    if (len < 8u) {
+        return;
+    }
+    sport = rd16(u + 0);
+    dport = rd16(u + 2);
+    dlen = rd16(u + 4);
+    if (dlen < 8u || dlen > len) {
+        return;
+    }
+    /* IPv4 permits a zero UDP checksum, but a supplied checksum is mandatory. */
+    if (rd16(u + 6) != 0u && l4_checksum(src, dst, IP_PROTO_UDP, u, dlen) != 0u) {
+        net->rx_dropped++;
+        return;
+    }
+    data = u + 8;
+    dlen -= 8u;
+
+    if (dport == DHCP_LOCAL_PORT) {
+        dhcp_input(net, sport, data, dlen);
+        return;
+    }
+    if (net->dns_pending && dport == net->dns_port) {
+        dns_input(net, src, sport, data, dlen);
+        return;
+    }
+
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        vibeos_inet_socket_t *s = &net->sockets[i];
+        /* The port, and the address the socket bound, if it bound one; and a
+         * connected socket hears only its peer (#65). Linux's demultiplexing,
+         * which this used to stop at the port of. */
+        if (s->used && s->type == VIBEOS_INET_SOCK_UDP && s->local_port == dport &&
+            (s->local_ip == 0u || s->local_ip == dst) &&
+            (!s->udp_peer || (s->remote_ip == src && s->remote_port == sport))) {
+            uint32_t k;
+            /* Queue the datagram behind any already waiting. A full queue drops
+             * the newest and is counted: UDP may lose datagrams, but it must
+             * never corrupt or silently overwrite one already delivered. */
+            if (dlen + UDP_FRAME_HDR > VIBEOS_INET_RXBUF - s->rx_len) {
+                s->udp_dropped++;
+                net->rx_dropped++;
+                return;
+            }
+            wr16(s->rx + s->rx_len, (uint16_t)dlen);
+            wr32(s->rx + s->rx_len + 2u, src);
+            wr16(s->rx + s->rx_len + 6u, sport);
+            for (k = 0; k < dlen; k++) {
+                s->rx[s->rx_len + UDP_FRAME_HDR + k] = data[k];
+            }
+            s->rx_len += UDP_FRAME_HDR + dlen;
+            s->last_src_ip = src;
+            s->last_src_port = sport;
+            return;
+        }
+    }
+    net->rx_dropped++;
+}
+
+/* ---- TCP ----------------------------------------------------------------- */
+
+/* Emit one TCP segment. `data`/`dlen` is the payload; flags carry SYN/FIN/etc. */
+static int tcp_send_seg(vibeos_inet_t *net, vibeos_inet_socket_t *s, uint8_t flags,
+                        uint32_t seq, const uint8_t *data, uint32_t dlen) {
+    uint8_t *t = net->scratch + ETH_HDR + IP_HDR;
+    uint32_t i;
+    uint32_t win = VIBEOS_INET_RXBUF - s->rx_len;
+
+    if (dlen + 20u + IP_HDR + ETH_HDR > VIBEOS_INET_MTU) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    wr16(t + 0, s->local_port);
+    wr16(t + 2, s->remote_port);
+    wr32(t + 4, seq);
+    wr32(t + 8, (flags & TCP_ACK) ? s->rcv_nxt : 0u);
+    t[12] = 0x50;                       /* data offset = 5 words, no options */
+    t[13] = flags;
+    wr16(t + 14, (uint16_t)(win > 0xFFFFu ? 0xFFFFu : win));
+    wr16(t + 16, 0);
+    wr16(t + 18, 0);
+    for (i = 0; i < dlen; i++) {
+        t[20 + i] = data[i];
+    }
+    wr16(t + 16, l4_checksum(src_for(net, s->remote_ip), s->remote_ip, IP_PROTO_TCP, t, 20u + dlen));
+    return ip_send_from(net, src_for(net, s->remote_ip), s->remote_ip, IP_PROTO_TCP,
+                        s->local_port, s->remote_port, 20u + dlen);
+}
+
+/* The FIN on the wire: it takes the sequence number after the last byte of
+ * data, so it goes only once every byte has. ESTABLISHED goes to FIN_WAIT_1,
+ * CLOSE_WAIT to LAST_ACK. */
+static void tcp_fin_now(vibeos_inet_t *net, vibeos_inet_socket_t *s) {
+    uint8_t was_close_wait = (s->state == VIBEOS_TCP_CLOSE_WAIT);
+
+    (void)tcp_send_seg(net, s, TCP_ACK | TCP_FIN, s->snd_nxt, 0, 0);
+    s->snd_nxt++;
+    s->fin_sent = 1;
+    s->state = was_close_wait ? VIBEOS_TCP_LAST_ACK : VIBEOS_TCP_FIN_WAIT_1;
+}
+
+/* Send whatever is queued and unsent, then a FIN that is waiting for it, and
+ * arm the retransmission timer.
+ *
+ * What is in flight can be one more than the data: a FIN takes a sequence
+ * number and no byte of tx. This used to be `snd_una + tx_len - snd_nxt`
+ * unsigned, so once the peer had acknowledged the data and not yet the FIN the
+ * count was minus one - four billion - and the loop sent the buffer's
+ * neighbours for ever, holding the network lock: the machine stopped with one
+ * core here and the others queued behind it. A close with data in flight could
+ * always do it; nc, which writes and shuts down at once, did it every time
+ * (docs/abi/ L4 step 7). */
+static void tcp_flush(vibeos_inet_t *net, vibeos_inet_socket_t *s) {
+    uint32_t flight = s->snd_nxt - s->snd_una;
+    uint32_t unsent = flight < s->tx_len ? s->tx_len - flight : 0u;
+    uint32_t off, n;
+
+    while (unsent > 0u) {
+        n = (unsent > TCP_MSS) ? TCP_MSS : unsent;
+        if (n > s->snd_wnd) {
+            n = s->snd_wnd ? s->snd_wnd : 1u;
+        }
+        off = s->snd_nxt - s->snd_una;
+        if (tcp_send_seg(net, s, TCP_ACK | TCP_PSH, s->snd_nxt, s->tx + off, n) != 0) {
+            return;   /* ARP pending: the retransmit timer will try again */
+        }
+        s->snd_nxt += n;
+        unsent -= n;
+    }
+    if (s->fin_queued && !s->fin_sent && s->snd_nxt == s->snd_una + s->tx_len) {
+        tcp_fin_now(net, s);
+    }
+    if (s->tx_len > 0u && s->rto_deadline_ms == 0u) {
+        s->rto_deadline_ms = net->now_ms + s->rto_ms;
+    }
+}
+
+int vibeos_inet_connect(vibeos_inet_t *net, int sock, uint32_t ip, uint16_t port) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    if (!s) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (ip == 0u) {
+        ip = 0x7F000001u;   /* Linux: "any" as a destination is this machine */
+    }
+    if (s->local_port == 0u) {
+        if ((s->local_port = ephemeral_free(net, s)) == 0u) {
+            return -VIBEOS_INET_EADDRINUSE;
+        }
+        s->bound = 1;
+    }
+    /* A datagram socket's connect names its peer and sends nothing; a second
+     * one names another (L5 step 1). */
+    if (s->type == VIBEOS_INET_SOCK_UDP) {
+        s->remote_ip = ip;
+        s->remote_port = port;
+        s->udp_peer = 1;
+        return 0;
+    }
+    if (s->type != VIBEOS_INET_SOCK_TCP) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (s->state != VIBEOS_TCP_CLOSED) {
+        return s->state == VIBEOS_TCP_LISTEN ? -VIBEOS_INET_EINVAL : -VIBEOS_INET_EISCONN;
+    }
+    s->remote_ip = ip;
+    s->remote_port = port;
+    s->snd_una = tcp_isn(net, s->local_port, ip, port);   /* RFC 6528; see tcp_isn */
+    s->snd_nxt = s->snd_una;
+    s->state = VIBEOS_TCP_SYN_SENT;
+    s->retries = 0;
+    s->rto_ms = TCP_RTO_MIN;
+    s->rto_deadline_ms = net->now_ms + s->rto_ms;
+    (void)tcp_send_seg(net, s, TCP_SYN, s->snd_nxt, 0, 0);
+    s->snd_nxt++;   /* SYN consumes one sequence number */
+    return 0;
+}
+
+int vibeos_inet_listen(vibeos_inet_t *net, int sock) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    if (!s || s->type != VIBEOS_INET_SOCK_TCP ||
+        (s->state != VIBEOS_TCP_CLOSED && s->state != VIBEOS_TCP_LISTEN)) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    /* Nobody bound it: Linux binds it to a port of its own and listens there
+     * (LTP's epoll_wait05, found in L4). */
+    if (s->local_port == 0u) {
+        if ((s->local_port = ephemeral_free(net, s)) == 0u) {
+            return -VIBEOS_INET_EADDRINUSE;
+        }
+        s->bound = 1;
+    }
+    if (s->state == VIBEOS_TCP_LISTEN) {
+        return 0;   /* listen again: Linux changes the backlog and nothing else */
+    }
+    s->state = VIBEOS_TCP_LISTEN;
+    s->backlog_len = 0;
+    return 0;
+}
+
+int vibeos_inet_accept(vibeos_inet_t *net, int sock) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    int child;
+    uint32_t i;
+    if (!s || s->state != VIBEOS_TCP_LISTEN) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (s->backlog_len == 0u) {
+        return -VIBEOS_INET_EAGAIN;
+    }
+    child = s->backlog[0];
+    for (i = 1; i < s->backlog_len; i++) {
+        s->backlog[i - 1u] = s->backlog[i];
+    }
+    s->backlog_len--;
+    return child;
+}
+
+long vibeos_inet_send(vibeos_inet_t *net, int sock, const void *buf, uint32_t len) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    uint32_t room, n, i;
+
+    if (!s || !buf) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (s->type != VIBEOS_INET_SOCK_TCP) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (s->reset) {
+        return -VIBEOS_INET_ECONNRESET;
+    }
+    if (s->fin_queued) {
+        return -VIBEOS_INET_EPIPE;   /* shut for writing: Linux's EPIPE */
+    }
+    if (s->state != VIBEOS_TCP_ESTABLISHED && s->state != VIBEOS_TCP_CLOSE_WAIT) {
+        return -VIBEOS_INET_ENOTCONN;
+    }
+    room = VIBEOS_INET_TXBUF - s->tx_len;
+    if (room == 0u) {
+        return -VIBEOS_INET_EAGAIN;
+    }
+    n = (len > room) ? room : len;
+    for (i = 0; i < n; i++) {
+        s->tx[s->tx_len + i] = ((const uint8_t *)buf)[i];
+    }
+    s->tx_len += n;
+    tcp_flush(net, s);
+    return (long)n;
+}
+
+long vibeos_inet_recv(vibeos_inet_t *net, int sock, void *buf, uint32_t len) {
+    return vibeos_inet_recv_ex(net, sock, buf, len, 0);
+}
+
+long vibeos_inet_recv_ex(vibeos_inet_t *net, int sock, void *buf, uint32_t len, uint32_t flags) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    uint32_t n, i;
+
+    if (!s || (!buf && len != 0u)) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (s->rx_len == 0u) {
+        if (s->reset) {
+            return -VIBEOS_INET_ECONNRESET;
+        }
+        if (s->fin_received || s->shut_rd) {
+            return 0;   /* orderly shutdown, or this side's SHUT_RD: end of stream */
+        }
+        return -VIBEOS_INET_EAGAIN;
+    }
+    n = (s->rx_len < len) ? s->rx_len : len;
+    for (i = 0; i < n; i++) {
+        ((uint8_t *)buf)[i] = s->rx[i];
+    }
+    if (!(flags & VIBEOS_INET_PEEK)) {
+        for (i = n; i < s->rx_len; i++) {
+            s->rx[i - n] = s->rx[i];
+        }
+        s->rx_len -= n;
+    }
+    return (long)n;
+}
+
+/* This side has nothing more to send: the FIN is queued behind the data and
+ * goes when tcp_flush has sent the last byte - at once, unless a segment is
+ * still waiting for ARP. A FIN sent ahead of unsent data would take the
+ * sequence number the data needed. */
+static void tcp_send_fin(vibeos_inet_t *net, vibeos_inet_socket_t *s) {
+    s->fin_queued = 1;
+    tcp_flush(net, s);
+}
+
+int vibeos_inet_shutdown(vibeos_inet_t *net, int sock, int how) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+
+    if (!s || (how & ~(VIBEOS_INET_SHUT_RD | VIBEOS_INET_SHUT_WR)) || how == 0) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    if (s->type != VIBEOS_INET_SOCK_TCP) {
+        return -VIBEOS_INET_ENOTCONN;   /* a datagram socket here is never connected */
+    }
+    if (s->state == VIBEOS_TCP_LISTEN) {
+        return 0;
+    }
+    if (s->state == VIBEOS_TCP_CLOSED || s->state == VIBEOS_TCP_SYN_SENT ||
+        s->state == VIBEOS_TCP_SYN_RECEIVED) {
+        return -VIBEOS_INET_ENOTCONN;
+    }
+    if (how & VIBEOS_INET_SHUT_RD) {
+        s->shut_rd = 1;
+    }
+    if ((how & VIBEOS_INET_SHUT_WR) && !s->fin_queued &&
+        (s->state == VIBEOS_TCP_ESTABLISHED || s->state == VIBEOS_TCP_CLOSE_WAIT)) {
+        tcp_send_fin(net, s);
+    }
+    return 0;
+}
+
+int vibeos_inet_close(vibeos_inet_t *net, int sock) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    if (!s) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    s->closed = 1;
+    /* Shut for writing already: its FIN is queued or out and the exchange
+     * finishes on its own. Freed here, the slot would answer the peer's last
+     * FIN with a reset. Reclaimed by the deadline instead, as a close's is. */
+    if (s->type == VIBEOS_INET_SOCK_TCP && s->fin_queued && s->state != VIBEOS_TCP_CLOSED) {
+        if (s->close_deadline_ms == 0u) {
+            s->close_deadline_ms = net->now_ms + VIBEOS_INET_TIME_WAIT_MS;
+        }
+        return 0;
+    }
+    if (s->type == VIBEOS_INET_SOCK_TCP &&
+        (s->state == VIBEOS_TCP_ESTABLISHED || s->state == VIBEOS_TCP_CLOSE_WAIT)) {
+        tcp_send_fin(net, s);
+        /* If the peer never finishes the exchange, the slot is still reclaimed
+         * instead of being held for the life of the system. */
+        s->close_deadline_ms = net->now_ms + VIBEOS_INET_TIME_WAIT_MS;
+        return 0;
+    }
+    s->used = 0;
+    s->state = VIBEOS_TCP_CLOSED;
+    return 0;
+}
+
+int vibeos_inet_close_owned(vibeos_inet_t *net, int sock, uint32_t owner_pid) {
+    vibeos_inet_socket_t *s = sock_at(net, sock);
+    if (!s || owner_pid == 0u || s->owner_pid != owner_pid) {
+        return -VIBEOS_INET_EINVAL;
+    }
+    return vibeos_inet_close(net, sock);
+}
+
+uint32_t vibeos_inet_release_owner_sockets(vibeos_inet_t *net, uint32_t owner_pid) {
+    uint32_t i;
+    uint32_t released = 0;
+    if (!net || owner_pid == 0u) {
+        return 0;
+    }
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        vibeos_inet_socket_t *s = &net->sockets[i];
+        if (s->used && s->owner_pid == owner_pid) {
+            s->used = 0;
+            s->state = VIBEOS_TCP_CLOSED;
+            s->close_deadline_ms = 0;
+            released++;
+        }
+    }
+    return released;
+}
+
+/* Give a kernel-owned TCP child back to the table. A child made by a SYN is
+ * owned by nobody until accept() hands it out, so nothing else will ever free
+ * it: the retry timer used to only mark it CLOSED (H-030, a remote SYN flood
+ * filled the table) and a child whose listener vanished mid-handshake stayed
+ * ESTABLISHED forever (M-023). One routine so both ends do the same thing. */
+static void tcp_abort_socket(vibeos_inet_t *net, int idx) {
+    vibeos_inet_socket_t *s = &net->sockets[idx];
+    int i;
+    uint32_t j, at;
+    for (i = 0; i < (int)VIBEOS_INET_MAX_SOCKETS; i++) {
+        vibeos_inet_socket_t *p = &net->sockets[i];
+        if (!p->used || p->state != VIBEOS_TCP_LISTEN) {
+            continue;
+        }
+        /* Find the child, then close the gap with a counter of its own. The
+         * shift used to reuse the search loop's counter and was correct only
+         * because a `break` followed it - one line added after the shift would
+         * have gone on searching from a position the shift had moved.
+         *
+         * Nothing reaches this today, and no test can: a child joins a backlog
+         * only on becoming ESTABLISHED, and this routine is called for
+         * SYN_RECEIVED children (H-030) and for children whose listener is gone
+         * (M-023) - neither is queued. Breaking it goes unnoticed, which was
+         * checked. It stays because it is the one place a child is given back,
+         * and the first caller that aborts a queued ESTABLISHED child (a RST
+         * before accept, say) would otherwise leave accept() a freed slot; that
+         * caller should bring the host test this loop does not have. */
+        for (at = 0; at < p->backlog_len && p->backlog[at] != idx; at++) {
+        }
+        if (at == p->backlog_len) {
+            continue;
+        }
+        for (j = at; j + 1u < p->backlog_len; j++) {
+            p->backlog[j] = p->backlog[j + 1u];
+        }
+        p->backlog_len--;
+    }
+    s->used = 0;
+    s->state = VIBEOS_TCP_CLOSED;
+    s->rto_deadline_ms = 0;
+    s->close_deadline_ms = 0;
+}
+
+/* Find the socket a segment belongs to: an exact four-tuple match first, then a
+ * listening socket on the destination port. */
+static vibeos_inet_socket_t *tcp_lookup(vibeos_inet_t *net, uint32_t src, uint32_t dst,
+                                        uint16_t sport, uint16_t dport, int *out_index) {
+    uint32_t i;
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        vibeos_inet_socket_t *s = &net->sockets[i];
+        if (s->used && s->type == VIBEOS_INET_SOCK_TCP && s->local_port == dport &&
+            s->remote_port == sport && s->remote_ip == src &&
+            s->state != VIBEOS_TCP_LISTEN) {
+            if (out_index) {
+                *out_index = (int)i;
+            }
+            return s;
+        }
+    }
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        vibeos_inet_socket_t *s = &net->sockets[i];
+        if (s->used && s->type == VIBEOS_INET_SOCK_TCP &&
+            s->state == VIBEOS_TCP_LISTEN && s->local_port == dport &&
+            (s->local_ip == 0u || s->local_ip == dst)) {   /* the address it bound (#66) */
+            if (out_index) {
+                *out_index = (int)i;
+            }
+            return s;
+        }
+    }
+    return 0;
+}
+
+/* Append in-order bytes to the receive buffer, as much as there is room for. */
+static void tcp_deliver(vibeos_inet_socket_t *s, const uint8_t *data, uint32_t dlen) {
+    uint32_t room = VIBEOS_INET_RXBUF - s->rx_len;
+    uint32_t n = (dlen > room) ? room : dlen;
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        s->rx[s->rx_len + i] = data[i];
+    }
+    s->rx_len += n;
+    s->rcv_nxt += n;
+}
+
+/* Hold a segment that arrived ahead of the gap. Duplicates and anything too
+ * large for a slot are dropped: the peer will retransmit. */
+static void tcp_hold_ooo(vibeos_inet_socket_t *s, uint32_t seq,
+                         const uint8_t *data, uint32_t dlen) {
+    uint32_t i, k;
+    if (dlen == 0u || dlen > VIBEOS_INET_TCP_MSS) {
+        return;
+    }
+    for (i = 0; i < VIBEOS_INET_OOO_SLOTS; i++) {
+        if (s->ooo[i].used && s->ooo[i].seq == seq) {
+            return;   /* already held */
+        }
+    }
+    for (i = 0; i < VIBEOS_INET_OOO_SLOTS; i++) {
+        if (!s->ooo[i].used) {
+            s->ooo[i].seq = seq;
+            s->ooo[i].len = dlen;
+            s->ooo[i].used = 1;
+            for (k = 0; k < dlen; k++) {
+                s->ooo[i].data[k] = data[k];
+            }
+            return;
+        }
+    }
+}
+
+/* A RST, believed only when it could have come from the peer (M-005).
+ *
+ * This used to close any connection a RST matched by address and ports, so
+ * anybody able to put a packet on the path could end a connection without
+ * knowing where its byte stream was. The rule is RFC 5961 section 3.2:
+ *
+ *   - LISTEN: there is no connection to reset. A RST to a listening port used
+ *     to close the listening socket itself.
+ *   - SYN_SENT: acceptable only if it acknowledges our SYN - which is how a
+ *     connect to a closed port is refused, so that case still ends at once.
+ *   - otherwise: exactly rcv_nxt resets; anywhere else in the receive window is
+ *     answered with an ACK naming rcv_nxt, which a genuine peer answers with the
+ *     exact RST; outside the window it is dropped silently.
+ *
+ * The window is the free space in the receive buffer. The offset is unsigned
+ * modular arithmetic, so a sequence number just *behind* rcv_nxt wraps to a huge
+ * offset and is dropped rather than read as in-window. */
+static void tcp_input_rst(vibeos_inet_t *net, vibeos_inet_socket_t *s,
+                          uint32_t seq, uint32_t ack, uint32_t flags) {
+    uint32_t off, wnd;
+
+    if (s->state == VIBEOS_TCP_LISTEN) {
+        return;
+    }
+    if (s->state == VIBEOS_TCP_SYN_SENT) {
+        if ((flags & TCP_ACK) && ack == s->snd_nxt) {
+            s->reset = 1;
+            s->state = VIBEOS_TCP_CLOSED;
+        }
+        return;
+    }
+    if (seq == s->rcv_nxt) {
+        s->reset = 1;
+        s->state = VIBEOS_TCP_CLOSED;
+        return;
+    }
+    off = seq - s->rcv_nxt;
+    wnd = VIBEOS_INET_RXBUF - s->rx_len;
+    if (off < wnd) {
+        (void)tcp_send_seg(net, s, TCP_ACK, s->snd_nxt, 0, 0);
+    }
+}
+
+/* Deliver every held segment that now starts exactly at rcv_nxt, repeatedly:
+ * releasing one can make the next one contiguous too. */
+static void tcp_drain_ooo(vibeos_inet_socket_t *s) {
+    int progress = 1;
+    while (progress) {
+        uint32_t i;
+        progress = 0;
+        for (i = 0; i < VIBEOS_INET_OOO_SLOTS; i++) {
+            if (!s->ooo[i].used) {
+                continue;
+            }
+            if (s->ooo[i].seq == s->rcv_nxt) {
+                tcp_deliver(s, s->ooo[i].data, s->ooo[i].len);
+                s->ooo[i].used = 0;
+                progress = 1;
+            } else if ((int32_t)(s->ooo[i].seq - s->rcv_nxt) < 0) {
+                s->ooo[i].used = 0;   /* now stale: already delivered */
+            }
+        }
+    }
+}
+
+/* Drop acknowledged bytes off the front of the send buffer. */
+static void tcp_ack_data(vibeos_inet_t *net, vibeos_inet_socket_t *s, uint32_t ack) {
+    uint32_t acked = ack - s->snd_una;
+    uint32_t i;
+
+    /* Beyond anything sent is snd_nxt, which counts a SYN and a FIN when
+     * they have been sent and not otherwise: "the data plus two" let an ACK
+     * for a SYN or FIN never sent move snd_una past snd_nxt (#14). */
+    if (acked == 0u || acked > s->snd_nxt - s->snd_una) {
+        return;   /* nothing new, or beyond anything we sent */
+    }
+    if (acked > s->tx_len) {
+        acked = s->tx_len;   /* the rest acknowledged a SYN or FIN */
+    }
+    for (i = acked; i < s->tx_len; i++) {
+        s->tx[i - acked] = s->tx[i];
+    }
+    s->tx_len -= acked;
+    s->snd_una = ack;
+    s->retries = 0;
+    s->rto_ms = TCP_RTO_MIN;
+    s->rto_deadline_ms = (s->tx_len > 0u) ? (net->now_ms + s->rto_ms) : 0u;
+}
+
+static void tcp_input(vibeos_inet_t *net, uint32_t src, uint32_t dst,
+                      const uint8_t *t, uint32_t len) {
+    uint16_t sport, dport;
+    uint32_t seq, ack;
+    uint8_t flags;
+    uint32_t hdr, dlen;
+    const uint8_t *data;
+    vibeos_inet_socket_t *s;
+    int idx = -1;
+
+    if (len < 20u) {
+        return;
+    }
+    sport = rd16(t + 0);
+    dport = rd16(t + 2);
+    seq = rd32(t + 4);
+    ack = rd32(t + 8);
+    hdr = (uint32_t)(t[12] >> 4) * 4u;
+    flags = t[13];
+    if (hdr < 20u || hdr > len) {
+        return;
+    }
+    if (l4_checksum(src, dst, IP_PROTO_TCP, t, len) != 0u) {
+        net->rx_dropped++;
+        return;
+    }
+    data = t + hdr;
+    dlen = len - hdr;
+
+    s = tcp_lookup(net, src, dst, sport, dport, &idx);
+    if (!s) {
+        net->rx_dropped++;
+        /* A SYN to a port nobody listens on is answered with a reset, so the
+         * caller hears ECONNREFUSED at once instead of retrying to its
+         * timeout - which on loopback (L5) is the only answer there is. */
+        if ((flags & TCP_SYN) && !(flags & (TCP_RST | TCP_ACK))) {
+            uint8_t *r = net->scratch + ETH_HDR + IP_HDR;
+            uint32_t from = (dst >> 24) == 127u ? dst : net->ip;
+
+            bzero_n(r, 20u);
+            wr16(r + 0, dport);
+            wr16(r + 2, sport);
+            wr32(r + 8, seq + 1u);
+            r[12] = 0x50;
+            r[13] = TCP_RST | TCP_ACK;
+            wr16(r + 16, l4_checksum(from, src, IP_PROTO_TCP, r, 20u));
+            (void)ip_send_from(net, from, src, IP_PROTO_TCP, dport, sport, 20u);
+        }
+        return;
+    }
+    if (flags & TCP_RST) {
+        tcp_input_rst(net, s, seq, ack, flags);
+        return;
+    }
+
+    s->snd_wnd = rd16(t + 14);
+    if (s->snd_wnd == 0u) {
+        s->snd_wnd = 1u;   /* keep a one-byte probe possible */
+    }
+
+    /* A SYN to a listening socket opens a new connection. */
+    if (s->state == VIBEOS_TCP_LISTEN) {
+        int c;
+        vibeos_inet_socket_t *cs;
+        if (!(flags & TCP_SYN) || s->backlog_len >= VIBEOS_INET_BACKLOG) {
+            return;
+        }
+        c = sock_alloc(net, VIBEOS_INET_SOCK_TCP);
+        if (c < 0) {
+            return;
+        }
+        cs = &net->sockets[c];
+        cs->local_port = dport;
+        cs->remote_port = sport;
+        cs->remote_ip = src;
+        cs->rcv_nxt = seq + 1u;
+        cs->snd_una = tcp_isn(net, dport, src, sport);   /* RFC 6528; see tcp_isn */
+        cs->snd_nxt = cs->snd_una;
+        cs->state = VIBEOS_TCP_SYN_RECEIVED;
+        cs->parent = idx;
+        cs->parent_gen = s->gen;   /* pin the identity, not just the slot (H-028) */
+        (void)tcp_send_seg(net, cs, TCP_SYN | TCP_ACK, cs->snd_nxt, 0, 0);
+        cs->snd_nxt++;
+        cs->rto_deadline_ms = net->now_ms + cs->rto_ms;
+        return;
+    }
+
+    switch (s->state) {
+        case VIBEOS_TCP_SYN_SENT:
+            if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK) && ack == s->snd_nxt) {
+                s->rcv_nxt = seq + 1u;
+                s->snd_una = ack;
+                s->state = VIBEOS_TCP_ESTABLISHED;
+                s->rto_deadline_ms = 0;
+                s->retries = 0;
+                (void)tcp_send_seg(net, s, TCP_ACK, s->snd_nxt, 0, 0);
+                tcp_flush(net, s);
+            }
+            return;
+
+        case VIBEOS_TCP_SYN_RECEIVED:
+            if ((flags & TCP_ACK) && ack == s->snd_nxt) {
+                s->snd_una = ack;
+                if (s->parent < 0) {
+                    s->state = VIBEOS_TCP_ESTABLISHED;
+                    s->rto_deadline_ms = 0;
+                } else {
+                    vibeos_inet_socket_t *p = &net->sockets[s->parent];
+                    /* The listener may have been closed and its slot handed to
+                     * an unrelated socket while this handshake was in flight;
+                     * `used` alone would deliver the child to that stranger's
+                     * accept queue. Require the slot to still hold the very
+                     * listener that accepted the SYN - same generation, still a
+                     * listening TCP socket - or drop the child (H-028). */
+                    if (p->used && p->type == VIBEOS_INET_SOCK_TCP &&
+                        p->state == VIBEOS_TCP_LISTEN &&
+                        p->gen == s->parent_gen &&
+                        p->backlog_len < VIBEOS_INET_BACKLOG) {
+                        s->state = VIBEOS_TCP_ESTABLISHED;
+                        s->rto_deadline_ms = 0;
+                        p->backlog[p->backlog_len++] = idx;
+                    } else {
+                        if (p->used &&
+                            (p->gen != s->parent_gen ||
+                             p->type != VIBEOS_INET_SOCK_TCP ||
+                             p->state != VIBEOS_TCP_LISTEN)) {
+                            /* The slot is in use but by a different socket than
+                             * the listener that accepted the SYN: the ABA the
+                             * guard exists for. A parent that is simply gone
+                             * (slot free) is an orphaned child, expected and
+                             * not counted. */
+                            net->sock_stale_parent++;
+                        }
+                        /* Nobody can ever accept this child: free it rather
+                         * than leave it ESTABLISHED with no owner (M-023). */
+                        tcp_abort_socket(net, idx);
+                        return;
+                    }
+                }
+            }
+            break;
+
+        case VIBEOS_TCP_FIN_WAIT_1:
+            if ((flags & TCP_ACK) && ack == s->snd_nxt) {
+                s->state = VIBEOS_TCP_FIN_WAIT_2;
+            }
+            break;
+
+        case VIBEOS_TCP_LAST_ACK:
+            if ((flags & TCP_ACK) && ack == s->snd_nxt) {
+                s->state = VIBEOS_TCP_CLOSED;
+                /* Freed only if its owner has let go; a shutdown that got here
+                 * is freed by the close still to come (see TIME_WAIT). */
+                if (s->closed) {
+                    s->used = 0;
+                }
+                return;
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    if (flags & TCP_ACK) {
+        tcp_ack_data(net, s, ack);
+    }
+
+    if (dlen > 0u) {
+        if (seq == s->rcv_nxt) {
+            tcp_deliver(s, data, dlen);
+            tcp_drain_ooo(s);        /* a filled gap may release held segments */
+        } else if ((int32_t)(seq - s->rcv_nxt) > 0) {
+            tcp_hold_ooo(s, seq, data, dlen);   /* ahead of the gap: keep it */
+        }
+        /* Always acknowledge: in order this advances the peer, out of order it
+         * is a duplicate ACK telling the peer which byte we still need. */
+        (void)tcp_send_seg(net, s, TCP_ACK, s->snd_nxt, 0, 0);
+    }
+
+    if ((flags & TCP_FIN) && seq + dlen == s->rcv_nxt) {
+        s->fin_received = 1;
+        s->rcv_nxt++;
+        (void)tcp_send_seg(net, s, TCP_ACK, s->snd_nxt, 0, 0);
+        if (s->state == VIBEOS_TCP_ESTABLISHED) {
+            s->state = VIBEOS_TCP_CLOSE_WAIT;
+        } else if (s->state == VIBEOS_TCP_FIN_WAIT_2 || s->state == VIBEOS_TCP_FIN_WAIT_1) {
+            s->state = VIBEOS_TCP_TIME_WAIT;
+            /* Nothing else will arrive for this connection: arm reclamation so
+             * the slot cannot be held forever - once its owner has closed it.
+             * A shutdown(SHUT_WR) reaches here with the descriptor still open
+             * and the peer's last bytes still unread, and reclaiming it then
+             * lost them under the reader: BusyBox nc -l, slow under three
+             * parallel boots, read nothing and the call counted sock_fd_aba
+             * (L5). vibeos_inet_close arms the deadline for one that is. */
+            if (s->closed) {
+                s->close_deadline_ms = net->now_ms + VIBEOS_INET_TIME_WAIT_MS;
+            }
+        }
+    }
+
+    tcp_flush(net, s);
+}
+
+/* ---- ARP + IPv4 input ---------------------------------------------------- */
+
+static void arp_input(vibeos_inet_t *net, const uint8_t *a, uint32_t len) {
+    uint16_t op;
+    uint32_t spa, tpa;
+
+    if (len < 28u || rd16(a + 2) != ETH_TYPE_IP || a[4] != 6u || a[5] != 4u) {
+        return;
+    }
+    op = rd16(a + 6);
+    spa = rd32(a + 14);
+    tpa = rd32(a + 24);
+
+    /* Who may teach the cache what (M-008). This inserted every sender and
+     * overwrote what it knew, so a gratuitous ARP from any host made it the
+     * gateway. ARP has no authentication; what a host can do is refuse traffic
+     * nobody asked for:
+     *   - a reply to the request the stack sent, for that address, may add or
+     *     change an entry;
+     *   - a request addressed to this host may add an entry it does not have,
+     *     which answering it needs - never change one it has;
+     *   - anything else is ignored.
+     * An attacker who races the real reply to a request remains possible, and
+     * so does one learning a host before the host speaks: the change removes
+     * rewriting a neighbour that is already known. */
+    {
+        int solicited = (op == 2u && net->ip != 0u && tpa == net->ip &&
+                         spa == net->arp_pending_ip && spa != 0u &&
+                         net->now_ms < net->arp_pending_until_ms);
+        int known = (arp_find(net, spa) != 0);
+
+        if (solicited) {
+            arp_insert(net, spa, a + 8);
+            net->arp_pending_ip = 0;
+        } else if (op == 1u && net->ip != 0u && tpa == net->ip && !known && spa != 0u) {
+            arp_insert(net, spa, a + 8);
+        }
+    }
+
+    if (op == 1u && net->ip != 0u && tpa == net->ip) {   /* request for us */
+        uint8_t *o = net->scratch + ETH_HDR;
+        uint8_t sender_mac[6];
+        bcopy_n(sender_mac, a + 8, 6);
+        wr16(o + 0, 1u);
+        wr16(o + 2, ETH_TYPE_IP);
+        o[4] = 6;
+        o[5] = 4;
+        wr16(o + 6, 2u);                 /* reply */
+        bcopy_n(o + 8, net->mac, 6);
+        wr32(o + 14, net->ip);
+        bcopy_n(o + 18, sender_mac, 6);
+        wr32(o + 24, spa);
+        net->arp_replies++;
+        (void)eth_send(net, sender_mac, ETH_TYPE_ARP, 28u);
+    }
+}
+
+static void ip_input(vibeos_inet_t *net, const uint8_t *ip, uint32_t len, int looped) {
+    uint32_t hdr, total, src, dst;
+    const uint8_t *payload;
+    uint32_t plen;
+
+    if (len < IP_HDR || (ip[0] >> 4) != 4u) {
+        return;
+    }
+    hdr = (uint32_t)(ip[0] & 0x0Fu) * 4u;
+    total = rd16(ip + 2);
+    if (hdr < IP_HDR || total < hdr || total > len) {
+        return;
+    }
+    if (vibeos_inet_checksum(ip, hdr) != 0u) {
+        net->rx_dropped++;
+        return;   /* corrupt header */
+    }
+    /* The offset and More Fragments both: a first fragment has offset 0 and
+     * MF set, and is not a whole datagram (#15). */
+    if ((rd16(ip + 6) & 0x3FFFu) != 0u) {
+        net->rx_dropped++;
+        return;   /* fragment: not supported */
+    }
+    src = rd32(ip + 12);
+    dst = rd32(ip + 16);
+    payload = ip + hdr;
+    plen = total - hdr;
+
+    /* Accept our address, broadcast, and anything while we have no lease yet
+     * (a DHCP reply is addressed to an IP we do not own yet). */
+    /* The loopback network exists only on this side of the device: a packet
+     * from the wire claiming it is a martian, and is dropped. */
+    if (!looped && ((src >> 24) == 127u || (dst >> 24) == 127u)) {
+        net->rx_dropped++;
+        return;
+    }
+    if (net->ip != 0u && dst != net->ip && dst != 0xFFFFFFFFu && (dst >> 24) != 127u &&
+        (net->netmask == 0u || dst != (net->ip | ~net->netmask))) {
+        return;
+    }
+
+    if (net->policy) {
+        uint16_t remote_port = 0u;
+        uint16_t local_port = 0u;
+        if (plen >= 4u && (ip[9] == IP_PROTO_TCP || ip[9] == IP_PROTO_UDP)) {
+            remote_port = rd16(payload);
+            local_port = rd16(payload + 2u);
+        }
+        if (vibeos_net_policy_check(net->policy, VIBEOS_NET_DIR_INGRESS, ip[9],
+                                    dst, local_port, src, remote_port, net->now_ms) != 1) {
+            return;
+        }
+    }
+
+    switch (ip[9]) {
+        case IP_PROTO_ICMP: icmp_input(net, src, payload, plen); break;
+        case IP_PROTO_UDP:  udp_input(net, src, dst, payload, plen); break;
+        case IP_PROTO_TCP:  tcp_input(net, src, dst, payload, plen); break;
+        default: net->rx_dropped++; break;
+    }
+}
+
+int vibeos_inet_input(vibeos_inet_t *net, const void *frame, uint32_t len) {
+    const uint8_t *f = (const uint8_t *)frame;
+    uint16_t type;
+
+    if (!net || !frame || len < ETH_HDR) {
+        return -1;
+    }
+    net->rx_frames++;
+
+    /* Ours, broadcast, or multicast; anything else is not for this host. */
+    if (!beq_n(f, net->mac, 6) && !beq_n(f, g_broadcast_mac, 6) && (f[0] & 1u) == 0u) {
+        net->rx_dropped++;
+        return -1;
+    }
+
+    type = rd16(f + 12);
+    if (type == ETH_TYPE_ARP) {
+        arp_input(net, f + ETH_HDR, len - ETH_HDR);
+        return 0;
+    }
+    if (type == ETH_TYPE_IP) {
+        ip_input(net, f + ETH_HDR, len - ETH_HDR, 0);
+        return 0;
+    }
+    net->rx_dropped++;
+    return -1;
+}
+
+/* ---- timers -------------------------------------------------------------- */
+
+void vibeos_inet_poll(vibeos_inet_t *net, uint64_t now_ms) {
+    uint32_t i;
+
+    if (!net) {
+        return;
+    }
+    net->now_ms = now_ms;
+
+    /* Loopback: what was sent to this machine since the last poll, and what
+     * that provokes, up to a bound - each packet copied out of its slot first,
+     * because the answer it provokes takes a slot of its own. */
+    {
+        uint32_t budget = 4u * VIBEOS_INET_LOOP_SLOTS;
+
+        while (net->loop_count != 0u && budget-- != 0u) {
+            uint32_t len = net->loop[net->loop_head].len;
+
+            bcopy_n(net->loop_rx, net->loop[net->loop_head].pkt, len);
+            net->loop_head = (net->loop_head + 1u) % VIBEOS_INET_LOOP_SLOTS;
+            net->loop_count--;
+            ip_input(net, net->loop_rx, len, 1);
+        }
+    }
+
+    if (net->policy) {
+        (void)vibeos_net_policy_expire_flows(net->policy, now_ms, 60000ull);
+    }
+
+    for (i = 0; i < VIBEOS_INET_ARP_ENTRIES; i++) {
+        if (net->arp[i].valid && now_ms > net->arp[i].expires_ms) {
+            net->arp[i].valid = 0;
+        }
+    }
+
+    if (net->dhcp_state == 1u || net->dhcp_state == 2u) {
+        if (now_ms >= net->dhcp_retry_ms) {
+            if (net->dhcp_state == 1u) {
+                dhcp_send(net, 1, 0, 0);
+            } else {
+                dhcp_send(net, 3, net->dhcp_offer_ip, net->dhcp_server);
+            }
+        }
+    } else if (net->dhcp_state >= 3u) {
+        /* A lease has a lifetime. Renew at T1, rebind at T2, and give the
+         * address up when it expires rather than keep using one we no longer
+         * hold. */
+        if (now_ms >= net->dhcp_expire_ms) {
+            net->ip = 0;
+            net->netmask = 0;
+            net->gateway = 0;
+            net->dhcp_offer_ip = 0;
+            net->dhcp_state = 1;
+            dhcp_send(net, 1 /* DISCOVER */, 0, 0);
+        } else if (now_ms >= net->dhcp_t2_ms && net->dhcp_state != 5u) {
+            net->dhcp_state = 5;              /* rebind: broadcast to anyone  */
+            dhcp_send_lease(net, 0xFFFFFFFFu);
+        } else if (now_ms >= net->dhcp_t1_ms && net->dhcp_state == 3u) {
+            net->dhcp_state = 4;              /* renew with our own server    */
+            dhcp_send_lease(net, net->dhcp_server);
+        } else if ((net->dhcp_state == 4u || net->dhcp_state == 5u) &&
+                   now_ms >= net->dhcp_retry_ms) {
+            dhcp_send_lease(net, (net->dhcp_state == 4u) ? net->dhcp_server : 0xFFFFFFFFu);
+        }
+    }
+
+    /* Reclaim connections that finished closing, and time out DNS queries. */
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        vibeos_inet_socket_t *s = &net->sockets[i];
+        if (s->used && s->close_deadline_ms != 0u && now_ms >= s->close_deadline_ms) {
+            s->used = 0;
+            s->state = VIBEOS_TCP_CLOSED;
+            s->close_deadline_ms = 0;
+        }
+    }
+
+    if (net->dns_pending && now_ms >= net->dns_retry_ms) {
+        if (net->dns_retries < 3u) {
+            net->dns_retries++;
+            dns_send_query(net);
+        } else {
+            /* Give up rather than leave a caller waiting forever. */
+            net->dns_pending = 0;
+            net->dns_done = 1;
+            net->dns_result = 0;
+            net->dns_timeouts++;
+        }
+    }
+
+    if (net->ping_pending && now_ms - net->ping_sent_ms > 500ull) {
+        if (net->ping_seq < 5u) {
+            net->ping_seq++;
+            (void)icmp_echo_send(net, net->ping_peer, net->ping_id, net->ping_seq);
+            net->ping_sent_ms = now_ms;
+        } else {
+            net->ping_pending = 0;
+        }
+    }
+
+    for (i = 0; i < VIBEOS_INET_MAX_SOCKETS; i++) {
+        vibeos_inet_socket_t *s = &net->sockets[i];
+        if (!s->used || s->type != VIBEOS_INET_SOCK_TCP) {
+            continue;
+        }
+        if (s->rto_deadline_ms == 0u || now_ms < s->rto_deadline_ms) {
+            continue;
+        }
+        if (s->retries >= TCP_MAX_RETRIES) {
+            if (s->state == VIBEOS_TCP_SYN_RECEIVED && s->owner_pid == 0u) {
+                /* A half-open child nobody has been handed: reclaim it fully
+                 * or a SYN flood exhausts the table (H-030). */
+                tcp_abort_socket(net, (int)i);
+                continue;
+            }
+            s->state = VIBEOS_TCP_CLOSED;
+            s->reset = 1;
+            s->rto_deadline_ms = 0;
+            continue;
+        }
+        s->retries++;
+        net->tcp_retransmits++;
+        s->rto_ms = (s->rto_ms * 2u > TCP_RTO_MAX) ? TCP_RTO_MAX : s->rto_ms * 2u;
+        s->rto_deadline_ms = now_ms + s->rto_ms;
+
+        if (s->state == VIBEOS_TCP_SYN_SENT) {
+            (void)tcp_send_seg(net, s, TCP_SYN, s->snd_una, 0, 0);
+        } else if (s->state == VIBEOS_TCP_SYN_RECEIVED) {
+            (void)tcp_send_seg(net, s, TCP_SYN | TCP_ACK, s->snd_una, 0, 0);
+        } else if (s->tx_len > 0u) {
+            uint32_t n = (s->tx_len > TCP_MSS) ? TCP_MSS : s->tx_len;
+            (void)tcp_send_seg(net, s, TCP_ACK | TCP_PSH, s->snd_una, s->tx, n);
+        } else if (s->fin_sent) {
+            (void)tcp_send_seg(net, s, TCP_ACK | TCP_FIN, s->snd_nxt - 1u, 0, 0);
+        } else {
+            s->rto_deadline_ms = 0;
+        }
+    }
+}

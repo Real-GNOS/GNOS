@@ -1,0 +1,76 @@
+# /proc (docs/abi/ L3 step 3, L2 step 6). Host tests: t_procfs and t_procdev
+# in tests/kernel/linux_abi_tests.c.
+#
+#  1. a number is printed without its unit and newline, so a reader's scanf
+#     matches the next line's name as part of this one's value
+#  2. a file's size is not what a read of it returns
+#  3. half a directory's name is taken for the directory
+#  4. /proc/self names nobody: the asking process is not asked
+#  5. stat loses its last field, so a reader counting fields reads the wrong one
+#  6. a read at an offset starts from the beginning of the text again
+#  7. a directory lists a name once for every file under it: /proc shows
+#     "sys" twice. Not a case until L2 step 7 put a second file under
+#     /proc/sys/kernel (random/entropy_avail beside pid_max), as this file
+#     said it would be.
+#  8. task/<tid> takes any thread, another process's too
+#
+# Target source: kernel/fs/procfs.c
+# Run: SABOTAGE_VERIFY="bash scripts/dev/verify-host.sh build-gcc-Release" python3 scripts/dev/sabotage.py kernel/fs/procfs.c scripts/dev/cases/fs-procfs.txt
+
+### a number is printed without its unit and newline
+--- old
+    pf_num(o, kb, 8, ' ');
+    pf_str(o, " kB\n");
++++ new
+    pf_num(o, kb, 8, ' ');
+
+### a file's size is not what a read of it returns
+--- old
+            out->size = o.len;
++++ new
+            out->size = 4096u;
+
+### half a directory's name is taken for the directory
+--- old
+    return (path[i] == 0 && f[i] == '/') ? (int)(i + 1u) : -1;
++++ new
+    return (path[i] == 0) ? (int)(i + 1u) : -1;
+
+### /proc/self names nobody
+--- old
+        pid = pf->self ? pf->self() : 0u;
+        if (*rest == 0) {
++++ new
+        pid = 0u;
+        if (*rest == 0) {
+
+### stat loses its last field
+--- old
+    for (i = 39; i <= 52u; i++) {
++++ new
+    for (i = 40; i <= 52u; i++) {
+
+### a read at an offset starts from the beginning of the text again
+--- old
+    o.skip = off;
++++ new
+    o.skip = 0;
+
+### a directory lists a name once for every file under it
+--- old
+        if (dup || seen++ != index) {
++++ new
+        if (seen++ != index) {
+
+### task/<tid> takes any thread
+--- old
+            if (pid == 0u || pf->proc(pid, &w->p) != 0 || (w->p.tgid ? w->p.tgid : w->p.pid) != tgid) {
++++ new
+            if (pid == 0u || pf->proc(pid, &w->p) != 0) {
+
+### maps stops after one batch of regions (#105)
+--- old
+        after = batch[n - 1].end;
++++ new
+        after = batch[n - 1].end;
+        n = 0;

@@ -1,0 +1,54 @@
+# The address space as every personality changes it (kernel/abi/mem/umem.c),
+# lifted out of kernel/abi/linux/mm.c for W3 (docs/abi/windows.md). The first
+# two cases moved here with the code they break, from abi-mmap.txt and
+# mm-vma-exhausted.txt, and fail the same Linux tests as before.
+#
+# Target source: kernel/abi/mem/umem.c
+# Run: SABOTAGE_VERIFY="bash scripts/dev/verify-host-quick.sh" python3 scripts/dev/sabotage.py kernel/abi/mem/umem.c scripts/dev/cases/mem-umem.txt
+
+### the arena does not step over what is already mapped
+--- old
+        v = vibeos_umem_region_in(ps, base, bytes);
+        if (!v) {
+            break;
+        }
+        base = v->base + v->len;
++++ new
+        (void)v;
+        break;
+
+### munmap unmaps whatever the region list said
+--- old
+    if (vibeos_vma_remove(&ps->mm->vmas, addr, end - addr) == VIBEOS_VMA_REFUSED) {
+        return -VIBEOS_ENOMEM;
+    }
++++ new
+    (void)vibeos_vma_remove(&ps->mm->vmas, addr, end - addr);
+
+
+### placement ignores the alignment
+--- old
+        base = (base + mask) & ~mask;
++++ new
+        (void)mask;
+
+# ---- placing inside bounds (W3 step 10), proved by t_placeholders in
+# nt_abi_tests.c: NtAllocateVirtualMemoryEx's address requirements.
+
+### a floor is not honoured
+--- old
+    uint64_t base = lo > cur ? lo : cur;
++++ new
+    uint64_t base = cur;
+
+### a ceiling is not honoured
+--- old
+        if (base + bytes < base || base + bytes - 1u > hi || !ks_user_fixed_ok(base, bytes)) {
++++ new
+        if (base + bytes < base || !ks_user_fixed_ok(base, bytes)) {
+
+### a floor above the cursor moves the cursor past everything below it
+--- old
+    if (lo <= cur) {
++++ new
+    if (1) {

@@ -1,0 +1,1002 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Freestanding user-space program for VibeOS.
+ *
+ * Built as a static, position-dependent ELF64 (see user.ld) with no libc. It
+ * talks to the kernel only through syscalls, using the Linux x86-64 argument
+ * order (nr in rax; args in rdi, rsi, rdx). The kernel loads this ELF and runs
+ * it in ring 3.
+ *
+ * VIBEOS_USE_SYSCALL_INSN selects the entry mechanism:
+ *   - unset: legacy `int 0x80` gate (bring-up path)
+ *   - set:   the native `syscall` instruction (real Linux ABI)
+ */
+
+static long user_syscall3(long nr, long a1, long a2, long a3) {
+    long ret;
+    /* r10, r8 and r9 zero, not what the compiler left there: a fourth
+     * argument is read whether or not it was meant (see init.c's sys3). */
+    register long r10 __asm__("r10") = 0;
+    register long r8 __asm__("r8") = 0;
+    register long r9 __asm__("r9") = 0;
+#if defined(VIBEOS_USE_SYSCALL_INSN)
+    __asm__ __volatile__("syscall"
+                         : "=a"(ret)
+                         : "a"(nr), "D"(a1), "S"(a2), "d"(a3),
+                           "r"(r10), "r"(r8), "r"(r9)
+                         : "rcx", "r11", "memory");
+#else
+    __asm__ __volatile__("int $0x80"
+                         : "=a"(ret)
+                         : "a"(nr), "D"(a1), "S"(a2), "d"(a3),
+                           "r"(r10), "r"(r8), "r"(r9)
+                         : "memory");
+#endif
+    return ret;
+}
+
+/* Six-argument form. Linux puts the fourth, fifth and sixth arguments in r10,
+ * r8 and r9 - not rcx, which the syscall instruction overwrites with the
+ * return address. mmap is the reason this exists: with fewer arguments there
+ * is no way to say "anonymous, private, no file". */
+static long user_syscall6(long nr, long a1, long a2, long a3,
+                          long a4, long a5, long a6) {
+    long ret;
+    register long r10 __asm__("r10") = a4;
+    register long r8 __asm__("r8") = a5;
+    register long r9 __asm__("r9") = a6;
+#if defined(VIBEOS_USE_SYSCALL_INSN)
+    __asm__ __volatile__("syscall"
+                         : "=a"(ret)
+                         : "a"(nr), "D"(a1), "S"(a2), "d"(a3),
+                           "r"(r10), "r"(r8), "r"(r9)
+                         : "rcx", "r11", "memory");
+#else
+    __asm__ __volatile__("int $0x80"
+                         : "=a"(ret)
+                         : "a"(nr), "D"(a1), "S"(a2), "d"(a3),
+                           "r"(r10), "r"(r8), "r"(r9)
+                         : "memory");
+#endif
+    return ret;
+}
+
+/* Linux syscall numbers (x86-64). */
+#define SYS_read   0
+#define SYS_write  1
+#define SYS_mmap   9
+#define SYS_brk    12
+#define SYS_getpid 39
+#define SYS_exit   60
+#define SYS_fork   57
+#define SYS_wait4  61
+#define SYS_execve 59
+#define SYS_mprotect 10
+#define SYS_munmap   11
+#define SYS_futex    202
+#define SYS_ioctl    16
+#define SYS_writev   20
+#define SYS_uname    63
+#define SYS_arch_prctl 158
+#define SYS_clock_gettime 228
+#define SYS_pageinfo 1001
+
+static const char message[] = "Hello from a real user ELF (loaded by the kernel)\n";
+static const char ok_heap[] = "heap+mmap ok\n";
+static const char bad_ptr[] = "kernel pointer correctly rejected\n";
+static const char in_child[] = "child process running (fork ok)\n";
+static const char reaped_ok[] = "parent reaped child with status 7\n";
+static const char exec_path[] = "EFI/BOOT/TASK.ELF";
+static const char exec_done[] = "parent: exec'd child completed\n";
+static const char kbd_prefix[] = "console read: ";
+static const char shell_path[] = "EFI/BOOT/SH.ELF";
+
+static const char argv_ok[] = "argv ok: well formed and NULL terminated\n";
+static const char argv_bad[] = "argv wrong\n";
+static const char auxv_ok[] = "auxv ok: AT_PHDR points at our program headers\n";
+static const char auxv_bad[] = "auxv wrong\n";
+
+/* Walk the auxiliary vector the way a C runtime does: past the environment's
+ * NULL terminator, then key/value pairs until AT_NULL. Finding AT_PHDR,
+ * AT_PHNUM and AT_PHENT there - and finding a real program header table at the
+ * address AT_PHDR gives - is what a real libc needs to start, so checking it
+ * from ring 3 is the only proof that matters. */
+static int check_auxv(char **envp) {
+    unsigned long *aux;
+    unsigned long phdr = 0, phnum = 0, phent = 0, at_entry = 0;
+    int saw_at_base = 0;
+    const unsigned char *ph;
+
+    while (*envp) {
+        envp++;
+    }
+    aux = (unsigned long *)(void *)(envp + 1);
+    while (aux[0] != 0ul) {
+        if (aux[0] == 3ul) { phdr = aux[1]; }
+        if (aux[0] == 4ul) { phent = aux[1]; }
+        if (aux[0] == 5ul) { phnum = aux[1]; }
+        if (aux[0] == 9ul) { at_entry = aux[1]; }
+        if (aux[0] == 7ul) { saw_at_base = 1; }   /* AT_BASE */
+        aux += 2;
+    }
+    if (phdr == 0ul || phnum == 0ul || phent != 56ul || at_entry == 0ul) {
+        return 0;
+    }
+    /* AT_BASE must be absent. This program has no interpreter, so there is no
+     * interpreter base to report - and the kernel field that supplies it was
+     * written only on the interpreter path and read unconditionally, so a
+     * program like this one was handed whatever the kernel had left on its
+     * stack. A static position-independent binary relocates itself against
+     * that value.
+     *
+     * Checked from ring 3 because that is the only place the answer is real,
+     * and asserted rather than printed: the value that leaked was a kernel
+     * pointer, and it only crashed when the leftover happened to be one. */
+    if (saw_at_base) {
+        return 0;
+    }
+    /* The first program header of a static executable we loaded is PT_LOAD,
+     * and its p_vaddr is where the image starts. */
+    ph = (const unsigned char *)phdr;
+    if (ph[0] != 1u) {   /* p_type == PT_LOAD, little-endian low byte */
+        return 0;
+    }
+    return 1;
+}
+
+static const char abi_ok[] = "linux abi ok: fs/uname/clock/writev/mmap\n";
+static const char abi_fs[] = "abi: arch_prctl or %fs broken\n";
+static const char abi_uname[] = "abi: uname wrong\n";
+static const char abi_clock[] = "abi: clock_gettime wrong\n";
+static const char abi_iov[] = "abi: writev wrong\n";
+static const char abi_tty[] = "abi: the console is not a terminal\n";
+static const char abi_mm[] = "abi: mmap/mprotect/munmap wrong\n";
+static const char abi_futex[] = "abi: futex did not check the value\n";
+static const char abi_nosys[] = "abi: an unimplemented syscall did not return ENOSYS\n";
+static const char abi_refused[] = "abi: a refused syscall did not return its registry errno\n";
+static const char abi_nx[] = "abi: PROT_EXEC is not enforced (page executable without it)\n";
+static const char tls_kept[] = "tls survived context switches\n";
+static const char tls_lost[] = "abi: %fs lost across a context switch\n";
+static const char gs_kept[] = "gs survived context switches\n";
+static const char gs_lost[] = "abi: %gs lost across a context switch\n";
+static const char abi_gs[] = "abi: arch_prctl or %gs broken\n";
+static const char sse_kept[] = "sse survived context switches\n";
+static const char sse_lost[] = "abi: xmm lost across a context switch\n";
+static const char self_path[] = "/EFI/BOOT/SELFTEST.ELF";
+static const char iov_a[] = "iov";
+static const char iov_b[] = "ec\n";
+
+/* The thread-control block a libc would allocate. Its first word is the
+ * self-pointer every x86-64 C runtime stores there, which is what makes
+ * "%fs:0" mean "the address of my own thread state". */
+static unsigned long tcb[16];
+/* The same for %gs, which a Windows program reaches its TEB through and the
+ * kernel swaps since docs/abi/windows.md W1. Its own block, so that %fs and %gs
+ * reading back the same address cannot be a register read twice. */
+static unsigned long gs_block[16];
+
+struct abi_iovec { const void *base; unsigned long len; };
+
+/* Exercise the syscalls a static libc runs before main, and check the effect
+ * rather than the return code: setting %fs is only meaningful if a %fs-relative
+ * load afterwards actually reads through it. */
+static const char *check_linux_abi(void) {
+    unsigned long got = 0;
+    unsigned long self;
+    char un[6 * 65];
+    unsigned long ts[2];
+    struct abi_iovec iov[2];
+    long r, page;
+
+    tcb[0] = (unsigned long)(void *)tcb;
+    if (user_syscall3(SYS_arch_prctl, 0x1002 /*ARCH_SET_FS*/,
+                      (long)(unsigned long)tcb, 0) != 0) {
+        return abi_fs;
+    }
+    /* Read the self-pointer back through the segment, not through the C
+     * pointer: this is the access a libc makes, and it only works if the
+     * kernel really wrote the MSR. */
+    __asm__ __volatile__("movq %%fs:0, %0" : "=r"(self));
+    if (self != (unsigned long)(void *)tcb) {
+        return abi_fs;
+    }
+    if (user_syscall3(SYS_arch_prctl, 0x1003 /*ARCH_GET_FS*/,
+                      (long)(unsigned long)&got, 0) != 0 ||
+        got != (unsigned long)(void *)tcb) {
+        return abi_fs;
+    }
+    /* A base outside user memory must be refused - it would fault in ring 0. */
+    if (user_syscall3(SYS_arch_prctl, 0x1002, 0x1000, 0) == 0) {
+        return abi_fs;
+    }
+    /* %gs, by the same rules (W1). Read through the segment, as a TEB is. */
+    gs_block[0] = (unsigned long)(void *)gs_block;
+    if (user_syscall3(SYS_arch_prctl, 0x1001 /*ARCH_SET_GS*/,
+                      (long)(unsigned long)gs_block, 0) != 0) {
+        return abi_gs;
+    }
+    __asm__ __volatile__("movq %%gs:0, %0" : "=r"(self));
+    if (self != (unsigned long)(void *)gs_block) {
+        return abi_gs;
+    }
+    if (user_syscall3(SYS_arch_prctl, 0x1004 /*ARCH_GET_GS*/,
+                      (long)(unsigned long)&got, 0) != 0 ||
+        got != (unsigned long)(void *)gs_block) {
+        return abi_gs;
+    }
+    /* Where the kernel is linked: the base its entry would take for its own
+     * block, so refused. */
+    if (user_syscall3(SYS_arch_prctl, 0x1001, 0x4000000, 0) == 0) {
+        return abi_gs;
+    }
+
+    /* A number no kernel implements must come back as -ENOSYS (38): it is what a
+     * libc probes with, and what the kernel counts on its [ABI] MUSTBEZERO line
+     * so the count is seen moving on every boot. */
+    if (user_syscall3(1999, 0, 0, 0) != -38) {
+        return abi_nosys;
+    }
+    /* A refused number must come back with its registry errno - iopl is EPERM
+     * (1), not ENOSYS - and be counted as refused, which the gate requires to
+     * be non-zero so the counter is seen moving (docs/abi/, phase A1). */
+    if (user_syscall3(172 /* iopl */, 3, 0, 0) != -1) {
+        return abi_refused;
+    }
+    if (user_syscall3(SYS_uname, (long)(unsigned long)un, 0, 0) != 0) {
+        return abi_uname;
+    }
+    if (un[0] != 'L' || un[1] != 'i' || un[2] != 'n' || un[3] != 'u' ||
+        un[4] != 'x' || un[5] != 0) {
+        return abi_uname;
+    }
+    if (un[4 * 65] != 'x' || un[4 * 65 + 1] != '8' || un[4 * 65 + 2] != '6') {
+        return abi_uname;   /* machine field must be x86_64 */
+    }
+    /* Again with the direction flag set, as any program may set it: the
+     * kernel's copy ran backwards from the first byte, so uname came back with
+     * its first letter and wrote the rest below the buffer (issue #183). */
+    {
+        int i;
+        long r;
+
+        for (i = 0; i < 8; i++) {
+            un[i] = 0;
+        }
+        __asm__ __volatile__("std" ::: "memory");
+        r = user_syscall3(SYS_uname, (long)(unsigned long)un, 0, 0);
+        __asm__ __volatile__("cld" ::: "memory");
+        if (r != 0 || un[0] != 'L' || un[1] != 'i' || un[4] != 'x' || un[5] != 0) {
+            return abi_uname;
+        }
+    }
+
+    if (user_syscall3(SYS_clock_gettime, 1 /*CLOCK_MONOTONIC*/,
+                      (long)(unsigned long)ts, 0) != 0) {
+        return abi_clock;
+    }
+    if (ts[1] >= 1000000000ul) {
+        return abi_clock;   /* nanoseconds must be a fraction of a second */
+    }
+
+    /* stdout is a terminal (docs/abi/ L1 step 7), and a libc asks exactly this
+     * to decide how to buffer it: TCGETS answers, with the modes a terminal
+     * starts in - canonical, echoing. Until step 7 the answer was ENOTTY, and
+     * this line checked for that. */
+    {
+        unsigned int tio[9];
+        if (user_syscall3(SYS_ioctl, 1, 0x5401 /*TCGETS*/, (long)(unsigned long)tio) != 0 ||
+            (tio[3] & 0xAu) != 0xAu /* ICANON|ECHO */) {
+            return abi_tty;
+        }
+        if (user_syscall3(SYS_ioctl, 1, 0x5401, 0x1000) != -14 /*EFAULT*/) {
+            return abi_tty;
+        }
+    }
+    iov[0].base = iov_a;
+    iov[0].len = sizeof(iov_a) - 1;
+    iov[1].base = iov_b;
+    iov[1].len = sizeof(iov_b) - 1;
+    r = user_syscall3(SYS_writev, 1, (long)(unsigned long)iov, 2);
+    if (r != (long)(sizeof(iov_a) - 1 + sizeof(iov_b) - 1)) {
+        return abi_iov;
+    }
+
+    /* A real mmap/mprotect/munmap round trip: map it, write it, take write
+     * away, give it back, then unmap. */
+    page = user_syscall6(SYS_mmap, 0, 4096, 3 /*READ|WRITE*/,
+                         0x22 /*PRIVATE|ANONYMOUS*/, -1, 0);
+    if (page <= 0) {
+        return abi_mm;
+    }
+    *(volatile unsigned char *)(unsigned long)page = 0x5A;
+    if (*(volatile unsigned char *)(unsigned long)page != 0x5A) {
+        return abi_mm;
+    }
+    /* W^X (M-036): the page table, not the API, is what forbids running data.
+     * pageinfo reports the entry's NX bit. A writable page must have it; asking
+     * for PROT_EXEC must clear it; taking PROT_EXEC away must set it again. */
+    {
+        unsigned long info[3];   /* frame, flags | owners << 32, first_word */
+        info[1] = 0;
+        if (user_syscall3(SYS_pageinfo, page, (long)(unsigned long)info, 0) != 0 ||
+            (info[1] & 0x20u) == 0u) {
+            return abi_nx;   /* RW, no PROT_EXEC: must be NX */
+        }
+        if (user_syscall3(SYS_mprotect, page, 4096, 5 /*READ|EXEC*/) != 0) {
+            return abi_mm;
+        }
+        info[1] = 0xFFu;
+        if (user_syscall3(SYS_pageinfo, page, (long)(unsigned long)info, 0) != 0 ||
+            (info[1] & 0x20u) != 0u) {
+            return abi_nx;   /* PROT_EXEC granted: NX must be clear */
+        }
+        if (user_syscall3(SYS_mprotect, page, 4096, 1 /*READ*/) != 0) {
+            return abi_mm;
+        }
+        info[1] = 0;
+        if (user_syscall3(SYS_pageinfo, page, (long)(unsigned long)info, 0) != 0 ||
+            (info[1] & 0x20u) == 0u) {
+            return abi_nx;   /* PROT_EXEC revoked: NX must be set again */
+        }
+    }
+    if (user_syscall3(SYS_mprotect, page, 4096, 1 /*READ*/) != 0) {
+        return abi_mm;
+    }
+    if (user_syscall3(SYS_mprotect, page, 4096, 3 /*READ|WRITE*/) != 0) {
+        return abi_mm;
+    }
+    if (user_syscall3(SYS_munmap, page, 4096, 0) != 0) {
+        return abi_mm;
+    }
+    /* An unmapped-but-still-fixed address must not be accepted afterwards. */
+    if (user_syscall3(SYS_mprotect, page, 4096, 3) == 0) {
+        return abi_mm;
+    }
+    /* A length that wraps when rounded up to a page (M-006). mmap computed
+     * pages = (len + 0xFFF) / 4096, which for a length near 2^64 is zero - so
+     * it claimed nothing, mapped nothing, and returned success with the same
+     * base the next call would get. Linux answers ENOMEM, in both branches:
+     * PROT_NONE is a separate path with the same arithmetic. */
+    if (user_syscall6(SYS_mmap, 0, (long)~0ul, 3, 0x22, -1, 0) != -12 /*ENOMEM*/) {
+        return abi_mm;
+    }
+    if (user_syscall6(SYS_mmap, 0, (long)~0ul, 0 /*NONE*/, 0x22, -1, 0) != -12) {
+        return abi_mm;
+    }
+    /* The same rounding in munmap and mprotect: addr + len does not wrap, the
+     * page-aligned end does, and becomes 0. munmap then handed the region list
+     * a length of 2^64 - addr and dropped every region above addr while its
+     * pages stayed mapped; mprotect changed nothing and said it had. Both must
+     * refuse. Anything non-negative is the defect. */
+    if (user_syscall3(SYS_munmap, page, (long)(~0ul - (unsigned long)page), 0) >= 0) {
+        return abi_mm;
+    }
+    if (user_syscall3(SYS_mprotect, page, (long)(~0ul - (unsigned long)page), 3) >= 0) {
+        return abi_mm;
+    }
+    /* FUTEX_WAIT must compare before it sleeps.
+     *
+     * That comparison is the whole contract: it is what makes a wake that
+     * arrives between reading a word and deciding to sleep impossible to lose.
+     * Asking to wait for a value the word does not hold must come straight
+     * back with EAGAIN - and if the check were missing this call would block
+     * forever instead, which is the failure it exists to prevent, so the test
+     * either returns wrong or never returns.
+     *
+     * Deterministic on purpose: the race itself needs two threads and a
+     * particular interleaving, and a test that only sometimes exercises a
+     * check is a check that is only sometimes tested. */
+    {
+        /* Named for what it is rather than `word`, which shadowed an outer
+         * declaration. Harmless as it stood, and exactly the kind of thing
+         * that stops being harmless the day somebody edits around it. */
+        volatile int futex_word = 1;
+        /* Six arguments, the timeout NULL: with three, r10 held whatever the
+         * last call left there, and once FUTEX_WAIT read its timeout (L2 step
+         * 6) that was a pointer to nowhere - EFAULT before the compare, as
+         * Linux answers too. */
+        long waited = user_syscall6(SYS_futex, (unsigned long)&futex_word,
+                                    0 /*WAIT*/, 2, 0, 0, 0);
+
+        if (waited != -11 /*EAGAIN*/) {
+            return abi_futex;
+        }
+    }
+
+    /* MAP_FIXED maps at the address given and takes the place of what was
+     * there (docs/abi/ L3 step 1) - it used to be refused, and this checked
+     * that it was. A page written, mapped over, and read back as zeros: the
+     * old page is gone, not hidden. */
+    {
+        long at = user_syscall6(SYS_mmap, 0, 8192, 3, 0x22, -1, 0);
+        volatile char *q = (volatile char *)at;
+
+        if (at <= 0) {
+            return abi_mm;
+        }
+        q[0] = 'x';
+        q[4096] = 'y';
+        if (user_syscall6(SYS_mmap, at, 4096, 3, 0x32 /*FIXED|ANON|PRIVATE*/, -1, 0) != at ||
+            q[0] != 0 || q[4096] != 'y') {
+            return abi_mm;
+        }
+        /* MAP_FIXED_NOREPLACE refuses a range in use: EEXIST. */
+        if (user_syscall6(SYS_mmap, at, 4096, 3, 0x100022, -1, 0) != -17) {
+            return abi_mm;
+        }
+        /* A path in memory the program may not read is EFAULT (M-082). A
+         * PROT_NONE page holds zeros: a kernel that read it without asking
+         * whose it was saw an empty path and said ENOENT, which is one bit of
+         * memory the program had been refused. */
+        {
+            long none = user_syscall6(SYS_mmap, 0, 4096, 0 /* PROT_NONE */, 0x22, -1, 0);
+            unsigned char stx[256];
+
+            if (none <= 0 ||
+                user_syscall6(332 /* statx */, -100, none, 0, 0, (long)(unsigned long)stx, 0) != -14 ||
+                user_syscall6(262 /* newfstatat */, -100, none, (long)(unsigned long)stx, 0, 0, 0) != -14) {
+                return abi_mm;
+            }
+        }
+        /* And a mapping must say whether it is private or shared. */
+        if (user_syscall6(SYS_mmap, 0, 4096, 3, 0x20, -1, 0) != -22) {
+            return abi_mm;
+        }
+    }
+    /* A file mapped privately holds the file's bytes: this program's own image,
+     * off the FAT boot volume, begins with the ELF magic - and a store into the
+     * mapping stays in the mapping. */
+    {
+        long fd = user_syscall3(2 /* open */, (long)(unsigned long)self_path, 0, 0);
+        long at;
+        volatile unsigned char *q;
+
+        if (fd < 0) {
+            return abi_mm;
+        }
+        at = user_syscall6(SYS_mmap, 0, 4096, 3, 2 /* MAP_PRIVATE */, fd, 0);
+        q = (volatile unsigned char *)at;
+        if (at <= 0 || q[0] != 0x7f || q[1] != 'E' || q[2] != 'L' || q[3] != 'F') {
+            return abi_mm;
+        }
+        q[1] = 'e';
+        if (q[1] != 'e') {
+            return abi_mm;
+        }
+        user_syscall3(3 /* close */, fd, 0, 0);
+    }
+    return abi_ok;
+}
+
+/* File locks, across two processes (docs/abi/ L1 step 6) - which is the only
+ * way a lock means anything, and nothing else the boot runs takes one.
+ *
+ * The parent holds a record lock on ten bytes and a flock on the whole file.
+ * The child is another process, so the record lock is in its way, and F_GETLK
+ * tells it which bytes; a description of its own is refused the flock; and the
+ * descriptor it inherited names the parent's description, which already holds
+ * it. The child's exit status says whether all of that was so. */
+struct abi_flock {
+    short l_type;
+    short l_whence;
+    long l_start;
+    long l_len;
+    int l_pid;
+};
+
+static const char lock_path[] = "/tmp/lockself";
+static const char locks_ok[] = "LOCKS_OK: record and whole-file locks hold between processes\n";
+static const char locks_bad[] = "abi: file locks wrong\n";
+
+static int check_file_locks(void) {
+    struct abi_flock fl;
+    volatile int status = 0;
+    long fd, child;
+
+    fd = user_syscall3(2 /* open */, (long)(unsigned long)lock_path, 0x42 /* O_CREAT|O_RDWR */, 0600);
+    if (fd < 0) {
+        return 0;
+    }
+    fl.l_type = 1;   /* F_WRLCK */
+    fl.l_whence = 0;
+    fl.l_start = 0;
+    fl.l_len = 10;
+    fl.l_pid = 0;
+    if (user_syscall3(72 /* fcntl */, fd, 6 /* F_SETLK */, (long)(unsigned long)&fl) != 0 ||
+        user_syscall3(73 /* flock */, fd, 2 /* LOCK_EX */, 0) != 0) {
+        return 0;
+    }
+    child = user_syscall3(SYS_fork, 0, 0, 0);
+    if (child == 0) {
+        struct abi_flock ask;
+        long own = user_syscall3(2, (long)(unsigned long)lock_path, 2 /* O_RDWR */, 0);
+        int ok = own >= 0;
+
+        ask.l_type = 0;   /* F_RDLCK */
+        ask.l_whence = 0;
+        ask.l_start = 5;
+        ask.l_len = 1;
+        ask.l_pid = 0;
+        ok = ok && user_syscall3(72, own, 6, (long)(unsigned long)&ask) == -11 /* EAGAIN */;
+        ok = ok && user_syscall3(72, own, 5 /* F_GETLK */, (long)(unsigned long)&ask) == 0 &&
+             ask.l_type == 1 && ask.l_start == 0 && ask.l_len == 10;
+        ok = ok && user_syscall3(73, own, 2 | 4 /* LOCK_EX|LOCK_NB */, 0) == -11;
+        ok = ok && user_syscall3(73, fd, 2 | 4, 0) == 0;
+        user_syscall3(SYS_exit, ok ? 0 : 1, 0, 0);
+    }
+    if (child < 0 || user_syscall3(SYS_wait4, child, (long)(unsigned long)&status, 0) != child) {
+        return 0;
+    }
+    user_syscall3(3 /* close */, fd, 0, 0);
+    user_syscall3(87 /* unlink */, (long)(unsigned long)lock_path, 0, 0);
+    return status == 0;
+}
+
+/* The stack grows (docs/abi/ L3). Four pages are mapped when a program starts;
+ * this function's frame is a hundred kilobytes, so it only works if a page
+ * the stack reaches is given to it.
+ *
+ * Three ways of reaching one. A store from ring 3 into the far end of the
+ * frame. A read() into a page well below the frame, which is the kernel
+ * storing into a page nobody has touched - refused as EFAULT if the range
+ * check does not know the stack may grow, and a fault in ring 0 if it does.
+ * Below the frame and not inside it, because the compiler probes every page of
+ * a large frame on entry: the first version read into the middle of `big`, a
+ * page ring 3 had already touched, and removing the range check's knowledge of
+ * the stack went NOT RED. And, in a child, a
+ * store into the page below the region, which must stay unmapped: the child is
+ * killed by SIGSEGV, and that is the answer wanted. */
+static const char stack_ok[] = "STACK_OK: the stack grew when it was reached, and its guard held\n";
+static const char stack_bad[] = "abi: the stack did not grow as it should\n";
+
+static int check_stack_grows(void) {
+    volatile unsigned char big[100 * 1024];
+    volatile int status = 0;
+    long fd, child;
+
+    big[0] = 'a';                       /* the lowest address: furthest from the top */
+    big[sizeof(big) - 1] = 'z';
+    fd = user_syscall3(2 /* open */, (long)(unsigned long)self_path, 0, 0);
+    {
+        /* 256 KiB under this frame's lowest byte, page aligned: stack nobody
+         * has reached. */
+        volatile unsigned char *deep =
+            (volatile unsigned char *)(((unsigned long)&big[0] - 256ul * 1024ul) & ~0xFFFul);
+
+        if (fd < 0 ||
+            user_syscall3(0 /* read */, fd, (long)(unsigned long)deep, 4096) != 4096 ||
+            deep[0] != 0x7f || deep[1] != 'E') {
+            return 0;
+        }
+    }
+    user_syscall3(3 /* close */, fd, 0, 0);
+    if (big[0] != 'a' || big[sizeof(big) - 1] != 'z' || big[30000] != 0) {
+        return 0;   /* a page given to the stack is zeroed, and keeps what is stored */
+    }
+    child = user_syscall3(SYS_fork, 0, 0, 0);
+    if (child == 0) {
+        /* 0x8000200800: inside the one page below the stack's region. */
+        *(volatile char *)0x8000200800ul = 1;
+        user_syscall3(SYS_exit, 0, 0, 0);   /* only if the guard was not there */
+    }
+    if (child < 0 || user_syscall3(SYS_wait4, child, (long)(unsigned long)&status, 0) != child) {
+        return 0;
+    }
+    return (status & 0x7f) == 11;       /* killed by SIGSEGV */
+}
+
+/* Shared mappings (docs/abi/ L3 step 2). Two pages of anonymous memory and one
+ * page of a file on /tmp, mapped shared, and a fork: the child stores into
+ * each, and the parent has to see the stores - and the file has to have its
+ * own, read back through the descriptor, because a shared mapping of a file is
+ * the file. The child's store into the anonymous memory goes to a page the
+ * parent never touched, so a fork that copied instead of sharing cannot pass by
+ * both sides happening to hold the same bytes. */
+static const char shared_ok[] = "SHARED_OK: a shared mapping stayed shared across a fork, and a file's was the file\n";
+static const char shared_bad[] = "abi: shared mappings wrong\n";
+static const char shm_path[] = "/tmp/selftest.shm";
+
+static int check_shared_mappings(void) {
+    volatile unsigned char *a, *m;
+    volatile int status = -1;
+    unsigned char back = 0;
+    long fd, child;
+
+    a = (volatile unsigned char *)user_syscall6(SYS_mmap, 0, 8192, 3, 0x21 /* SHARED|ANONYMOUS */, -1, 0);
+    if ((long)a <= 0) {
+        return 0;
+    }
+    a[0] = 'p';
+    fd = user_syscall3(2 /* open */, (long)(unsigned long)shm_path, 0x242 /* CREAT|TRUNC|RDWR */, 0600);
+    if (fd < 0 || user_syscall3(77 /* ftruncate */, fd, 4096, 0) != 0) {
+        return 0;
+    }
+    m = (volatile unsigned char *)user_syscall6(SYS_mmap, 0, 4096, 3, 0x01 /* SHARED */, fd, 0);
+    if ((long)m <= 0) {
+        return 0;
+    }
+    child = user_syscall3(SYS_fork, 0, 0, 0);
+    if (child == 0) {
+        a[4096] = 'c';
+        m[7] = 'f';
+        user_syscall3(SYS_exit, a[0] == 'p' ? 0 : 1, 0, 0);
+    }
+    if (child < 0 || user_syscall3(SYS_wait4, child, (long)(unsigned long)&status, 0) != child ||
+        status != 0) {
+        return 0;
+    }
+    if (a[4096] != 'c' || m[7] != 'f') {
+        return 0;
+    }
+    if (user_syscall6(17 /* pread64 */, fd, (long)(unsigned long)&back, 1, 7, 0, 0) != 1 || back != 'f') {
+        return 0;
+    }
+    if (user_syscall3(26 /* msync */, (long)(unsigned long)m, 4096, 4 /* MS_SYNC */) != 0) {
+        return 0;
+    }
+    /* The name and the descriptor go; the mapping still has the page. */
+    user_syscall3(3 /* close */, fd, 0, 0);
+    user_syscall3(87 /* unlink */, (long)(unsigned long)shm_path, 0, 0);
+    return m[7] == 'f';
+}
+
+/* Credentials (docs/abi/ L2 step 1), on the machine. Root makes a file only
+ * it may read and a directory only it may search; a child gives its privileges
+ * up for good and has to be refused both, has to be able to make a file of its
+ * own in /tmp and find itself its owner, and must not be able to remove root's
+ * file from /tmp, which is sticky - nor to become root again. */
+static const char cred_ok[] = "CRED_OK: a process that gave up root was refused what root owns\n";
+static const char cred_bad[] = "abi: credentials wrong\n";
+static const char cred_file[] = "/tmp/cred.root";
+static const char cred_dir[] = "/tmp/cred.dir";
+static const char cred_in[] = "/tmp/cred.dir/x";
+static const char cred_mine[] = "/tmp/cred.mine";
+static const char cred_bb[] = "/EFI/BOOT/BUSYBOX.ELF";
+static const char *const cred_argv[] = { "test", "-r", cred_file, 0 };
+
+static int check_credentials(void) {
+    volatile int status = -1;
+    unsigned char st[144];
+    long fd, child;
+
+    fd = user_syscall3(2 /* open */, (long)(unsigned long)cred_file, 0x241 /* CREAT|TRUNC|WRONLY */, 0600);
+    if (fd < 0 || user_syscall3(90 /* chmod */, (long)(unsigned long)cred_file, 0600, 0) != 0) {
+        return 0;
+    }
+    user_syscall3(3 /* close */, fd, 0, 0);
+    if (user_syscall3(83 /* mkdir */, (long)(unsigned long)cred_dir, 0700, 0) != 0 ||
+        user_syscall3(90, (long)(unsigned long)cred_dir, 0700, 0) != 0) {
+        return 0;
+    }
+    /* A file in it that anybody may read: what refuses the child is then the
+     * directory's search bit and nothing else. The first version had the child
+     * create a file there, which the directory's write bit refuses as well, and
+     * a walk that asked nobody for search permission passed the boot. */
+    fd = user_syscall3(2, (long)(unsigned long)cred_in, 0x241, 0644);
+    if (fd < 0 || user_syscall3(90, (long)(unsigned long)cred_in, 0644, 0) != 0) {
+        return 0;
+    }
+    user_syscall3(3, fd, 0, 0);
+    child = user_syscall3(SYS_fork, 0, 0, 0);
+    if (child == 0) {
+        int bad = 0;
+        long mine;
+
+        bad |= user_syscall3(106 /* setgid */, 100, 0, 0) != 0;
+        bad |= user_syscall3(105 /* setuid */, 1000, 0, 0) != 0;
+        bad |= user_syscall3(102 /* getuid */, 0, 0, 0) != 1000 || user_syscall3(107 /* geteuid */, 0, 0, 0) != 1000;
+        bad |= user_syscall3(105, 0, 0, 0) != -1 /* EPERM */;
+        bad |= user_syscall3(2, (long)(unsigned long)cred_file, 0, 0) != -13 /* EACCES */;
+        bad |= user_syscall3(2, (long)(unsigned long)cred_in, 0 /* O_RDONLY */, 0) != -13;
+        bad |= user_syscall3(87 /* unlink */, (long)(unsigned long)cred_file, 0, 0) != -1;
+        mine = user_syscall3(2, (long)(unsigned long)cred_mine, 0x241, 0644);
+        bad |= mine < 0 || user_syscall3(5 /* fstat */, mine, (long)(unsigned long)st, 0) != 0 ||
+               *(unsigned int *)(void *)(st + 28) != 1000u /* st_uid */ ||
+               *(unsigned int *)(void *)(st + 32) != 100u /* st_gid */;
+        bad |= user_syscall3(87, (long)(unsigned long)cred_mine, 0, 0) != 0;
+        /* And it stays who it is across an exec: another program, run by this
+         * one, is refused root's file as this one was. exec built the new
+         * process state without the credentials at first, and the program was
+         * whoever the slot had last belonged to. */
+        {
+            volatile int st2 = -1;
+            long gc = user_syscall3(SYS_fork, 0, 0, 0);
+            if (gc == 0) {
+                user_syscall3(SYS_execve, (long)(unsigned long)cred_bb, (long)(unsigned long)cred_argv, 0);
+                user_syscall3(SYS_exit, 0, 0, 0);   /* no exec: reads as "was let in" */
+            }
+            bad |= gc < 0 || user_syscall3(SYS_wait4, gc, (long)(unsigned long)&st2, 0) != gc ||
+                   ((st2 >> 8) & 0xff) != 1 || (st2 & 0x7f) != 0;
+        }
+        user_syscall3(SYS_exit, bad ? 1 : 0, 0, 0);
+    }
+    if (child < 0 || user_syscall3(SYS_wait4, child, (long)(unsigned long)&status, 0) != child) {
+        return 0;
+    }
+    user_syscall3(87, (long)(unsigned long)cred_file, 0, 0);
+    user_syscall3(87, (long)(unsigned long)cred_in, 0, 0);
+    user_syscall3(84 /* rmdir */, (long)(unsigned long)cred_dir, 0, 0);
+    return status == 0 && user_syscall3(102, 0, 0, 0) == 0;
+}
+
+/* The rest of the memory calls (docs/abi/ L3 step 4), on the machine: a page
+ * given back reads zeros; a mapping that has to move to grow arrives with its
+ * contents; a locked page is reported in memory; and a memfd, mapped shared,
+ * is one memory in two processes that a read() of the descriptor also sees. */
+static const char mem4_ok[] = "MEM4_OK: madvise, mincore, mlock, mremap and memfd_create\n";
+static const char mem4_bad[] = "abi: the memory calls of L3 step 4 are wrong\n";
+static const char memfd_name[] = "selftest";
+
+static int check_memory_calls(void) {
+    volatile unsigned char *p, *q, *m;
+    volatile int status = -1;
+    unsigned char vec[2] = {9, 9}, back = 0;
+    long fd, child;
+
+    p = (volatile unsigned char *)user_syscall6(SYS_mmap, 0, 8192, 3, 0x22, -1, 0);
+    if ((long)p <= 0) {
+        return 0;
+    }
+    p[0] = 'a';
+    p[4096] = 'b';
+    if (user_syscall3(28 /* madvise */, (long)(unsigned long)p, 4096, 4 /* DONTNEED */) != 0 ||
+        p[0] != 0 || p[4096] != 'b') {
+        return 0;
+    }
+    p[0] = 'a';
+    if (user_syscall3(149 /* mlock */, (long)(unsigned long)p, 8192, 0) != 0 ||
+        user_syscall3(27 /* mincore */, (long)(unsigned long)p, 8192, (long)(unsigned long)vec) != 0 ||
+        vec[0] != 1 || vec[1] != 1 ||
+        user_syscall3(150 /* munlock */, (long)(unsigned long)p, 8192, 0) != 0) {
+        return 0;
+    }
+    /* Something right after it, so that growing means moving. */
+    if (user_syscall6(SYS_mmap, (long)(unsigned long)p + 8192, 4096, 3, 0x32 /* FIXED */, -1, 0) !=
+        (long)(unsigned long)p + 8192) {
+        return 0;
+    }
+    q = (volatile unsigned char *)user_syscall6(25 /* mremap */, (long)(unsigned long)p, 8192, 16384,
+                                                1 /* MAYMOVE */, 0, 0);
+    if ((long)q <= 0 || q == p || q[0] != 'a' || q[4096] != 'b' || q[8192] != 0 || q[16383] != 0) {
+        return 0;
+    }
+    q[16383] = 'z';
+
+    fd = user_syscall3(319 /* memfd_create */, (long)(unsigned long)memfd_name, 0, 0);
+    if (fd < 0 || user_syscall3(77 /* ftruncate */, fd, 4096, 0) != 0) {
+        return 0;
+    }
+    m = (volatile unsigned char *)user_syscall6(SYS_mmap, 0, 4096, 3, 0x01 /* SHARED */, fd, 0);
+    if ((long)m <= 0) {
+        return 0;
+    }
+    child = user_syscall3(SYS_fork, 0, 0, 0);
+    if (child == 0) {
+        m[9] = 'm';
+        user_syscall3(SYS_exit, q[16383] == 'z' ? 0 : 1, 0, 0);
+    }
+    if (child < 0 || user_syscall3(SYS_wait4, child, (long)(unsigned long)&status, 0) != child ||
+        status != 0 || m[9] != 'm' ||
+        user_syscall6(17 /* pread64 */, fd, (long)(unsigned long)&back, 1, 9, 0, 0) != 1 || back != 'm') {
+        return 0;
+    }
+    user_syscall3(3 /* close */, fd, 0, 0);
+    return m[9] == 'm';
+}
+
+int vibeos_main(int argc, char **argv, char **envp) {
+    long pid, brk0, brk1, map, rejected;
+
+    user_syscall3(SYS_write, 1 /*stdout*/, (long)(unsigned long)message, sizeof(message) - 1);
+
+    /* The kernel built this stack; confirm it arrived intact.
+     *
+     * This used to require argv[0] to begin with 'i', from when this program
+     * was init and was called "init". It became a supervised service, its
+     * argv[0] became the service name, and the check started failing on every
+     * boot - visibly, in the serial log, for as long as nobody was asserting
+     * on the line. What the kernel is responsible for is a well-formed,
+     * NULL-terminated vector; which name the parent chose is the parent's
+     * business, so that is what this checks now. */
+    if (argc == 1 && argv[0] && argv[0][0] != '\0' && argv[1] == 0) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)argv_ok, sizeof(argv_ok) - 1);
+    } else {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)argv_bad, sizeof(argv_bad) - 1);
+    }
+    if (check_auxv(envp)) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)auxv_ok, sizeof(auxv_ok) - 1);
+    } else {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)auxv_bad, sizeof(auxv_bad) - 1);
+    }
+    {
+        const char *verdict = check_linux_abi();
+        long n = 0;
+        while (verdict[n]) {
+            n++;
+        }
+        user_syscall3(SYS_write, 1, (long)(unsigned long)verdict, n);
+    }
+    if (check_stack_grows()) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)stack_ok, sizeof(stack_ok) - 1);
+    } else {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)stack_bad, sizeof(stack_bad) - 1);
+    }
+    if (check_credentials()) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)cred_ok, sizeof(cred_ok) - 1);
+    } else {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)cred_bad, sizeof(cred_bad) - 1);
+    }
+    if (check_memory_calls()) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)mem4_ok, sizeof(mem4_ok) - 1);
+    } else {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)mem4_bad, sizeof(mem4_bad) - 1);
+    }
+    if (check_shared_mappings()) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)shared_ok, sizeof(shared_ok) - 1);
+    } else {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)shared_bad, sizeof(shared_bad) - 1);
+    }
+    if (check_file_locks()) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)locks_ok, sizeof(locks_ok) - 1);
+    } else {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)locks_bad, sizeof(locks_bad) - 1);
+    }
+
+    pid = user_syscall3(SYS_getpid, 0, 0, 0);
+
+    /* Grow the heap, then take an anonymous mapping, and touch both. */
+    brk0 = user_syscall3(SYS_brk, 0, 0, 0);
+    brk1 = user_syscall3(SYS_brk, brk0 + 8192, 0, 0);
+    if (brk1 > brk0) {
+        *(volatile char *)(unsigned long)brk0 = 'x';
+    }
+    map = user_syscall6(SYS_mmap, 0, 4096, 3 /*READ|WRITE*/,
+                        0x22 /*PRIVATE|ANONYMOUS*/, -1, 0);
+    if (map > 0) {
+        *(volatile char *)(unsigned long)map = 'y';
+    }
+    if (brk1 > brk0 && map > 0) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)ok_heap, sizeof(ok_heap) - 1);
+    }
+
+    /* The kernel must refuse a buffer that is not in our address space. */
+    rejected = user_syscall3(SYS_write, 1, 0x4000000L /* kernel image */, 8);
+    if (rejected < 0) {
+        user_syscall3(SYS_write, 1, (long)(unsigned long)bad_ptr, sizeof(bad_ptr) - 1);
+    }
+
+    /* Classic POSIX process creation: fork, child exits, parent reaps it. */
+    {
+        long child = user_syscall3(SYS_fork, 0, 0, 0);
+        if (child == 0) {
+            user_syscall3(SYS_write, 1, (long)(unsigned long)in_child, sizeof(in_child) - 1);
+            user_syscall3(SYS_exit, 7, 0, 0);
+        } else if (child > 0) {
+            volatile int status = 0;
+            long reaped = user_syscall3(SYS_wait4, child, (long)(unsigned long)&status, 0);
+            if (reaped == child && ((status >> 8) & 0xff) == 7) {
+                user_syscall3(SYS_write, 1, (long)(unsigned long)reaped_ok, sizeof(reaped_ok) - 1);
+            }
+        }
+    }
+
+    /* fork + exec: the child replaces itself with a different program from disk. */
+    {
+        long child = user_syscall3(SYS_fork, 0, 0, 0);
+        if (child == 0) {
+            user_syscall3(SYS_execve, (long)(unsigned long)exec_path, 0, 0);
+            user_syscall3(SYS_exit, 99, 0, 0); /* only if exec failed */
+        } else if (child > 0) {
+            user_syscall3(SYS_wait4, child, 0, 0);
+            user_syscall3(SYS_write, 1, (long)(unsigned long)exec_done, sizeof(exec_done) - 1);
+        }
+    }
+
+    /* Read a line from the console (keyboard) and echo it back. */
+    {
+        char kb[32];
+        long k = user_syscall3(SYS_read, 0 /*stdin*/, (long)(unsigned long)kb, sizeof(kb));
+        if (k > 0) {
+            user_syscall3(SYS_write, 1, (long)(unsigned long)kbd_prefix, sizeof(kbd_prefix) - 1);
+            user_syscall3(SYS_write, 1, (long)(unsigned long)kb, k);
+        }
+    }
+
+    /* Hand off to the shell, the way init does: run it as a child and wait. */
+    {
+        long child = user_syscall3(SYS_fork, 0, 0, 0);
+        if (child == 0) {
+            user_syscall3(SYS_execve, (long)(unsigned long)shell_path, 0, 0);
+            user_syscall3(SYS_exit, 127, 0, 0);
+        } else if (child > 0) {
+            user_syscall3(SYS_wait4, child, 0, 0);
+        }
+    }
+
+    /* By now this task has forked, waited, and been preempted repeatedly, so
+     * it has been switched off this CPU and back many times. Setting %fs is
+     * easy; keeping it across those switches is the part that breaks, and it
+     * cannot be observed at all without checking here rather than only next
+     * to the arch_prctl call. */
+    {
+        unsigned long self_again;
+        __asm__ __volatile__("movq %%fs:0, %0" : "=r"(self_again));
+        if (self_again == (unsigned long)(void *)tcb) {
+            user_syscall3(SYS_write, 1, (long)(unsigned long)tls_kept,
+                          sizeof(tls_kept) - 1);
+        } else {
+            user_syscall3(SYS_write, 1, (long)(unsigned long)tls_lost,
+                          sizeof(tls_lost) - 1);
+        }
+        /* And %gs, which the kernel now swaps on every entry and exit and
+         * reloads on every switch: the shell ran with a base of zero meanwhile,
+         * so a switch that forgot to reload it would leave that here. */
+        __asm__ __volatile__("movq %%gs:0, %0" : "=r"(self_again));
+        if (self_again == (unsigned long)(void *)gs_block) {
+            user_syscall3(SYS_write, 1, (long)(unsigned long)gs_kept,
+                          sizeof(gs_kept) - 1);
+        } else {
+            user_syscall3(SYS_write, 1, (long)(unsigned long)gs_lost,
+                          sizeof(gs_lost) - 1);
+        }
+    }
+
+    /* The same question about the SSE registers, and it is not rhetorical.
+     *
+     * The kernel sets CR4.OSFXSR, compiles 6955 XMM instructions of its own,
+     * and contains no fxsave, fxrstor or xsave anywhere. So a task's vector
+     * registers survive a syscall or an interrupt by luck, and clang stores
+     * 16-byte stack buffers with movdqa - which is why a corrupted user buffer
+     * in this system loses exactly sixteen bytes, one register wide.
+     *
+     * The first version of this check passed on three boots out of three, and
+     * it was the check that was wrong rather than the kernel: it set the
+     * register, made 64 getpid calls from C, and read it back. Two things made
+     * the defect unable to show. getpid is cheap enough that all 64 can fall
+     * inside one time slice, so nothing was preempted; and between the two
+     * inline-asm statements the compiler is free to spill and reload xmm6
+     * itself, which would have measured the compiler rather than the kernel.
+     *
+     * Right about the property, wrong about the arrangement - the fifth time
+     * this project has recorded that shape, and the reason the sabotage
+     * discipline exists.
+     *
+     * So the whole thing is one asm block with no C in the middle, and the loop
+     * is long enough to span many timer ticks with other tasks running. xmm6
+     * rather than xmm0 because the compiler uses the low registers constantly,
+     * and a check on xmm0 would be measuring whether it happened to reload it.
+     *
+     * Expected to FAIL until the FPU context switch is written. It is written
+     * first on purpose: a fix whose test has never been red is a fix nobody has
+     * checked. */
+    {
+        unsigned long pair[2];
+        unsigned long want_lo = 0x0123456789ABCDEFul;
+        unsigned long want_hi = 0xFEDCBA9876543210ul;
+
+        pair[0] = want_lo;
+        pair[1] = want_hi;
+        __asm__ __volatile__(
+            "movdqu (%0), %%xmm6\n\t"
+            "movq $200000, %%rbx\n"
+            "1:\n\t"
+            "movq $39, %%rax\n\t"        /* getpid: does nothing else */
+            "syscall\n\t"
+            "decq %%rbx\n\t"
+            "jnz 1b\n\t"
+            "movdqu %%xmm6, (%0)\n\t"
+            :: "r"(pair)
+            : "rax", "rbx", "rcx", "r11", "xmm6", "memory");
+        if (pair[0] == want_lo && pair[1] == want_hi) {
+            user_syscall3(SYS_write, 1, (long)(unsigned long)sse_kept,
+                          sizeof(sse_kept) - 1);
+        } else {
+            user_syscall3(SYS_write, 1, (long)(unsigned long)sse_lost,
+                          sizeof(sse_lost) - 1);
+        }
+    }
+
+    user_syscall3(SYS_exit, pid, 0, 0);
+    for (;;) {
+        /* not reached */
+    }
+}

@@ -1,0 +1,253 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Single source of truth for the two portable libraries.
+#
+# These lists used to be written twice: here, and again by hand inside
+# scripts/run-tests.ps1 for its manual compiler fallback. The copies drifted
+# three separate times (log.c, inet.c, tls_adapter.c), and each time the
+# Windows job failed to link long after the real change had landed.
+#
+# The PowerShell fallback now parses this file instead of carrying its own
+# copy, so adding a file here is enough. Keep the plain
+# `set(<NAME> <paths>)` shape: that script reads it with a simple parser and
+# does not evaluate CMake syntax.
+
+set(VIBEOS_KERNEL_CORE_SOURCES
+    kernel/mm/stats.c
+    kernel/mm/frame.c
+    kernel/mm/vmspace.c
+    kernel/mm/vma.c
+    kernel/mm/backing.c
+    kernel/mm/rmap.c
+    kernel/mm/reclaim.c
+    kernel/mm/swapmap.c
+    kernel/mm/anon.c
+    kernel/mm/swaparea.c
+    kernel/io/blkdev.c
+    kernel/io/device.c
+    kernel/io/logsink.c
+    kernel/txn/journal.c
+    kernel/io/parttab.c
+    kernel/sched/stats.c
+    kernel/sched/task.c
+    kernel/sched/task_ident.c
+    kernel/sched/cred.c
+    kernel/sched/ptimer.c
+    kernel/sched/runq.c
+    kernel/sched/lifetime.c
+    kernel/sched/view.c
+    kernel/sched/account.c
+    kernel/sched/sched_policy.c
+    kernel/sched/forkguard.c
+    kernel/exec/stats.c
+    kernel/exec/view.c
+    kernel/mm/usage.c
+    kernel/core/kmain.c
+    kernel/core/elf.c
+    kernel/fs/fat_chain.c
+    kernel/fs/blockcache.c
+    kernel/fs/vfs.c
+    kernel/fs/fdtable.c
+    kernel/fs/file.c
+    kernel/fs/path.c
+    kernel/fs/tmpfs.c
+    kernel/fs/procfs.c
+    kernel/fs/devfs.c
+    kernel/fs/filelock.c
+    kernel/ipc/pipe.c
+    kernel/fs/partition.c
+    kernel/fs/storage.c
+    kernel/mm/pmm.c
+    kernel/net/inet.c
+    kernel/net/net_policy.c
+    kernel/object/handle_table.c
+    kernel/proc/process.c
+    kernel/sched/scheduler.c
+    kernel/ipc/event.c
+    kernel/ipc/channel.c
+    kernel/ipc/handle_transfer.c
+    kernel/ipc/waitset.c
+    kernel/core/log.c
+    kernel/diag/klog.c
+    kernel/diag/crash.c
+    kernel/core/mbz.c
+    kernel/core/random.c
+    kernel/abi/abi.c
+    kernel/abi/abi_linux.c
+    kernel/core/policy.c
+    kernel/core/security.c
+    kernel/time/timer.c
+    kernel/arch/x86_64/trap.c
+    kernel/arch/x86_64/idt.c
+    kernel/arch/x86_64/boot_stub.c
+    kernel/arch/x86_64/serial.c
+)
+
+set(VIBEOS_USER_CORE_SOURCES
+    user/init/init_system.c
+    user/init/userland_abi.c
+    user/servicemgr/service_manager.c
+    user/servicemgr/supervisor.c
+    user/servicemgr/service_ipc.c
+    user/devmgr/device_manager.c
+    user/devmgr/driver_host.c
+    user/drivers/driver_framework.c
+    user/fs/vfs_service.c
+    user/fs/vfs_ops.c
+    user/net/network_service.c
+    user/net/socket.c
+    user/compat/compat_runtime.c
+    user/compat/linux/linux_compat.c
+    user/compat/macos/macos_compat.c
+    user/lib/user_api.c
+    boot/bootloader_core.c
+)
+
+# The TLS adapter is built into its own target so hosted crypto can never be
+# linked into the freestanding kernel image. It compiles with or without the
+# audited dependency, reporting TLS as unavailable when it is absent.
+set(VIBEOS_TLS_SOURCES
+    user/net/tls_adapter.c
+)
+
+# Drivers that register themselves (VIBEOS_DEVICE) and are portable enough to
+# be host-tested. Two lists would be wrong in opposite ways:
+#
+# - in VIBEOS_KERNEL_CORE_SOURCES alone they reach the image through a static
+#   archive, and an archive member is linked only when something references it.
+#   A driver that registers is referenced by nothing - that is the point of the
+#   registry - so the linker leaves it out, silently. The GUI did exactly that
+#   the day it moved to kernel/io (C7): the boot came up with five devices, the
+#   text console took the framebuffer, and only gui_counters_missing said why;
+# - in VIBEOS_ARCH_X86_64_SOURCES alone the host tests cannot link them.
+#
+# So both: the host library links them for the tests, and the image compiles
+# them directly, where every object is linked whether or not it is named.
+set(VIBEOS_KERNEL_DRIVER_SOURCES
+    kernel/io/gui.c
+    kernel/fs/ext2.c
+    kernel/fs/ext4_write.c
+    kernel/fs/iso9660.c
+    kernel/fs/exfat.c
+    kernel/fs/ntfs.c
+    kernel/fs/fat.c
+)
+
+# The file types every personality shares (docs/abi/ A3): regular files and
+# directories, pipe ends, sockets and the console, written against vibeos/ksvc.h
+# like a handler is. Built wherever a personality is.
+set(VIBEOS_ABI_FILES_SOURCES
+    kernel/abi/files/chrdev.c
+    kernel/abi/files/console.c
+    kernel/abi/files/pipefile.c
+    kernel/abi/files/pidfd.c
+    kernel/abi/files/eventfd.c
+    kernel/abi/files/timerfd.c
+    kernel/abi/files/regular.c
+    kernel/abi/files/socket.c
+    kernel/abi/files/sockopt.c
+    kernel/abi/files/unixsock.c
+    # And the address space as every personality changes it (W3): placing,
+    # releasing, RLIMIT_AS - mmap's and NtAllocateVirtualMemory's alike.
+    kernel/abi/mem/umem.c
+)
+
+# The Linux syscall personality. Portable since docs/abi/ A2: it reaches the
+# kernel only through include/vibeos/ksvc.h, so the image links it against the
+# architecture's services (kernel/arch/x86_64/ksvc.c) and the host tests against
+# tests/kernel/ksvc_fake.c. A second personality is a second list like this one.
+set(VIBEOS_LINUX_ABI_SOURCES
+    kernel/abi/linux/net.c
+    kernel/abi/linux/common.c
+    kernel/abi/linux/dispatch.c
+    kernel/abi/linux/fs.c
+    kernel/abi/linux/names.c
+    kernel/abi/linux/futex.c
+    kernel/abi/linux/sched.c
+    kernel/abi/linux/ipc.c
+    kernel/abi/linux/sem.c
+    kernel/abi/linux/shm.c
+    kernel/abi/linux/mqueue.c
+    kernel/abi/linux/splice.c
+    kernel/abi/linux/misc.c
+    kernel/abi/linux/mm.c
+    kernel/abi/linux/proc.c
+    kernel/abi/linux/sig.c
+    kernel/abi/linux/signal.c
+    kernel/abi/linux/timer.c
+    kernel/abi/linux/limits.c
+    kernel/abi/linux/procsrc.c
+    kernel/abi/linux/poll.c
+    kernel/abi/linux/events.c
+    kernel/abi/linux/epoll.c
+    kernel/abi/linux/inotify.c
+    ${VIBEOS_ABI_FILES_SOURCES}
+)
+
+# The NT personality (docs/abi/windows.md W1), portable for the same reason as
+# Linux's: the image links it against the architecture's services, the host
+# tests against the fake.
+set(VIBEOS_NT_ABI_SOURCES
+    kernel/core/pe.c
+    kernel/abi/abi_nt.c
+    kernel/abi/nt/dispatch.c
+    kernel/abi/nt/process.c
+    kernel/abi/nt/file.c
+    kernel/abi/nt/system.c
+    kernel/abi/nt/start.c
+    kernel/abi/nt/object.c
+    kernel/abi/nt/sync.c
+    kernel/abi/nt/section.c
+    kernel/abi/nt/memory.c
+    kernel/abi/nt/thread.c
+    kernel/abi/nt/apc.c
+    kernel/abi/nt/except.c
+    kernel/abi/nt/registry/reg.c
+    kernel/abi/nt/key.c
+)
+
+# The freestanding half of the kernel image: hardware bring-up that host tests
+# never link. Kept here for the same reason as the lists above - it was written
+# out by hand in CMakeLists.txt, which made it a second place to remember, and
+# the two lists do not fail loudly when they disagree.
+set(VIBEOS_ARCH_X86_64_SOURCES
+    kernel/arch/x86_64/arch_hw.c
+    kernel/arch/x86_64/task_life.c
+    kernel/arch/x86_64/mm_bridge.c
+    kernel/arch/x86_64/task_switch.c
+    kernel/arch/x86_64/net_bringup.c
+    kernel/arch/x86_64/diagnostics.c
+    kernel/arch/x86_64/userland.c
+    kernel/arch/x86_64/smp.c
+    kernel/arch/x86_64/io_bringup.c
+    kernel/arch/x86_64/ksvc.c
+    kernel/arch/x86_64/personality.c
+    ${VIBEOS_LINUX_ABI_SOURCES}
+    kernel/arch/x86_64/apic.c
+    kernel/arch/x86_64/blk.c
+    kernel/arch/x86_64/ahci.c
+    kernel/arch/x86_64/virtio_blk.c
+    kernel/arch/x86_64/virtio_net.c
+    kernel/arch/x86_64/loopdev.c
+    kernel/arch/x86_64/keyboard.c
+    kernel/arch/x86_64/fb.c
+    kernel/arch/x86_64/mouse.c
+)
+
+# The NT personality's half of the image (docs/abi/windows.md W8 step 1): its
+# handlers, the PE loader and its glue into the architecture. Linked only with
+# VIBEOS_PERSONALITY_NT; nothing in the list above names any of it.
+set(VIBEOS_ARCH_NT_SOURCES
+    kernel/arch/x86_64/pe_load.c
+    kernel/arch/x86_64/nt_glue.c
+    ${VIBEOS_NT_ABI_SOURCES}
+)
+
+# The receive path, as the fuzzer must link it. net_policy.c belongs here
+# because ip_input calls into it for every packet: leaving it out is what broke
+# the CI fuzz build while a local check.sh stayed green, and stubbing it would
+# have fuzzed a shape of the code that does not ship.
+set(VIBEOS_FUZZ_INET_SOURCES
+    tests/fuzz/fuzz_inet_input.c
+    kernel/net/inet.c
+    kernel/net/net_policy.c
+)

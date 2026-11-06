@@ -1,0 +1,3745 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Interactive OVMF smoke test for the VibeOS serial CLI."""
+
+import os
+import random
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+# The guest's NET.ELF connects here through QEMU's user-mode network, which
+# presents the host as 10.0.2.2. Serving the echo from the harness is what makes
+# the TCP path a real end-to-end test rather than a loopback inside the guest.
+# The guest always dials 10.0.2.2:7777 - that address is compiled into NET.ELF
+# and is not negotiable from here. What *is* negotiable is where QEMU forwards
+# it on the host, which is what lets several boots run at once instead of one
+# after another. Set VIBEOS_SMOKE_ID to a small integer to move this run's host
+# port and its log files out of another run's way.
+#
+# Serial boots were costing about ninety seconds each, and the honest way to
+# see through a failure that reproduces one time in four is to run a lot of
+# them. In series that is the afternoon; in parallel it is a coffee.
+# The guest dials 10.0.2.2:7777, and slirp will not let that be redirected:
+# 10.0.2.2 is its gateway, and guestfwd refuses the gateway address. So a
+# parallel run cannot have an echo server of its own, and runs with a non-zero
+# id do without one - they check everything except the TCP round trip.
+#
+# That is the right trade for the thing parallelism is for. Hunting a failure
+# that appears one boot in four means running a lot of boots, and the question
+# being asked of them is "did it reach the shell", not "did the network work".
+# The full gate, echo server included, is still what run 0 and CI do.
+SMOKE_ID = int(os.environ.get("VIBEOS_SMOKE_ID", "0"))
+ECHO_PORT = 7777
+SKIP_ECHO = SMOKE_ID != 0
+# The other direction (docs/abi/ L4 step 7): the guest serves, the host asks.
+# QEMU forwards these host ports to the guest's 8080 (BusyBox httpd) and 8081
+# (nc listening). hostfwd, unlike guestfwd, takes any host port, so every run
+# has its own pair and parallel boots need not skip this as they skip the echo.
+STAMPS_PATH = os.environ.get("VIBEOS_SMOKE_STAMPS", "")   # a file: every serial line, timed
+PROG_HTTP_PORT = 18080 + 10 * SMOKE_ID
+PROG_NC_PORT = 18081 + 10 * SMOKE_ID
+
+# The guest is booted with this many vCPUs; every one of them must come online.
+# How many cores the guest gets. Four is what CI runs and what every assertion
+# here was written against; the knob exists because a defect that needs two
+# cores in one window and one that does not are different defects, and the
+# cheapest way to tell them apart is to take the second core away. Used that way
+# it is an experiment, not a configuration - a one-core boot fails other
+# assertions honestly and the counters are still printed.
+EXPECTED_CPUS = int(os.environ.get("VIBEOS_SMOKE_CPUS", "4"))
+
+
+# The disk controller under test. "virtio" is QEMU's own and is what the
+# default run uses; "ahci" is the standard SATA controller every desktop
+# hypervisor provides, and is how the AHCI driver gets exercised at all.
+DISK = os.environ.get("VIBEOS_SMOKE_DISK", "virtio")
+# What the boot disk is. "vvfat" is QEMU presenting efi_root as a FAT disk;
+# "image" is a real FAT image built from it by make_esp_image.py - the medium
+# the VM images use and the only one that behaves like a disk. vvfat translates
+# sector writes back into host files, and a write into the middle of an
+# existing file does not read back: swap, which writes pages into
+# SWAPFILE.BIN's sectors, got slot 0's contents back for every even slot and
+# slot 1's for every odd one - the first time anything wrote past the first
+# cluster.
+ESP = os.environ.get("VIBEOS_SMOKE_ESP", "image")
+DISK_ARGS = {
+    "virtio": ["-device", "virtio-blk-pci,drive=esp,bootindex=1"],
+    "ahci": ["-device", "ich9-ahci,id=ahci",
+             "-device", "ide-hd,drive=esp,bus=ahci.0,bootindex=1"],
+}
+# A second disk, on the other controller, for I5b's log.
+#
+# It is a real raw file rather than a vvfat directory, because the whole point
+# of the log is that it survives the machine: the gate boots twice over the
+# same file and the second boot has to read what the first one wrote. vvfat
+# synthesises a filesystem from a host directory and is not a medium.
+#
+# On the other controller deliberately. Until this phase the arch block adapter
+# held one driver and refused the second - "first one to come up owns the
+# disk" - so a second disk on the *same* controller would have proved nothing
+# about the change that made this possible.
+# The loop device names every refusal separately, and only some of them are a
+# machine this gate should pass. An image that is simply not on the medium is
+# fine - a CI job without e2fsprogs or xorriso still boots, and saying so is the
+# point of the message. Running out of loop slots, or a fragmented file, are
+# defects and must stay red.
+#
+# This list exists because the first version compared against one literal and
+# the reasons then got more specific, which turned every nightly boot red on a
+# job that had never had xorriso in the first place.
+ABSENT_IS_FINE = ("no image", "no such file on this medium")
+
+LOG_DISK_SECTORS = 8192          # 4 MiB, addressed by sector, no filesystem
+LOG_DISK_ARGS = {
+    "virtio": ["-device", "ich9-ahci,id=ahci",
+               "-device", "ide-hd,drive=vlog,bus=ahci.0"],
+    "ahci": ["-device", "virtio-blk-pci,drive=vlog"],
+}
+
+if DISK not in DISK_ARGS:
+    raise SystemExit(f"VIBEOS_SMOKE_DISK={DISK!r}: expected one of "
+                     + ", ".join(sorted(DISK_ARGS)))
+
+
+# Kernel log lines that a healthy boot is *expected* to produce, because
+# something deliberately provokes them. Everything else at WARN or above is a
+# failure - the kernel said something was wrong and, until now, nobody was
+# listening.
+#
+# This is the same lesson as the ring-3 self-test that printed "abi: ...wrong"
+# for a whole session while the gate stayed green: a diagnostic nobody asserts
+# on is decoration. The kernel has had levelled logging for a long time and its
+# WARN and ERROR lines have never once failed a build.
+#
+# Keep this list short and specific. A pattern added to quieten a real warning
+# is how the mechanism stops working.
+EXPECTED_KERNEL_COMPLAINTS = (
+    # The ring-3 ABI self-test asks for things it expects to be refused.
+    "mmap refused: MAP_FIXED",
+    "mprotect refused: page not mapped",
+    # svc-crash dereferences null on purpose, every boot.
+    "ring-3 fault: killing the task",
+)
+
+
+def unexpected_complaints(text):
+    """WARN and above from the kernel that nothing in the boot asked for."""
+    out = []
+    for line in text.splitlines():
+        if "[LOG][WARN]" not in line and "[LOG][ERROR]" not in line and \
+           "[LOG][FATAL]" not in line:
+            continue
+        if any(expected in line for expected in EXPECTED_KERNEL_COMPLAINTS):
+            continue
+        out.append(line)
+    return out
+
+
+assert unexpected_complaints("[LOG][WARN] mmap refused: MAP_FIXED code=0xa") == []
+assert unexpected_complaints("[LOG][ERROR] something nobody expected") != []
+assert unexpected_complaints("[HW][SYS] write(ring3): all fine") == []
+
+
+# Stage failures a program has already printed, found anywhere in the log.
+#
+# Only for annotating a reason, never for deciding one: the named invariants
+# below still decide pass or fail. What this fixes is a stall hiding its own
+# diagnosis. A missing: reason is raised while the CLI is being driven, before
+# any invariant runs, so a defect that leaves a process alive - the kernel only
+# leaves userland once every user task has retired - reported missing:CLI_READY
+# while THREADS_C5_EXIT_GROUP_BLOCKED_FAIL sat in the log, unread.
+#
+# NAME_FAIL as a whole word, upper case with underscores. Deliberately not
+# FAILED: init prints "FAILED svc-flap" and "SVC_FAILED" for services that fail
+# by design, and a detector that reports healthy behaviour is one people learn
+# to ignore.
+_STAGE_FAIL = re.compile(r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_FAIL)\b")
+
+
+def stage_failures(text):
+    """Distinct NAME_FAIL markers in the log, sorted."""
+    return sorted(set(_STAGE_FAIL.findall(text)))
+
+
+assert stage_failures("write(ring3): THREADS_C5_EXIT_GROUP_BLOCKED_FAIL: the process never ended") \
+    == ["THREADS_C5_EXIT_GROUP_BLOCKED_FAIL"], "misses a stage failure"
+assert stage_failures("STRESS_FAIL: wait4 returned the wrong pid") == ["STRESS_FAIL"], \
+    "misses a single-word stage failure"
+assert stage_failures("[HW][SYS] write(ring3): FAILED svc-flap") == [], "flags a designed failure"
+assert stage_failures("[HW][SYS] write(ring3): SVC_FAILED svc-flap") == [], "flags SVC_FAILED"
+assert stage_failures("[LOG] nothing to see _FAIL here, or a_fail") == [], "flags a fragment"
+
+
+def drain_available(recv, on_chunk, budget_s=0.25, clock=None):
+    """Hand every chunk a non-blocking socket has to on_chunk - for at most
+    budget_s seconds, even if more keeps arriving.
+
+    The serial pump used to loop until recv raised BlockingIOError, which is
+    to say until the guest stopped talking. A guest that faults inside its own
+    panic path reprints trap lines as fast as the port carries them, so the
+    pump never returned, and the deadline and the silence budget - both checked
+    by the caller - never ran. That is how one boot held a run for 48 minutes
+    with every core parked in the panic and fault paths. Returning on a budget
+    gives the caller its turn; the bytes still waiting are read next time.
+    """
+    if clock is None:
+        clock = time.monotonic
+    start = clock()
+    while True:
+        try:
+            chunk = recv(4096)
+        except BlockingIOError:
+            return
+        if not chunk:
+            return
+        on_chunk(chunk)
+        if clock() - start >= budget_s:
+            return
+
+
+# A socket that is never empty, and a clock that moves 0.1 s per reading: the
+# drain must stop after a few chunks. Without the budget this does not fail, it
+# hangs at import - the defect itself, and not something anyone can mistake for
+# a pass.
+_drain_clock = [0.0]
+
+
+def _drain_tick():
+    _drain_clock[0] += 0.1
+    return _drain_clock[0]
+
+
+def _never_dry(_n):
+    return b"trap line\n"
+
+
+def _always_empty(_n):
+    raise BlockingIOError()
+
+
+_drained = []
+drain_available(_never_dry, _drained.append, 0.25, _drain_tick)
+assert 1 <= len(_drained) <= 4, "the serial drain did not stop on its budget"
+_drained = []
+drain_available(_always_empty, _drained.append)
+assert _drained == [], "the serial drain invented data from an empty socket"
+
+
+# The marker of the THREADS four-worker crash family, taken live so the monitor
+# can be read at the fault rather than at the parked hlt state 45 s later.
+_THREAD_FAULT_MARKERS = ("free-page poison", "POISON_BROKEN")
+
+# The free-page poison value itself (frame.h VIBEOS_FRAME_POISON). It never
+# appears on a healthy boot - nothing prints the constant, and it is checked
+# across 12 clean logs as absent - so its presence in a trap or panic line means
+# a poisoned page's contents were executed or loaded as an address: the same
+# family, arriving without the "free-page poison" string.
+_POISON_VALUE = "dead0000dead0000"
+
+
+def thread_fault_signature(text):
+    """The marker of the four-worker crash family in `text`, or None.
+
+    Keyed on the free-page-poison panic and the frame-level POISON_BROKEN
+    report: both mean a page was reused while still in use, which is this
+    family and nothing healthy. Deliberately NOT keyed on a NOT-handled
+    COW_FAULT - svc-crash dereferences null on every good boot and produces
+    one, so keying on it would fire every time and snapshot a healthy machine.
+
+    Also keyed on the raw poison value: a page freed and poisoned while still
+    live as a kernel stack or page table leaves 0xdead0000dead0000 as a return
+    address or a PTE, and a core executes or loads it - a trap/panic that never
+    prints the "free-page poison" string. boot3 of .boot-evidence 2026-09-16 was
+    exactly this: kernel_fault_panic a1=0xdead0000dead0000, rip the same value,
+    cr3=0. The earlier trigger missed it and captured no snapshot.
+    """
+    for m in _THREAD_FAULT_MARKERS:
+        if m in text:
+            return m
+    if _POISON_VALUE in text.lower():
+        return "poison-value"
+    return None
+
+
+assert thread_fault_signature(
+    "[MM] COW_FAULT va=0x800000016b err=0x7 NOT-handled\n"
+    "[CRASH] recorded pid=0x9 exe=/EFI/BOOT/SVC_CRSH.ELF") is None, \
+    "fires on the benign svc-crash fault"
+assert thread_fault_signature(
+    "[CRASH] this task's stack is the free-page poison: reclaimed while running") \
+    == "free-page poison", "misses the poison panic"
+assert thread_fault_signature("[MM] POISON_BROKEN frame=0x243e000 word=0x140") \
+    == "POISON_BROKEN", "misses the frame poison report"
+assert thread_fault_signature(
+    "[LOG][FATAL] kernel_fault_panic code=0x5454464b a0=0xd a1=0xdead0000dead0000") \
+    == "poison-value", "misses the poison value executed in a panic"
+assert thread_fault_signature(
+    "[HW][TRAP] cpu=0x2 vector=0xd rip=0xdead0000dead0000 cs=0x8 cr3=0x0") \
+    == "poison-value", "misses the poison value as a faulting rip"
+assert thread_fault_signature(
+    "[HW][SYS] write(ring3): THREADS_STAGE1_OK\n[MM] mmap ok") is None, \
+    "fires on a healthy boot line"
+
+
+def start_echo_server(stop_event, state):
+    """Accept one connection at a time and echo whatever arrives."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("127.0.0.1", ECHO_PORT))
+    except OSError as exc:
+        # Someone else holds the port - usually another smoke run still going.
+        # Say so as an infrastructure problem: it is not a guest failure, and
+        # it must not read like one.
+        srv.close()
+        raise RuntimeError(
+            f"INFRA: echo port {ECHO_PORT} unavailable ({exc}); "
+            "another smoke run is probably still active") from exc
+    srv.listen(4)
+    srv.settimeout(0.5)
+
+    def serve():
+        while not stop_event.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            state["connections"] += 1
+            conn.settimeout(5)
+            try:
+                data = conn.recv(4096)
+                if data:
+                    state["received"] += len(data)
+                    conn.sendall(b"ECHO:" + data)
+            except OSError:
+                pass
+            finally:
+                try:
+                    conn.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                conn.close()
+        srv.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return t
+
+
+# The host's HTTP server for BusyBox wget (docs/abi/ L5 step 4). The guest
+# dials 10.0.2.2:7778, which slirp hands to the host's loopback - the echo's
+# arrangement, with the echo's limit: one run at a time, so runs with an id
+# do without it.
+WGET_PORT = 7778
+# The name the guest's DNS check resolves; "" when the host cannot, decided at
+# staging (host_dns_name).
+L5_DNS_NAME = ""
+
+
+def host_dns_name():
+    """A name for the guest to resolve, if the host can resolve it: the guest's
+    resolver is QEMU's, which asks the host's, so a host that cannot is a
+    machine without a network, not a guest that failed."""
+    name = os.environ.get("VIBEOS_SMOKE_DNS_NAME", "example.com")
+    try:
+        socket.setdefaulttimeout(5)
+        if any(ai[0] == socket.AF_INET for ai in socket.getaddrinfo(name, 80)):
+            return name
+    except OSError:
+        pass
+    finally:
+        socket.setdefaulttimeout(None)
+    return ""
+
+
+def start_http_server(stop_event, state):
+    """Answer every request with this run's page: a token made up here, so the
+    guest can only print it by having fetched it."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("127.0.0.1", WGET_PORT))
+    except OSError as exc:
+        srv.close()
+        raise RuntimeError(
+            f"INFRA: wget port {WGET_PORT} unavailable ({exc}); "
+            "another smoke run is probably still active") from exc
+    srv.listen(4)
+    srv.settimeout(0.5)
+
+    def serve():
+        while not stop_event.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            conn.settimeout(5)
+            try:
+                req = b""
+                while b"\r\n\r\n" not in req and len(req) < 8192:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    req += chunk
+                state["requests"].append(req.split(b"\r\n", 1)[0].decode("latin-1"))
+                body = (state["token"] + "\n").encode()
+                conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n"
+                             b"Content-Length: %d\r\n\r\n" % len(body) + body)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+        srv.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return t
+
+
+def drive_guest_programs(text, state):
+    """The host's half of the event loops' programs (docs/abi/ L4 step 7):
+    once the guest says its httpd is up, fetch the page; once its nc listens,
+    send it a line this run made up and read until it closes. Each runs once,
+    in a thread of its own, and leaves what happened in `state` for the
+    verdict - the gate asserts on the bytes, not on the guest's say-so."""
+    def fetch():
+        try:
+            with socket.create_connection(("127.0.0.1", PROG_HTTP_PORT), timeout=20) as c:
+                c.sendall(b"GET /index.html HTTP/1.0\r\nHost: vibeos\r\n\r\n")
+                got = b""
+                while True:
+                    part = c.recv(4096)
+                    if not part:
+                        break
+                    got += part
+            state["http"] = got.decode("utf-8", errors="replace")
+        except OSError as exc:
+            state["http"] = "error: %s" % exc
+
+    def send_line():
+        try:
+            with socket.create_connection(("127.0.0.1", PROG_NC_PORT), timeout=20) as c:
+                c.sendall((state["nc_token"] + "\n").encode())
+                c.shutdown(socket.SHUT_WR)
+                while c.recv(4096):
+                    pass
+            state["nc"] = "sent"
+        except OSError as exc:
+            state["nc"] = "error: %s" % exc
+
+    if not state["http_started"] and "L4P_HTTPD_2_READY" in text:
+        state["http_started"] = True
+        threading.Thread(target=fetch, daemon=True).start()
+    if not state["nc_started"] and "L4P_NCIN_4_READY" in text:
+        state["nc_started"] = True
+        threading.Thread(target=send_line, daemon=True).start()
+
+
+def write(path, text):
+    with open(path, "w", encoding="utf-8", errors="replace") as fp:
+        fp.write(text)
+
+
+# Tags the kernel puts at the start of a line. Two of them in one line means
+# one line was written into the middle of another, which only happens when the
+# console lock was not doing its job.
+#
+# This check exists because the harness was, for a session, capable of lying.
+# A missing serial_lock() let one core free the lock out from under another
+# mid-line; the markers this script matches on were cut in half, and the gate
+# reported failures that had never happened. Two crashes were investigated in
+# detail before the split was noticed. A test that can report a fault that did
+# not occur is worse than no test, so the log's integrity is now checked before
+# anything is concluded from its contents.
+KERNEL_TAGS = ("[HW][TRAP]", "[HW][SYS]", "[CRASH]", "[SIG]", "[MM]", "[SCHED]",
+               "[EXEC]", "[LOG][", "[BT]", "[BLK]", "[AHCI]", "[VIRTIO]",
+               "[NET]", "[SMP]", "[CLI]", "[BOOT]", "[FAT]", "[COMPAT]")
+
+
+def interleaved_lines(text):
+    """Lines that show one kernel write cut into another.
+
+    Two kernel tags on one physical line is the symptom, but on its own it is
+    not proof: a ring-3 program may write without a trailing newline - a shell
+    echoing a prompt does exactly that - and the next kernel line then
+    legitimately continues the same physical line. Flagging those was the first
+    version of this check and it cried wolf on its first run.
+
+    So a line is reported when either
+
+      - a hex field is cut short: "0x" with no hex digits after it and a tag
+        following. The kernel always prints its values in full, so this can
+        only mean another writer arrived mid-number. That is what caught the
+        unbracketed [EXEC] messages.
+      - a second tag follows a *kernel* tag. A kernel line ends with its own
+        newline, so nothing of anyone else's belongs on it. A line opened by a
+        ring-3 write is exempt, because that one really can be left open.
+
+    Known limit, written down rather than papered over: a split that lands
+    inside a ring-3 write and truncates no number is not caught here. The
+    console lock's bad-unlock counter is what guards that case.
+    """
+    bad = []
+    for line in text.splitlines():
+        hits = sorted((line.index(tag), tag) for tag in KERNEL_TAGS if tag in line)
+
+        truncated = False
+        pos = line.find("0x")
+        while pos >= 0:
+            i = pos + 2
+            while i < len(line) and line[i] in "0123456789abcdef":
+                i += 1
+            if i == pos + 2 and i < len(line) and line[i] == "[":
+                truncated = True
+                break
+            pos = line.find("0x", pos + 2)
+
+        if truncated:
+            bad.append(line)
+        elif len(hits) > 1 and not hits[0][1].startswith("[HW][SYS]"):
+            bad.append(line)
+    return bad
+
+
+# Verified against real examples of each kind rather than trusted. The first
+# two are taken verbatim from boots and were real defects: an [EXEC] message
+# assembled without bracketing, cut mid-number and cut by another tag.
+_SPLIT_HEX = "[EXEC] EFI/BOOT/SVC_OK.ELF bytes=0x[HW][SYS] write(ring3): argv ok"
+_SPLIT_TAGS = ("[EXEC] EFI/BOOT/SVC_FLAP.ELF bytes=0x0000000000001260"
+               "[LOG][WARN] mprotect refused: page not mapped")
+# And one that is not a defect: a shell prompt written with no trailing
+# newline, which leaves the physical line open for whatever comes next.
+_OPEN_LINE = ("[HW][SYS] write(ring3): $ write TMP.TXT scratch"
+              "[SCHED] task pid=0x000000000000002e exited code=0x0000000000000001")
+_CLEAN = "[HW][SYS] write(ring3): SVC_START selftest 6"
+
+assert interleaved_lines(_SPLIT_HEX) == [_SPLIT_HEX], "misses a truncated hex field"
+assert interleaved_lines(_SPLIT_TAGS) == [_SPLIT_TAGS], "misses a kernel line cut by another"
+assert interleaved_lines(_OPEN_LINE) == [], "flags a ring-3 write left open"
+assert interleaved_lines(_CLEAN) == [], "flags a healthy line"
+
+
+_KLOG_LN = re.compile(r"\[LOG\]\[[A-Z]+\] [^\r\n]*? ln=0x([0-9a-f]{16})")
+
+
+def klog_missing_lines(text, offered):
+    """Serial log line numbers 1..offered that the log does not contain.
+
+    The kernel log numbers every line it hands the serial sink (kernel/diag/
+    klog.c), so a line the device dropped while reporting success leaves a gap
+    here. A refused line is counted by the kernel itself; a line lost *without*
+    a refusal is the case only something outside the device can see, and this
+    is that something.
+
+    Only numbers up to `offered`, the count printed on the [KLOG] line, are
+    required: a line numbered after it may still be on its way when QEMU is
+    stopped. Replays - the console's `log` command, a panic's dump - carry no
+    number and are ignored."""
+    seen = set(int(m, 16) for m in _KLOG_LN.findall(text))
+    return [n for n in range(1, offered + 1) if n not in seen]
+
+
+assert klog_missing_lines(
+    "[LOG][INFO] a ln=0x0000000000000001\n"
+    "[LOG][WARN] b code=0x0000000000000001 a0=0x0000000000000000 "
+    "a1=0x0000000000000000 ln=0x0000000000000002\n", 2) == [], \
+    "flags a complete sequence"
+assert klog_missing_lines(
+    "[LOG][INFO] a ln=0x0000000000000001\n[LOG][INFO] c ln=0x0000000000000003\n",
+    3) == [2], "misses a dropped line"
+assert klog_missing_lines("[LOG][INFO] a ln=0x0000000000000001\n", 2) == [2], \
+    "misses a dropped last line"
+assert klog_missing_lines(
+    "[LOG] #0000000000000002 [LOG][INFO] replay\n[LOG][INFO] replay\n", 1) == [1], \
+    "counts a replay as the live line"
+
+
+_RING_HEAD = re.compile(r"\[LOG\] kernel ring: showing 0x([0-9a-f]{16}) of 0x[0-9a-f]{16}")
+_PANIC_HEAD = re.compile(r"\[LOG\] dump count=0x([0-9a-f]{16}) dropped=")
+_CRASH_END = re.compile(r"\[CRASH\] end lines=0x([0-9a-f]{16})")
+
+
+def replay_incomplete(text):
+    """Replays that do not have the lines they announced.
+
+    ln= numbers only the live lines, so a line lost from a replay - the
+    console's `log` and `crash`, a panic's dump of the ring - left no gap to
+    find. Each replay says how long it is: `log` and the panic dump in their
+    header, `crash` in its last line. Each is printed under the console lock,
+    so its lines are contiguous and can be counted. Returns one name per
+    incomplete replay."""
+    lines = text.splitlines()
+    bad = []
+    for i, line in enumerate(lines):
+        m = _RING_HEAD.search(line)
+        if m:
+            n = int(m.group(1), 16)
+            body = lines[i + 1:i + 1 + n]
+            if len(body) < n or any(not b.startswith("[LOG]") or " ln=0x" in b
+                                    for b in body):
+                bad.append("kernel_ring")
+            continue
+        m = _PANIC_HEAD.search(line)
+        if m:
+            n = int(m.group(1), 16)
+            body = lines[i + 1:i + 1 + n]
+            if len(body) < n or any(not b.startswith("[LOG] #") for b in body):
+                bad.append("panic_dump")
+            continue
+        if "[CRASH] total=" in line:
+            for j in range(i + 1, min(len(lines), i + 64)):
+                m = _CRASH_END.search(lines[j])
+                if m:
+                    if j - i != int(m.group(1), 16):
+                        bad.append("crash_dump")
+                    break
+                if not lines[j].startswith("[CRASH] "):
+                    bad.append("crash_dump")
+                    break
+            else:
+                bad.append("crash_dump")
+    return bad
+
+
+_R_HEAD = "[LOG] kernel ring: showing 0x0000000000000002 of 0x0000000000000009"
+assert replay_incomplete(_R_HEAD + "\n[LOG][INFO] a\n[LOG][WARN] b\n$ ") == [], \
+    "flags a complete ring replay"
+assert replay_incomplete(_R_HEAD + "\n[LOG][INFO] a\n$ ") == ["kernel_ring"], \
+    "misses a ring replay one line short"
+assert replay_incomplete(
+    _R_HEAD + "\n[LOG][INFO] a ln=0x0000000000000004\n[LOG][WARN] b\n") == \
+    ["kernel_ring"], "counts a live line as part of a replay"
+_C_OK = ("[CRASH] total=0x1 pid=0x9 sig=0xb exe=/X\n[CRASH] vector=0xe\n"
+         "[CRASH] end lines=0x0000000000000002\n")
+assert replay_incomplete(_C_OK) == [], "flags a complete crash dump"
+assert replay_incomplete(_C_OK.replace("[CRASH] vector=0xe\n", "")) == ["crash_dump"], \
+    "misses a crash dump one line short"
+assert replay_incomplete("[CRASH] total=0x1 pid=0x9\n[CRASH] rip=0x1\n") == \
+    ["crash_dump"], "misses a crash dump with no end"
+assert replay_incomplete(
+    "[LOG] dump count=0x0000000000000002 dropped=0x0000000000000000\n"
+    "[LOG] #0000000000000001 [LOG][INFO] a\n") == ["panic_dump"], \
+    "misses a panic dump one line short"
+
+
+def ring3_writes_with_nul(text):
+    """Ring-3 writes the kernel copied wrongly.
+
+    No program here writes NUL bytes to stdout. A `write(ring3)` line carrying
+    them means the kernel read a user buffer and did not get what the process
+    put there - which is a memory-lifetime defect, and one that reports itself
+    as something else entirely.
+
+    It was found this way. Three boots in ten failed as
+    `stress_run_did_not_finish`, and the stress run had finished: it completed
+    120 rounds and exited zero. What went missing was its marker, and the log
+    held, byte-identical on all three,
+
+        [HW][SYS] write(ring3): \\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0=120
+
+    "STRESS_OK rounds" is exactly sixteen characters. The first sixteen bytes of
+    a user *stack* buffer read as zero and the rest was correct - and a freshly
+    allocated frame is handed out zeroed, so those bytes came from a page that
+    had been copied while the writes into it were lost.
+
+    The point of putting it here rather than in interleaved_lines: this is not
+    the console lock. That check's docstring already states the limit that let
+    this through - a split inside a ring-3 write that truncates no number - and
+    widening it would conflate two mechanisms. A NUL is not a split. It is the
+    kernel handing over memory that is not the process's.
+
+    Byte-identical repetition is what makes it worth its own assertion. Random
+    corruption is not identical three times.
+    """
+    out = []
+    for line in text.splitlines():
+        if "write(ring3):" not in line:
+            continue
+        if "\x00" in line:
+            out.append(line.replace("\x00", "\\0"))
+    return out
+
+
+_NUL_WRITE = "[HW][SYS] write(ring3): \x00\x00\x00\x00=120"
+_GOOD_WRITE = "[HW][SYS] write(ring3): STRESS_OK rounds=120"
+assert ring3_writes_with_nul(_NUL_WRITE) != [], "misses a NUL in a ring-3 write"
+assert ring3_writes_with_nul(_GOOD_WRITE) == [], "flags a healthy ring-3 write"
+# A NUL somewhere that is not a ring-3 write is not this check's business.
+assert ring3_writes_with_nul("[MM] frame layer online\x00") == [], \
+    "flags a line that is not a ring-3 write"
+
+
+def frame_accounting_premise_broken(text):
+    """Did the frame accounting get sampled while userland was still running?
+
+    The comparison of frames free on the way in against frames free on the way
+    out means something only under one premise, which the kernel states in its
+    own comment: every user process that started has exited by this point.
+
+    That premise was false and nothing noticed. The wait loop treated only
+    READY and RUNNING as alive, so a moment when every user task happened to be
+    blocked - in waitpid after a fork, on a pipe, on a futex - read as "all
+    retired". The machine went on to the console and sampled the counters from
+    a machine still forking. It stayed hidden because an ordinary boot's
+    programs are short; raising the stress service to 12000 rounds opened the
+    window on nearly every boot, and the mid-flight numbers looked like a leak
+    that grew with the workload.
+
+    Checked by ordering, and only when the stress service ran: its completion
+    line is the last thing userland does that takes real time, so a
+    FRAMES_AT_USERLAND_DONE printed before it is proof the premise broke.
+
+    Asserted rather than assumed, because the failure is silent by
+    construction - a mid-flight sample still produces two plausible numbers.
+    """
+    if "FRAMES_AT_USERLAND_DONE" in text:
+        # The general form (M-068): any user task that exits after the kernel
+        # announced that all of them had is proof the announcement was early.
+        # A starved boot showed it with svc-reclaim - still paging, reported
+        # retired, and killed by the console's Ctrl-C a minute later.
+        retired = text.find("all user tasks retired")
+        if retired >= 0 and re.search(r"\[SCHED\] task pid=0x[0-9a-f]{16} exited",
+                                      text[retired:]):
+            return True
+    if "STRESS_OK" not in text or "FRAMES_AT_USERLAND_DONE" not in text:
+        return False
+    return text.index("STRESS_OK") > text.index("FRAMES_AT_USERLAND_DONE")
+
+
+# Self-tested for the same reason interleaved_lines is: the sabotage that
+# breaks the kernel side of this only opens the window on some boots, so a
+# single red run cannot prove the check fires and a single green one cannot
+# prove it does not. These can.
+_PREMISE_OK = ("[HW][SYS] write(ring3): STRESS_OK rounds=120\n"
+               "[MM] FRAMES_AT_USERLAND_DONE=0x0 cache_resident=0x0\n")
+_PREMISE_BROKEN = ("[MM] FRAMES_AT_USERLAND_DONE=0x0 cache_resident=0x0\n"
+                   "[HW][SYS] write(ring3): STRESS_OK rounds=12000\n")
+_PREMISE_NO_STRESS = "[MM] FRAMES_AT_USERLAND_DONE=0x0 cache_resident=0x0\n"
+
+assert not frame_accounting_premise_broken(_PREMISE_OK), "flags a healthy ordering"
+assert frame_accounting_premise_broken(_PREMISE_BROKEN), "misses a mid-flight sample"
+assert not frame_accounting_premise_broken(_PREMISE_NO_STRESS), \
+    "flags a boot the stress service never ran in"
+
+
+def tail_text(text, lines=40):
+    return "|".join(text.replace("\r", " ").splitlines()[-lines:])
+
+
+def find_ovmf_pair():
+    code_candidates = [
+        "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        "/usr/share/OVMF/OVMF_CODE.fd",
+        "/usr/share/qemu/OVMF_CODE.fd",
+        "/usr/share/ovmf/OVMF_CODE.fd",
+    ]
+    vars_candidates = [
+        "/usr/share/OVMF/OVMF_VARS_4M.fd",
+        "/usr/share/OVMF/OVMF_VARS.fd",
+        "/usr/share/qemu/OVMF_VARS.fd",
+        "/usr/share/ovmf/OVMF_VARS.fd",
+    ]
+    code = next((p for p in code_candidates if os.path.exists(p)), None)
+    vars_template = next((p for p in vars_candidates if os.path.exists(p)), None)
+    if not code or not vars_template:
+        raise RuntimeError("OVMF firmware files not found")
+    return code, vars_template
+
+
+# How long a guest may stay silent, once it has produced output at all, before
+# it is treated as wedged. Firmware goes quiet for long stretches with several
+# TCG cores, so this is generous - but a boot that reaches the kernel and then
+# says nothing for two minutes has stopped, and waiting out the rest of the
+# budget only delays a verdict that is already decided.
+# Long enough that an unoptimised build under emulation is not mistaken for a
+# wedged one. A Debug kernel loading a two-megabyte program on four TCG cores
+# can be silent for well over two minutes while doing real work, and cutting it
+# off there reported a hang that was not one. Still far below the budget, so a
+# genuine hang is caught in minutes instead of at the end.
+# How long silence is allowed depends entirely on where the guest is, which is
+# why one number was always going to be either too slow or wrong. Before the
+# kernel says BOOT_OK the machine is firmware and a bootloader dragging a
+# two-megabyte kernel off a FAT volume through TCG, and it is legitimately mute
+# for minutes. After BOOT_OK it narrates constantly - every task exit, every
+# exec, every line the shell echoes - and the longest honest gap in a healthy
+# Release boot is the BusyBox exec, which is seconds.
+#
+# So a wedged boot used to cost the whole 300-second budget, and a run of six
+# spent most of its time waiting for verdicts that were already decided.
+# Measured, not guessed: a healthy boot reaches the interactive shell in about
+# twelve seconds, and its whole kernel phase is under ten. Waiting seventy-five
+# seconds for silence to mean something was therefore spending six times the
+# entire boot to confirm a verdict, and it was the single largest cost in a run
+# of several boots - far larger than the boots themselves.
+#
+# 45 rather than 30: six boots at each gave two passes and three, which is
+# noise at this failure rate and therefore not evidence that the tighter number
+# is safe. Four times the whole healthy boot is a margin that does not need
+# defending, and it is still six times faster than waiting out the budget.
+QUIET_GIVE_UP_SEC = 300           # before the kernel is up
+QUIET_GIVE_UP_KERNEL_SEC = int(os.environ.get("VIBEOS_QUIET_KERNEL_SEC", "45"))
+
+# A Debug kernel on four emulated cores is several times slower than a Release
+# one, and cutting it off mid-exec reports a hang that is not one - that
+# mistake is why this number was raised to five minutes in the first place. The
+# build directory names the configuration, so the tighter number is not applied
+# to a build that cannot meet it.
+if any("debug" in a.lower() for a in sys.argv[1:]):
+    QUIET_GIVE_UP_KERNEL_SEC = max(QUIET_GIVE_UP_KERNEL_SEC, 120)
+
+_KERNEL_PHASES_START = "kernel_boot"
+
+
+def quiet_budget(text):
+    """Seconds of silence to tolerate, given how far the guest has got."""
+    phase = detect_guest_phase(text)
+    if phase == "boot" or phase.startswith("bootloader"):
+        return QUIET_GIVE_UP_SEC
+    return QUIET_GIVE_UP_KERNEL_SEC
+
+
+def detect_guest_phase(text):
+    """Return the furthest observable phase in the serial stream."""
+    phase = "boot"
+    for line in text.replace("\r", "").splitlines():
+        if "BL_EFI_OK" in line:
+            phase = "bootloader_efi"
+        elif "BL_FS_OK" in line:
+            phase = "bootloader_filesystem"
+        elif "BL_PLAN_OK" in line:
+            phase = "bootloader_plan"
+        elif "BL_LOAD_OK" in line:
+            phase = "bootloader_load"
+        elif "BL_EBS_OK" in line:
+            phase = "bootloader_exit_boot_services"
+        # The kernel is alive from here. This matters more than it looks: the
+        # arch layer runs the *entire* userland before vibeos_kmain is ever
+        # called, so BOOT_OK is printed after every user task has retired -
+        # it is an "everything finished" marker, not a boot one. Without the
+        # two phases below, any hang anywhere in userland was reported with
+        # the phase still stuck at the last bootloader marker, and a whole
+        # session was spent looking for a bootloader bug that did not exist.
+        elif "early init: loading GDT" in line:
+            phase = "kernel_early_init"
+        elif "USERLAND_START" in line:
+            phase = "userland_running"
+        elif "USERLAND_DONE" in line:
+            phase = "userland_finished"
+        elif "BOOT_OK" in line:
+            phase = "kernel_boot"
+        elif "CLI_READY" in line:
+            phase = "kernel_cli_ready"
+        elif "BUSYBOX.ELF echo" in line:
+            phase = "busybox_echo_started"
+        elif "BUSYBOX_ECHO_OK" in line:
+            phase = "busybox_echo"
+        elif "BUSYBOX.ELF cat" in line:
+            phase = "busybox_cat_started"
+        elif "persistent hello" in line:
+            phase = "busybox_cat"
+        elif "BUSYBOX.ELF ls" in line:
+            phase = "busybox_ls_started"
+        elif phase == "busybox_ls_started" and "[SCHED] task pid=" in line:
+            phase = "busybox_ls"
+        elif "BUSYBOX.ELF sh -c" in line:
+            phase = "busybox_shell_started"
+        elif "BUSYBOX_SH_OK" in line:
+            phase = "busybox_shell"
+        elif "ASH_INTERACTIVE_OK" in line:
+            phase = "busybox_interactive_shell"
+        elif "PIPE_OK" in line:
+            phase = "busybox_pipeline"
+        elif "VIBEOS_SELFTEST_DONE" in line:
+            phase = "selftest_done"
+    return phase
+
+
+def wait_for(buffer_getter, needle, deadline, last_rx_getter=None):
+    while time.monotonic() < deadline:
+        text = buffer_getter().replace("\r", "")
+        if needle in text:
+            return True
+        if last_rx_getter is not None and text:
+            if time.monotonic() - last_rx_getter() > quiet_budget(buffer_getter()):
+                return False   # wedged; the caller classifies it the same way
+        time.sleep(0.05)
+    return False
+
+
+# The exec refusals a healthy boot is expected to perform.
+#
+# Measured from a green boot rather than reasoned about from the loader, which
+# is the whole point of the phase that added it: nobody could tell which
+# refusals were happening, because every one of them printed a different
+# ad-hoc sentence and none of them was counted.
+#
+# "not-found" is expected and frequent. A shell resolving a bare command name
+# tries it as a path first, and a C runtime asks for /proc/self/exe, which this
+# filesystem does not have. Both miss on every healthy boot.
+#
+# Every other reason is a failure. That is a far stronger assertion than a
+# total would be: one "no-memory" or one "short-read" hidden among forty
+# expected "not-found"s is exactly what this is watching for, and a count of
+# forty-one would not blink.
+EXEC_EXPECTED_REFUSALS = {"not-found"}
+
+
+# ---- the corpus (docs/abi/ L1 step 8) ---------------------------------------
+#
+# tests/corpus/run-l1.sh runs the corpus's file workloads - BusyBox's applets
+# over a small tree, SQLite on a file, a Lua script - and prints every line of
+# every answer tagged "C:<workload>: ". The same script, under the same BusyBox,
+# was run on Linux by scripts/dev/corpus-expect.sh, and what Linux printed is
+# tests/corpus/l1-expected.txt. The guest's answers are compared with it line
+# for line: the oracle is Linux, not a list of markers somebody chose.
+#
+# SQLite and Lua are staged when scripts/dev/corpus-build.sh has built them,
+# which a plain build does not do. A workload whose program is not there
+# answers "absent", and that is accepted - reported in the summary, and
+# refused with VIBEOS_SMOKE_CORPUS=require, which is what a job that built
+# them sets. A workload that *ran* is always compared.
+CORPUS_MODE = os.environ.get("VIBEOS_SMOKE_CORPUS", "")
+CORPUS_PROGRAMS = ("sqlite3", "lua", "sqlite3-glibc", "lua-glibc", "threadpool", "threadpool-glibc",
+                   "sysvipc", "sysvipc-glibc")
+# LTP's tests, by name, to stage and run after the workloads (scripts/dev/
+# ltp-run.sh sets this). Each is run with its output kept and its exit code
+# printed as "C:ltp: <test> rc=<n>"; nothing here asserts on them - the boot's
+# verdict is the workloads' - and ltp-run.sh reads the codes out of the log.
+LTP_TESTS = os.environ.get("VIBEOS_SMOKE_LTP", "").split()
+# Wine's conformance tests, as "<dll>:<test>" (scripts/dev/winetest-run.sh sets
+# this; docs/abi/windows.md W2): the executables winetest-build.sh made, staged
+# at /win beside our DLLs and run like the LTP tests, each one's last lines and
+# exit code - its failure count - printed as "C:wt: <dll:test> rc=<n>". Nothing
+# here asserts on them either.
+WINETESTS = os.environ.get("VIBEOS_SMOKE_WINETEST", "").split()
+
+
+def stage_corpus(efi_root, build_dir):
+    """Put the workload script, and the third-party programs if built, on the
+    boot volume as /corpus. Returns the names of the programs staged."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dst = os.path.join(efi_root, "corpus")
+    os.makedirs(dst, exist_ok=True)
+    with open(os.path.join(root, "tests", "corpus", "run-l1.sh"), "rb") as f:
+        script = f.read().replace(b"\r\n", b"\n")   # a Windows checkout may have converted it
+    ltp_dst = os.path.join(dst, "ltp")
+    shutil.rmtree(ltp_dst, ignore_errors=True)
+    if LTP_TESTS:
+        os.makedirs(ltp_dst)
+        for t in LTP_TESTS:
+            src = os.path.join(build_dir, "corpus", "ltp", t)
+            if shutil.which("strip") is None or subprocess.run(
+                    ["strip", "-o", os.path.join(ltp_dst, t), src], capture_output=True).returncode != 0:
+                shutil.copyfile(src, os.path.join(ltp_dst, t))
+        # Each in /tmp, where LTP makes its own scratch directory; the last
+        # thirty lines of what it said, tagged, and its exit code - LTP's own
+        # verdict: 0 passed, 1 failed, 2 broken, 4 warned, 32 not applicable.
+        script = script.replace(b'echo "C:done: ', (
+            b'mkdir -p /tmp/ltp && cd /tmp/ltp\n'
+            b'for t in ' + " ".join(LTP_TESTS).encode() + b'; do\n'
+            # KCONFIG_SKIP_CHECK: a test that names kernel options it needs
+            # looks for the kernel's .config, and there is none to find.
+            b'    KCONFIG_SKIP_CHECK=1 "$C/ltp/$t" > /tmp/ltp/out 2>&1\n'
+            b'    rc=$?\n'
+            b'    tail -n 30 /tmp/ltp/out | sed "s/^/C:ltp-$t: /"\n'
+            b'    echo "C:ltp: $t rc=$rc"\n'
+            b'    rm -rf /tmp/ltp/* /tmp/ltp/.[!.]*\n'
+            b'done\n'
+            b'cd /\n'
+            b'echo "C:done: '))
+    # A test executable a previous run staged and this one did not ask for is
+    # taken off again: they are eight and thirteen megabytes, and an ordinary
+    # boot has no use for them. boots.sh runs three gates on one efi_root, so
+    # another may take the same file off first: that is done, not an error -
+    # the gate once died here before writing a verdict.
+    win_dir = os.path.join(efi_root, "win")
+    wanted = {"%s_test.exe" % t.split(":", 1)[0] for t in WINETESTS}
+    if os.path.isdir(win_dir):
+        for name in os.listdir(win_dir):
+            if name.endswith("_test.exe") and name not in wanted:
+                try:
+                    os.remove(os.path.join(win_dir, name))
+                except FileNotFoundError:
+                    pass
+    if WINETESTS:
+        for dll in sorted({t.split(":", 1)[0] for t in WINETESTS}):
+            exe = "%s_test.exe" % dll
+            shutil.copyfile(os.path.join(build_dir, "winetest", exe),
+                            os.path.join(efi_root, "win", exe))
+        lines = b""
+        for t in WINETESTS:
+            dll, test = t.split(":", 1)
+            lines += (b'/win/' + dll.encode() + b'_test.exe ' + test.encode() +
+                      b' > /tmp/wt.out 2>&1\n'
+                      b'rc=$?\n'
+                      b'tail -n 40 /tmp/wt.out | sed "s/^/C:wt-' + t.encode() + b': /"\n'
+                      b'echo "C:wt: ' + t.encode() + b' rc=$rc"\n')
+        script = script.replace(b'echo "C:done: ', lines + b'echo "C:done: ')
+    # Written beside and renamed over: several boots stage the same directory
+    # at once (scripts/dev/boots.sh), and another run building its image must
+    # read the whole file or the previous whole file, never one being written.
+    tmp = os.path.join(dst, "run.sh.%d.tmp" % os.getpid())
+    with open(tmp, "wb") as f:
+        f.write(script)
+    os.replace(tmp, os.path.join(dst, "run.sh"))
+    # The event loops' programs (docs/abi/ L4 step 7), beside it.
+    with open(os.path.join(root, "tests", "corpus", "run-l4.sh"), "rb") as f:
+        progs = f.read().replace(b"\r\n", b"\n")
+    tmp = os.path.join(dst, "progs.sh.%d.tmp" % os.getpid())
+    with open(tmp, "wb") as f:
+        f.write(progs)
+    os.replace(tmp, os.path.join(dst, "progs.sh"))
+    # The sockets' programs (docs/abi/ L5 step 4), with the name the DNS check
+    # asks for - only if the host can resolve it, so that a machine without a
+    # network says dns_absent rather than failing the guest for it.
+    global L5_DNS_NAME
+    L5_DNS_NAME = host_dns_name()
+    with open(os.path.join(root, "tests", "corpus", "run-l5.sh"), "rb") as f:
+        progs = f.read().replace(b"\r\n", b"\n").replace(b"@L5_DNS_NAME@", L5_DNS_NAME.encode())
+    tmp = os.path.join(dst, "progs5.sh.%d.tmp" % os.getpid())
+    with open(tmp, "wb") as f:
+        f.write(progs)
+    os.replace(tmp, os.path.join(dst, "progs5.sh"))
+    staged = []
+    for name in CORPUS_PROGRAMS:
+        src = os.path.join(build_dir, "corpus", name)
+        out = os.path.join(dst, name)
+        if not os.path.isfile(src):
+            if os.path.exists(out):
+                os.unlink(out)
+            continue
+        # Stripped: the symbols are a megabyte of a file the guest reads whole.
+        tmp = out + ".%d.tmp" % os.getpid()
+        if shutil.which("strip") is None or subprocess.run(
+                ["strip", "-o", tmp, src], capture_output=True).returncode != 0:
+            shutil.copyfile(src, tmp)
+        os.replace(tmp, out)
+        staged.append(name)
+    # glibc's loader and libraries, where the dynamically linked programs ask
+    # for them (docs/abi/ L3 step 6): <build>/corpus/glibc is laid over the
+    # volume's root. Copied only when it differs - two megabytes a boot adds up.
+    glibc = os.path.join(build_dir, "corpus", "glibc")
+    for base, _dirs, files in os.walk(glibc):
+        for name in files:
+            src = os.path.join(base, name)
+            out = os.path.join(efi_root, os.path.relpath(src, glibc))
+            if os.path.isfile(out) and os.path.getsize(out) == os.path.getsize(src) \
+                    and os.path.getmtime(out) >= os.path.getmtime(src):
+                continue
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            tmp = out + ".%d.tmp" % os.getpid()
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, out)
+    return staged
+
+
+def corpus_answers(text):
+    """{workload: [lines]} from "C:<workload>: <line>" lines, in order."""
+    out = {}
+    for name, line in re.findall(r"^(?:\[HW\]\[SYS\] write\(ring3\): )?C:([a-z0-9-]+): ?([^\r\n]*)\r?$",
+                                 text, re.M):
+        out.setdefault(name, []).append(line.rstrip())
+    return out
+
+
+def corpus_problems(serial_text):
+    """What the guest answered the corpus with, against what Linux answered."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "tests", "corpus", "l1-expected.txt"), encoding="utf-8") as f:
+        want = corpus_answers(f.read())
+    got = corpus_answers(serial_text)
+    if "done" not in got:
+        return ["corpus_did_not_finish"], []
+    differ, absent = [], []
+    for name, lines in want.items():
+        mine = got.get(name)
+        if mine == ["absent", "rc=0"]:
+            absent.append(name)
+        elif mine != lines:
+            differ.append(name)
+    problems = []
+    if differ:
+        problems.append("corpus_answers_differ:" + "+".join(differ))
+    if absent and CORPUS_MODE == "require":
+        problems.append("corpus_program_absent:" + "+".join(absent))
+    return problems, absent
+
+
+def boot_volume_problems(esp_img):
+    """What is wrong with the FAT volume the guest left behind, as reasons.
+
+    Two questions the serial log cannot answer. Is the volume consistent with
+    itself - no cluster lost or claimed twice, every chain as long as its size
+    says, every long name belonging to an entry (scripts/dev/fat-fsck.py)? And
+    does somebody else's FAT implementation read the file the shell wrote under
+    a long name? mtools is asked when it is installed, as it is in CI; without
+    it only the first question is asked."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = []
+    r = subprocess.run([sys.executable, os.path.join(here, "dev", "fat-fsck.py"), esp_img],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        m = re.search(r"first=(\S+)", r.stdout)
+        out.append("boot_volume_inconsistent:" + (m.group(1) if m else "unreadable"))
+    mtype = shutil.which("mtype")
+    if mtype:
+        r = subprocess.run([mtype, "-i", esp_img, "::/written with a long name.txt"],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or r.stdout.strip() != "LFN_5":
+            out.append("mtools_cannot_read_what_the_guest_wrote")
+    return out
+
+
+def main():
+    build_dir = sys.argv[1] if len(sys.argv) > 1 else "build"
+    timeout_sec = int(sys.argv[2]) if len(sys.argv) > 2 else 90
+    efi_root = os.path.join(build_dir, "artifacts", "efi_root")
+    bootloader = os.path.join(efi_root, "EFI", "BOOT", "BOOTX64.EFI")
+    kernel = os.path.join(efi_root, "EFI", "BOOT", "VIBEOSKR.ELF")
+    # Run 0 keeps the historical names, so every existing script and habit that
+    # greps qemu-cli-serial.log still works.
+    suffix = "" if SMOKE_ID == 0 else f"-{SMOKE_ID}"
+    serial_log_path = f"qemu-cli-serial{suffix}.log"
+    err_log_path = f"qemu-cli-err{suffix}.log"
+    summary_path = f"qemu-cli-summary{suffix}.txt"
+    # Not beside the other artefacts: on a Windows-mounted working directory a
+    # unix socket cannot be created at all, and the failure is QEMU refusing to
+    # start rather than anything to do with the guest.
+    # Deliberately not in the per-run temporary directory: this file is the one
+    # thing here that has to outlive a run, because "the machine was reset and
+    # the log survived" cannot be demonstrated by a medium that is recreated
+    # with the machine.
+    # Both media carry the run's id. They did not when parallel runs were
+    # added, because the boot disk was a host directory then; once it became an
+    # image, two boots at once were two machines writing one disk.
+    log_disk = os.path.abspath(f"qemu-cli-logdisk{suffix}.img")
+    if ESP == "image":
+        # Rebuilt every run: a real medium keeps what the guest wrote, and the
+        # previous run's writes are not this run's starting point.
+        esp_img = os.path.abspath(f"qemu-cli-esp{suffix}.img")
+        stage_corpus(efi_root, build_dir)
+        # As for QEMU below: the paths are the build directory this script was
+        # told to boot, and the call is a list, with no shell.
+        # Sized to what is on it, not a fixed 96 MB: the content passed 80 MB in
+        # W2, Wine's test programs add seventeen, and an image that does not fit
+        # is refused by its builder - which used to stop this script before it
+        # wrote a verdict, leaving the last run's verdict, log and image for the
+        # caller to read as this one's. FAT16 here reaches 128 MB.
+        # Another gate's staging file (".tmp", renamed when complete) is left
+        # out, as the image builder leaves it out: boots.sh runs three gates on
+        # one tree, and one of them died here on a file the next had renamed.
+        content = 0
+        for d, _, names in os.walk(efi_root):
+            for n in names:
+                if n.endswith(".tmp"):
+                    continue
+                try:
+                    content += (os.path.getsize(os.path.join(d, n)) + 2047) // 2048 * 2048
+                except FileNotFoundError:
+                    pass
+        esp_mb = max(96, min(127, content // (1024 * 1024) + 16))
+        subprocess.run([sys.executable,  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "make_esp_image.py"),
+                        efi_root, esp_img, str(esp_mb)],
+                       check=True, stdout=subprocess.DEVNULL)
+        esp_drive = f"if=none,id=esp,format=raw,file={esp_img}"
+    elif ESP == "vvfat":
+        esp_drive = f"if=none,id=esp,format=raw,file=fat:rw:{efi_root}"
+    else:
+        raise SystemExit(f"VIBEOS_SMOKE_ESP={ESP!r}: expected vvfat or image")
+
+    monitor_path = os.path.join(tempfile.gettempdir(),
+                                f"vibeos-monitor{suffix}.sock")
+    try:
+        os.unlink(monitor_path)
+    except OSError:
+        pass
+
+    serial_text = ""
+    serial_extra = []
+    err_text = ""
+    qemu = None
+    status = "fail"
+    reason = "unknown"
+    echo_stop = threading.Event()
+    echo_state = {"connections": 0, "received": 0}
+    echo_thread = None
+    wget_thread = None
+    infra = False
+    corpus_absent = []
+    last_guest_phase = "boot"
+    last_serial_timestamp = 0.0
+    phase_history = []
+    last_expected = "startup"
+    verbose = os.environ.get("VIBEOS_QEMU_VERBOSE", "") == "1"
+
+    try:
+        echo_thread = None if SKIP_ECHO else start_echo_server(echo_stop,
+                                                                echo_state)
+        wget_state = {"requests": [], "token": "L5P_PAGE_%d" % random.randrange(10**8, 10**9)}
+        wget_thread = None if SKIP_ECHO else start_http_server(echo_stop, wget_state)
+        progs_state = {"http_started": False, "nc_started": False, "http": None, "nc": None,
+                       "nc_token": "L4P_NCIN_%d" % random.randrange(10**8, 10**9)}
+        # QEMU refuses a forward to a port somebody holds and exits with one
+        # line in its error log, which read as "QEMU exited before serial
+        # connection" the first time - a stray httpd from a measurement on the
+        # host. Said here as what it is: the host's problem, not the guest's.
+        for port in (PROG_HTTP_PORT, PROG_NC_PORT):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # As QEMU binds a forward: a port the previous boot's connection
+            # left in TIME_WAIT is free to it, and only a listener is not. The
+            # first version bound without this and failed every other boot of
+            # a sabotage run with INFRA: for a port nobody was using.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError as exc:
+                raise RuntimeError(
+                    f"INFRA: forwarded port {port} unavailable ({exc}); "
+                    "another smoke run, or a server left on the host, holds it") from exc
+            finally:
+                probe.close()
+        if not os.path.exists(bootloader) or not os.path.exists(kernel):
+            raise RuntimeError("EFI bootloader or kernel payload missing")
+        if shutil.which("qemu-system-x86_64") is None:
+            raise RuntimeError("qemu-system-x86_64 not found")
+
+        ovmf_code, ovmf_vars_template = find_ovmf_pair()
+        with tempfile.TemporaryDirectory(prefix="vibeos-cli-smoke-") as tmp:
+            sock_path = os.path.join(tmp, "serial.sock")
+            vars_path = os.path.join(tmp, "OVMF_VARS.fd")
+            shutil.copyfile(ovmf_vars_template, vars_path)
+            err_fp = open(err_log_path, "wb")
+            cmd = [
+                "qemu-system-x86_64",
+                # Software emulation, always - even where /dev/kvm exists.
+                #
+                # This is not a preference, it is the whole point. A four-core
+                # TCG guest interleaves differently from KVM, and an SMP race
+                # that KVM hides reproduces under TCG in roughly one boot in
+                # two. Local runs on a machine with KVM were passing this smoke
+                # twenty times in a row while CI failed, because they were not
+                # running the same thing. Verification has to be at least as
+                # harsh as the gate it is meant to predict.
+                "-accel", "tcg",
+                "-machine", "q35",
+                "-m", "512M",
+                # Four cores: the kernel is SMP, so the smoke must exercise it.
+                "-smp", str(EXPECTED_CPUS),
+                "-display", "none",
+                # A monitor rather than none: a wedged guest cannot
+                # report on itself, and this is the only way to ask
+                # where its cores are once it has stopped.
+                "-monitor", "unix:" + monitor_path + ",server,nowait",
+                "-chardev", f"socket,id=serial0,path={sock_path},server=on,wait=off",
+                "-serial", "chardev:serial0",
+                "-drive", f"if=pflash,format=raw,readonly=on,file={ovmf_code}",
+                "-drive", f"if=pflash,format=raw,file={vars_path}",
+                "-drive", esp_drive,
+                # A real NIC on QEMU's user-mode network: DHCP and DNS come
+                # from the built-in services, and 10.0.2.2 is the host.
+                "-netdev", "user,id=n0,hostfwd=tcp:127.0.0.1:%d-:8080,hostfwd=tcp:127.0.0.1:%d-:8081"
+                           % (PROG_HTTP_PORT, PROG_NC_PORT),
+                "-device", "virtio-net-pci,netdev=n0",
+                "-no-reboot",
+                "-no-shutdown",
+            ]
+            # Which controller the disk hangs off. virtio-blk is QEMU's and is
+            # the default here; AHCI is what VirtualBox, VMware and real
+            # machines have, and until it was exercised the appliances booted
+            # and then could not read their own disk. Both paths have to be run
+            # somewhere, or the one nobody runs is the one that ships.
+            cmd += DISK_ARGS[DISK]
+            # And the log medium, on the other controller. Created once and
+            # kept: a second run over the same file is how "the machine was
+            # reset and the log survived" is demonstrated rather than argued.
+            if not os.path.exists(log_disk):
+                with open(log_disk, "wb") as f:
+                    f.truncate(LOG_DISK_SECTORS * 512)
+            cmd += ["-drive", f"if=none,id=vlog,format=raw,file={log_disk}"]
+            cmd += LOG_DISK_ARGS[DISK]
+            # Every exception and interrupt, with the CPU state at each, into a
+            # file - for a guest that dies without printing. The trap dump is
+            # printed through the console, and a machine whose console lock is
+            # held by the core that died prints nothing at all; the emulator
+            # still sees the first fault. Large (every timer tick is in it), so
+            # only when asked for.
+            trace = os.environ.get("VIBEOS_QEMU_TRACE", "")
+            if trace:
+                cmd += ["-d", "int,guest_errors", "-D", os.path.abspath(trace)]
+            # The command is built from this script's own arguments and
+            # environment - which build to boot, which disk controller. Whoever
+            # runs the gate chooses those; there is no other party whose input
+            # reaches it, and it is passed as a list, with no shell.
+            qemu = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_fp)  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
+
+            serial = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connect_deadline = time.monotonic() + 10
+            while True:
+                try:
+                    serial.connect(sock_path)
+                    break
+                except OSError:
+                    if time.monotonic() >= connect_deadline:
+                        raise RuntimeError("serial socket was not created by QEMU")
+                    if qemu.poll() is not None:
+                        raise RuntimeError(f"QEMU exited before serial connection rc={qemu.returncode}")
+                    time.sleep(0.05)
+
+            serial.setblocking(False)
+            started = time.monotonic()
+            last_rx = started
+            deadline = started + timeout_sec
+
+            fault_snapshot_taken = [False]
+
+            def capture_thread_fault_snapshot(marker):
+                # A THREADS thread has faulted and the machine is halting on the
+                # free-page poison, which parks every core - so the monitor now
+                # shows each core essentially at the fault. Taken once, the
+                # instant the marker appears, not at the end when the parked hlt
+                # state is all that is left, and from the monitor, so nothing is
+                # added to the guest: an in-guest probe on this path masks the
+                # family (boot_repeatability.md, the four-worker crash).
+                if fault_snapshot_taken[0]:
+                    return
+                fault_snapshot_taken[0] = True
+                header = ("THREAD-FAULT snapshot marker=%r t=%.1fs"
+                          % (marker, time.monotonic() - started))
+                print("[QEMU-CLI] " + header)
+                serial_extra.append(header)
+                try:
+                    sys.path.insert(0, os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)), "dev"))
+                    import wedge_report
+                    for wl in wedge_report.report(monitor_path, kernel):
+                        print("[QEMU-CLI] THREAD-FAULT " + wl)
+                        serial_extra.append("THREAD-FAULT " + wl)
+                except Exception as exc:      # never mask the verdict
+                    print("[QEMU-CLI] thread-fault snapshot failed: %s" % exc)
+
+            def on_serial_chunk(chunk):
+                nonlocal serial_text, last_rx, last_guest_phase, last_serial_timestamp
+                serial_text += chunk.decode("utf-8", errors="replace")
+                last_serial_timestamp = time.monotonic() - started
+                new_phase = detect_guest_phase(serial_text)
+                if new_phase != last_guest_phase:
+                    last_guest_phase = new_phase
+                    phase_history.append(f"{last_serial_timestamp:.3f}:{new_phase}")
+                    print(f"[QEMU-CLI] phase={new_phase} elapsed={last_serial_timestamp:.1f}s")
+                # When output last arrived is what separates "the guest is
+                # wedged" from "the guest is just slow": a failure with the
+                # serial line still active is a budget problem, one that has
+                # been silent for a long time is a hang.
+                last_rx = time.monotonic()
+                # When each line arrived, for finding where a slow boot spends
+                # its time: the serial log itself has no clock, and the phase
+                # list names only what the gate looks for.
+                if STAMPS_PATH:
+                    with open(STAMPS_PATH, "a", encoding="utf-8", errors="replace") as sp:
+                        for sl in chunk.decode("utf-8", errors="replace").splitlines():
+                            sp.write("%7.1f %s\n" % (last_serial_timestamp, sl))
+                drive_guest_programs(serial_text, progs_state)
+                if not fault_snapshot_taken[0]:
+                    marker = thread_fault_signature(serial_text)
+                    if marker:
+                        capture_thread_fault_snapshot(marker)
+
+            def pump():
+                # Bounded: a guest printing without pause used to keep this loop
+                # from ever returning. See drain_available.
+                drain_available(serial.recv, on_serial_chunk)
+
+            def buffer():
+                pump()
+                return serial_text
+
+            checks = [
+                ("BOOT_OK", None),
+                ("CLI_READY", None),
+                # Wait for the user-space self-test to finish before driving
+                # the kernel CLI. The two run concurrently, and on a slower
+                # build the halt below arrived while the script was still
+                # working - failing the invariants for a reason that had
+                # nothing to do with the kernel.
+                ("VIBEOS_SELFTEST_DONE", None),
+                ("vibeos> ", b"help\r"),
+                # `crash` prints the last ring-3 fault in full. svc-crash
+                # dereferences null earlier in every boot, so there is always
+                # one to print - and a dumper that only works when nothing has
+                # crashed would pass a test that never asked it for anything.
+                ("Commands: help, status, log, logdisk, meminfo, tasks, exec, crash, echo <text>, halt, reboot", b"crash\r"),
+                ("[CRASH] end", b"log\r"),
+                # `log` shows two rings: the boot stages kmain records, and
+                # the arch ring holding what the machine actually did - fork,
+                # exec, exit, signals, copy-on-write, munmap. The second was
+                # not reachable from the console at all until now, and the
+                # gate never ran this command, so neither was exercised.
+                # The log that is on the medium, as opposed to the two rings
+                # in memory. Driven because a command nobody runs is a command
+                # that rots, and because the assertion below needs its output:
+                # this is the only place a boot says how many of its own log
+                # lines actually reached the disk.
+                ("[LOG] kernel ring: showing", b"logdisk\r"),
+                ("[LOGDISK] shown=", b"meminfo\r"),
+                # meminfo is the memory picture a person asks for, and the three
+                # counters that must be zero are printed on one line so the gate
+                # can assert them without parsing the rest.
+                ("[MEM] end", b"tasks\r"),
+                # The task table, for the same reason meminfo is driven: a
+                # subsystem that cannot be looked at on a running machine gets
+                # debugged by adding print statements to an eight-thousand-line
+                # file, which is how every task defect here has been found.
+                # Why programs failed to start, by reason. The loader had
+                # fourteen refusal sites and one message between them, so a
+                # program that would not start told you only that. This line is
+                # asserted below on which reasons appear, not on a total.
+                ("[TASKS] end", b"exec\r"),
+                ("[EXEC] loaded=", b"status\r"),
+                # Ctrl-C on the serial console. The PS/2 path has turned it
+                # into a signal since it was written; this one dropped it along
+                # with every other control byte, so the foreground process
+                # group - and every syscall built on it - was unreachable from
+                # the console this system is actually driven through. The
+                # machinery existed and no input could get to it, which is why
+                # nothing noticed. Asserted because the fix is one comparison.
+                ("stage=core_ready", b"\x03"),
+                ("^C", b"echo vibeos\r"),
+                ("\nvibeos\nvibeos> ", b"halt\r"),
+                ("Halt requested", None),
+            ]
+
+            for expected, command in checks:
+                last_expected = expected
+                if not wait_for(buffer, expected, deadline, lambda: last_rx):
+                    # Say which kind of failure this is, so nobody has to run a
+                    # experiment to find out whether the guest froze or the
+                    # budget was simply too small on a loaded machine.
+                    now = time.monotonic()
+                    idle = now - last_rx
+                    if not serial_text:
+                        kind = "no_output_at_all"      # never got past firmware
+                    elif " FATAL: " in serial_text:
+                        # A guest that panicked did not wedge, and calling it a
+                        # wedge sends the next person looking for a hang.
+                        #
+                        # This became worth distinguishing the day a panic
+                        # started stopping the whole machine instead of one
+                        # core. Before that, a kernel fault parked a single cpu
+                        # and the survivors kept the log moving, so the boot
+                        # really did look like it froze somewhere unrelated,
+                        # seconds later - which is how the silent-wedge family
+                        # stayed unexplained for as long as it did.
+                        kind = "guest_panicked"
+                    elif "BOOT_VOLUME_FAIL:" in serial_text:
+                        # No disk the kernel can read carries a volume. The
+                        # machine carries on from its built-in init to an idle
+                        # prompt, and the wait here is for a self-test that
+                        # lives on the missing disk - so this used to be
+                        # reported as a wedge, and wedge_report went looking
+                        # for a hung core in a machine that had simply finished.
+                        kind = "boot_volume_missing"
+                    elif idle >= quiet_budget(serial_text):
+                        kind = "guest_wedged"          # gave up early on purpose
+                    elif idle > 20:
+                        # Silence is not proof of a hang: firmware is quiet for
+                        # long stretches, especially with several TCG cores. The
+                        # tail printed below is what settles it.
+                        kind = "guest_quiet"
+                    else:
+                        kind = "guest_still_talking"   # still progressing: the budget was too small
+                    if kind == "guest_panicked":
+                        pm = re.search(r" FATAL: ([^,\r\n]*)", serial_text)
+                        expected = (pm.group(1).strip() if pm else "unknown") \
+                            + f" (waiting for {expected})"
+                    reason = (f"missing:{expected} verdict={kind}"
+                              f" elapsed={now - started:.0f}s"
+                              f" quiet_for={idle:.0f}s"
+                              f" quiet_budget={quiet_budget(serial_text)}s"
+                              f" phase={detect_guest_phase(serial_text)}"
+                              f" budget={timeout_sec}s")
+                    # What a stall would otherwise hide: a stage that already
+                    # said it failed. See stage_failures.
+                    already_failed = stage_failures(serial_text)
+                    if already_failed:
+                        reason += " stage_failures=" + ",".join(already_failed[:8])
+                    # A wedged guest is exactly the case where none of the
+                    # in-guest logging runs: nothing panicked, so no backtrace
+                    # and no log dump. Ask the emulator instead, while the
+                    # machine is still up - after the kill there is nothing to
+                    # ask.
+                    if kind in ("guest_wedged", "guest_quiet"):
+                        try:
+                            sys.path.insert(0, os.path.join(
+                                os.path.dirname(os.path.abspath(__file__)),
+                                "dev"))
+                            import wedge_report
+                            for wl in wedge_report.report(monitor_path, kernel):
+                                print("[QEMU-CLI] " + wl)
+                                serial_extra.append(wl)
+                        except Exception as exc:      # never mask the verdict
+                            print(f"[QEMU-CLI] wedge report failed: {exc}")
+
+                    # Put the tail in the job output, not only in an artifact
+                    # nobody downloads. Whether the guest stalled in firmware
+                    # or inside the kernel is visible from these lines alone.
+                    tail_lines = 80 if verbose else 40
+                    tail = serial_text.replace(chr(13), "").splitlines()[-tail_lines:]
+                    print(f"[QEMU-CLI] last {len(tail)} serial lines before the failure:")
+                    for line in tail:
+                        print(f"[QEMU-CLI]   {line}")
+                    try:
+                        err_fp.flush()
+                        with open(err_log_path, "rb") as fp:
+                            err_text = fp.read().decode("utf-8", errors="replace")
+                    except (OSError, UnboundLocalError):
+                        err_text = ""
+                    if err_text:
+                        print(f"[QEMU-CLI] qemu stderr tail:")
+                        for line in err_text.replace(chr(13), "").splitlines()[-40:]:
+                            print(f"[QEMU-CLI]   {line}")
+                    if not tail:
+                        print("[QEMU-CLI]   (the guest never wrote to the serial port)")
+                    raise RuntimeError(reason)
+                if command is not None:
+                    serial.sendall(command)
+
+            # Beyond "did it print the marker": assert the system actually
+            # ended up in a sane state. A lease of 0.0.0.0 once passed this
+            # gate for weeks because only the marker was checked, and the
+            # guest kept limping along with a broken address.
+            text = buffer().replace("\r", "")
+            problems = []
+
+            # First, before anything is concluded from this text: is it
+            # trustworthy? Every other assertion below reads these lines,
+            # so a split one can invent a failure or hide a real one.
+            split = interleaved_lines(text)
+            if split:
+                problems.append(f"serial_log_interleaved({len(split)}_lines)")
+                for line in split[:3]:
+                    print(f"[QEMU-CLI] split line: {line[:160]}")
+
+            # And the other way a line can lie: the kernel copied a user buffer
+            # and did not get what the process wrote. Checked here, beside the
+            # interleaving check and before anything downstream, because the
+            # symptom is a *missing marker* somewhere else - three boots in ten
+            # were failing as stress_run_did_not_finish for a stress run that
+            # had finished and exited zero.
+            nul = ring3_writes_with_nul(text)
+            if nul:
+                problems.append(f"ring3_write_corrupted({len(nul)}_lines)")
+                for line in nul[:3]:
+                    print(f"[QEMU-CLI] corrupted ring-3 write: {line[:160]}")
+
+            # The kernel's own complaints. It has been raising these all along
+            # and nothing has ever failed a boot for one.
+            complaints = unexpected_complaints(text)
+            if complaints:
+                problems.append(f"kernel_reported_problems({len(complaints)})")
+                for line in complaints[:5]:
+                    print(f"[QEMU-CLI] kernel complaint: {line[:160]}")
+
+            # TCP_OK only appears when something answered on the host, so a
+            # parallel run without its own echo server must not require it.
+            # DHCP still must work: that comes from QEMU's own services and is
+            # a real assertion about the guest either way.
+            markers = ("NET_OK",) if SKIP_ECHO else ("NET_OK", "TCP_OK")
+            for marker in markers:
+                if marker not in text:
+                    problems.append("missing:" + marker)
+
+            lease = re.search(r"NET_OK dhcp lease ip=(\d+\.\d+\.\d+\.\d+)", text)
+            if lease is None:
+                problems.append("no_dhcp_lease_reported")
+            elif lease.group(1) == "0.0.0.0":
+                problems.append("dhcp_lease_is_zero")
+
+            # Match the full 16-digit field. An earlier version stripped leading
+            # zeros with 0x0* and then required one more digit, which made the
+            # regex backtrack and report 0 for a line that was merely cut short
+            # - a harness bug that reads exactly like a kernel bug.
+            cpus = re.search(r"SMP_OK: cpus online=0x([0-9a-f]{16})", text)
+            if cpus is None:
+                truncated = "SMP_OK: cpus online=" in text
+                problems.append("smp_report_truncated" if truncated else "no_smp_report")
+            elif int(cpus.group(1), 16) != EXPECTED_CPUS:
+                problems.append(f"cpus_online={int(cpus.group(1), 16)}_expected={EXPECTED_CPUS}")
+
+            # A recovered fault still means something went wrong that the boot
+            # was not supposed to hit. There are exactly three exceptions, and
+            # all are deliberate: the int3 self-test; svc-crash, which
+            # dereferences null so that the boot proves a ring-3 fault kills
+            # one task rather than the machine; and, since docs/abi/ L3, the
+            # self-test's child that stores into the guard page below its
+            # stack, which has to be killed for the guard to be one. That claim used to be gated and
+            # green while being false, because every service in the manifest
+            # died by exiting - a cooperative death that never reaches the trap
+            # handler at all.
+            lines = text.splitlines()
+            killed = [ln for ln in lines if "ring3 fault: killing task" in ln]
+            if len(killed) != 2:
+                # Not "at least two": another ring-3 fault is a real one, and
+                # allowing any number would re-open exactly the hole this
+                # assertion exists to close.
+                problems.append("deliberate_ring3_faults=%d_expected=2" % len(killed))
+
+            faults = [ln for ln in lines
+                      if "[HW][TRAP]" in ln
+                      and "vector=0x0000000000000003" not in ln       # int3 self-test
+                      and "ring3 fault: killing task" not in ln]      # the kill notice
+            # ...and the two trap dumps that belong to the deliberate crashes:
+            # page faults raised from ring 3 (cs=0x23), told apart by the
+            # address each one touched - null for svc-crash, the stack's guard
+            # page for the self-test. Each removed once, by that address, so a
+            # second fault at either, or one anywhere else, still counts. It
+            # used to remove whichever ring-3 page fault came first.
+            for addr in ("cr2=0x0000000000000000", "cr2=0x0000008000200800"):
+                for ln in faults:
+                    if ("vector=0x000000000000000e" in ln and "cs=0x0000000000000023" in ln
+                            and addr in ln):
+                        faults.remove(ln)
+                        break
+            if faults:
+                problems.append("unexpected_cpu_fault")
+
+            # "action=PANIC" is the trap model's recommendation, not what
+            # happened: a ring-3 fault is now classified that way and then
+            # survived. What says the machine actually stopped is hw_panic's
+            # own output, so that is what this asserts on - this boot's: the
+            # log sink's line quotes the previous boot's last record, and a
+            # panic there is the last run's, which made the next boot of the
+            # same id fail for it.
+            if any("FATAL" in ln and "LOGSINK result=" not in ln
+                   for ln in text.splitlines()):
+                problems.append("panic")
+
+            # The supervisor's view of that same crash. A service killed by a
+            # signal carries the signal in the low seven bits of the wait
+            # status and leaves the exit-code byte zero, so an init that reads
+            # only the code byte reports a segfault as a clean stop - which is
+            # what this one did until SVC_KILLED existed.
+            # The stack the kernel builds for a new program. This printed
+            # "argv wrong" on every boot for as long as it was unasserted: the
+            # self-test still required argv[0] to begin with 'i', from when it
+            # was init, and it had since become a service exec'd under its own
+            # name. A line in the serial log is not a check.
+            if "argv ok" not in text or "argv wrong" in text:
+                problems.append("argv_not_delivered_correctly")
+            # Each service is exec'd under its own name, which is what makes
+            # the supervisor's own logs mean anything.
+            if "SVC_OK_RUNNING" not in text:
+                problems.append("named_service_did_not_run")
+
+            # The TLB shootdown actually runs. This gates the mechanism, not
+            # the absence of the bug it fixes: a corruption that shows up one
+            # boot in thirty cannot be asserted on in a single boot. What can
+            # be asserted is that fork tells the other cores at all - and a
+            # shootdown that silently never fires would leave the bug exactly
+            # as it was, with every boot still green.
+            # TFORK.ELF is built with musl-gcc, and a machine without it - the
+            # CI runner, as it turns out - carries no such file. The assertions
+            # below are therefore conditional on the binary being staged, the
+            # same way the musl, PIE, dynamic and threads ones already are.
+            #
+            # Getting this wrong failed every CI boot, five out of five, while
+            # fifty local boots stayed green: the gate was demanding evidence
+            # from a program that was never on the disk. Worth remembering when
+            # a test fails everywhere except where it was written.
+            tfork = os.path.join(efi_root, "EFI", "BOOT", "TFORK.ELF")
+            stats = re.search(r"tlb_shootdowns=0x([0-9a-f]{16}) tlb_acks=0x([0-9a-f]{16}) "
+                              r"tlb_targets=0x([0-9a-f]{16}) tlb_flushed=0x([0-9a-f]{16})",
+                              text)
+            if stats is None:
+                problems.append("no_tlb_shootdown_stats")
+            else:
+                shootdowns = int(stats.group(1), 16)
+                targets = int(stats.group(3), 16)
+                flushed = int(stats.group(4), 16)
+                if shootdowns == 0 and os.path.exists(tfork):
+                    # TFORK.ELF forks while one of its threads is still
+                    # running, which is the only thing in this boot that
+                    # gives another core a stale entry to drop. Requiring a
+                    # non-zero count without it was simply wrong: an ordinary
+                    # single-threaded fork correctly sends nothing at all,
+                    # and the first version of this assertion failed every
+                    # boot for saying otherwise.
+                    problems.append("threaded_fork_never_shot_down_other_tlbs")
+                elif flushed != targets:
+                    # Every core a shootdown asked must be seen to flush before
+                    # it returns. Counted per target: acknowledgements stopped
+                    # meaning this when two requests to one core became one
+                    # flush, and 261 acks for 262 shootdowns failed a healthy
+                    # boot.
+                    problems.append(f"tlb_flushed={flushed}_of_targets={targets}")
+            # The copy-on-write exclusivity window.
+            #
+            # A page that looked exclusively one address space's, was widened to
+            # writable, and turned out to have been shared in the window between
+            # the decision and the store. That is a real race between a fault
+            # and a fork on another core, and it used to end with one process
+            # holding a writable mapping of another's copy-on-write page.
+            #
+            # Asserted as *present*, not as zero. It is handled now - the entry
+            # is put back and the page copied instead - so a non-zero count is
+            # the handling working. What must not happen is the number going
+            # missing: it was silently common before anything counted it, and a
+            # counter that stops being printed is a detector that stops
+            # existing.
+            if re.search(r"exclusive_lost=0x([0-9a-f]{16})", text) is None:
+                problems.append("no_cow_exclusivity_stats")
+
+            # Console-lock hygiene. An unlock from a core that never held
+            # the lock frees it out from under whoever is mid-line, and the
+            # result is a gate that reports failures which did not happen.
+            # It is refused and counted now; the count must stay zero.
+            bad = re.search(r"bad_unlocks=0x([0-9a-f]{16})", text)
+            if bad is None:
+                problems.append("no_lock_hygiene_stats")
+            elif int(bad.group(1), 16) != 0:
+                problems.append(f"console_unlock_by_non_owner={int(bad.group(1), 16)}")
+
+            # Freed pages are poisoned, and the poison is checked when the
+            # page is handed out again. A hit means something wrote to
+            # memory after it was released - which is how every hard
+            # memory bug in this kernel has started.
+            if "free page was written after it was freed" in text:
+                problems.append("use_after_free_detected")
+
+            if "shootdown timed out" in text:
+                problems.append("tlb_shootdown_timed_out")
+            if os.path.exists(tfork) and "TFORK_OK" not in text:
+                problems.append("threaded_fork_lost_the_child_pages")
+
+            # The crash recorder captured the deliberate fault, and named
+            # the program it happened in. A dump that cannot say which
+            # binary the task was running is the failure mode that cost
+            # this project three wrong diagnoses of one address.
+            if "[CRASH] recorded" not in text:
+                problems.append("fault_was_not_recorded")
+            else:
+                # Every record, and svc-crash's among them. This read the
+                # first record only while there was one; since the stack
+                # self-test's child also dies on purpose (L3) there are two,
+                # in whichever order the cores get there, and four boots in
+                # twenty-four failed here on a record that named its program
+                # correctly - SELFTEST.ELF, first.
+                recorded = [ln for ln in text.splitlines() if "[CRASH] recorded" in ln]
+                named = [re.search(r"exe=(\S+\.ELF)\b", ln) for ln in recorded]
+                if not all(named) or not any(m.group(1).endswith("SVC_CRSH.ELF") for m in named if m):
+                    problems.append("crash_record_does_not_name_the_program")
+            if "[CRASH] no process has faulted" in text:
+                problems.append("crash_dump_found_no_record")
+
+            # Randomised churn, and the seed that produced it. The seed is
+            # asserted on as well as the result: a stress run whose seed is
+            # not in the log is one nobody can replay, which is most of
+            # what makes a rare failure findable.
+            # The boot sequence itself, in order. The kernel must be up and
+            # say so before userland starts: that ordering was inverted until
+            # now, and asserting it is what stops it quietly reverting.
+            # The console can actually show the history. A log nobody
+            # can read is the same as no log, which is most of why the
+            # last two days went the way they did.
+            ring = re.search(r"kernel ring: showing 0x([0-9a-f]{16})", text)
+            if ring is None:
+                problems.append("console_cannot_show_the_arch_log")
+            elif int(ring.group(1), 16) == 0:
+                problems.append("arch_log_ring_is_empty")
+
+            # The memory counters that are assertions rather than diagnostics.
+            # Each one is a defect this subsystem has actually produced, and
+            # each was invisible until it was counted.
+            #
+            # The last two are the allocation side, which nothing watched. A
+            # frame handed out while somebody still owns it frees nothing, so
+            # every release-side watch stays silent through a whole boot; and
+            # "more mappers than owners" appears about one boot in sixteen, so
+            # a message alone is a lottery in which "nothing reported" and
+            # "fixed" look identical. Counted, two boots compare two states.
+            mz = re.search(r"MUSTBEZERO frames_leaked=0x([0-9a-f]{16}) "
+                           r"frames_double_put=0x([0-9a-f]{16}) "
+                           r"poison_hits=0x([0-9a-f]{16}) "
+                           r"double_allocs=0x([0-9a-f]{16}) "
+                           r"free_while_mapped=0x([0-9a-f]{16}) "
+                           r"fork_undercounted=0x([0-9a-f]{16}) "
+                           r"rmap_mismatch=0x([0-9a-f]{16}) "
+                           r"rmap_cycles=0x([0-9a-f]{16}) "
+                           r"rmap_missing_remove=0x([0-9a-f]{16})", text)
+            if mz is None:
+                problems.append("meminfo_missing")
+            else:
+                for name, group in (("frames_leaked", 1),
+                                    ("frames_double_put", 2),
+                                    ("poison_hits", 3),
+                                    ("double_allocs", 4),
+                                    ("free_while_mapped", 5),
+                                    ("fork_undercounted", 6),
+                                    # The reverse map against the reference
+                                    # count: the same quantity counted two
+                                    # ways, so a disagreement is somebody
+                                    # holding a page nothing counts. That is
+                                    # the defect four investigations chased,
+                                    # and it could previously only be found at
+                                    # a release, one boot in sixteen.
+                                    ("rmap_mismatch", 7),
+                                    # A holder list that loops. Not
+                                    # hypothetical: the first wiring of this
+                                    # layer put its node pool where the frame
+                                    # allocator could hand the pages out again,
+                                    # the lists were overwritten, and the boot
+                                    # stopped inside vibeos_rmap_add.
+                                    ("rmap_cycles", 8),
+                                    ("rmap_missing_remove", 9)):
+                    value = int(mz.group(group), 16)
+                    if value != 0:
+                        problems.append(f"mm_{name}={value}")
+
+                # rmap_mismatch is intermittent and its cause lives in the
+                # detail, not the count. Surface the detail into the job log so
+                # every occurrence is diagnosed from `gh run view` alone, not by
+                # fishing the serial artifact out after the fact. dup=1 means the
+                # reverse map double-counted one mapping (a detector fault);
+                # dup=0 with holders>owners is a genuinely lost owner reference.
+                # A print, not an assertion - the count above is the assertion.
+                if int(mz.group(7), 16) != 0:
+                    dt = re.search(r"rmap_mm_phys=0x([0-9a-f]+) "
+                                   r"rmap_mm_holders=0x([0-9a-f]+) "
+                                   r"rmap_mm_held=0x([0-9a-f]+) "
+                                   r"rmap_mm_owners=0x([0-9a-f]+) "
+                                   r"rmap_mm_dup=0x([0-9a-f]+) "
+                                   r"rmap_mm_h0_root=0x([0-9a-f]+) "
+                                   r"rmap_mm_h0_va=0x([0-9a-f]+)", text)
+                    if dt:
+                        print("[QEMU-CLI] rmap_mismatch_detail phys=0x%s "
+                              "holders=%d held=%d owners=%d dup=%d "
+                              "h0_root=0x%s h0_va=0x%s"
+                              % (dt.group(1), int(dt.group(2), 16),
+                                 int(dt.group(3), 16), int(dt.group(4), 16),
+                                 int(dt.group(5), 16), dt.group(6), dt.group(7)),
+                              flush=True)
+
+            # What userland cost, in frames that never came back.
+            #
+            # Every user process that started has exited by the time userland
+            # finishes, so free-on-the-way-out plus what the page cache is
+            # deliberately holding should equal free-on-the-way-in.
+            #
+            # It does not, quite: a boot leaves about twenty-six frames
+            # unaccounted for. That number is a known open defect, not a
+            # tolerance anybody is comfortable with, and the ceiling here
+            # exists to stop it *growing* rather than to bless it. A leak of
+            # one frame per fork is invisible in any single figure - meminfo
+            # looks healthy and the totals still partition - and only shows up
+            # hours later on a machine with no event to point at.
+            #
+            # Asserted as a ceiling rather than as equality for the same reason
+            # the cache is asserted as a ratio: a check that fails on every
+            # boot is a check people route around.
+            if frame_accounting_premise_broken(text):
+                problems.append("frame_accounting_sampled_before_userland_finished")
+
+            # The map the loader hands over must describe memory after the
+            # loader's own allocations, the kernel image among them (M-060).
+            # For as long as it did not, the frame allocator reached the image
+            # after about 40 MiB of allocation and zeroed the IDT - invisible in
+            # every boot that allocated less, which was every boot. The kernel
+            # reserves its image regardless; in_free_map=1 says the map was
+            # wrong and the reservation is all that stood in the way.
+            ki = re.search(r"\[HW\] kernel image 0x[0-9a-f]{16}-0x[0-9a-f]{16} "
+                           r"in_free_map=([01])", text)
+            if ki is None:
+                problems.append("kernel_image_line_missing")
+            elif ki.group(1) != "0":
+                problems.append("kernel_image_in_free_map")
+
+            fs = re.search(r"FRAMES_AT_USERLAND_START=0x([0-9a-f]{16})", text)
+            fd = re.search(r"FRAMES_AT_USERLAND_DONE=0x([0-9a-f]{16}) "
+                           r"cache_resident=0x([0-9a-f]{16})", text)
+            if fs is None or fd is None:
+                problems.append("userland_frame_accounting_missing")
+            else:
+                started = int(fs.group(1), 16)
+                ended = int(fd.group(1), 16)
+                cached = int(fd.group(2), 16)
+                lost = started - (ended + cached)
+                # Negative would mean frames appeared, which is a different
+                # defect - something released twice - and is never acceptable.
+                if lost < 0:
+                    problems.append(f"userland_frames_gained={-lost}")
+                elif lost > 64:
+                    problems.append(f"userland_frames_lost={lost}_ceiling=64")
+
+            # Swap, on a machine that now has some.
+            #
+            # For most of this project's life the answer here was "there is no
+            # swap area", and the whole of P5 - swap map, page-out, page-in,
+            # reclaim's anonymous tier - sat above it host-tested and
+            # unreachable. So the first assertion is that the area exists at
+            # all: a boot that silently stopped having one would otherwise put
+            # the subsystem straight back where it was, with everything green.
+            #
+            # The round trip is the part a host test cannot do. It writes a
+            # page through the area, reads it back, and then looks for the same
+            # bytes at the front of SWAPFILE.BIN *through the filesystem* -
+            # which resolves the file's own chain and never consults the area's
+            # first sector. Without that second half the check would pass an
+            # area pointed at the wrong place entirely, since a write and a
+            # read that use the same wrong address agree perfectly.
+            ms = re.search(r"\[MM\] SWAP_AREA slots=0x([0-9a-f]{16})", text)
+            if ms is None:
+                problems.append("swap_area_line_missing")
+            elif int(ms.group(1), 16) == 0:
+                problems.append("swap_area_not_configured")
+            elif "[MM] SWAP_ROUNDTRIP swap round trip OK" not in text:
+                mr = re.search(r"\[MM\] SWAP_ROUNDTRIP ([^\n]*)", text)
+                problems.append("swap_roundtrip:" +
+                                (mr.group(1).strip().replace(" ", "_")
+                                 if mr else "line_missing"))
+
+            # Every page-in compared with the hash of what was written to its
+            # slot. vvfat failed this on nearly every slot, silently, for as
+            # long as nothing paged in.
+            sc = re.search(r"\[MM\] SWAP_CHECK MUSTBEZERO read_mismatch=0x([0-9a-f]{16}) "
+                           r"checked=0x([0-9a-f]{16})", text)
+            if sc is None:
+                problems.append("swap_check_missing")
+            elif int(sc.group(1), 16) != 0:
+                problems.append(f"swap_read_mismatch={int(sc.group(1), 16)}")
+
+            msz = re.search(r"\[MM\] SWAP MUSTBEZERO double_free=0x([0-9a-f]{16}) "
+                            r"out_of_range=0x([0-9a-f]{16}) "
+                            r"slot_leaked=0x([0-9a-f]{16})", text)
+            if msz is None:
+                problems.append("swap_mustbezero_missing")
+            else:
+                for name, group in (("double_free", 1), ("out_of_range", 2),
+                                    ("slot_leaked", 3)):
+                    value = int(msz.group(group), 16)
+                    if value != 0:
+                        problems.append(f"swap_{name}={value}")
+
+            # What is on the disk (I4b steps 1 and 2).
+            #
+            # The partition reader, the GPT parser and the volume scan were
+            # written, host-tested and sabotage-verified, and had never
+            # executed a line on a booting machine - vibeos_storage_scan was
+            # defined and called by nobody. This asserts that it runs and finds
+            # something, because the whole of kernel/fs/ was in that state and
+            # the way it got there was nobody noticing.
+            #
+            # `mounted` is deliberately NOT asserted non-zero. The volume this
+            # disk holds is FAT, and the portable driver set is exfat, ext2,
+            # ntfs and iso9660 - none of them is the one the machine boots
+            # from. That is a real gap and it is step 3's, not this line's; a
+            # gate that demanded a mount here would be demanding a driver that
+            # does not exist.
+            mv = re.search(r"\[IO\] VOLUMES table=(\w+) partitions=0x([0-9a-f]{16}) "
+                           r"volumes=0x([0-9a-f]{16}) mounted=0x([0-9a-f]{16}) "
+                           r"disk_sectors=0x([0-9a-f]{16})", text)
+            if mv is None:
+                problems.append("volume_scan_missing")
+            else:
+                if int(mv.group(3), 16) == 0:
+                    problems.append("volume_scan_found_nothing")
+                if int(mv.group(5), 16) == 0:
+                    # A zero here means the scan could not parse a GPT even if
+                    # the disk had one, since every GPT check is against a size.
+                    problems.append("volume_scan_saw_a_disk_of_unknown_size")
+
+            # Writing a partition table (I4c).
+            #
+            # On a scratch device that is nobody's disk, because the plan says
+            # at the top of its own section that this is the one phase that can
+            # lose a user's data. It is a RAM-backed block device registered
+            # like any other, so the write goes through the real partition
+            # writer, the real block layer and the real cache - only the medium
+            # is different, and the medium is the one part I4 already proves.
+            #
+            # The round trip is the assertion: a writer that produces a table
+            # only it can read is indistinguishable from a correct one until
+            # another tool looks at the disk, and by then the disk is
+            # somebody's.
+            if "[IO] PARTTAB" not in text:
+                problems.append("parttab_round_trip_missing")
+            elif "round_trip=OK" not in text:
+                mp = re.search(r"\[IO\] PARTTAB [^\n]*round_trip=([^\n]*)", text)
+                problems.append("parttab_round_trip:" +
+                                (mp.group(1).strip().replace(" ", "_")
+                                 if mp else "unreadable"))
+
+            # Putting a filesystem on a volume (I4c step 3).
+            #
+            # Checked by probing the result, not by mounting it: this driver's
+            # state is a single global, so mounting the scratch volume would
+            # unmount the one the machine is running from. Probing proves the
+            # bytes on the medium are a FAT16 volume a reader will recognise,
+            # which is what a format op is responsible for.
+            #
+            # The probe is the one the volume scan uses, with no shared state
+            # with the formatter - a formatter checked by its own idea of what
+            # it wrote proves nothing.
+            #
+            # The verdict is read off the FORMAT line itself. This used to ask
+            # whether "result=OK" appeared anywhere in the log - and
+            # `[IO] LOGSINK result=OK` is on every boot, so no FORMAT failure
+            # could ever be reported. Found in C7, when a FAT mount that ignored
+            # its volume printed `result=FAILED: also on the root` and the gate
+            # passed it.
+            mf = re.search(r"\[IO\] FORMAT [^\n]*result=([^\n]*)", text)
+            if "[IO] FORMAT" not in text:
+                problems.append("format_exercise_missing")
+            elif mf is None or mf.group(1).strip() != "OK":
+                problems.append("format:" +
+                                (mf.group(1).strip().replace(" ", "_")
+                                 if mf else "unreadable"))
+
+            # The filesystems that had never run (I5).
+            #
+            # Mounted from images the *host's* own mkfs tools built, and read
+            # from. An image this project wrote itself would only prove the
+            # driver and the writer agree with each other; an image made by the
+            # tool everybody else uses is the only kind that can say the driver
+            # is wrong.
+            #
+            # The expected names are listed here rather than counted, because a
+            # count cannot tell "iso9660 stopped being exercised" from "ext2
+            # ran twice". Every member of the family is asserted by name, which
+            # is the whole reason the bring-up became a table.
+            #
+            # The absence of an image is reported, not asserted: a machine
+            # without e2fsprogs or xorriso still boots and the build says so
+            # rather than failing somewhere a developer has to guess about.
+            #
+            # NTFS and exFAT were mounted on every boot and asserted by nobody
+            # until 2026-09-28: the list below named two of the four, while
+            # io-filesystems.txt recorded red results for the other two that
+            # this gate could not produce. exFAT passes on "OK (no marker)" -
+            # its image cannot be given a file without mounting it, so a mount
+            # is all it can prove, and the verdict says that rather than "OK".
+            # CI installs ntfs-3g and exfatprogs so the images exist there; a
+            # machine without them reports "no image" as for the others.
+            seen_fs = {}
+            for m in re.finditer(
+                    r"\[IO\] FSIMAGE name=(\S+) sectors=0x[0-9a-f]{16} "
+                    r"got=0x[0-9a-f]{16} "
+                    r"result=([^\n]*)", text):
+                seen_fs[m.group(1)] = m.group(2).strip()
+            # /tmp (docs/abi/ L1): tmpfs mounted, read off its own line.
+            m = re.search(r"\[IO\] TMPFS at=/tmp pages=0x[0-9a-f]+ result=([^\n]*)", text)
+            if not m or m.group(1).strip() != "OK":
+                problems.append("tmpfs_not_mounted")
+
+            # fat since docs/abi/ A4: VFAT long names written by mtools.
+            for want in ("ext2", "ext4", "iso9660", "ntfs", "exfat", "fat"):
+                res = seen_fs.get(want)
+                if res is None:
+                    problems.append("fsimage_missing:" + want)
+                elif res.startswith("FAILED"):
+                    problems.append(want + ":" + res.replace(" ", "_"))
+                elif (res != "OK" and not res.startswith("OK (") and
+                      res not in ABSENT_IS_FINE):
+                    problems.append(want + ":" + res.replace(" ", "_"))
+
+            # The kernel own log, on a medium that outlives it (I5b).
+            #
+            # Two things are asserted, and only the second is interesting.
+            #
+            # The first is that the sink came up at all: a second disk that
+            # stops being attached, or an attach that fails, puts this straight
+            # back to where it was - a feature that exists and never runs.
+            #
+            # The second is the whole feature. A fresh medium legitimately has
+            # nothing on it, so "previous=none" cannot simply be banned. But
+            # once the medium carries records from an earlier machine -
+            # prev_seq is how the sink says so - the previous boot last line
+            # MUST come back. That is the conditional that makes this a test of
+            # persistence rather than of a write followed by a read: the gate
+            # keeps its log disk between runs on purpose, so the second run in
+            # any working directory exercises the interesting branch.
+            mlog = re.search(
+                r"\[IO\] LOGSINK result=(.*?) capacity=0x([0-9a-f]{16}) "
+                r"prev_seq=0x([0-9a-f]{16}) written=0x([0-9a-f]{16}) "
+                r"failed=0x([0-9a-f]{16}) bad=0x([0-9a-f]{16}) "
+                r"previous=(.*)", text)
+            if mlog is None:
+                problems.append("logsink_missing")
+            else:
+                verdict = mlog.group(1).strip()
+                prev_seq = int(mlog.group(3), 16)
+                written = int(mlog.group(4), 16)
+                failed = int(mlog.group(5), 16)
+                previous = mlog.group(7).strip()
+                if verdict != "OK":
+                    problems.append("logsink:" + verdict.replace(" ", "_"))
+                elif written == 0:
+                    problems.append("logsink_wrote_nothing")
+                elif failed != 0:
+                    problems.append("logsink_write_failed")
+                elif prev_seq > 0 and previous == "none":
+                    # A medium carrying an earlier machine records handed back
+                    # nothing. This is the failure the whole phase is about: a
+                    # log that loses its last line loses the only line anybody
+                    # wanted.
+                    problems.append("logsink_lost_the_previous_boot")
+
+            # Kernel stacks handed over rather than freed under their own
+            # core.
+            #
+            # A task exits standing on its own kernel stack, so the stack
+            # cannot be freed by the exiting task and must not be freed by
+            # anybody else: the reaper on another core used to free it in the
+            # handful of instructions between the zombie being published and
+            # the switch away, and those instructions push. The frame was
+            # written after being freed and poisoned, handed out again as a
+            # page table, and a core executed 0xdead0000dead0000.
+            #
+            # It is parked on the core and freed once that core is provably on
+            # another stack. Asserted non-zero because a deferred free that
+            # never happens is a leak that looks exactly like a fix - this
+            # project has shipped that shape before, which is why the counter
+            # exists at all rather than just the mechanism.
+            mks = re.search(r"dead_kstacks_freed=0x([0-9a-f]{16})", text)
+            if mks is None:
+                problems.append("dead_kstack_counter_missing")
+            elif int(mks.group(1), 16) == 0:
+                problems.append("dead_kstacks_never_freed")
+            # The scheduling policy is charged, which is what it picks by. It
+            # was neither initialised nor charged for a month and nothing said
+            # so: the picker fell back to round robin on every tick (L2 step 4).
+            mpc = re.search(r"policy_charged=0x([0-9a-f]{16})", text)
+            if mpc is None or int(mpc.group(1), 16) == 0:
+                problems.append("sched_policy_never_charged")
+
+            # The kernel own log lines, on the medium (I5b, second half).
+            #
+            # The first half only wrote a boot mark, which proved the sink
+            # worked and nothing about it being useful. Every hw_log event now
+            # goes there - every one, including the ones below the serial
+            # level, because the quiet lines nobody was printing are exactly
+            # what is wanted after a machine has stopped.
+            #
+            # Asserted as "more than the boot mark", not merely non-zero: a
+            # sink that recorded only its own bring-up would satisfy a
+            # non-zero check and still have none of the log in it.
+            mld = re.search(r"\[LOGDISK\] shown=0x([0-9a-f]{16}) "
+                            r"written=0x([0-9a-f]{16}) failed=0x([0-9a-f]{16}) "
+                            r"truncated=0x([0-9a-f]{16})", text)
+            if mld is None:
+                problems.append("logdisk_tail_missing")
+            else:
+                shown = int(mld.group(1), 16)
+                written = int(mld.group(2), 16)
+                failed = int(mld.group(3), 16)
+                if written < 2:
+                    problems.append("logdisk_holds_only_the_boot_mark")
+                elif shown == 0:
+                    problems.append("logdisk_tail_read_nothing_back")
+                elif failed != 0:
+                    problems.append("logdisk_writes_failed")
+
+            # Disk completions by interrupt (I6, second half).
+            #
+            # The driver spun on the used ring up to a hundred million times
+            # per transfer. It halts now and the device wakes it. The ring is
+            # still the only thing that says *what* completed - two consumers
+            # of one used index is a defect this driver has already had - so a
+            # missed interrupt costs a timer tick of latency rather than a lost
+            # completion, which is the conservative half of the split.
+            #
+            # Asserted non-zero because that split makes the failure silent:
+            # an interrupt that never arrives leaves the machine exactly as
+            # slow as it was and nothing else would say so.
+            # AHCI, the same path taken second. It carries the log disk on
+            # every boot, so it does real work whichever controller the boot
+            # disk is on.
+            mah = re.search(r"ahci_irqs=0x([0-9a-f]{16})", text)
+            if mah is None:
+                problems.append("ahci_irq_counter_missing")
+            elif int(mah.group(1), 16) == 0:
+                problems.append("ahci_interrupt_never_fired")
+
+            mirq = re.search(r"blk_irqs=0x([0-9a-f]{16}) "
+                             r"blk_irq_completions=0x([0-9a-f]{16}) "
+                             r"blk_poll_completions=0x([0-9a-f]{16})", text)
+            if mirq is None:
+                problems.append("blk_completion_counters_missing")
+            elif (int(mirq.group(2), 16) + int(mirq.group(3), 16)) == 0:
+                # Every transfer must be accounted for by one of the two, or
+                # the counters are not being reached and say nothing. This is
+                # not hypothetical: for most of the investigation both read
+                # zero because the dispatcher hook had never been added, and a
+                # counter nothing increments is indistinguishable from a device
+                # that does nothing.
+                problems.append("blk_completions_unaccounted")
+            elif int(mirq.group(1), 16) == 0:
+                # The device raised no interrupt at all. Asserted now that it
+                # demonstrably does: about twenty thousand a boot, ending some
+                # sixty per cent of the waits. A regression here puts the
+                # driver back to burning a core on every transfer, silently.
+                problems.append("blk_interrupt_never_fired")
+
+            # The mount table (I4b step 4).
+            #
+            # There was one global mount, and that was the structural reason
+            # only one filesystem could run - not a missing driver, a missing
+            # place to put a second one. A machine that cannot say what it has
+            # mounted cannot be asked to prove it mounted the right thing, so
+            # the boot names each mount and its type.
+            #
+            # Only one is asserted, and honestly: this medium has one partition
+            # and one driver that can claim it. "Mounts more than one" is the
+            # phase's own wording and it needs a second volume, which is a
+            # change to the image rather than to the kernel.
+            mm_ = re.findall(r"\[IO\] MOUNTED at=(\S+) type=(\S+)", text)
+            if not mm_:
+                problems.append("nothing_was_mounted_through_the_table")
+            elif mm_[0][0] != "/":
+                problems.append(f"first_mount_is_not_the_root:{mm_[0][0]}")
+            elif len(mm_) < 2:
+                # The phase's own "done when": more than one. It became
+                # reachable when the FAT driver stopped being a singleton -
+                # before that, mounting a second volume would have unmounted
+                # the one the machine was running from.
+                problems.append(f"only_one_mount:{len(mm_)}")
+
+            # The ordering primitive (I4 step 1b).
+            #
+            # Asked for at least once, because a barrier nothing calls is a
+            # promise nobody has tested - and this one was added before the
+            # journal that will need it precisely so the write-back policy
+            # could be designed around a primitive that exists. Failures are a
+            # defect: a barrier the device refused means the bytes may still be
+            # in its volatile cache, and a caller told otherwise builds on
+            # something that is not there.
+            mba = re.search(r"\[IO\] BARRIERS asked=0x([0-9a-f]{16})", text)
+            if mba is None:
+                problems.append("barrier_counter_missing")
+            elif int(mba.group(1), 16) == 0:
+                problems.append("barrier_never_asked_for")
+
+            # Writes that are proved (I4 step 2).
+            #
+            # A boot writes about thirty sectors through the shell's mkdir, and
+            # until this nothing checked any of them. That is worse than not
+            # writing: the machine modifies a medium with no evidence that what
+            # it wrote is what comes back, and a defect there is silent until
+            # some later boot cannot mount.
+            #
+            # The pattern carries its own offset, so a write that landed a
+            # sector early, a read that returned a neighbour, and a transfer
+            # that lost its last sector all fail it - a constant survives every
+            # one of those.
+            #
+            # What it does not prove is that the bytes reached the *medium*.
+            # Everything could be served from the block cache. Only a reboot
+            # tells those apart, and that is step 3.
+            if "[IO] WRITE_PROOF" not in text:
+                problems.append("write_proof_missing")
+            elif "[IO] WRITE_PROOF bytes=0x0000000000000514 OK" not in text:
+                mw = re.search(r"\[IO\] WRITE_PROOF bytes=\S+ ([^\n]*)", text)
+                problems.append("write_proof:" +
+                                (mw.group(1).strip().replace(" ", "_")
+                                 if mw else "unreadable"))
+
+            # The block cache below the filesystem (I2).
+            #
+            # Asserted as a *ratio*, not as a presence, and this project has
+            # paid for the difference: the mm page cache shipped at 36% while a
+            # "non-zero hits" check passed happily, so the gate said the cache
+            # was wired in and said nothing about whether it worked. One hit
+            # satisfies "non-zero" on a boot that reads four thousand sectors.
+            #
+            # The floor is 50, and how it was arrived at is the point.
+            #
+            # It was first set to 20 from a single measurement of 38%, which is
+            # the mistake this project has a written rule about - check a
+            # criterion against the baseline before using it to judge a change.
+            # Twenty-four consecutive boots then measured 7%, exactly, every
+            # time: the 38% was a stale image and the real number was a seventh
+            # of it.
+            #
+            # That 7% turned out to be a defect rather than a property. fat.c
+            # still had its own one-sector FAT cache, which absorbed every
+            # repeated table read and passed on only the misses - two caches in
+            # series where the first is a hundredth the size of the second, so
+            # the small one decided what the large one was allowed to see.
+            # Removing it took the ratio to 93%.
+            #
+            # Fifty is therefore comfortably under a healthy boot and far above
+            # anything a cache that had stopped caching could reach. It is
+            # still a ratio rather than a presence check, because the mm page
+            # cache shipped at 36% while "non-zero hits" passed happily.
+            #
+            # evict_failed is a defect, not a description: it means a block the
+            # caller was told had been written is still only in this cache.
+            mbc = re.search(r"\[IO\] BLKCACHE hits=0x([0-9a-f]{16}) "
+                            r"misses=0x([0-9a-f]{16}) "
+                            r"evictions=0x([0-9a-f]{16}) "
+                            r"evict_failed=0x([0-9a-f]{16}) "
+                            r"hit_pct=0x([0-9a-f]{16})", text)
+            if mbc is None:
+                problems.append("blockcache_line_missing")
+            else:
+                hits = int(mbc.group(1), 16)
+                misses = int(mbc.group(2), 16)
+                failed = int(mbc.group(4), 16)
+                pct = int(mbc.group(5), 16)
+                if hits == 0:
+                    problems.append("blockcache_never_hit")
+                if misses == 0:
+                    problems.append("blockcache_never_missed")
+                if failed != 0:
+                    problems.append(f"blockcache_evict_failed={failed}")
+                if hits and misses and pct < 50:
+                    problems.append(f"blockcache_hit_ratio={pct}pct_floor=50")
+
+            # The console lock, which is the one that cannot report itself.
+            #
+            # Every other lock here panics when its bound fires. This one takes
+            # the lock and carries on instead, because a panic prints and
+            # printing goes through the very lock in question - so the only way
+            # it can tell anyone is a counter somebody else asserts. That is
+            # this. A stuck console is how this machine goes silent, and
+            # silence is the failure where all the evidence is missing rather
+            # than wrong.
+            mc = re.search(r"\[CONSOLE\] MUSTBEZERO bad_unlocks=0x([0-9a-f]{16}) "
+                           r"stuck=0x([0-9a-f]{16}) stuck_owner=0x([0-9a-f]{16})",
+                           text)
+            if mc is None:
+                problems.append("console_counters_missing")
+            else:
+                if int(mc.group(1), 16) != 0:
+                    problems.append(f"console_bad_unlocks={int(mc.group(1), 16)}")
+                if int(mc.group(2), 16) != 0:
+                    problems.append(f"console_lock_stuck={int(mc.group(2), 16)}"
+                                    f"_held_by_cpu={int(mc.group(3), 16)}")
+
+            # The network stack's must-be-zero: both a slot-index ABA the stack
+            # is supposed to catch. sock_stale_parent is a TCP child whose
+            # listener slot was reused mid-handshake (H-028); sock_fd_aba is a
+            # blocking accept/connect/recvfrom whose descriptor was closed and
+            # reused by a sibling thread while it slept (M-020). Either non-zero
+            # means a connection or its data could have reached the wrong socket.
+            nz = re.search(r"\[NET\] MUSTBEZERO sock_stale_parent=0x([0-9a-f]{16}) "
+                           r"sock_fd_aba=0x([0-9a-f]{16})", text)
+            if nz is None:
+                problems.append("net_counters_missing")
+            else:
+                if int(nz.group(1), 16) != 0:
+                    problems.append(f"net_sock_stale_parent={int(nz.group(1), 16)}")
+                if int(nz.group(2), 16) != 0:
+                    problems.append(f"net_sock_fd_aba={int(nz.group(2), 16)}")
+
+            # The mouse decoder and the ABI surface. Both counters were only ever
+            # trusted at zero: proved=1 says the boot fed the decoder a bad byte
+            # and saw the counter move; probes>=1 says a real ring-3 program asked
+            # for a syscall number nobody implements and the kernel counted it.
+            # Without those two a zero would mean "the counter cannot fire".
+            mz = re.search(r"\[MOUSE\] MUSTBEZERO desync=0x([0-9a-f]{16}) "
+                           r"proved=0x([0-9a-f]{16})", text)
+            if mz is None:
+                problems.append("mouse_counters_missing")
+            else:
+                if int(mz.group(1), 16) != 0:
+                    problems.append(f"mouse_desync={int(mz.group(1), 16)}")
+                if int(mz.group(2), 16) != 1:
+                    problems.append("mouse_desync_unproven")
+            az = re.search(r"\[ABI\] MUSTBEZERO unexpected_unimplemented=0x([0-9a-f]{16}) "
+                           r"probes=0x([0-9a-f]{16}) last_nr=0x([0-9a-f]{16}) "
+                           r"refused=0x([0-9a-f]{16}) deferred=0x([0-9a-f]{16}) "
+                           r"deferred_nr=0x([0-9a-f]{16})", text)
+            if az is None:
+                problems.append("abi_counters_missing")
+            else:
+                if int(az.group(1), 16) != 0:
+                    problems.append(f"abi_unimplemented_syscall_nr={int(az.group(3), 16)}")
+                if int(az.group(2), 16) < 1:
+                    problems.append("abi_counter_unproven")
+                # The registry (docs/abi/ A1): a refusal is expected, and hello
+                # makes one on purpose so the count is seen moving; a deferred
+                # call is a program asking for something nothing planned for.
+                if int(az.group(4), 16) < 1:
+                    problems.append("abi_refused_unproven")
+                if int(az.group(5), 16) != 0:
+                    problems.append(f"abi_deferred_syscall_nr={int(az.group(6), 16)}")
+
+            # The must-be-zero registry (kernel/core/mbz.c): the parsers, the
+            # journal, the log sink and the scheduler's requeue. `first` and
+            # `witness` are printed on the same line as the count so a failure
+            # names the harm and the value that tripped it, not just "non-zero".
+            mb = re.search(r"\[MBZ\] MUSTBEZERO total=0x([0-9a-f]{16}) "
+                           r"first=([a-z0-9_]+) witness=0x([0-9a-f]{16})", text)
+            if mb is None:
+                problems.append("mbz_counters_missing")
+            elif int(mb.group(1), 16) != 0:
+                problems.append(f"mbz_{mb.group(2)}_witness={int(mb.group(3), 16)}")
+
+            # The kernel log's sinks (kernel/diag/klog.c). A refused line is in
+            # the registry above as klog_line_lost; this is the other half, a
+            # line the serial device lost while saying it had not. Every number
+            # the log gave out up to this line must be somewhere in the log.
+            mk = re.search(r"\[KLOG\] sinks=0x([0-9a-f]{16}) serial_lines=0x([0-9a-f]{16}) "
+                           r"serial_lost=0x([0-9a-f]{16}) "
+                           r"serial_reentered=0x([0-9a-f]{16})", text)
+            if mk is None:
+                problems.append("klog_counters_missing")
+            else:
+                offered = int(mk.group(2), 16)
+                # The serial sink never logs from inside its own write, so an
+                # event it was not offered because it was "busy" is a line it
+                # never got - a task moved to another core mid-write leaves the
+                # flag set on the core it left. Counted by the kernel; this is
+                # where the count stops being a number nobody reads.
+                if int(mk.group(4), 16) != 0:
+                    problems.append(f"klog_serial_reentered={int(mk.group(4), 16)}")
+                if offered == 0:
+                    # A boot writes dozens of log lines. None means the serial
+                    # sink was never offered one, and a gap check over nothing
+                    # is green by construction.
+                    problems.append("klog_serial_unproven")
+                else:
+                    missing = klog_missing_lines(text, offered)
+                    if missing:
+                        problems.append(f"klog_line_missing={missing[0]}"
+                                        f"_of_{len(missing)}")
+            # The other half of the same question: replays carry no ln=, so a
+            # line lost from one is counted against the length it announced.
+            for which in replay_incomplete(text):
+                problems.append(f"replay_incomplete={which}")
+
+            # Every bounded wait a syscall can reach, asserted at zero.
+            #
+            # P7's latency property is two halves and only one of them was
+            # here. The bounds all existed - virtio-blk's completion poll,
+            # AHCI's busy check and completion poll, virtio-net's transmit, the
+            # TLB shootdown - but a bound with no counter proves nothing, and
+            # both disk drivers collapsed a timeout into the same -1 the
+            # device's own error bit produces. So VIBEOS_BLK_TIMEOUT, which the
+            # MUSTBEZERO line above asserts, was a result no driver could
+            # produce: an assertion that was green and could not go red.
+            # virtio-net counted its transmit timeouts and nothing read the
+            # number, which is this project's most-repeated defect.
+            #
+            # A missing line is a failure, not a pass. That distinction is the
+            # whole reason this check exists.
+            # Two lines since C7: the disk's in kmain's WAITS line, the network
+            # card's in its driver's own report ([VNET]), because the registry
+            # prints a driver's counters rather than kmain naming them. Either
+            # missing is the same failure it always was.
+            mw = re.search(r"\[IO\] WAITS blk_timeouts=0x([0-9a-f]{16})", text)
+            mn = re.search(r"\[VNET\] .*net_tx_timeouts=0x([0-9a-f]{16})", text)
+            if mw is None or mn is None:
+                problems.append("io_wait_counters_missing")
+            else:
+                for name, m in (("blk_timeouts", mw), ("net_tx_timeouts", mn)):
+                    value = int(m.group(1), 16)
+                    if value != 0:
+                        problems.append(f"io_{name}={value}")
+
+            # The keyboard, which had no counter of any kind before C2.
+            #
+            # Only the second is asserted. kbd_dropped is the ring overflowing
+            # under a fast typist, which is how a ring behaves and not
+            # a defect - it is parsed here so a rename is noticed, and left
+            # unasserted deliberately.
+            #
+            # kbd_inject_truncated is a real must-be-zero. The boot self-test
+            # injects a fixed string into a ring that is empty by construction
+            # so read() can be exercised on a console with no human. If that
+            # injection is cut short, the self-test checks a prefix of what it
+            # meant to check and passes - the seventh instance of this
+            # project's "right about the outcome, wrong about the mechanism",
+            # arriving through the one path where the input itself is the test
+            # fixture.
+            # The unmap quarantine, which closes a stale-TLB window an external
+            # review found - and which the source used to admit was open.
+            #
+            # deferred is asserted NON-ZERO. The defect is a stale translation
+            # on another core; that cannot be observed in one boot, and every
+            # earlier claim in this project that such a thing was "fixed"
+            # rested on a handful of green boots. What a boot *can* assert is
+            # that munmap took the safe path at all. A quarantine that silently
+            # stopped running would leave every boot green with the defect
+            # exactly as it was - the same failure tlb_shootdowns is gated
+            # against, and the same argument.
+            #
+            # overflow is NOT asserted zero. Falling back is precisely what the
+            # kernel did before the quarantine existed, so it is never worse
+            # than the status quo; the number says how much of the window is
+            # still open, which is worth reporting and wrong to fail on.
+            tq = re.search(r"tlbq_deferred=0x([0-9a-f]{16}) "
+                           r"tlbq_released=0x([0-9a-f]{16}) "
+                           r"tlbq_overflow=0x([0-9a-f]{16}) "
+                           r"tlbq_live_peak=0x([0-9a-f]{16})", text)
+            #
+            # Since M-061 a frame is parked only when another core has the
+            # address space loaded, so whether a boot parks anything depends on
+            # timing: two boots in ten parked nothing, correctly, and the old
+            # "deferred is non-zero" assertion failed them. What is asserted
+            # instead is not timing-dependent:
+            #
+            #   - munmap reached the quarantine's decision at all. svc-press
+            #     unmaps 64 MiB every boot, so a zero here is the hook gone;
+            #   - the kernel's own self-test, which constructs both cases on
+            #     the real per-core fields: a held space parks and drains, a
+            #     space nobody holds is released at once.
+            tqi = re.search(r"tlbq_immediate=0x([0-9a-f]{16})", text)
+            if tq is None or tqi is None:
+                problems.append("tlb_quarantine_counters_missing")
+            elif (int(tq.group(1), 16) + int(tq.group(3), 16)
+                  + int(tqi.group(1), 16)) == 0:
+                problems.append("munmap_bypassed_the_quarantine")
+            st = re.search(r"TLBQ_SELFTEST held=(\w+) drained=([01]) unheld=(\w+)",
+                           text)
+            if st is None:
+                problems.append("tlbq_selftest_missing")
+            else:
+                if st.group(1) != "parked":
+                    problems.append("tlbq_selftest_held_space_not_parked")
+                elif st.group(2) != "1":
+                    problems.append("tlbq_selftest_parked_frame_never_drained")
+                if st.group(3) != "released":
+                    problems.append("tlbq_selftest_unheld_space_not_released")
+
+            kb = re.search(r"kbd_dropped=0x([0-9a-f]{16}) "
+                           r"MUSTBEZERO kbd_inject_truncated=0x([0-9a-f]{16})",
+                           text)
+            if kb is None:
+                problems.append("kbd_counters_missing")
+            elif int(kb.group(2), 16) != 0:
+                problems.append("kbd_inject_truncated=%d" % int(kb.group(2), 16))
+
+            # The interrupt path, end to end (C7). Nobody types in CI: the
+            # boot's script is injected, which raises no interrupt, so IRQ1's
+            # routing, the device registry's dispatch and the wake-up of a
+            # blocked reader ran in no boot at all - and sabotaging either went
+            # green. The keyboard's probe now makes the controller raise IRQ1;
+            # irq_proved says it arrived, input_irq_wakes that the dispatch
+            # woke readers because of it. registered counts the drivers the
+            # linker collected: keyboard, mouse, virtio-net, AHCI, virtio-blk
+            # and the GUI are always built, so fewer than six is a driver that
+            # never reached the image - which is what happened to the GUI the
+            # day it moved into the core archive, where nothing referenced it. stray_vectors is an interrupt on a registry
+            # vector no device owns - a driver routing its line somewhere it
+            # was not given, acknowledged and otherwise forgotten.
+            kp = re.search(r"\[KBD\] .* irq_proved=0x([0-9a-f]{16})", text)
+            if kp is None:
+                problems.append("kbd_counters_missing")
+            elif int(kp.group(1), 16) != 1:
+                problems.append("kbd_irq_unproven")
+            dv = re.search(r"\[DEV\] registered=0x([0-9a-f]{16}) "
+                           r"input_irq_wakes=0x([0-9a-f]{16}) "
+                           r"MUSTBEZERO stray_vectors=0x([0-9a-f]{16})", text)
+            if dv is None:
+                problems.append("device_counters_missing")
+            else:
+                if int(dv.group(1), 16) < 6:
+                    problems.append("device_table_short=%d" % int(dv.group(1), 16))
+                if int(dv.group(2), 16) == 0:
+                    problems.append("input_irq_wake_unproven")
+                if int(dv.group(3), 16) != 0:
+                    problems.append("device_stray_vector=%d" % int(dv.group(3), 16))
+
+            # What the disk did.
+            #
+            # The storage path carried no counters at all before I1, so "the
+            # disk is slow", "the disk is retrying" and "the disk is fine" were
+            # the same silence. These are the ones that are assertions rather
+            # than diagnostics: a boot that reads nothing has not booted, and a
+            # medium error, a short transfer or a timeout on a healthy boot is
+            # a defect rather than weather.
+            #
+            # NO_DEVICE is deliberately not here. A machine with no disk is a
+            # configuration, not a failure, and asserting it would make the
+            # gate fail on a machine that is working as configured.
+            iz = re.search(r"\[IO\] MUSTBEZERO medium=0x([0-9a-f]{16}) "
+                           r"short=0x([0-9a-f]{16}) "
+                           r"timeout=0x([0-9a-f]{16}) "
+                           r"bad_request=0x([0-9a-f]{16}) "
+                           r"out_of_range=0x([0-9a-f]{16}) "
+                           r"barriers_failed=0x([0-9a-f]{16}) "
+                           r"register_refused=0x([0-9a-f]{16})", text)
+            if iz is None:
+                problems.append("io_counters_missing")
+            else:
+                for name, group in (("medium", 1), ("short", 2),
+                                    ("timeout", 3), ("bad_request", 4),
+                                    ("out_of_range", 5),
+                                    # A barrier the device refused is an
+                                    # ordering the caller believes it has and
+                                    # does not - the failure a journal would
+                                    # build a corrupt medium on.
+                                    ("barriers_failed", 6),
+                                    ("register_refused", 7)):
+                    value = int(iz.group(group), 16)
+                    if value != 0:
+                        problems.append(f"io_{name}={value}")
+
+            # The three hot paths (core plan C0).
+            #
+            # This kernel had no performance measurement of any kind until now,
+            # so the refactor that adds indirect calls to the syscall, fault and
+            # switch paths could not have been shown not to cost anything.
+            #
+            # Asserted: the counts are non-zero. That is deliberately weak and
+            # it is the assertion this project keeps needing - VIBEOS_BLK_TIMEOUT
+            # was defined, printed, asserted and produced by nothing, and a disk
+            # interrupt counter read zero for an hour because its hook had never
+            # been added. A counter nothing increments and a counter reporting
+            # nothing happening are indistinguishable, so before any of these
+            # numbers can be reasoned about, something has to establish they can
+            # move at all.
+            #
+            # Nothing else is asserted yet, and the reason is a measurement
+            # rather than caution. The counts were expected to be deterministic
+            # and to be the ratchetable half; two boots gave 1416/1381 syscalls,
+            # 396/378 faults, 516/497 switches. They move three to four per cent
+            # because service interleaving decides what the machine does. So a
+            # ratchet needs a band, and a band needs a characterised spread -
+            # which is the mistake the memory manager's P2 made from the other
+            # direction, judging a change against a background nobody had
+            # measured. The numbers are printed every run so that spread can be
+            # collected; the threshold is a separate decision, made here, in the
+            # change that earns it.
+            pf = re.search(r"\[PERF\] syscalls=0x([0-9a-f]{16}) "
+                           r"syscall_cycles=0x([0-9a-f]{16}) "
+                           r"syscall_min=0x([0-9a-f]{16}) "
+                           r"faults=0x([0-9a-f]{16}) "
+                           r"fault_cycles=0x([0-9a-f]{16}) "
+                           r"fault_min=0x([0-9a-f]{16}) "
+                           r"switches=0x([0-9a-f]{16})", text)
+            if pf is None:
+                problems.append("perf_counters_missing")
+            else:
+                (syscalls, syscycles, sysmin, faults, faultcycles, faultmin,
+                 switches) = (int(pf.group(i), 16) for i in range(1, 8))
+                for name, value in (("syscalls", syscalls),
+                                    ("faults", faults),
+                                    ("switches", switches)):
+                    if value == 0:
+                        problems.append(f"perf_{name}_never_counted")
+                # Cycles without events, or events with no cycles, means one of
+                # the two reads is not happening - the pair is what makes a mean
+                # meaningful, and half of it is worse than neither.
+                if syscalls != 0 and syscycles == 0:
+                    problems.append("perf_syscall_cycles_never_accumulated")
+                if faults != 0 and faultcycles == 0:
+                    problems.append("perf_fault_cycles_never_accumulated")
+                # Printed rather than asserted. The mean is not a baseline: a
+                # syscall that blocks is timed across the block, so this number
+                # is dominated by waitpid and read rather than by dispatch cost.
+                # The minimum on the same line is the robust one - the fastest
+                # observed traversal of the path, which is what an added lookup
+                # would move and what a blocked task cannot inflate.
+                print("[QEMU-CLI] perf syscalls=%d min=%d mean=%d | "
+                      "faults=%d min=%d mean=%d | switches=%d"
+                      % (syscalls, sysmin, syscycles // syscalls if syscalls
+                         else 0,
+                         faults, faultmin, faultcycles // faults if faults
+                         else 0,
+                         switches), flush=True)
+
+                # The ratchet, on the one robust number of the three. syscall_min
+                # is the fastest dispatch actually observed: a blocked task cannot
+                # inflate it (that is the mean's problem, argued above), and an
+                # added lookup, lock or copy on the entry path raises it. The
+                # ceiling is deliberately generous. The minimum was characterised
+                # at 208 cycles on a clean boot and up to ~440 on a stressed one
+                # under TCG - a 3-4% band the counts already showed - so 5000 is
+                # set to catch a gross regression (a path made an order of
+                # magnitude slower) without firing on that jitter. It is a
+                # ceiling, not a band: a path getting *faster* is never a
+                # failure. core-perf.txt slows the path on purpose and confirms
+                # this goes red, because a ratchet nobody has seen fire is a
+                # ratchet with no evidence behind it (docs/core/phases.md, C0).
+                SYSCALL_MIN_CEIL = 5000
+                if syscalls != 0 and sysmin > SYSCALL_MIN_CEIL:
+                    problems.append(
+                        "perf_syscall_min_regressed(%d>%d)" % (sysmin,
+                                                               SYSCALL_MIN_CEIL))
+
+            # Boot wall time: kernel_early_init to kernel_boot, the kernel's own
+            # bring-up before any user task runs. C0's step 1 - the timestamps
+            # were recorded in phase_history since the gate existed and never
+            # read. Ratcheted loosely on purpose: this is wall-clock seconds, not
+            # rdtsc cycles, so it moves with how loaded the emulating host is -
+            # syscall_min above is the tight, machine-speed-independent baseline.
+            # The ceiling only catches a bring-up that ballooned (a hang, or a
+            # path an order of magnitude slower), which shows in seconds even on a
+            # slow runner. Observed 1.1-1.2s; the ceiling is 8s.
+            def _phase_ts(name):
+                for e in phase_history:
+                    if e.endswith(":" + name):
+                        try:
+                            return float(e.split(":", 1)[0])
+                        except ValueError:
+                            return None
+                return None
+            _early = _phase_ts("kernel_early_init")
+            _kboot = _phase_ts("kernel_boot")
+            if _early is not None and _kboot is not None:
+                boot_wall = _kboot - _early
+                print("[QEMU-CLI] boot_wall_s=%.3f" % boot_wall, flush=True)
+                BOOT_WALL_CEIL = 8.0
+                if boot_wall > BOOT_WALL_CEIL:
+                    problems.append("boot_wall_regressed(%.3f>%.1f)"
+                                    % (boot_wall, BOOT_WALL_CEIL))
+
+            # Which disk the boot volume was found on, and that it was found by
+            # looking rather than by assuming.
+            #
+            # The bug this watches: "the disk" used to mean whichever driver
+            # bound first, which is only the boot disk when there is one disk.
+            # With the ESP on AHCI and I5b's log on virtio-blk the machine
+            # mounted a blank 4 MiB file, and every exec for the rest of the
+            # boot said not-found. It was red in the AHCI job for days.
+            #
+            # Asserted on both runs, not just the AHCI one, because the failure
+            # this really guards against is the selection quietly going away:
+            # on the default machine the boot disk is adapter 0 anyway, so a
+            # regression there is invisible in the verdict and visible only in
+            # this line. Deliberately not asserting rejected>0 - that is true
+            # on AHCI and false on virtio, and an assertion that only holds in
+            # one configuration is one somebody will loosen.
+            bv = re.search(r"\[BLK\] boot volume on (\S+) "
+                           r"rejected=0x([0-9a-f]{16}) "
+                           r"disks=0x([0-9a-f]{16})", text)
+            if bv is None:
+                problems.append("boot_volume_not_reported")
+            else:
+                name, rejected, disks = (bv.group(1), int(bv.group(2), 16),
+                                         int(bv.group(3), 16))
+                if name == "none":
+                    problems.append("boot_volume_on_no_disk")
+                if disks == 0:
+                    problems.append("boot_volume_no_disks_present")
+                # More rejections than there are disks means the loop ran past
+                # the table, which the accessor should refuse.
+                if rejected >= disks and disks != 0:
+                    problems.append(
+                        f"boot_volume_rejected={rejected}_of_disks={disks}")
+
+            ib = re.search(r"\[IO\] BLK reads=0x([0-9a-f]{16}) "
+                           r"writes=0x([0-9a-f]{16}) "
+                           r"sectors_read=0x([0-9a-f]{16})", text)
+            if ib is None:
+                problems.append("io_blk_counters_missing")
+            else:
+                if int(ib.group(1), 16) == 0:
+                    problems.append("io_read_nothing")
+                if int(ib.group(3), 16) == 0:
+                    problems.append("io_read_no_sectors")
+                # Writes are asserted non-zero because this boot does them -
+                # the shell's mkdir reaches FAT, which writes both copies of
+                # the table. Thirty sectors on a normal boot. A boot that
+                # stopped writing would mean the shell stopped running, which
+                # is worth failing on.
+                if int(ib.group(2), 16) == 0:
+                    problems.append("io_wrote_nothing")
+
+            # The page cache, asserted as a ratio rather than as "not zero".
+            #
+            # Non-zero is satisfied by a cache that works once and thrashes
+            # afterwards, which is what the first table size actually did: 768
+            # pages against eleven megabytes of programs gave five hits in a
+            # whole boot. A ratio is the difference between a cache and a
+            # decoration.
+            mc = re.search(r"cache_hits=0x([0-9a-f]{16}) cache_misses=0x([0-9a-f]{16})", text)
+            if mc is None:
+                problems.append("cache_counters_missing")
+            else:
+                hits = int(mc.group(1), 16)
+                misses = int(mc.group(2), 16)
+                if hits == 0 or misses == 0:
+                    problems.append(f"cache_not_exercised hits={hits} misses={misses}")
+                elif hits < misses:
+                    # Tightened from "hits * 4 < misses" - a 20% floor - once
+                    # image pages started coming from the cache. A boot now
+                    # measures 5285 hits against 1822 misses, which is 74%, and
+                    # a floor of 20% would have let that collapse back to the
+                    # 36% this cache shipped with while every boot stayed green.
+                    # A floor is only useful near what the thing actually does.
+                    problems.append(f"cache_hit_ratio_too_low hits={hits} misses={misses}")
+
+            # The three task counters that are assertions rather than
+            # diagnostics. Each names a defect this subsystem has produced: a
+            # slot written to after being published as reusable, a stale
+            # reference used as if it still named its task, and a task about to
+            # run on page tables somebody else had freed.
+            mt = re.search(r"\[TASKS\] MUSTBEZERO illegal_transition=0x([0-9a-f]{16}) "
+                           r"use_after_publish=0x([0-9a-f]{16}) "
+                           r"tenancy_mismatch=0x([0-9a-f]{16}) "
+                           r"cr3_without_owner=0x([0-9a-f]{16}) "
+                           r"exit_switch_irq_on=0x([0-9a-f]{16}) "
+                           r"procstate_double_put=0x([0-9a-f]{16}) "
+                           r"files_double_leave=0x([0-9a-f]{16})", text)
+            if mt is None:
+                problems.append("tasks_counters_missing")
+
+            else:
+                for name, group in (("illegal_transition", 1),
+                                    ("use_after_publish", 2),
+                                    ("tenancy_mismatch", 3),
+                                    ("cr3_without_owner", 4),
+                                    # hw_task_exit choosing the next task with
+                                    # interrupts on: a timer there saves the
+                                    # dying task's kernel frame as the next
+                                    # task's context. The crash it causes is
+                                    # rare; the precondition is every boot.
+                                    ("exit_switch_irq_on", 5),
+                                    # a process-state reference given back that
+                                    # nobody held: a double free of the shared
+                                    # per-process block, which threads share and
+                                    # exit/exec give back exactly once.
+                                    ("procstate_double_put", 6),
+                                    # a thread leaving the process's descriptor
+                                    # table without having been counted in it:
+                                    # the table closes under its other threads
+                                    # and then is never closed at all (M-072).
+                                    ("files_double_leave", 7)):
+                    value = int(mt.group(group), 16)
+                    if value != 0:
+                        problems.append(f"task_{name}={value}")
+
+            # Where the machine's time went.
+            #
+            # Asserted as an identity: every tick is charged to exactly one
+            # place - one task, or one core's idleness - so charged plus idle is
+            # seen, exactly. Not a tolerance. A mismatch is a tick that went
+            # somewhere nobody can name, and S-P5's policy would be tuned
+            # against the result.
+            #
+            # Also asserted non-zero: an accounting layer that is wired up but
+            # never called balances perfectly at zero, which is the way this
+            # check would quietly stop meaning anything.
+            cp = re.search(r"\[TASKS\] CPUTIME charged=0x([0-9a-f]+) idle=0x([0-9a-f]+)"
+                           r" seen=0x([0-9a-f]+) balanced=(\w+) dropped=0x([0-9a-f]+)", text)
+            if cp is None:
+                problems.append("cputime_accounting_missing")
+            else:
+                ch, idl, sn = (int(cp.group(i), 16) for i in (1, 2, 3))
+                # Within the number of cores - what can be in flight while
+                # the three counters are read - and not an exact match. A
+                # tick increments the total and then one of the parts, so a
+                # core caught between those two adds leaves the parts one
+                # short. The first version asserted equality and turned a
+                # correct kernel red twice in twelve boots.
+                if cp.group(4) != "yes" or abs((ch + idl) - sn) > 8:
+                    problems.append(
+                        f"cputime_does_not_balance charged={ch}_idle={idl}_seen={sn}")
+                elif sn == 0:
+                    problems.append("cputime_never_accounted")
+                elif ch == 0:
+                    problems.append("cputime_all_idle_no_task_ran")
+                # A refused tick keeps the identity above intact, because it was
+                # never counted at all - so this needs its own assertion or an
+                # accounting layer sized for one core would balance perfectly
+                # while reporting a quarter of a four-core machine. It did
+                # exactly that, once.
+                if int(cp.group(5), 16) != 0:
+                    problems.append(f"cputime_ticks_dropped={int(cp.group(5), 16)}")
+
+            # Threads created and joined while children exec. S-P6.
+            #
+            # Asserted rather than merely run, and the first run is why: the
+            # test failed, printed why, and the boot was reported verified
+            # because nothing was looking. A line in the log is not a check -
+            # this file has said so since the ring-3 ABI self-test spent a whole
+            # session printing "mmap/mprotect/munmap wrong" into a green boot.
+            # Keyed on the program having been *started*, not on the file
+            # being present. Those are different questions, and the difference
+            # cost a run: the binary ships on the media whether or not the boot
+            # script runs it, so a file check reported a missing result as a
+            # failure while nothing had been asked to produce one.
+            if "EFI/BOOT/TEXEC.ELF bytes=" in text:
+                if "TEXEC_OK" not in text:
+                    problems.append("thread_and_exec_did_not_pass")
+                for line in text.splitlines():
+                    if "TEXEC_FAIL" in line:
+                        problems.append("thread_and_exec_failed")
+                        break
+
+            # The time slice is spent, not merely declared.
+            #
+            # Preemption used to happen on every timer tick, so a task ran for
+            # exactly one tick per turn: ticks and runs were equal on every
+            # line of the task view. With a quantum they are not, and the ratio
+            # is the whole visible effect of the phase.
+            #
+            # Asserted on the busiest task, because a task that ran twice tells
+            # you nothing, and asserted as "more than one tick per turn" rather
+            # than as the quantum itself - a task blocks, is preempted by a
+            # higher class, or exits mid-slice, and pinning the exact number
+            # would fail on a boot that simply did different work.
+            #
+            # This exists because the quantum was defined and consulted by
+            # nothing for a whole phase, and every boot stayed green.
+            busiest = None
+            for tm in re.finditer(r"ticks=0x([0-9a-f]+) runs=0x([0-9a-f]+)", text):
+                t, r = int(tm.group(1), 16), int(tm.group(2), 16)
+                if r > 0 and (busiest is None or t > busiest[0]):
+                    busiest = (t, r)
+            if busiest is None:
+                problems.append("no_task_cpu_times_reported")
+            elif busiest[0] <= busiest[1]:
+                problems.append(
+                    f"quantum_not_spent ticks={busiest[0]}_runs={busiest[1]}")
+
+            # The fork storm. Phase S-P6 of docs/sched/.
+            #
+            # What is asserted is not that the storm ran but that it was
+            # *stopped* and then cleaned up after: SVC_BOMB_DONE only prints
+            # once every child has been reaped, and everything the boot does
+            # afterwards - the shell, the kernel CLI - is the real assertion
+            # that the machine stayed administrable.
+            #
+            # SVC_BOMB_UNBOUNDED is the case that must never appear: it means
+            # the program forked as many times as it cared to and the kernel
+            # never said no, which is the guard silently not working while
+            # every other line still looks healthy.
+            if "SVC_BOMB_START" not in text:
+                problems.append("fork_storm_never_ran")
+            elif "SVC_BOMB_DONE" not in text:
+                problems.append("fork_storm_did_not_finish_or_reap")
+            if "SVC_BOMB_UNBOUNDED" in text:
+                problems.append("fork_storm_was_never_refused")
+
+            # Allocation pressure: svc-press takes 64 MiB in 256 KiB blocks,
+            # checks every page still holds what it wrote, gives it all back
+            # and allocates once more. Nothing had ever asked this machine for
+            # that much in a row, and the first time something did it found two
+            # defects: the kernel image inside the frame pool (M-060, a wedge)
+            # and the TLB quarantine leaking a burst of unmaps (M-061, caught by
+            # userland_frames_lost). The verdict is read off its own lines.
+            # Reclaim, on a machine, end to end: svc-reclaim takes memory down
+            # to the low watermark and 12 MiB past it, reads every page back
+            # and checks it. The kernel's side has to show that it really went
+            # to swap and came back, that no slot was left behind, and that no
+            # fork of a page in swap failed (M-063).
+            if "RECLAIM_START" not in text:
+                problems.append("reclaim_load_never_ran")
+            elif re.search(r"^.*RECLAIM_FAIL", text, re.M):
+                problems.append("reclaim_load_failed")
+            elif not re.search(r"RECLAIM_OK blocks=\d+ past_low=\d+", text):
+                problems.append("reclaim_load_did_not_finish")
+            elif not re.search(r"RECLAIM_ABANDON_OK pushed=\d+", text):
+                # The second half: a child exits with most of the machine
+                # mapped while the parent's allocations drive reclaim into its
+                # pages - a teardown racing the clock, arranged rather than
+                # left to accident (M-070, M-073).
+                problems.append("reclaim_abandon_did_not_finish")
+            rcl = re.search(r"anon_evicted=0x([0-9a-f]{16})", text)
+            if rcl is None or int(rcl.group(1), 16) == 0:
+                problems.append("reclaim_never_evicted_an_anonymous_page")
+            sw = re.search(r"swap_ins=0x([0-9a-f]{16}) swap_dropped=0x([0-9a-f]{16}) "
+                           r"fork_swapped_in=0x([0-9a-f]{16}) "
+                           r"fork_swapped_failed=0x([0-9a-f]{16})", text)
+            if sw is None:
+                problems.append("swap_counters_missing")
+            else:
+                if int(sw.group(1), 16) == 0:
+                    problems.append("nothing_ever_came_back_from_swap")
+                if int(sw.group(4), 16) != 0:
+                    problems.append(f"fork_of_swapped_page_failed={int(sw.group(4), 16)}")
+            # The stack grows on demand (docs/abi/ L3): BusyBox's sed, which the
+            # corpus prints through, needs more than the four pages mapped at
+            # exec - so a boot in which no stack grew is one in which the
+            # mechanism was not there to be used.
+            sg = re.search(r" stack_grown=0x([0-9a-f]{16})", text)
+            if sg is None or int(sg.group(1), 16) == 0:
+                problems.append("stack_never_grew")
+            # And the mechanism under the self-test above: the fork in it has to
+            # have handed shared pages on as they were. Zero with the self-test
+            # passing would be a test that passes for another reason.
+            fk = re.search(r" fork_kept_shared=0x([0-9a-f]{16})", text)
+            if fk is None or int(fk.group(1), 16) == 0:
+                problems.append("fork_never_kept_a_shared_page")
+            sl = re.search(r"\[MM\] SWAP slots=0x[0-9a-f]{16} allocated=0x([0-9a-f]{16})",
+                           text)
+            if sl is not None and int(sl.group(1), 16) != 0:
+                # Read after every process has gone: a slot still held belongs
+                # to nobody. Every swapped page of every exited process used to
+                # stay here for the rest of the boot.
+                problems.append(f"swap_slots_leaked={int(sl.group(1), 16)}")
+
+            if "PRESS_START" not in text:
+                problems.append("press_never_ran")
+            elif re.search(r"^.*PRESS_FAIL", text, re.M):
+                problems.append("press_failed")
+            elif not re.search(r"PRESS_OK blocks=\d+", text):
+                problems.append("press_did_not_finish")
+
+            # Exec refusals, by reason.
+            #
+            # Asserted on the *names* that appear, not on a count. A boot
+            # deliberately provokes some refusals - a service that is meant to
+            # fail to start is a test - and the failure is any other reason
+            # showing up at all. A total would hide that: one extra
+            # "no-memory" among twenty expected "not-found"s is exactly the
+            # kind of thing this is for.
+            # Re-exec is cheap: X-P4's acceptance criterion, as a ratio.
+            #
+            # A read-only image page that comes wholly from the file is mapped
+            # from the page cache rather than copied into a fresh frame. BusyBox
+            # is two megabytes of text and is exec'd twenty times in a boot, so
+            # on a healthy boot the great majority of image pages are mapped
+            # rather than copied.
+            #
+            # Asserted as a ratio and not a threshold in pages: the number of
+            # pages depends on which programs a boot happens to run, and a
+            # figure tuned to today's manifest would fail the day somebody adds
+            # a program. What must hold is that the mechanism is doing the work.
+            cm = re.search(r"pages_from_cache=0x([0-9a-f]+) pages_copied=0x([0-9a-f]+)",
+                           text)
+            if cm is None:
+                problems.append("exec_page_source_stats_missing")
+            else:
+                from_cache = int(cm.group(1), 16)
+                copied = int(cm.group(2), 16)
+                if from_cache == 0:
+                    # The branch is on now, so nothing mapped from the cache is
+                    # a failure rather than a state.
+                    #
+                    # This is the case the previous version of this comment
+                    # anticipated and deliberately tolerated while the mapping
+                    # was disabled behind an if(0): "that is exactly how it
+                    # would stop working while every boot stayed green". It is
+                    # on, it measures 4242 pages mapped against 239 copied, and
+                    # the tolerance has to go with the if(0) - a gate that still
+                    # accepts zero would accept the branch being switched off
+                    # again by accident.
+                    problems.append("exec_mapped_nothing_from_cache")
+                elif from_cache < copied:
+                    problems.append(
+                        f"exec_copies_more_than_it_maps from_cache={from_cache}"
+                        f"_copied={copied}")
+            # Zero-fill .bss left to the page fault (W3 step 4). Every boot
+            # runs programs with static arrays, so none deferred is the
+            # mechanism gone, with every boot still green - each page would
+            # simply be allocated and cleared at exec again.
+            dm = re.search(r"pages_deferred=0x([0-9a-f]+)", text)
+            if dm is None or int(dm.group(1), 16) == 0:
+                problems.append("exec_deferred_no_bss")
+
+            # Every resident cache page still holds what its file holds.
+            #
+            # This detector was written, wired, and run on every boot - 1821
+            # pages compared against the file on the boot this assertion was
+            # added - and the gate never read the result. The comment above
+            # hw_cache_audit said "Reported as a count, and the boot gate
+            # asserts it is zero", which was false: a guarantee documented in
+            # the source and provided by nobody, which is worse than an
+            # undocumented gap because the sentence is what a reader trusts
+            # instead of checking.
+            #
+            # The harm it watches is the worst class this project has had. Once
+            # a read-only image page is mapped from the cache rather than
+            # copied, one frame is the text of every process running that
+            # program, so a single stray write reaches all of them and surfaces
+            # as some unrelated program misbehaving. That is the family that
+            # took four attempts and produced three confident wrong answers.
+            #
+            # checked is asserted non-zero as well: an audit that examined
+            # nothing reports changed=0, and this project has already shipped
+            # one counter that was never anything but zero.
+            ca = re.search(r"cache_audit_checked=0x([0-9a-f]+) "
+                           r"MUSTBEZERO cache_audit_changed=0x([0-9a-f]+)", text)
+            if ca is None:
+                problems.append("exec_cache_audit_missing")
+            else:
+                if int(ca.group(1), 16) == 0:
+                    problems.append("exec_cache_audit_checked_nothing")
+                changed = int(ca.group(2), 16)
+                if changed != 0:
+                    problems.append("exec_cache_page_changed=%d" % changed)
+
+            em = re.search(r"\[EXEC\] loaded=0x([0-9a-f]+).*? refused:(.*)", text)
+            if em is None:
+                problems.append("exec_counters_missing")
+            else:
+                if int(em.group(1), 16) == 0:
+                    problems.append("exec_loaded_zero")
+                seen = set(re.findall(r"([a-z-]+)=0x[0-9a-f]+", em.group(2)))
+                unexpected = sorted(seen - EXEC_EXPECTED_REFUSALS)
+                if unexpected:
+                    problems.append("exec_unexpected_refusal=" + ",".join(unexpected))
+
+            # The frame states must partition the total exactly.
+            #
+            # This is the assertion that would have caught meminfo assembling
+            # its picture from three sources that could not add up: allocated
+            # was derived as total minus free and silently swallowed every
+            # reserved frame. A breakdown whose parts do not sum to the whole is
+            # worse than no breakdown, because somebody acts on it.
+            mt = re.search(r"\[MEM\] bytes total=0x([0-9a-f]{16})", text)
+            mf = re.search(r"\[MEM\] frames free=0x([0-9a-f]{16}) "
+                           r"allocated=0x([0-9a-f]{16}) "
+                           r"reserved=0x([0-9a-f]{16}) "
+                           r"page-table=0x([0-9a-f]{16}) "
+                           r"cache=0x([0-9a-f]{16})", text)
+            if mt is None or mf is None:
+                problems.append("meminfo_frames_missing")
+            else:
+                total = int(mt.group(1), 16) // 4096
+                parts = sum(int(mf.group(i), 16) for i in range(1, 6))
+                if parts != total:
+                    problems.append(f"mm_states_do_not_sum {parts}!={total}")
+                if int(mf.group(1), 16) == 0:
+                    problems.append("mm_no_free_frames_at_cli")
+
+            # Fragmentation. Asserted rather than printed, because a run of zero
+            # means no contiguous allocation can ever succeed again - and the
+            # kernel stack of the next task is a contiguous allocation.
+            mr = re.search(r"largest_free_run=0x([0-9a-f]{16})", text)
+            if mr is None:
+                problems.append("meminfo_fragmentation_missing")
+            elif int(mr.group(1), 16) < 2:
+                problems.append("mm_no_contiguous_memory_left")
+
+            # The frame layer replaced the bump allocator; if it failed to come
+            # up the machine still boots on the static pool, which is a very
+            # different machine and must not pass quietly.
+            if "[MM] frame layer online:" not in text:
+                problems.append("mm_frame_layer_absent")
+
+            if "USERLAND_START" not in text:
+                problems.append("userland_never_started")
+            elif text.index("BOOT_OK") > text.index("USERLAND_START"):
+                problems.append("kernel_announced_itself_after_userland_ran")
+            if "USERLAND_DONE" not in text:
+                problems.append("userland_never_finished")
+
+            if "STRESS_SEED" not in text:
+                problems.append("stress_seed_not_reported")
+            if "STRESS_OK" not in text:
+                problems.append("stress_run_did_not_finish")
+            if "STRESS_FAIL" in text:
+                problems.append("stress_run_found_a_defect")
+                # Print it here rather than leaving it in an artifact. This
+                # failure has reproduced five times out of five in CI and not
+                # once in fifty boots locally, so the run that can see it is
+                # the only one that can say what it is - and every one of
+                # these lines names what was found, at which offset, and the
+                # seed that replays it.
+                for line in text.splitlines():
+                    if "STRESS_FAIL" in line or "STRESS_SEED" in line:
+                        print(f"[QEMU-CLI] {line.strip()[:200]}")
+
+            if "SVC_CRASH_FAULTING" not in text:
+                problems.append("crashing_service_never_ran")
+            if "SVC_KILLED svc-crash" not in text:
+                problems.append("signal_death_not_distinguished_from_exit")
+            if "SVC_STOPPED svc-crash" in text:
+                problems.append("crashed_service_reported_as_clean_stop")
+            if "SVC_FAILED svc-crash" not in text:
+                problems.append("crashed_service_not_marked_failed")
+
+            if echo_state["connections"] == 0 and not SKIP_ECHO:
+                problems.append("no_tcp_connection_reached_the_host")
+
+            # If the build staged an unmodified static Linux binary, it has to
+            # have run. This is checked only when the file exists because
+            # musl-gcc is not available on every machine - but where it is, a
+            # regression that stops a real Linux program from starting must
+            # fail the boot rather than be noticed later by someone reading
+            # the log.
+            # BusyBox is a real program doing real work rather than a test
+            # written to pass: it dispatches on its own name, reads a file
+            # through openat/fstat/read, and lists a directory through
+            # getdents64. Checked only when the host had a static BusyBox to
+            # stage.
+            busybox = os.path.join(efi_root, "EFI", "BOOT", "BUSYBOX.ELF")
+            if os.path.exists(busybox):
+                if "BUSYBOX_ECHO_OK" not in text:
+                    problems.append("busybox_did_not_run")
+                if "applet not found" in text:
+                    problems.append("busybox_applet_dispatch_failed")
+                # Starting is not working. These are BusyBox's own error
+                # messages when a file operation fails, so they catch a
+                # regression in openat, fstat, read or getdents64 that would
+                # otherwise leave the boot looking green.
+                if "cat: can't open" in text or "ls: can't open" in text:
+                    problems.append("busybox_file_operations_failed")
+                # The console is handed to BusyBox's shell, which then reads
+                # typed lines itself. This checks the whole chain: an
+                # interactive shell running a builtin, then finding an external
+                # command through PATH and exec'ing it.
+                # The file the native shell wrote is read back with its
+                # contents, by every program that cats it - five times: the
+                # native shell, BusyBox as a program, and BusyBox's shell with
+                # -c, at its prompt and after cd. The line had been
+                # in the log for months and was never asserted - it only moved
+                # the reported phase - so when the write stopped writing
+                # (L1 step 4: the native `write` opened read-only) every cat
+                # printed nothing and the boot stayed green for three steps.
+                if len(re.findall(r"write\(ring3\): persistent hello\r?\n", text)) < 5:
+                    problems.append("notes_file_not_read_back")
+                # The console is a terminal (L1 step 7), so BusyBox's shell is
+                # interactive on it: it prints its prompt, which it does for
+                # nothing but a terminal...
+                if not re.search(r"write\(ring3\): ~ # ", text):
+                    problems.append("shell_not_interactive")
+                # ...and reads its command line a key at a time with the
+                # terminal's echo off, showing each key itself: the word "echo"
+                # as four writes of one character. With the kernel still
+                # echoing, the typed letters would be in the log bare, between
+                # the shell's.
+                if not re.search(r"write\(ring3\): e\[HW\]\[SYS\] write\(ring3\): c\[HW\]\[SYS\] "
+                                 r"write\(ring3\): h\[HW\]\[SYS\] write\(ring3\): o\[HW\]", text):
+                    problems.append("terminal_raw_mode_failed")
+                if "ASH_INTERACTIVE_OK" not in text:
+                    problems.append("interactive_shell_did_not_run")
+                # A pipeline is the first thing anyone tries on a shell, and
+                # the way it fails is by hanging rather than by erroring - so
+                # PIPE_OK arriving at all is the check. It is printed after
+                # the pipeline, so it cannot appear if the pipeline stalled.
+                if "PIPE_OK" not in text:
+                    problems.append("pipeline_did_not_complete")
+                if "BUSYBOX_SH_OK" not in text:
+                    problems.append("shell_script_did_not_run")
+                # cd in a shell (docs/abi/ A4): the chain prints CD_OK only if
+                # chdir, getcwd and a relative open all worked, and getcwd's
+                # own answer - pwd -P, which asks getcwd, not ash's $PWD - is
+                # checked on its line. Both are read off the program's output
+                # lines: the command itself is echoed into the log as it is
+                # typed, so the bare token would be found whether or not it ran.
+                if (not re.search(r"write\(ring3\): CD_OK\r?\n", text) or
+                        not re.search(r"write\(ring3\): /DOCS\r?\n", text)):
+                    problems.append("shell_cd_did_not_work")
+                # A file written in /tmp and read back (docs/abi/ L1). The
+                # contents are computed by the shell - TMPFS_RT_$((1+1)) - so
+                # the typed command, which is echoed into the log too, cannot
+                # stand in for the file's contents.
+                if not re.search(r"write\(ring3\): TMPFS_RT_2\r?\n", text):
+                    problems.append("tmpfs_round_trip_failed")
+                # Writing through a descriptor (docs/abi/ L1 step 3): 820
+                # bytes written in twenty writes, five appended, and wc's
+                # count of the file. Any other number is on the line instead:
+                # 512 was the old ceiling, 820 is >> that did not append.
+                if not re.search(r"write\(ring3\): 825\r?\n", text):
+                    problems.append("tmp_write_path_failed")
+                # The same on the boot volume, FAT, in place (step 4): 866
+                # bytes counted, and a file under a name that is not 8.3 read
+                # back by it.
+                if (not re.search(r"write\(ring3\): 866\r?\n", text) or
+                        not re.search(r"write\(ring3\): LFN_5\r?\n", text)):
+                    problems.append("fat_write_path_failed")
+                # Names and metadata (step 5): stat's own line, printed only
+                # if mv, ln, ln -s, chmod, mkdir and rmdir before it worked, and
+                # carrying the mode, link count and size they should have left;
+                # then a rename on the FAT volume, read back by its new name.
+                if not re.search(r"write\(ring3\): META_600_2_2\r?\n", text):
+                    problems.append("names_and_metadata_failed")
+                if not re.search(r"write\(ring3\): FATMV_4\r?\n", text):
+                    problems.append("fat_rename_failed")
+                # The corpus's file workloads, against Linux's answers (step 8).
+                if ESP == "image":
+                    cp, corpus_absent = corpus_problems(text)
+                    problems.extend(cp)
+                # A directory listed (step 6): ls prints the long name whole,
+                # ls -a counts four entries - the two dots, the file, the link -
+                # and find, which trusts the type in the entry, counts one link.
+                # Since step 7 the two names are on one line: ls found a
+                # terminal, asked how wide it is, and laid them out in columns.
+                if (not re.search(r"write\(ring3\): a file name longer than fifteen bytes +dangling\r?\n", text) or
+                        not re.search(r"write\(ring3\): DIRS_4_1\r?\n", text)):
+                    problems.append("directory_listing_failed")
+
+            signal_elf = os.path.join(efi_root, "EFI", "BOOT", "SIGNAL.ELF")
+            if os.path.exists(signal_elf):
+                if "SIG_OK" not in text:
+                    problems.append("signal_delivery_broken")
+                # docs/abi/ L2 step 2: the frame is Linux's, a fault goes to a
+                # handler that asked for it, and the calls that wait for a
+                # signal work. Read off the program's own line, which it prints
+                # only if every one of those checks held.
+                if not re.search(r"write\(ring3\): SIG_L2_OK: ", text):
+                    problems.append("signal_l2_checks_failed")
+                # L2 step 3: every timer kind fires, read off the program's own
+                # line, which it prints only if each one did.
+                if not re.search(r"write\(ring3\): TIMER_OK: ", text):
+                    problems.append("timers_did_not_fire")
+                # L2 step 4: the enforced limits are run into, read off the
+                # program's own line.
+                if not re.search(r"write\(ring3\): LIMITS_OK: ", text):
+                    problems.append("limits_not_enforced")
+                # L2 step 5: waiting, pidfds, execveat, clone3.
+                if not re.search(r"write\(ring3\): PROC_OK: ", text):
+                    problems.append("process_calls_failed")
+                # L2 step 6: /proc, /dev, getrandom, and the three defects
+                # step 5's LTP run found (shared futex, clone's exit signal,
+                # orphans given to init).
+                if not re.search(r"write\(ring3\): PROCDEV_OK: ", text):
+                    problems.append("proc_dev_checks_failed")
+                # L2 step 7: a stop holds until SIGCONT, and a group orphaned
+                # with a stopped member is hung up (step 6's LTP run).
+                if not re.search(r"write\(ring3\): JOBS_OK: ", text):
+                    problems.append("job_control_broken")
+
+            # docs/abi/ L4: the event loops, read off EVENTS.ELF's own line,
+            # which it prints only if every one of its checks held.
+            events_elf = os.path.join(efi_root, "EFI", "BOOT", "EVENTS.ELF")
+            if os.path.exists(events_elf):
+                if not re.search(r"write\(ring3\): EVENTS_OK: ", text):
+                    problems.append("events_l4_failed")
+
+            # docs/abi/ L4 step 7: the programs the phase was planned from,
+            # run by /corpus/progs.sh under BusyBox. Each verdict is read off
+            # what came back, not off a line the guest chose to print.
+            if os.path.exists(busybox):
+                print("[QEMU-CLI] programs: httpd fetch=%r nc send=%s"
+                      % ((progs_state["http"] or "never asked")[:120], progs_state["nc"]))
+                if "L4P_DONE_42" not in text:
+                    problems.append("l4_programs_did_not_finish")
+                if "L4P_TAILF_SAW L4P_TAILF_42" not in text:
+                    problems.append("tail_f_did_not_follow")
+                body = progs_state["http"] or "never asked"
+                if not body.startswith("HTTP/1.") or not body.rstrip().endswith("L4P_BODY_42"):
+                    print("[QEMU-CLI] httpd answered: %r" % body[:200])
+                    problems.append("httpd_not_served")
+                if "L4P_NCIN_SAW " + progs_state["nc_token"] not in text:
+                    print("[QEMU-CLI] nc listening: host side %s" % progs_state["nc"])
+                    problems.append("nc_in_not_received")
+                if not SKIP_ECHO and "L4P_NCOUT_SAW ECHO:L4P_NCOUT_9" not in text:
+                    problems.append("nc_out_no_answer")
+
+            # docs/abi/ L5: the sockets. SOCKETS.ELF's checks, a Unix-socket
+            # server and client among them, read off its own line; BusyBox
+            # wget read off the page this run made up; the DNS answer read off
+            # what the resolver said, when the host could ask at all.
+            sockets_elf = os.path.join(efi_root, "EFI", "BOOT", "SOCKETS.ELF")
+            if os.path.exists(sockets_elf) and os.path.exists(busybox):
+                print("[QEMU-CLI] sockets: wget requests=%r dns=%r"
+                      % (wget_state["requests"][:3], L5_DNS_NAME or "absent"))
+                if "L5P_DONE_45" not in text:
+                    problems.append("l5_programs_did_not_finish")
+                if not re.search(r"write\(ring3\): SOCKETS_OK: ", text) or "L5P_SOCKETS_RC 0" not in text:
+                    problems.append("sockets_l5_failed")
+                if not SKIP_ECHO and "L5P_WGET_SAW " + wget_state["token"] not in text:
+                    problems.append("wget_not_fetched")
+                if L5_DNS_NAME:
+                    m = re.search(r"SOCK_RESOLVED " + re.escape(L5_DNS_NAME)
+                                  + r" (\d+)\.(\d+)\.(\d+)\.(\d+)", text)
+                    if not m or not all(int(x) < 256 for x in m.groups()) or m.group(1) in ("0", "127"):
+                        problems.append("dns_not_resolved")
+
+            # The graphical shell, to the extent a serial log can speak for
+            # it: the console has to have reached the on-screen terminal. Only
+            # checked when a desktop came up at all, since a build without a
+            # framebuffer is not a failing one.
+            gui = re.search(r"GUI_STATS frames=0x([0-9a-f]+) termchars=0x([0-9a-f]+)", text)
+            # A framebuffer the desktop did not take. Every check below is
+            # conditional on the desktop having come up, so until C7 a GUI
+            # that refused - or was never linked, which is what happened the
+            # day it moved into the core archive - passed the gate with the
+            # text console standing in for it. The GUI names its reason in
+            # its own report now, and that is what the failure carries.
+            if "[FB] framebuffer console ready" in text:
+                why = re.search(r"GUI_STATS [^\n]* init=([^\r\n]*)", text)
+                problems.append("gui_refused:" + (why.group(1).strip().replace(" ", "_")
+                                                  if why else "not_registered"))
+            if "[GUI] desktop up" in text:
+                if gui is None:
+                    problems.append("gui_reported_nothing")
+                elif int(gui.group(2), 16) == 0:
+                    problems.append("gui_terminal_empty")
+
+            # The desktop's canary, which was printed as MUSTBEZERO and read by
+            # nobody for the whole of C0 - added in the session that had just
+            # quoted "a line in the serial log is not a check", and missed by
+            # both existing checks-on-checks: it has a `++` so
+            # check-counters-produced.py was satisfied, and it never appears in
+            # a reason= so check-assertions-covered.py had nothing to match.
+            # check-mustbezero-asserted.py exists for that gap and found this.
+            #
+            # Unconditional, unlike the two above: guard_broken is printed
+            # whenever the framebuffer report runs, and a build with no desktop
+            # prints no line at all, so absence is not a failure but a non-zero
+            # value always is.
+            guard = re.search(r"\[GUI\] MUSTBEZERO guard_broken=0x([0-9a-f]+)", text)
+            if guard is not None and int(guard.group(1), 16) != 0:
+                problems.append("gui_guard_broken=%d" % int(guard.group(1), 16))
+
+            # The GUI as a registered display (C7): its own report, from the
+            # device registry, on every boot whether or not a desktop came up.
+            # term_overrun is a grid write the GUI refused because it fell
+            # outside the grid - which before its lock existed was two cores
+            # in putc writing a row past the end of the array, silently.
+            # guard_checks says the canary above is examined on the repaint
+            # and not only at the end: a check that never runs reads as zero.
+            gz = re.search(r"\[GUI\] MUSTBEZERO guard_broken=0x([0-9a-f]{16}) "
+                           r"MUSTBEZERO term_overrun=0x([0-9a-f]{16}) "
+                           r"guard_checks=0x([0-9a-f]{16})", text)
+            if gz is None:
+                problems.append("gui_counters_missing")
+            else:
+                if int(gz.group(2), 16) != 0:
+                    problems.append("gui_term_overrun=%d" % int(gz.group(2), 16))
+                if "[GUI] desktop up" in text and int(gz.group(3), 16) == 0:
+                    problems.append("gui_guard_never_checked")
+            # The back buffer's frames, asked of the frame layer at the end of
+            # the boot. Printed as must-be-zero since the argv investigation
+            # and asserted by nobody: guard_broken led the line, and
+            # check-mustbezero-asserted.py reads only the first name after the
+            # word. Moving guard_broken to the GUI's own line exposed it.
+            bb = re.search(r"\[GUI\] MUSTBEZERO backbuf_shared=0x([0-9a-f]{16}) "
+                           r"MUSTBEZERO backbuf_lost=0x([0-9a-f]{16})", text)
+            if bb is not None:
+                if int(bb.group(1), 16) != 0:
+                    problems.append("gui_backbuf_shared=%d" % int(bb.group(1), 16))
+                if int(bb.group(2), 16) != 0:
+                    problems.append("gui_backbuf_lost=%d" % int(bb.group(2), 16))
+
+            # A position-independent executable is placed by the loader, not
+            # by the file. Checking argv as well as the greeting is what
+            # separates "it ran" from "it ran and could still see the stack
+            # the loader built" - a bias applied to the image but not to
+            # AT_PHDR produces the first without the second.
+            pie = os.path.join(efi_root, "EFI", "BOOT", "PIE.ELF")
+            if os.path.exists(pie):
+                if "PIE_OK" not in text:
+                    problems.append("position_independent_binary_did_not_run")
+                elif "PIE_ARGS: argc=1" not in text:
+                    problems.append("position_independent_binary_got_wrong_argv")
+
+            # A dynamic executable is started by its interpreter, not by the
+            # kernel. Reaching main() at all means the second image was mapped,
+            # AT_BASE told the loader where it landed, and AT_ENTRY still
+            # pointed at the program. argv0len comes back through the C
+            # library's strlen, so a symbol had to be resolved rather than
+            # folded away by the compiler.
+            # Threads. The counter is asserted as well as the greeting:
+            # "the threads ran" and "the threads ran, shared one address
+            # space and took a contended lock without losing an increment"
+            # are different claims, and a kernel can produce the first while
+            # failing the second. tls=ok says each thread saw its own
+            # thread-local, which is what separates four threads from one
+            # thread run four times.
+            thr = os.path.join(efi_root, "EFI", "BOOT", "THREADS.ELF")
+            if os.path.exists(thr):
+                if "THREADS_STAGE1_OK" not in text:
+                    problems.append("thread_create_or_join_failed")
+                elif "counter=8000 expected=8000" not in text:
+                    problems.append("threads_lost_an_increment")
+                elif "tls=ok" not in text:
+                    problems.append("thread_local_storage_shared")
+
+                # Whether the threads are one *process*. The three checks above
+                # cannot see it: every thread there is created by main and no
+                # worker touches process state, so a kernel that gives each
+                # thread a private copy of the process passes them. These
+                # stages were run against such a kernel and failed on it.
+                #
+                # A stage that printed nothing is a failure, not a pass -
+                # `in text` is the easiest way for an assertion to evaporate.
+                #
+                # Every reason is spelled out rather than assembled: the first
+                # version built the did_not_report names with an f-string, and
+                # check-assertions-covered.py cannot match a name it cannot
+                # read, so three assertions left its view on the day they were
+                # written.
+                for stage, reason, silent in (
+                        ("C5_MMAP", "thread_mmap_reused_a_base",
+                         "threads_c5_mmap_did_not_report"),
+                        ("C5_SIGACTION", "thread_sigaction_not_shared",
+                         "threads_c5_sigaction_did_not_report"),
+                        ("C5_EXIT_GROUP", "thread_exit_group_left_siblings",
+                         "threads_c5_exit_group_did_not_report"),
+                        ("C5_WNOHANG", "wait4_ignored_wnohang",
+                         "threads_c5_wnohang_did_not_report"),
+                        ("C5_TKILL", "tkill_missed_a_live_thread",
+                         "threads_c5_tkill_did_not_report"),
+                        ("C5_EXIT_GROUP_BLOCKED",
+                         "thread_blocked_sibling_survived_exit_group",
+                         "threads_c5_exit_group_blocked_did_not_report"),
+                        ("C5_FUTEX_XPROC",
+                         "futex_wake_crossed_processes",
+                         "threads_c5_futex_xproc_did_not_report"),
+                        ("C5_EXEC", "thread_exec_left_siblings_or_identity",
+                         "threads_c5_exec_did_not_report"),
+                        ("C5_FILES", "thread_descriptors_not_shared",
+                         "threads_c5_files_did_not_report"),
+                        # docs/abi/ L6: a robust lock its owner died holding,
+                        # and a broadcast handed on with FUTEX_REQUEUE.
+                        ("C6_ROBUST", "robust_lock_not_released_at_exit",
+                         "threads_c6_robust_did_not_report"),
+                        # Issue #143: the same lock, held across an execve.
+                        ("C6_EXECROBUST", "robust_lock_not_released_at_exec",
+                         "threads_c6_execrobust_did_not_report"),
+                        ("C6_COND", "cond_broadcast_left_waiters",
+                         "threads_c6_cond_did_not_report"),
+                        # L6 step 2: a thread pinned to core 1 runs there,
+                        # membarrier's IPIs come back, SCHED_FIFO reads back.
+                        ("C6_SCHED", "sched_affinity_membarrier_or_policy_failed",
+                         "threads_c6_sched_did_not_report"),
+                        # L6 step 3: CLONE_VM|CLONE_VFORK, and posix_spawn on it.
+                        ("C6_VFORK", "vfork_did_not_share_or_wait",
+                         "threads_c6_vfork_did_not_report"),
+                        # L6 step 4: a fatal signal ends every thread.
+                        ("C6_ABORT", "fatal_signal_left_a_thread",
+                         "threads_c6_abort_did_not_report")):
+                    if f"THREADS_{stage}_OK" in text:
+                        continue
+                    if f"THREADS_{stage}_FAIL" in text:
+                        problems.append(reason)
+                    else:
+                        problems.append(silent)
+
+            # PID 1 is a native ring-3 init, and it is the parent of the
+            # bring-up workload rather than being it. Asserted because the
+            # difference is invisible from everything else in this log: the
+            # same programs run either way, and only this line says a process
+            # existed whose job was to outlive them.
+            if "NATIVE_INIT_READY" not in text:
+                problems.append("native_init_did_not_run")
+            elif "NATIVE_INIT_CHILD_PID=" not in text:
+                # An init that exec'd the workload in place would print the
+                # line above and nothing here, and the rest of the boot would
+                # look the same - so this is the assertion that says init is a
+                # parent rather than the workload wearing its name.
+                problems.append("native_init_did_not_fork_a_child")
+
+            # Supervision, asserted as behaviour rather than as a marker. Each
+            # of these is a different way "we have services" can be false:
+            #
+            #  - three services start from the manifest, so init is reading a
+            #    list rather than knowing one program by name;
+            #  - a service that exits zero is left stopped. This one is easy to
+            #    get wrong in the direction that looks healthy: a supervisor
+            #    that restarts everything produces a busy, plausible log and an
+            #    infinite loop;
+            #  - a failing service is restarted by policy, then given up on. A
+            #    supervisor with no limit and one with no restarts both "work"
+            #    right up until a service starts failing;
+            #  - init is still there afterwards and says so. Without this the
+            #    other three could all be true of a supervisor that died with
+            #    the last service it was watching.
+            started = set(re.findall(r"SVC_START (\S+)", text))
+            if len(started) < 3:
+                problems.append("services_did_not_start_from_manifest")
+            if "SVC_STOPPED svc-ok" not in text:
+                problems.append("clean_exit_not_left_stopped")
+            if "SVC_RESTART svc-flap 2" not in text:
+                problems.append("failed_service_not_restarted_by_policy")
+            if "SVC_FAILED svc-flap" not in text:
+                problems.append("restart_limit_not_enforced")
+            if "SVC_STOPPED svc-flap" in text:
+                # The restart limit marks a service FAILED; calling it stopped
+                # would report a machine in trouble as a machine at rest.
+                problems.append("exhausted_service_reported_as_clean_stop")
+            if "NATIVE_INIT_CHILD_EXITED" not in text:
+                problems.append("init_did_not_survive_its_services")
+
+            # The ring-3 ABI round trip. This was printing "abi: ...wrong"
+            # for a whole session while the gate stayed green, because the
+            # line was collected into the summary and never asserted on - so
+            # a regression in mmap/mprotect/munmap was visible in the log and
+            # invisible to CI. A check that is only ever read by a human is
+            # not a check.
+            if "linux abi ok" not in text:
+                problems.append("linux_abi_selftest_failed")
+            # %fs and %gs kept across the context switches the self-test has
+            # been through by the time it asks. Both lines were printed and
+            # neither asserted until docs/abi/windows.md W1, when the kernel
+            # began swapping %gs - which a switch that forgot to reload would
+            # leave holding another program's base.
+            if "tls survived context switches" not in text:
+                problems.append("tls_lost_across_switch")
+            if "gs survived context switches" not in text:
+                problems.append("gs_lost_across_switch")
+            # File locks between two processes (L1 step 6), which the same
+            # program checks from ring 3 and says in a line of its own: nothing
+            # else the boot runs takes a lock.
+            if not re.search(r"write\(ring3\): LOCKS_OK", text):
+                problems.append("file_locks_selftest_failed")
+            # The stack, from ring 3 (L3): a frame of a hundred kilobytes, the
+            # kernel storing into a page of it nobody had touched, and a child
+            # killed on the guard page below.
+            if not re.search(r"write\(ring3\): STACK_OK", text):
+                problems.append("stack_selftest_failed")
+            # Shared mappings, from ring 3 (L3 step 2): anonymous memory and a
+            # page of a file on /tmp, stored into by a forked child and read by
+            # the parent - and, for the file, read back through the descriptor.
+            if not re.search(r"write\(ring3\): SHARED_OK", text):
+                problems.append("shared_mapping_selftest_failed")
+            # madvise, mincore, mlock, mremap and memfd_create, from ring 3
+            # (L3 step 4): a page given back reads zeros, a mapping that moves
+            # to grow keeps its contents, a memfd is shared across a fork.
+            if not re.search(r"write\(ring3\): MEM4_OK", text):
+                problems.append("memory_calls_selftest_failed")
+            # Credentials, from ring 3 (L2 step 1): a child that gave up root
+            # is refused root's file and root's directory, owns what it makes,
+            # and cannot take root back.
+            if not re.search(r"write\(ring3\): CRED_OK", text):
+                problems.append("credentials_selftest_failed")
+
+            # A write from a kernel address must be refused. The row declares the
+            # buffer and the dispatcher's descriptor engine refuses it before the
+            # handler runs; the program prints this line only if it was refused.
+            # Until now nothing asserted it, so an engine that validated nothing
+            # would have booted green.
+            if "kernel pointer correctly rejected" not in text:
+                problems.append("kernel_pointer_not_rejected")
+
+            # The user-access recovery (H-003, H-010): a copy from an unmapped
+            # user address must return an error rather than panic the kernel.
+            # The kernel forces one every boot and says so; a missing line means
+            # it either panicked or never ran the probe.
+            if "uaccess recovery ok" not in text:
+                problems.append("uaccess_recovery_not_proven")
+
+            dyn = os.path.join(efi_root, "EFI", "BOOT", "DYN.ELF")
+            if os.path.exists(dyn):
+                if "DYN_OK" not in text:
+                    problems.append("dynamic_binary_did_not_run")
+                elif "DYN_ARGS: argc=1" not in text:
+                    problems.append("dynamic_binary_got_wrong_argv")
+
+            musl = os.path.join(efi_root, "EFI", "BOOT", "MUSL.ELF")
+            if os.path.exists(musl):
+                if "MUSL_OK" not in text:
+                    problems.append("unmodified_linux_binary_did_not_run")
+                elif "MUSL_ARGS: argc=1" not in text:
+                    problems.append("linux_binary_got_wrong_argv")
+
+            # The NT personality (docs/abi/windows.md W1): a PE program on our
+            # ntdll. NT_HELLO_OK is printed only if every answer it checked was
+            # right - the TEB through %gs, the PEB, each W1 service - and a
+            # failure prints which. The one unimplemented service it asks for
+            # on purpose is the only one a healthy boot may name, as syscall
+            # 1999 is on the Linux side; any other is a program asking for a
+            # step nobody has written.
+            nt_absent = False
+            hello_exe = os.path.join(efi_root, "win", "hello.exe")
+            if os.path.exists(hello_exe):
+                if "NT_HELLO_OK" not in text:
+                    failed = re.search(r"NT_HELLO_FAIL (\w+)", text)
+                    problems.append("nt_program_did_not_run" +
+                                    ("=" + failed.group(1) if failed else ""))
+                asked = re.findall(r"unimplemented NT service nr=0x[0-9a-f]+ (\w+)", text)
+                if "NtYieldExecution" not in asked:
+                    problems.append("nt_probe_not_counted")
+                for name in sorted(set(asked) - {"NtYieldExecution"}):
+                    problems.append("nt_unimplemented_service=" + name)
+                # A DLL loaded from the disk (W2): our msvcrt, linked by our
+                # ntdll's loader and called.
+                if "NT_DLL_OK: msvcrt printf 42 loaded" not in text:
+                    problems.append("nt_dll_not_loaded")
+                # The process heap grows on NtAllocateVirtualMemory (W3 step
+                # 3), and malloc is on it. Printed after NT_HELLO_OK, so it
+                # needs its own assertion: a failure here would leave that
+                # line standing.
+                elif "NT_HEAP_OK" not in text:
+                    failed = re.search(r"NT_HELLO_FAIL (heap_\w+)", text)
+                    problems.append("nt_heap_did_not_grow" +
+                                    ("=" + failed.group(1) if failed else ""))
+            stubcall = os.path.join(efi_root, "win", "stubcall.exe")
+            if os.path.exists(stubcall):
+                # A function no DLL exports is bound to a stub that names it
+                # and ends the program - and it does end there.
+                if not re.search(r"unimplemented: kernel32\.dll\.SetFirmwareEnvironmentVariableA", text,
+                                 re.IGNORECASE):
+                    problems.append("nt_stub_did_not_name_the_import")
+                if "NT_STUBCALL_RETURNED" in text:
+                    problems.append("nt_stub_returned")
+            else:
+                nt_absent = True
+
+            if problems:
+                reason = "invariant_failed:" + ",".join(problems)
+                raise RuntimeError(reason)
+
+            serial.close()
+            qemu.terminate()
+            try:
+                qemu.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                qemu.kill()
+                qemu.wait(timeout=5)
+            err_fp.close()
+
+            # The boot volume, now that nothing is writing it (docs/abi/ L1
+            # step 4). The guest wrote files on it in place; whether the volume
+            # it left behind is one another system would accept is not something
+            # the guest can say about itself.
+            if ESP == "image":
+                problems = boot_volume_problems(esp_img)
+                if problems:
+                    reason = "invariant_failed:" + ",".join(problems)
+                    raise RuntimeError(reason)
+
+            status = "pass"
+            reason = (f"cli_and_network_verified"
+                      f" tcp_connections={echo_state['connections']}"
+                      f" bytes={echo_state['received']}")
+            if ESP == "image" and corpus_absent:
+                # Said in the verdict, not left to be noticed: these workloads
+                # were skipped because their programs were not built.
+                reason += " corpus_absent=" + "+".join(corpus_absent)
+            if ESP == "image" and not L5_DNS_NAME:
+                # A skip that is allowed is printed where the result is read.
+                reason += " dns_absent"
+            if nt_absent:
+                # No mingw-w64, no Windows program: said, as corpus_absent is.
+                reason += " nt_absent"
+
+    except Exception as exc:
+        reason = str(exc)
+        infra = reason.startswith("INFRA:")
+        if qemu is not None and qemu.poll() is None:
+            qemu.terminate()
+            try:
+                qemu.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                qemu.kill()
+        status = "infra_error" if infra else "fail"
+    finally:
+        echo_stop.set()
+        if echo_thread is not None:
+            echo_thread.join(timeout=2)
+        if wget_thread is not None:
+            wget_thread.join(timeout=2)
+        if os.path.exists(err_log_path):
+            with open(err_log_path, "rb") as fp:
+                err_text = fp.read().decode("utf-8", errors="replace")
+        write(serial_log_path, serial_text)
+        write(summary_path, "\n".join([
+            f"status={status}",
+            f"reason={reason}",
+            f"failure_class={'infra_error' if infra else ('pass' if status == 'pass' else 'guest_failure')}",
+            f"last_guest_phase={last_guest_phase}",
+            f"last_expected={last_expected}",
+            f"last_serial_timestamp={last_serial_timestamp:.3f}",
+            f"phase_history={'|'.join(phase_history)}",
+            "wedge_report=" + " || ".join(serial_extra),
+            f"qemu_exit_code={qemu.returncode if qemu is not None else 'unknown'}",
+            f"build_dir={build_dir}",
+            f"efi_root={efi_root}",
+            f"serial_log={serial_log_path}",
+            f"error_log={err_log_path}",
+            f"serial_tail={tail_text(serial_text)}",
+            f"error_tail={tail_text(err_text)}",
+            "",
+        ]))
+
+    if status == "pass":
+        print("[QEMU-CLI] PASS boot-to-cli verified")
+        return 0
+    print(f"[QEMU-CLI] FAIL {reason}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,459 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* B1 — block devices. See include/vibeos/blkdev.h for why a request is a value.
+ *
+ * The whole of the layer is: validate, dispatch, and check what came back
+ * against what was asked for. That third step is the one that does not exist
+ * today and is the reason this file does: a driver that moves four sectors of
+ * eight and returns success is reporting a success that lost half the data,
+ * and every caller above would believe it.
+ */
+
+#include <string.h>
+#include "vibeos/blkdev.h"
+#include "vibeos/io_stats.h"
+
+/* Small and fixed. This layer is reached from paths that must not allocate -
+ * a page fault reading an executable, and eventually a log written from a
+ * panic handler - so the table is static and its size is a decision recorded
+ * in docs/io/decisions.md rather than a limit discovered at runtime. */
+/* Raised from 4 in the change that earned it, which is the only way a limit
+ * here should move. A boot now registers five: the virtio boot disk, the AHCI
+ * log disk, the RAM scratch device, and the two loop devices behind I5's ext2
+ * and ISO9660 images. At four the fifth was refused, and the refusal is
+ * counted and asserted - which is how it was found, rather than by a device
+ * quietly not being there. 8 -> 12 for ext4's image (docs/filesystem-design/
+ * ext4.md step 1): a boot registers nine now - the boot disk, the log disk,
+ * the scratch device and six loop devices - and at eight the long-name FAT
+ * image's was refused, reported by the gate as io_register_refused=1. */
+#define BLK_MAX_DEVICES 12u
+
+/* quota: none - devices drivers register; no program adds one. */
+static vibeos_blk_driver_t g_dev[BLK_MAX_DEVICES];
+static uint32_t g_count;
+
+static vibeos_io_stats_t g_stats;
+
+/* Every counter in this layer is written by whichever core happens to be in
+ * it, and I7's concurrency measurement says that is more than one: a boot
+ * reports in_flight_peak=2. So `x++` here is a read-modify-write two cores can
+ * interleave, and a lost increment makes a MUSTBEZERO counter read zero for
+ * the wrong reason - which is worse than a wrong number, because it is a wrong
+ * number that looks like good news.
+ *
+ * Atomic rather than locked. A lock here would have to be taken on the path
+ * that already holds the drivers' own locks, and this project has a rule about
+ * inventing new ordering between locks; an atomic add has no ordering to get
+ * wrong. Relaxed would do for a counter, but these are read by a gate that
+ * treats them as facts about a finished boot, so they are sequentially
+ * consistent and the cost is nothing on the path that matters. */
+#define BLK_COUNT(field, by) \
+    (void)__atomic_add_fetch(&(field), (uint64_t)(by), __ATOMIC_SEQ_CST)
+
+
+vibeos_io_stats_t *vibeos_io_stats(void) {
+    return &g_stats;
+}
+
+void vibeos_io_stats_reset(void) {
+    uint8_t *p = (uint8_t *)&g_stats;
+    uint32_t i;
+
+    for (i = 0; i < sizeof(g_stats); i++) {
+        p[i] = 0;
+    }
+}
+
+const char *vibeos_blk_result_name(vibeos_blk_result_t r) {
+    switch (r) {
+        case VIBEOS_BLK_OK:           return "ok";
+        case VIBEOS_BLK_NOT_ISSUED:   return "not-issued";
+        case VIBEOS_BLK_BAD_REQUEST:  return "bad-request";
+        case VIBEOS_BLK_NO_DEVICE:    return "no-device";
+        case VIBEOS_BLK_OUT_OF_RANGE: return "out-of-range";
+        case VIBEOS_BLK_TIMEOUT:      return "timeout";
+        case VIBEOS_BLK_MEDIUM:       return "medium";
+        case VIBEOS_BLK_SHORT:        return "short";
+        default:                      return "unknown";
+    }
+}
+
+void vibeos_blk_reset(void) {
+    uint32_t i;
+
+    for (i = 0; i < BLK_MAX_DEVICES; i++) {
+        g_dev[i].name = 0;
+        g_dev[i].submit = 0;
+        g_dev[i].barrier = 0;
+        g_dev[i].ctx = 0;
+        g_dev[i].sector_bytes = 0;
+        g_dev[i].sectors = 0;
+    }
+    g_count = 0;
+}
+
+int vibeos_blk_register(const vibeos_blk_driver_t *drv, uint32_t *out_device) {
+    /* A device that cannot say how big it is cannot have its requests
+     * bounds-checked, and an unchecked bound is the difference between an
+     * error and a disk written at the wrong offset. Refused rather than
+     * defaulted: guessing a size here would make every later check a guess. */
+    if (!drv || !drv->submit || !drv->name ||
+        drv->sector_bytes == 0u || drv->sectors == 0ull) {
+        BLK_COUNT(g_stats.register_refused, 1);
+        return -1;
+    }
+    if (g_count >= BLK_MAX_DEVICES) {
+        BLK_COUNT(g_stats.register_refused, 1);
+        return -1;
+    }
+    g_dev[g_count] = *drv;
+    if (out_device) {
+        *out_device = g_count;
+    }
+    g_count++;
+    g_stats.devices_registered = g_count;
+    return 0;
+}
+
+uint32_t vibeos_blk_count(void) {
+    return g_count;
+}
+
+int vibeos_blk_info(uint32_t device, vibeos_blk_driver_t *out) {
+    if (device >= g_count || !out) {
+        return -1;
+    }
+    *out = g_dev[device];
+    return 0;
+}
+
+const char *vibeos_blk_name(uint32_t device) {
+    if (device >= g_count) {
+        return "none";
+    }
+    return g_dev[device].name;
+}
+
+/* Count a result, whatever a driver put there.
+ *
+ * The index comes from the driver on the paths where the driver set it, and a
+ * driver is not trusted to return a value from this enum. The first version
+ * indexed the array with it directly, and a sabotage case found it the way
+ * these things are found: the suite segfaulted rather than failing an
+ * assertion, because an out-of-range result wrote past the end of the
+ * statistics.
+ *
+ * A value outside the enum is itself worth knowing about - it means a driver
+ * is returning something nobody defined - so it is counted as BAD_REQUEST
+ * rather than dropped. */
+static void count_result(vibeos_blk_result_t r) {
+    if ((unsigned)r >= (unsigned)VIBEOS_BLK_RESULT_COUNT) {
+        g_stats.results[VIBEOS_BLK_BAD_REQUEST]++;
+        return;
+    }
+    BLK_COUNT(g_stats.results[r], 1);
+}
+
+static void queue_lock(void);
+static void queue_unlock(void);
+
+/* Every exit from submit() goes through here, which is what makes "completed
+ * exactly once" a property of the code rather than of the reader's attention.
+ *
+ * The lock is taken and dropped around the bookkeeping and *not* around the
+ * callback: vibeos_blk_complete does that itself, for the reason written
+ * there. */
+static int finish(vibeos_blk_request_t *req, vibeos_blk_result_t r) {
+    uint32_t done = req->sectors_done;
+
+    queue_lock();
+    /* A request refused before it was ever in flight - a null buffer, an
+     * unknown device - has not been submitted to anything, so it is moved to
+     * IN_FLIGHT here purely so that the one completion path can retire it.
+     * The alternative is a second retirement path for refusals, which is a
+     * second place that has to be right about the state machine. */
+    if (req->state != VIBEOS_BLK_REQ_INFLIGHT) {
+        req->state = VIBEOS_BLK_REQ_INFLIGHT;
+    }
+    queue_unlock();
+    vibeos_blk_complete(req, r, done);
+    return (r == VIBEOS_BLK_OK) ? 0 : -1;
+}
+
+/* ---- I6: the queue ---------------------------------------------------------
+ *
+ * There is deliberately no list here yet. Both drivers are still synchronous,
+ * so a request handed to enqueue is submitted and completed before enqueue
+ * returns, and a list would be a list with at most one entry in it - code
+ * that exists and is never exercised, which is the defect this project
+ * produces most often.
+ *
+ * What does exist now is the *contract*: a request has a state, it is
+ * completed exactly once, and the completion callback runs outside the lock.
+ * Those are the three things interrupt-driven completion will break if they
+ * are not established first, and they are all checkable today.
+ */
+static int g_queue_locked;      /* the lock, as a flag: see the note below */
+
+/* ---- I7: were two requests ever inside this layer at once? -----------------
+ *
+ * Answered, and then the measuring code removed: **yes - in_flight_peak
+ * reached 2 on a boot.** So every counter here was being written by more than
+ * one core, which is why they go through BLK_COUNT and an atomic add now.
+ * That change is kept and is the whole point of having asked.
+ *
+ * The mechanism is gone rather than left disabled. It was an atomic depth
+ * counter and a compare-exchange on the peak, and keeping it would have meant
+ * keeping code nothing calls - the defect this project produces most often.
+ * It is a dozen lines to write again from this paragraph if the number is ever
+ * wanted a second time.
+ *
+ * Two things it exposed on the way, both still true and both worth fixing:
+ *
+ *   two paths in vibeos_blk_submit return without going through finish(), so
+ *   the comment there claiming every exit does is wrong - and under the I6
+ *   contract those requests are never completed either, which for a caller
+ *   waiting on a callback is a wait that never ends;
+ *
+ *   the boot got worse with the tracking in: zero green of three, against one
+ *   of three without it and two of three at HEAD. Small samples, and the
+ *   failures were the pre-existing argv defect on a different program rather
+ *   than anything naming this code - so "correlated, not demonstrated". It
+ *   came out on those grounds rather than on a diagnosis, which is a weaker
+ *   reason than this project usually accepts and is recorded as such.
+ */
+
+
+/* The lock is a flag rather than a hw_lock_t because kernel/io/ is portable
+ * and has no spinlock of its own - the arch layer registers one when a real
+ * queue needs it, exactly as the frame layer and the block cache do. Until
+ * then this exists to answer one question the tests need to ask: was the
+ * callback run while the layer considered itself locked? */
+static void queue_lock(void) { g_queue_locked = 1; }
+static void queue_unlock(void) { g_queue_locked = 0; }
+
+void vibeos_blk_complete(vibeos_blk_request_t *req, vibeos_blk_result_t r,
+                         uint32_t sectors_done) {
+    void (*done)(void *ctx, struct vibeos_blk_request *req);
+    void *ctx;
+
+    if (!req) {
+        return;
+    }
+    if (req->state == VIBEOS_BLK_REQ_DONE) {
+        /* Refused, not obeyed. By now the owner may have reused the request,
+         * so running its callback again would deliver somebody else's
+         * completion. */
+        BLK_COUNT(g_stats.completed_twice, 1);
+        return;
+    }
+    if (req->state != VIBEOS_BLK_REQ_INFLIGHT) {
+        BLK_COUNT(g_stats.completed_not_inflight, 1);
+        return;
+    }
+
+    req->result = r;
+    req->sectors_done = sectors_done;
+    req->state = VIBEOS_BLK_REQ_DONE;
+    count_result(r);
+    BLK_COUNT(g_stats.completed, 1);
+
+    /* Taken out of the request before the lock is dropped, and called after.
+     *
+     * A completion callback typically submits the next request, and doing that
+     * from inside the lock that guards the queue is a deadlock the day the
+     * queue acquires a real lock. Counted as well as avoided, because "we do
+     * not do that" is not a property anybody checks. */
+    done = req->done;
+    ctx = req->done_ctx;
+    if (done) {
+        if (g_queue_locked) {
+            BLK_COUNT(g_stats.callback_under_lock, 1);
+        }
+        done(ctx, req);
+    }
+}
+
+/* Set only while a request is on its way through enqueue().
+ *
+ * This is what stops vibeos_blk_submit from ever calling a callback it was not
+ * given. Every caller written before I6 builds its request field by field and
+ * knows nothing about `done`, so that field holds whatever was on the stack -
+ * and the first thing the layer did with the new code was call it. A host test
+ * segfaulted immediately, which is the good outcome; on a machine it would
+ * have been a jump to stack rubbish inside the block layer.
+ *
+ * The rule this follows is the one this project already wrote down after
+ * interp_base: clear the field in the function that owns the contract, not at
+ * every caller. The synchronous entry point owns "there is no callback", so it
+ * enforces it. */
+static int g_in_enqueue;
+
+int vibeos_blk_enqueue(vibeos_blk_request_t *req) {
+    int rc;
+
+    if (!req) {
+        return -1;
+    }
+    req->state = VIBEOS_BLK_REQ_QUEUED;
+    BLK_COUNT(g_stats.enqueued, 1);
+    g_in_enqueue = 1;
+    rc = vibeos_blk_submit(req);
+    g_in_enqueue = 0;
+    /* submit completes the request itself while the drivers are synchronous.
+     * When one of them grows an interrupt, it will call complete() from there
+     * and submit() will return with the request still in flight - which is why
+     * this does not complete it here. */
+    return rc;
+}
+
+int vibeos_blk_submit(vibeos_blk_request_t *req) {
+    vibeos_blk_driver_t *d;
+    int rc;
+
+    if (!req) {
+        return -1;
+    }
+    /* Reset before anything else, so a request that is refused below carries a
+     * reason rather than whatever the caller left in the struct. */
+    req->result = VIBEOS_BLK_NOT_ISSUED;
+    req->sectors_done = 0;
+    if (!g_in_enqueue) {
+        /* Reached directly, so there is no callback and no queue state - and
+         * saying so beats trusting a caller that predates both fields. */
+        req->done = 0;
+        req->done_ctx = 0;
+    }
+    /* In flight from here: every exit below goes through finish(), which is
+     * what moves it to DONE. A request that left this function in any other
+     * state would be one the completion path cannot tell from a fresh one. */
+    req->state = VIBEOS_BLK_REQ_INFLIGHT;
+
+    if (!req->buf || req->sectors == 0u) {
+        return finish(req, VIBEOS_BLK_BAD_REQUEST);
+    }
+    if (req->device >= g_count) {
+        return finish(req, VIBEOS_BLK_NO_DEVICE);
+    }
+    d = &g_dev[req->device];
+
+    /* The bound lives here rather than in each driver.
+     *
+     * A driver that checks its own bounds protects the *device*; it cannot
+     * protect a neighbouring partition, whose sectors are perfectly valid
+     * addresses on that device. The same argument the swap area makes about
+     * the filesystem, one layer down. */
+    if (req->lba > d->sectors ||
+        (uint64_t)req->sectors > d->sectors - req->lba) {
+        if (g_stats.results[VIBEOS_BLK_OUT_OF_RANGE] == 0ull) {
+            g_stats.first_oor_device = req->device;
+            g_stats.first_oor_lba = req->lba;
+            g_stats.first_oor_sectors = req->sectors;
+            g_stats.first_oor_device_size = d->sectors;
+        }
+        return finish(req, VIBEOS_BLK_OUT_OF_RANGE);
+    }
+
+    rc = d->submit(d->ctx, req);
+
+    /* What came back, against what was asked for.
+     *
+     * A driver may set a reason itself, and if it did that reason stands - it
+     * knows more than this layer does about why. What this layer will not
+     * accept is silence: a non-zero return with no reason becomes MEDIUM,
+     * because a driver that fails without saying so is still a failure the
+     * caller must see. */
+    if (rc != 0 && req->result == VIBEOS_BLK_NOT_ISSUED) {
+        return finish(req, VIBEOS_BLK_MEDIUM);
+    }
+    if (rc != 0) {
+        count_result(req->result);
+        return -1;
+    }
+    if (req->sectors_done != req->sectors) {
+        /* Success that lost data. This is the check the FAT defect needed:
+         * there, a failed table read came back as the end-of-chain marker and
+         * the reader returned the size the directory claimed. */
+        return finish(req, VIBEOS_BLK_SHORT);
+    }
+    if (req->result != VIBEOS_BLK_NOT_ISSUED && req->result != VIBEOS_BLK_OK) {
+        /* Zero return, non-OK reason. Trust the reason - but not the index. */
+        count_result(req->result);
+        return -1;
+    }
+
+    if (req->write) {
+        BLK_COUNT(g_stats.writes, 1);
+        BLK_COUNT(g_stats.sectors_written, req->sectors_done);
+    } else {
+        BLK_COUNT(g_stats.reads, 1);
+        BLK_COUNT(g_stats.sectors_read, req->sectors_done);
+    }
+    return finish(req, VIBEOS_BLK_OK);
+}
+
+int vibeos_blk_read(uint32_t device, uint64_t lba, uint32_t sectors,
+                    void *buf) {
+    vibeos_blk_request_t req;
+
+    /* Zeroed, not filled field by field. The request gained `done`, `done_ctx`
+     * and `state` for I6, and a helper that assigns each member would have
+     * left them holding whatever was on the stack - a callback pointer out of
+     * stack rubbish, called. That exact mistake cost a CI segfault in this
+     * tree three days ago with a different struct. */
+    memset(&req, 0, sizeof(req));
+    req.device = device;
+    req.lba = lba;
+    req.sectors = sectors;
+    req.buf = buf;
+    req.write = 0;
+    return vibeos_blk_submit(&req);
+}
+
+int vibeos_blk_barrier(uint32_t device) {
+    const vibeos_blk_driver_t *d = (device < g_count) ? &g_dev[device] : 0;
+
+    if (!d) {
+        BLK_COUNT(vibeos_io_stats()->results[VIBEOS_BLK_NO_DEVICE], 1);
+        BLK_COUNT(vibeos_io_stats()->barriers_failed, 1);
+        return -1;
+    }
+    BLK_COUNT(vibeos_io_stats()->barriers, 1);
+    if (!d->barrier) {
+        /* Refused, not quietly granted. A device with no way to order its own
+         * writes cannot be given an ordering by pretending, and a caller told
+         * "yes" would build on something that is not there - which for a
+         * journal is the difference between a recoverable medium and a
+         * corrupt one. */
+        BLK_COUNT(vibeos_io_stats()->barriers_failed, 1);
+        BLK_COUNT(vibeos_io_stats()->results[VIBEOS_BLK_NO_DEVICE], 1);
+        return -1;
+    }
+    if (d->barrier(d->ctx) != 0) {
+        BLK_COUNT(vibeos_io_stats()->barriers_failed, 1);
+        BLK_COUNT(vibeos_io_stats()->results[VIBEOS_BLK_MEDIUM], 1);
+        return -1;
+    }
+    BLK_COUNT(vibeos_io_stats()->results[VIBEOS_BLK_OK], 1);
+    return 0;
+}
+
+int vibeos_blk_write(uint32_t device, uint64_t lba, uint32_t sectors,
+                     const void *buf) {
+    vibeos_blk_request_t req;
+
+    /* Zeroed, not filled field by field. The request gained `done`, `done_ctx`
+     * and `state` for I6, and a helper that assigns each member would have
+     * left them holding whatever was on the stack - a callback pointer out of
+     * stack rubbish, called. That exact mistake cost a CI segfault in this
+     * tree three days ago with a different struct. */
+    memset(&req, 0, sizeof(req));
+    req.device = device;
+    req.lba = lba;
+    req.sectors = sectors;
+    /* The cast is the one place this layer admits that a write does not modify
+     * its buffer. Keeping `buf` non-const in the request is what lets read and
+     * write be one operation with one path, which is the point. */
+    req.buf = (void *)(uintptr_t)buf;
+    req.write = 1;
+    return vibeos_blk_submit(&req);
+}

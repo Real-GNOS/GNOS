@@ -1,0 +1,131 @@
+# The stack's half of the BSD calls (kernel/net/inet.c, docs/abi/ L5 step 1),
+# proved by t_sock_bsd in tests/kernel/linux_abi_tests.c.
+#
+#  1. bind takes a port another socket holds. Expect "bind: ... another on the
+#     port EADDRINUSE".
+#  2. MSG_PEEK consumes the datagram it looked at. Expect "MSG_PEEK reads and
+#     leaves".
+#  3. a datagram's whole length is the part that was copied. Expect "MSG_PEEK
+#     reads and leaves; MSG_TRUNC says the whole length".
+#  4. loopback goes to the device. Expect "connect to it completes the
+#     handshake over loopback" (t_loopback).
+#  5. a SYN to a closed port is dropped without a reset. Expect "a port nobody
+#     listens on answers with a reset: ECONNREFUSED, at once". NOT RED the
+#     first time: the SYN's retries running out also ends as ECONNREFUSED, so
+#     the check asks how long it took now.
+#  6. TIME_WAIT reclaims the slot of a descriptor still open. Expect "the
+#     half-closed client still reads it long after TIME_WAIT" - found by a
+#     parallel boot in which nc -l read nothing and sock_fd_aba was 2.
+#
+# Target source: kernel/net/inet.c
+# Run: SABOTAGE_VERIFY="bash scripts/dev/verify-host-quick.sh" python3 scripts/dev/sabotage.py kernel/net/inet.c scripts/dev/cases/net-l5-inet.txt
+
+### bind takes a port another socket holds
+--- old
+    } else if (port_taken(net, s, ip, port)) {
+        return -VIBEOS_INET_EADDRINUSE;
+    }
++++ new
+    }
+
+### MSG_PEEK consumes the datagram it looked at
+--- old
+        if (!(flags & VIBEOS_INET_PEEK)) {
+            for (i = total; i < s->rx_len; i++) {
++++ new
+        if (1) {
+            for (i = total; i < s->rx_len; i++) {
+
+### a datagram's whole length is the part that was copied
+--- old
+            *full_len = dlen;
++++ new
+            *full_len = copied;
+
+### loopback goes to the device
+--- old
+    if (is_loopback(net, dst)) {
+        return loop_queue(net, ip, total);
+    }
++++ new
+
+### a SYN to a closed port is dropped without a reset
+--- old
+        if ((flags & TCP_SYN) && !(flags & (TCP_RST | TCP_ACK))) {
++++ new
+        if (0) {
+
+### TIME_WAIT reclaims the slot of a descriptor still open
+--- old
+            if (s->closed) {
+                s->close_deadline_ms = net->now_ms + VIBEOS_INET_TIME_WAIT_MS;
+            }
++++ new
+            s->close_deadline_ms = net->now_ms + VIBEOS_INET_TIME_WAIT_MS;
+
+### an ACK may run two past the data whether or not a SYN or FIN was sent (#14)
+--- old
+    if (acked == 0u || acked > s->snd_nxt - s->snd_una) {
++++ new
+    if (acked == 0u || acked > s->tx_len + 2u) {
+
+### a first fragment is taken as a whole datagram (#15)
+--- old
+    if ((rd16(ip + 6) & 0x3FFFu) != 0u) {
++++ new
+    if ((rd16(ip + 6) & 0x1FFFu) != 0u) {
+
+### an ICMP message is believed whatever its checksum (#62)
+--- old
+    if (len < 8u || vibeos_inet_checksum(p, len) != 0u) {
++++ new
+    if (len < 8u) {
+
+### any echo reply completes the ping, whatever its sequence (#63)
+--- old
+        if (rd16(p + 4) == net->ping_id && rd16(p + 6) == net->ping_seq && src == net->ping_peer) {
++++ new
+        if (rd16(p + 4) == net->ping_id && src == net->ping_peer) {
+
+### a truncated or failed DNS answer is read for its records (#69)
+--- old
+    if ((b[2] & 0x02u) != 0u || (b[3] & 0x0Fu) != 0u) {
++++ new
+    if (0) {
+
+### any A record answers the name asked (#16)
+--- old
+        if (rclass != 1u || !dns_names_equal(b, len, owner, wanted)) {
++++ new
+        if (0) {
+
+### a datagram goes to the first socket on its port, whatever it bound or is connected to (#65)
+--- old
+            (s->local_ip == 0u || s->local_ip == dst) &&
+            (!s->udp_peer || (s->remote_ip == src && s->remote_port == sport))) {
++++ new
+            1) {
+
+### a listener answers a SYN for an address it did not bind (#66)
+--- old
+            (s->local_ip == 0u || s->local_ip == dst)) {   /* the address it bound (#66) */
++++ new
+            1) {
+
+### SO_REUSEPORT is stored and shares nothing (#60)
+--- old
+        if ((s->reuse & o->reuse & VIBEOS_INET_REUSE_PORT) && s->reuse_uid == o->reuse_uid) {
++++ new
+        if (0) {
+
+### a renewal goes out as a client without a lease's would (#64)
+--- old
+            dhcp_send_lease(net, net->dhcp_server);
++++ new
+            dhcp_send(net, 3, net->ip, net->dhcp_server);
+
+### SO_REUSEPORT shares a port with another user's socket (M-130)
+--- old
+        if ((s->reuse & o->reuse & VIBEOS_INET_REUSE_PORT) && s->reuse_uid == o->reuse_uid) {
++++ new
+        if (s->reuse & o->reuse & VIBEOS_INET_REUSE_PORT) {

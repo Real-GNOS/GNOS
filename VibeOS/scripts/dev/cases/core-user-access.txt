@@ -1,0 +1,48 @@
+# check-user-access.py must go red when a Linux ABI handler touches user memory
+# other than through the fault-safe copy (M-050..M-052).
+#
+# The race these guard against - a sibling thread's munmap between the
+# dispatcher's range check and the handler's access - does not reproduce on
+# demand, so the check is the gate: it holds the mechanism, and these cases hold
+# the check. Each puts back one of the shapes the review found.
+#
+#  1. accept()'s address written through a raw pointer again (net.c; since L5
+#     every socket call writes through linux_net_out, so that is where it goes);
+#  2. read() of a file handing the user's buffer to the filesystem again (fs.c);
+#  3. uname's fields written into the user's buffer directly (misc.c).
+#
+# Case 1 is in net.c, case 2 in fs.c, case 3 in misc.c; run the file once against
+# each - the cases whose anchor is elsewhere are skipped.
+# Target source: kernel/abi/linux/net.c, kernel/abi/linux/fs.c, kernel/abi/linux/misc.c, kernel/abi/files/regular.c (read, since A3)
+# Run: SABOTAGE_VERIFY="python3 scripts/dev/check-user-access.py" python3 scripts/dev/sabotage.py <one of them> scripts/dev/cases/core-user-access.txt
+
+### a socket address is written through a raw pointer
+--- old
+    if (!linux_user_ok(uptr, len, 1) || vibeos_uaccess_copy((void *)(uintptr_t)uptr, k, len) != 0) {
+        return -VIBEOS_EFAULT;
+    }
++++ new
+    if (!linux_user_ok(uptr, len, 1)) {
+        return -VIBEOS_EFAULT;
+    }
+    {
+        uint8_t *u = (uint8_t *)(uintptr_t)uptr;
+        const uint8_t *from = (const uint8_t *)k;
+        uint64_t i;
+        for (i = 0; i < len; i++) {
+            u[i] = from[i];
+        }
+    }
+
+### read() hands the user's buffer to the filesystem
+--- old
+        got = vibeos_fs_read_at(f->mnt, &node, off + done, bounce, (uint32_t)want);
++++ new
+        got = vibeos_fs_read_at(f->mnt, &node, off + done,
+                                (uint8_t *)(uintptr_t)(buf + done), (uint32_t)want);
+
+### uname writes the user's buffer directly
+--- old
+        char *dst = dsts[f];
++++ new
+        char *dst = (char *)(uintptr_t)(buf + (uint64_t)f * 65u);

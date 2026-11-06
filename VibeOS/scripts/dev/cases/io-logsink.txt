@@ -1,0 +1,196 @@
+# Sabotage cases for the kernel's own log on disk (I5b).
+#
+# Host tests: bash scripts/dev/check.sh tests build-gcc-Release
+# Boot gate:  bash scripts/dev/check.sh build build-gcc-Release
+#             python3 scripts/qemu-cli-smoke-linux.py build-gcc-Release 300
+#
+# The second run in a working directory is the interesting one: the gate keeps
+# qemu-cli-logdisk.img between runs on purpose, so a fresh checkout exercises
+# the "nothing here yet" branch and every run after it exercises persistence.
+# A sabotage run that starts by deleting that file is testing the easy half.
+
+case: the sink stops being brought up
+  in arch_hw.c, remove the hw_logsink_bringup call
+  expect: logsink_missing
+  why it matters: this is the state the whole phase exists to leave. A feature
+    that is present and never runs is the defect this project produces most
+    often, and it looks exactly like a feature that works.
+
+case: the previous machine's records are not read back
+  in hw_logsink_bringup, read record 0 *after* writing the boot mark
+  expect: nothing on the gate, and that is the point of writing it down
+  why it matters: it would pass. The newest record would be this boot's own,
+    so the check would prove that a write followed by a read works and nothing
+    about persistence. The order in the bring-up is load-bearing and the
+    comment there says so.
+
+case: attach forgets what the medium already held
+  in vibeos_logsink_attach, set g_next_seq = 1 instead of highest + 1
+  expect: FAIL:logsink "survives a reset"; and on the gate,
+    logsink_lost_the_previous_boot on any run after the first
+  why it matters: sequence numbers that restart at every boot cannot order
+    records across a reset, which is the one ordering anybody needs after a
+    machine has stopped.
+
+case: the reader stops checking it got the record it asked for
+  in vibeos_logsink_read, drop the `got != want` comparison
+  expect: FAIL:logsink "a wrap keeps ordering"
+  why it matters: after a wrap the slot holds a *newer* record than the one
+    asked for. Returning it is worse than returning nothing - a log that
+    answers with the wrong line is not a log.
+
+case: the checksum stops covering the sequence number
+  in log_sum, skip bytes 4..11 as well as the checksum field
+  expect: FAIL:logsink "a torn sequence does not survive attach"
+  why it matters: and this case is here because the first version of it was
+    caught by NOTHING, and the comment in the module claiming the rule guarded
+    against stale slots was simply wrong - the reader's own comparison does
+    that. What the rule really guards is attach, which validates with no
+    sequence to compare against: one flipped high bit in a sequence field sets
+    the next sequence to something enormous for the rest of the life of the
+    medium. The test was written after the sabotage, not before it.
+
+case: records are allowed into sector 0
+  in vibeos_logsink_attach, use dev->sectors as the capacity and drop the +1
+  expect: FAIL:logsink "leaves sector zero alone"
+  why it matters: a module that writes to sector 0 of a disk will one day eat
+    somebody's partition table, and it will do it on the medium nobody was
+    watching.
+
+case: a failed write is counted as a record written
+  in vibeos_logsink_write, increment records_written on the failure path too
+  expect: FAIL:logsink "counts a failed write"
+  why it matters: a sink that silently absorbs a refusal is worse than no sink,
+    because it is believed. NOTE: the first attempt at this sabotage was a sed
+    that did not apply, and it came back green - which is indistinguishable
+    from the test not working. Check the edit landed before believing the
+    result. This is the third time that trap has been walked into here.
+
+case: the attach scan reads one sector at a time
+  in vibeos_logsink_attach, ignore dev->read_many
+  expect: nothing deterministic - but boots start wedging, about two in four on
+    a 4 MiB medium
+  why it matters: this happened. Eight thousand synchronous single-sector
+    transfers during bring-up do not look slow, they look stopped: the failures
+    were a wedge at busybox_cat and the known bad-args, neither of which points
+    anywhere near a log. It was identified by shrinking the medium to 512
+    sectors and watching four boots go green, and fixed by batching rather than
+    by keeping the medium small. The scan is the only batched path; the write
+    stays one sector, because batching there would be the write-back this
+    module exists to refuse.
+
+case: every core shares one staging buffer
+  in vibeos_logsink_write, use g_stage[0] instead of g_stage[log_cpu()]
+  expect: THE CASE EXISTS AND THIS ENVIRONMENT CANNOT TELL. The host tests are
+    single-threaded, so switching the reported cpu id proves the slot follows
+    the sequence number but cannot make two cores write at once. On the machine
+    the sink is written from bring-up only, so no boot exercises it either.
+    Same distinction the AHCI cases carry: "no case exists" and "the case
+    exists and cannot be decided here" are different things. It becomes
+    decidable when something logs from more than one core - which is the point
+    at which it must be re-run.
+
+case: the sink reports success having written nothing
+  in vibeos_logsink_write, return 0 before touching the medium
+  expect: logsink_wrote_nothing
+  why it matters: "it came up" and "it recorded something" are different
+    claims, and only the second one is worth making.
+
+case: the medium refuses every write
+  attach the sink to a device whose write always fails
+  expect: logsink_write_failed
+  why it matters: a boot that cannot write its log should say so at the moment
+    it finds out, not at the crash where the log turns out to be empty.
+
+# ---- the nightly torture (I5b) --------------------------------------------
+#
+# Run: cmake --build <dir> --target vibeos_logsink_torture
+#      ./<dir>/vibeos_logsink_torture <seed> <rounds>
+#
+# The model keeps its own account of the ring from the operations alone and
+# never reads the sink's state, which is what makes a disagreement a question
+# rather than the subsystem agreeing with itself.
+
+case: the reader stops checking it got the record it asked for
+  in vibeos_logsink_read, drop the `got != want` comparison
+  expect: caught on 30 of 30 seeds, "came back and should not have"
+
+case: attach forgets what the medium already held
+  in vibeos_logsink_attach, set g_next_seq to 0 unconditionally
+  expect: caught on 30 of 30 seeds, "was lost" after a reset
+
+case: the ring is one slot shorter than the reader believes
+  in vibeos_logsink_write, take the slot modulo capacity - 1
+  expect: caught on 30 of 30 seeds
+  why it matters: writer and reader disagreeing about the size of the ring is
+    the defect a fixed set of unit tests is least likely to construct, and it
+    corrupts nothing visible until the ring wraps.
+
+# What the torture found on its first run, in both directions:
+#
+# In the sink: an empty medium started at sequence 1, not 0. `highest` is
+# initialised to 0 and a record with sequence 0 is perfectly valid, so attach
+# could not tell "nothing here" from "one record, number zero" and burned
+# sequence 0 for the life of the disk. Harmless, and exactly the sort of thing
+# only an independent account of the operations notices.
+#
+# In the model, twice, which is the more useful half to record:
+#   - a refused write was treated as destroying the slot it would have used.
+#     The write never reached the medium, so the older record in that slot is
+#     still there and still readable; the model claimed a live record should be
+#     gone.
+#   - the model only ever raised its sequence to match the sink after a reset.
+#     A reattach can legitimately land *below* the model's running count,
+#     because a refused write consumes a number that never reaches the medium -
+#     so the model reported the sink as having gone backwards when the sink was
+#     right. What must not go backwards is the last sequence that actually
+#     landed and is still inside the ring, and that is what is asserted now.
+#
+# Two model bugs to one real one. When a detector fires, the first question is
+# whether the detector is right, and here it was wrong more often than the code.
+
+# ---- the second half: the kernel's own log reaches the medium (I5b) --------
+
+case: log events stop being fed to the sink
+  in hw_log, remove the hw_log_to_sink call
+  expect: logdisk_holds_only_the_boot_mark
+  BUT WHAT ACTUALLY HAPPENS is stranger and is why this is written up rather
+    than ticked off: three boots out of three wedged before reaching the
+    console at all, so the assertion was never exercised. Removing a disk write
+    from the kernel log path reliably stops the machine. That is not the known
+    intermittent - the known one is about one boot in six and does not repeat
+    like this. Unexplained, and it means the log write is load-bearing for
+    timing somewhere it should not be. Worth chasing before I6, because
+    asynchrony will make it disappear into the noise.
+
+case: the assertion cannot tell a full log from a bare boot mark
+  in the gate, raise the `written < 2` threshold
+  expect: logdisk_holds_only_the_boot_mark - confirmed, it fires
+  why it matters: "non-zero" would be satisfied by a sink that recorded only
+    its own bring-up, which is exactly the state the first half of I5b left
+    and which looked like a working feature.
+
+case: the tail reads nothing back
+  in the gate, require shown to be large
+  expect: logdisk_tail_read_nothing_back - confirmed, it fires
+  why it matters: writing and reading are separate claims. A sink that accepts
+    records and cannot return them is a sink that will be discovered at the one
+    moment it is needed.
+
+# Both gate branches were confirmed to fire by moving the thresholds, since the
+# kernel-side sabotage above could not reach them. That is weaker than breaking
+# the code and watching the gate go red, and it is recorded as weaker.
+
+case: the logdisk command stops being reachable from the console
+  in kmain.c, remove the "logdisk" branch
+  expect: logdisk_tail_missing
+  why it matters: the sink can be perfectly correct and still useless if
+    nothing on a running machine can ask it what it holds. That is the state
+    the arch log ring was in until the `log` command learned to print it.
+
+case: a write to the medium is refused and the sink absorbs it
+  attach the sink to a device whose write fails after N records
+  expect: logdisk_writes_failed
+  why it matters: same argument as logsink_write_failed at bring-up, but for
+    the steady state - a medium that starts refusing halfway through a boot is
+    the case where the log is most wanted and least likely to be checked.

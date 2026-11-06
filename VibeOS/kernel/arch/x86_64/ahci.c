@@ -1,0 +1,815 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* AHCI (SATA) block driver, read/write, polled.
+ *
+ * Why this exists: the kernel could only talk to virtio-blk, which QEMU
+ * provides and no desktop hypervisor does. The appliances imported into
+ * VirtualBox, booted, and then every exec failed - the files were on the disk
+ * and the kernel had no way to read them. UEFI does the reading up to
+ * ExitBootServices, so the bootloader worked and hid it.
+ *
+ * The controller is found by PCI class rather than by device id. VirtualBox
+ * emulates an ICH8 (8086:2829), QEMU an ICH9 (8086:2922), VMware something
+ * else again, and all three are the same standard controller - matching ids
+ * would mean a table that is wrong on the next hypervisor.
+ *
+ * Polled, not interrupt-driven, and deliberately: the filesystem calls this
+ * from inside g_exec_lock, with interrupts masked, so a completion interrupt
+ * could never arrive. That is the same reason the multi-sector path matters -
+ * see the note about the 2 MB read under a spinlock in CLAUDE.md.
+ */
+
+#include <stdint.h>
+
+#include "vibeos/arch_x86_64.h"
+#include "arch_hw_internal.h"   /* g_timer_ticks, VIBEOS_HW_TIMER_HZ */
+#include "vibeos/device.h"
+
+/* ---- PCI config space ---------------------------------------------------- */
+
+#define PCI_ADDR 0xCF8u
+#define PCI_DATA 0xCFCu
+
+static inline void ah_outl(uint16_t p, uint32_t v) {
+    __asm__ __volatile__("outl %0,%1" :: "a"(v), "Nd"(p));
+}
+static inline uint32_t ah_inl(uint16_t p) {
+    uint32_t v;
+    __asm__ __volatile__("inl %1,%0" : "=a"(v) : "Nd"(p));
+    return v;
+}
+
+static uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t off) {
+    uint32_t addr = 0x80000000u | ((uint32_t)bus << 16) | ((uint32_t)dev << 11) |
+                    ((uint32_t)fn << 8) | (off & 0xFCu);
+    ah_outl(PCI_ADDR, addr);
+    return ah_inl(PCI_DATA);
+}
+
+static void pci_write32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t off, uint32_t val) {
+    uint32_t addr = 0x80000000u | ((uint32_t)bus << 16) | ((uint32_t)dev << 11) |
+                    ((uint32_t)fn << 8) | (off & 0xFCu);
+    ah_outl(PCI_ADDR, addr);
+    ah_outl(PCI_DATA, val);
+}
+
+/* ---- HBA and port registers ---------------------------------------------- */
+
+#define HBA_GHC      0x04u
+#define HBA_GHC_AE   0x80000000u
+/* Interrupt enable, in the global control register, and the port's own
+ * interrupt-enable and status registers. All three are zero out of reset, so a
+ * routed line with any of them clear delivers nothing. */
+#define HBA_GHC_IE   0x00000002u
+#define HBA_IS       0x08u
+#define PxIE         0x14u
+
+/* ---- I6: completion by interrupt ------------------------------------------
+ *
+ * Same shape as virtio-blk, and written second on purpose: that one proved the
+ * path, so this one is a port rather than an investigation.
+ *
+ * The controller's own status registers stay the single source of truth about
+ * what completed - the handler acknowledges and says that something did, and
+ * the waiter still reads PxCI. One consumer of the completion state, as there.
+ */
+/* Declared here rather than pulled from a header: this is the only thing this
+ * driver needs from the interrupt controller, and gcc accepts an implicit
+ * declaration with a warning while clang refuses it. */
+extern int vibeos_x86_64_ioapic_route_pci(uint8_t irq, uint8_t vector, uint32_t dest);
+
+static uint8_t g_irq_line;
+/* The interrupt vector the device registry gave this device (C7); 0 when
+ * none, and then the driver polls. It used to be a literal chosen by hand. */
+static uint32_t g_vector;
+static uint8_t g_irq_ready;
+static volatile uint32_t g_irq_count;
+
+static uint64_t ahci_dev_irqs(void) {
+    return (uint64_t)g_irq_count;
+}
+
+
+/* May this core halt while it waits? The two conditions virtio-blk learned:
+ * the line must be routed, and interrupts must actually be enabled - during
+ * bring-up they are not, and halting there is a boot that never resumes. */
+static int ahci_may_halt(uint32_t spin) {
+    uint64_t flags;
+
+    if (!g_irq_ready || spin < 1024u) {
+        return 0;
+    }
+    __asm__ __volatile__("pushfq; pop %0" : "=r"(flags));
+    return (flags & 0x200ull) != 0ull;
+}
+#define HBA_PI       0x0Cu
+
+#define PORT_BASE(p) (0x100u + (uint32_t)(p) * 0x80u)
+#define PxCLB   0x00u
+#define PxCLBU  0x04u
+#define PxFB    0x08u
+#define PxFBU   0x0Cu
+#define PxIS    0x10u
+#define PxCMD   0x18u
+#define PxTFD   0x20u
+#define PxSIG   0x24u
+#define PxSSTS  0x28u
+#define PxSERR  0x30u
+#define PxCI    0x38u
+
+#define PxCMD_ST  0x0001u
+#define PxCMD_FRE 0x0010u
+#define PxCMD_FR  0x4000u
+#define PxCMD_CR  0x8000u
+
+#define ATA_CMD_READ_DMA_EX  0x25u
+#define ATA_CMD_WRITE_DMA_EX 0x35u
+#define ATA_CMD_FLUSH_EX     0xEAu
+#define ATA_CMD_IDENTIFY     0xECu
+#define ATA_DEV_BUSY 0x80u
+#define ATA_DEV_DRQ  0x08u
+
+/* ---- DMA structures ------------------------------------------------------ */
+
+/* Physical == virtual below 4 GiB (the kernel identity-maps it), and these are
+ * kernel .bss, so a pointer is a bus address. The alignment requirements are
+ * the controller's, not ours: 1 KiB for the command list, 256 B for the
+ * received-FIS area, 128 B for a command table. */
+
+typedef struct {
+    uint16_t flags;        /* cfl (bits 0-4), plus A/W/P */
+    uint16_t prdtl;
+    volatile uint32_t prdbc;
+    uint32_t ctba;
+    uint32_t ctbau;
+    uint32_t reserved[4];
+} hba_cmd_header_t;
+
+typedef struct {
+    uint32_t dba;
+    uint32_t dbau;
+    uint32_t reserved;
+    uint32_t dbc;          /* bit 31 = interrupt on completion; count is n-1 */
+} hba_prdt_entry_t;
+
+typedef struct {
+    uint8_t cfis[64];
+    uint8_t acmd[16];
+    uint8_t reserved[48];
+    hba_prdt_entry_t prdt[8];
+} hba_cmd_table_t;
+
+static hba_cmd_header_t g_cmd_list[32] __attribute__((aligned(1024)));
+static uint8_t g_fis[256] __attribute__((aligned(256)));
+static hba_cmd_table_t g_cmd_table __attribute__((aligned(128)));
+
+/* A bounce buffer, because the caller's is not guaranteed to be anywhere the
+ * controller can reach and this driver must not quietly DMA somewhere else. */
+static uint8_t g_bounce[64u * 512u] __attribute__((aligned(4096)));
+
+static volatile uint8_t *g_abar;
+static uint32_t g_port = 0xFFFFFFFFu;
+static int g_ready;
+
+/* One controller, one command slot, one bounce buffer. virtio-blk shipped
+ * without this and two cores did not race over a window, they overwrote each
+ * other's requests and each returned the other's data, successfully.
+ *
+ * The registry's lock, which masks interrupts while it is held (M-067). This
+ * was a bare test-and-set with interrupts left on, and the wait for a command
+ * halted with them on - so the holder could be interrupted, or taken off its
+ * core by the scheduler, in the middle of a command. With the log disk on this
+ * controller, every core that logged then queued behind a holder that could not
+ * get a core back: four cores spinning here, nobody running the code that held
+ * it, and a machine that went quiet. Waits now poll, and the completion
+ * interrupt is still raised and counted - it is taken when the lock is let go.
+ * A core that already holds it is refused rather than left spinning on itself. */
+static vibeos_dev_lock_t g_lock = VIBEOS_DEV_LOCK("ahci");
+
+static int ahci_lock(void) {
+    return vibeos_dev_lock(&g_lock);
+}
+
+static void ahci_unlock(void) {
+    vibeos_dev_unlock(&g_lock);
+}
+
+static uint32_t mmio_read(uint32_t off) {
+    return *(volatile uint32_t *)(g_abar + off);
+}
+
+static void mmio_write(uint32_t off, uint32_t value) {
+    *(volatile uint32_t *)(g_abar + off) = value;
+}
+
+static uint32_t port_read(uint32_t off) {
+    return mmio_read(PORT_BASE(g_port) + off);
+}
+
+static void port_write(uint32_t off, uint32_t value) {
+    mmio_write(PORT_BASE(g_port) + off, value);
+}
+
+/* ---- bring-up ------------------------------------------------------------ */
+
+/* Find an AHCI controller by class code and return its ABAR, or 0. */
+static uint64_t ahci_find(void) {
+    uint16_t bus, dev;
+    uint8_t fn;
+
+    for (bus = 0; bus < 256u; bus++) {
+        for (dev = 0; dev < 32u; dev++) {
+            for (fn = 0; fn < 8u; fn++) {
+                uint32_t id = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x00);
+                uint32_t cls, cmd, bar5;
+
+                if ((id & 0xFFFFu) == 0xFFFFu) {
+                    if (fn == 0) {
+                        break;   /* no device here at all */
+                    }
+                    continue;
+                }
+                cls = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x08);
+                /* class 0x01 mass storage, subclass 0x06 SATA, prog-if 0x01
+                 * AHCI 1.0. Matching this rather than a vendor/device pair is
+                 * what makes the same driver work on QEMU, VirtualBox and
+                 * VMware, which emulate three different chips. */
+                if (((cls >> 24) & 0xFFu) != 0x01u ||
+                    ((cls >> 16) & 0xFFu) != 0x06u ||
+                    ((cls >> 8) & 0xFFu) != 0x01u) {
+                    continue;
+                }
+                /* Memory space + bus mastering. Without the second the
+                 * controller reads no descriptors and simply never completes,
+                 * which looks like a hang rather than a refusal. */
+                cmd = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x04);
+                /* Memory space and bus mastering on, and Interrupt Disable
+                 * *off*. Bit 10 was being preserved from whatever UEFI left,
+                 * and UEFI leaves it set - the same defect virtio-blk had, in
+                 * the same shape, one file over. */
+                pci_write32((uint8_t)bus, (uint8_t)dev, fn, 0x04,
+                            (cmd | 0x6u) & ~0x400u);
+                g_irq_line = (uint8_t)(pci_read32((uint8_t)bus, (uint8_t)dev,
+                                                  fn, 0x3Cu) & 0xFFu);
+
+                bar5 = pci_read32((uint8_t)bus, (uint8_t)dev, fn, 0x24);
+                if ((bar5 & 1u) != 0u) {
+                    continue;   /* an I/O BAR: not the ABAR */
+                }
+                return (uint64_t)(bar5 & 0xFFFFFFF0u);
+            }
+        }
+    }
+    return 0;
+}
+
+/* Stop the port's engines so its pointers can be moved. */
+static int port_stop(void) {
+    uint32_t spin = 0;
+
+    port_write(PxCMD, port_read(PxCMD) & ~(uint32_t)PxCMD_ST);
+    port_write(PxCMD, port_read(PxCMD) & ~(uint32_t)PxCMD_FRE);
+    while ((port_read(PxCMD) & (PxCMD_CR | PxCMD_FR)) != 0u) {
+        if (++spin > 1000000u) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void port_start(void) {
+    uint32_t spin = 0;
+    while ((port_read(PxCMD) & PxCMD_CR) != 0u && ++spin < 1000000u) {
+    }
+    port_write(PxCMD, port_read(PxCMD) | PxCMD_FRE);
+    port_write(PxCMD, port_read(PxCMD) | PxCMD_ST);
+}
+
+static int ahci_dev_init(void) {
+    uint64_t abar = ahci_find();
+    uint32_t ports, p;
+
+    if (abar == 0) {
+        vibeos_x86_64_serial_puts("[AHCI] no AHCI controller on the PCI bus\n");
+        return -1;
+    }
+
+    /* The identity map covers the first 4 GiB with 2 MiB write-back pages, and
+     * this range is registers rather than memory: reads have side effects and
+     * must not be served from a cache line. Marking it uncacheable is what
+     * makes the completion poll below observe the controller instead of a
+     * stale copy of it. */
+    vibeos_x86_64_mark_uncacheable(abar, 0x2000ull);
+
+    g_abar = (volatile uint8_t *)(uintptr_t)abar;
+    mmio_write(HBA_GHC, mmio_read(HBA_GHC) | HBA_GHC_AE);
+
+    ports = mmio_read(HBA_PI);
+    for (p = 0; p < 32u; p++) {
+        uint32_t ssts, det, ipm, sig;
+
+        if ((ports & (1u << p)) == 0u) {
+            continue;
+        }
+        g_port = p;
+        ssts = port_read(PxSSTS);
+        det = ssts & 0x0Fu;
+        ipm = (ssts >> 8) & 0x0Fu;
+        /* det 3: a device is there and the link is up. ipm 1: it is awake.
+         * Anything else is a port that exists in the register and has nothing
+         * usable behind it. */
+        /* Instrument rather than infer. "no SATA disk on any port" is an
+         * absence, and an absence cannot say which of the three reasons it
+         * was - a link that is down, a port asleep, or a signature that is not
+         * a disk. One line, written in one call so two cores cannot split it. */
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[AHCI] port=0x");
+        vibeos_x86_64_serial_print_hex(p);
+        vibeos_x86_64_serial_puts(" ssts=0x");
+        vibeos_x86_64_serial_print_hex(ssts);
+        vibeos_x86_64_serial_puts(" sig=0x");
+        vibeos_x86_64_serial_print_hex(port_read(PxSIG));
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+        if (det != 3u || ipm != 1u) {
+            continue;
+        }
+        if (port_stop() != 0) {
+            continue;
+        }
+        {
+            uint32_t i;
+            for (i = 0; i < sizeof(g_fis); i++) {
+                g_fis[i] = 0;
+            }
+            for (i = 0; i < sizeof(g_cmd_list) / sizeof(g_cmd_list[0]); i++) {
+                g_cmd_list[i].flags = 0;
+                g_cmd_list[i].prdtl = 0;
+                g_cmd_list[i].prdbc = 0;
+                g_cmd_list[i].ctba = 0;
+                g_cmd_list[i].ctbau = 0;
+            }
+        }
+        port_write(PxCLB, (uint32_t)(uintptr_t)g_cmd_list);
+        port_write(PxCLBU, 0);
+        port_write(PxFB, (uint32_t)(uintptr_t)g_fis);
+        port_write(PxFBU, 0);
+        port_write(PxSERR, 0xFFFFFFFFu);   /* write-1-to-clear */
+        port_write(PxIS, 0xFFFFFFFFu);
+        /* Ask the port to raise interrupts at all: PxIE is zero out of reset,
+         * so a routed line with this register clear delivers nothing - which
+         * is the same class of silence virtio-blk cost an hour on. DHRS bit 0
+         * is the device-to-host register FIS, which is what a finished DMA
+         * command produces. */
+        port_write(PxIE, 0x1u | 0x2u | 0x4u | 0x8u);
+        mmio_write(HBA_GHC, mmio_read(HBA_GHC) | HBA_GHC_IE);
+        port_start();
+
+        if (g_vector != 0u && g_irq_line != 0u && g_irq_line < 24u &&
+            vibeos_x86_64_ioapic_route_pci(g_irq_line, (uint8_t)g_vector, 0u) == 0) {
+            g_irq_ready = 1u;
+        }
+        /* Which line, as virtio-blk says too: two PCI devices on one INTx line
+         * each need their own acknowledgement, and the question "who else is
+         * on this line" starts here. */
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[AHCI] irq line=0x");
+        vibeos_x86_64_serial_print_hex((uint64_t)g_irq_line);
+        vibeos_x86_64_serial_puts(" vector=0x");
+        vibeos_x86_64_serial_print_hex((uint64_t)g_vector);
+        vibeos_x86_64_serial_puts(g_irq_ready ? " routed\n" : " not routed\n");
+        vibeos_x86_64_serial_unlock();
+
+        /* The signature, read *here* and not before the port was set up.
+         *
+         * It used to be read straight after PxSSTS, and that worked for the
+         * only case anybody ran: the disk the machine boots from, on a
+         * controller UEFI had already brought up, with the signature long
+         * since latched. Attaching a second disk to a controller the firmware
+         * never touches gave PxSIG = 0xFFFFFFFF - the register is only valid
+         * once the device has sent its first D2H FIS, which cannot happen
+         * before FIS receive is enabled. So the driver reported "controller
+         * found but no SATA disk on any port" for a port with det=3 and ipm=1,
+         * which is a link that is up with a disk on the end of it.
+         *
+         * Same shape as everything else this phase has turned up: the code was
+         * only ever exercised in the one arrangement where its assumption
+         * happened to hold, and the arrangement was doing the work.
+         *
+         * Bounded, and the bound is not a timeout worth counting - this is
+         * bring-up, not a path a syscall can wait on. */
+        {
+            uint32_t tries;
+            sig = 0xFFFFFFFFu;
+            for (tries = 0; tries < 100000u; tries++) {
+                sig = port_read(PxSIG);
+                if (sig != 0xFFFFFFFFu && sig != 0u) {
+                    break;
+                }
+            }
+        }
+        if (sig != 0x00000101u) {
+            /* Not a plain SATA disk (0xEB140101 is ATAPI). Say which, because
+             * "no disk" and "a disk this driver does not drive" are different
+             * facts and the old message could not tell them apart. */
+            vibeos_x86_64_serial_lock();
+            vibeos_x86_64_serial_puts("[AHCI] port=0x");
+            vibeos_x86_64_serial_print_hex(p);
+            vibeos_x86_64_serial_puts(" not a plain SATA disk sig=0x");
+            vibeos_x86_64_serial_print_hex(sig);
+            vibeos_x86_64_serial_puts("\n");
+            vibeos_x86_64_serial_unlock();
+            (void)port_stop();
+            continue;
+        }
+
+        g_ready = 1;
+        vibeos_x86_64_serial_puts("[AHCI] port ready: 0x");
+        vibeos_x86_64_serial_print_hex((uint64_t)p);
+        vibeos_x86_64_serial_puts(" abar=0x");
+        vibeos_x86_64_serial_print_hex(abar);
+        vibeos_x86_64_serial_puts("\n");
+        return 0;
+    }
+
+    vibeos_x86_64_serial_puts("[AHCI] controller found but no SATA disk on any port\n");
+    g_port = 0xFFFFFFFFu;
+    return -1;
+}
+
+/* ---- transfers ----------------------------------------------------------- */
+
+/* How many times a wait for the port hit its bound.
+ *
+ * Both of the waits below already had one - the busy check before a command is
+ * issued and the completion poll after it - and both then returned -1, the
+ * same value the device's own error bit produces. So "the disk took too long"
+ * and "the disk said no" arrived at the block layer as one thing, and
+ * VIBEOS_BLK_TIMEOUT, which the boot gate asserts is zero, was produced by
+ * nobody at all. A bound with no counter proves nothing about latency.
+ *
+ * Only these two are counted. The bounds in port_stop and port_start are
+ * bring-up, not reachable from a syscall, and P7's property is about the paths
+ * a program can wait on. */
+/* Acknowledge, in the order the specification requires: the port's own
+ * interrupt status first, then the controller's bit for that port. Doing it
+ * the other way round leaves the controller believing the port is still
+ * asserting and it never raises another one - a hang that looks exactly like a
+ * device that stopped working. */
+static void ahci_dev_irq(void) {
+    if (g_abar == 0) {
+        return;
+    }
+    port_write(PxIS, port_read(PxIS));
+    mmio_write(HBA_IS, 1u << g_port);
+    g_irq_count++;
+}
+
+static uint64_t g_timeouts;
+
+/* How long a command may take, in timer ticks: five seconds. The bound used to
+ * be twenty million turns of the wait below, and once the wait halts each turn
+ * lasts until the next interrupt - a tick - so twenty million turns were two
+ * days. A command QEMU never completed (three boots in six under host load,
+ * 2026-10-22, M-124) therefore never timed out: the core sat in this loop
+ * holding the disk, every other core went idle behind it, and the gate saw a
+ * silent machine. Time is the bound now, and a command that runs out says what
+ * the port held when it did. */
+#define AHCI_CMD_TICKS (5u * VIBEOS_HW_TIMER_HZ)
+
+/* The port's registers at a timeout, in one line - one critical section. */
+static void ahci_report_timeout(uint8_t command, uint64_t lba, uint64_t waited) {
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[AHCI] command timed out cmd=0x");
+    vibeos_x86_64_serial_print_hex(command);
+    vibeos_x86_64_serial_puts(" lba=0x");
+    vibeos_x86_64_serial_print_hex(lba);
+    vibeos_x86_64_serial_puts(" ticks=0x");
+    vibeos_x86_64_serial_print_hex(waited);
+    vibeos_x86_64_serial_puts(" ci=0x");
+    vibeos_x86_64_serial_print_hex(port_read(PxCI));
+    vibeos_x86_64_serial_puts(" is=0x");
+    vibeos_x86_64_serial_print_hex(port_read(PxIS));
+    vibeos_x86_64_serial_puts(" tfd=0x");
+    vibeos_x86_64_serial_print_hex(port_read(PxTFD));
+    vibeos_x86_64_serial_puts(" serr=0x");
+    vibeos_x86_64_serial_print_hex(port_read(PxSERR));
+    vibeos_x86_64_serial_puts(" cmd=0x");
+    vibeos_x86_64_serial_print_hex(port_read(PxCMD));
+    vibeos_x86_64_serial_puts(" irqs=0x");
+    vibeos_x86_64_serial_print_hex(g_irq_count);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}
+
+
+static uint64_t ahci_dev_timeouts(void) {
+    return g_timeouts;
+}
+
+/* Build and run one command. Returns 0 on success. */
+/* One command, whatever it is.
+ *
+ * Generalised from a read/write-only version so that IDENTIFY does not have to
+ * duplicate forty lines of FIS construction. Two things this file has already
+ * learned the hard way are in that construction - the PRDT byte count is one
+ * less than the bytes, and the error bit has to be checked inside the wait
+ * rather than after it - and a second copy would have to learn them again. */
+static int ahci_cmd(uint8_t command, uint64_t lba, uint32_t sectors,
+                    int write, uint32_t bytes) {
+    hba_cmd_header_t *hdr = &g_cmd_list[0];
+    hba_cmd_table_t *tbl = &g_cmd_table;
+    uint8_t *fis = tbl->cfis;
+    uint32_t i, spin;
+    uint64_t t0;
+
+    for (i = 0; i < sizeof(g_cmd_table); i++) {
+        ((uint8_t *)tbl)[i] = 0;
+    }
+
+    hdr->flags = (uint16_t)((5u & 0x1Fu) |          /* H2D FIS is 5 dwords */
+                            (write ? 0x40u : 0u));  /* W: guest -> device  */
+    hdr->prdtl = 1;
+    hdr->prdbc = 0;
+    hdr->ctba = (uint32_t)(uintptr_t)tbl;
+    hdr->ctbau = 0;
+
+    tbl->prdt[0].dba = (uint32_t)(uintptr_t)g_bounce;
+    tbl->prdt[0].dbau = 0;
+    /* The count is bytes minus one, and a driver that writes the plain byte
+     * count transfers one byte too many - which on a 512-byte read means the
+     * sector after it, silently. */
+    tbl->prdt[0].dbc = bytes - 1u;
+
+    fis[0] = 0x27;                       /* register FIS, host to device */
+    fis[1] = 0x80;                       /* C: this is a command         */
+    fis[2] = command;
+    fis[4] = (uint8_t)(lba & 0xFFu);
+    fis[5] = (uint8_t)((lba >> 8) & 0xFFu);
+    fis[6] = (uint8_t)((lba >> 16) & 0xFFu);
+    fis[7] = 0x40;                       /* LBA mode */
+    fis[8] = (uint8_t)((lba >> 24) & 0xFFu);
+    fis[9] = (uint8_t)((lba >> 32) & 0xFFu);
+    fis[10] = (uint8_t)((lba >> 40) & 0xFFu);
+    fis[12] = (uint8_t)(sectors & 0xFFu);
+    fis[13] = (uint8_t)((sectors >> 8) & 0xFFu);
+
+    /* Wait for the port to go idle before handing it anything. */
+    spin = 0;
+    while ((port_read(PxTFD) & (ATA_DEV_BUSY | ATA_DEV_DRQ)) != 0u) {
+        if (++spin > 1000000u) {
+            g_timeouts++;
+            return -1;
+        }
+    }
+
+    port_write(PxIS, 0xFFFFFFFFu);
+    port_write(PxCI, 1u);   /* slot 0 */
+
+    spin = 0;
+    t0 = g_timer_ticks;
+    for (;;) {
+        if ((port_read(PxCI) & 1u) == 0u) {
+            break;
+        }
+        /* TFD.ERR, checked inside the loop rather than after it: a command
+         * that fails leaves CI set on some controllers, and waiting for a bit
+         * that will never clear is a hang rather than an error. */
+        if ((port_read(PxTFD) & 0x01u) != 0u) {
+            return -1;
+        }
+        if (++spin > 20000000u || g_timer_ticks - t0 > AHCI_CMD_TICKS) {
+            ahci_report_timeout(command, lba, g_timer_ticks - t0);
+            g_timeouts++;
+            return -1;
+        }
+        if (ahci_may_halt(spin)) {
+            __asm__ __volatile__("hlt" ::: "memory");
+        }
+    }
+    if ((port_read(PxTFD) & 0x01u) != 0u) {
+        return -1;
+    }
+    return 0;
+}
+
+static int ahci_xfer(uint64_t lba, uint32_t sectors, int write) {
+    return ahci_cmd(write ? (uint8_t)ATA_CMD_WRITE_DMA_EX
+                          : (uint8_t)ATA_CMD_READ_DMA_EX,
+                    lba, sectors, write, sectors * 512u);
+}
+
+/* How big the disk is, or 0 if the device would not say.
+ *
+ * Nothing asked until now, and that is the defect rather than an omission:
+ * every AHCI read has been unbounded, so an LBA past the end of the medium
+ * went straight to the controller. The block layer refuses to register a
+ * device that cannot state its size, because a device with no size cannot
+ * have its requests bounds-checked - and an unchecked bound is the difference
+ * between an error and a disk written at the wrong offset.
+ *
+ * LBA48 first, LBA28 second, and both are read rather than assuming the
+ * first: word 83 bit 10 says whether the 48-bit fields mean anything, and a
+ * driver that reads them unconditionally gets a plausible number from a disk
+ * that never filled them in. */
+static uint64_t ahci_identify_sectors(void) {
+    const uint8_t *id = g_bounce;
+    uint64_t lba48;
+    uint32_t lba28;
+    uint32_t i;
+
+    for (i = 0; i < 512u; i++) {
+        g_bounce[i] = 0;
+    }
+    if (ahci_cmd((uint8_t)ATA_CMD_IDENTIFY, 0, 0, 0, 512u) != 0) {
+        return 0;
+    }
+
+    /* Little-endian 16-bit words, assembled by hand: this runs before
+     * anything has established that the structure is aligned or that the
+     * compiler will not widen a load across a word boundary. */
+    if ((((uint32_t)id[83 * 2] | ((uint32_t)id[83 * 2 + 1] << 8)) & (1u << 10))
+            != 0u) {
+        lba48 = 0;
+        for (i = 0; i < 8u; i++) {
+            lba48 |= (uint64_t)id[100 * 2 + i] << (8u * i);
+        }
+        if (lba48 != 0ull) {
+            return lba48;
+        }
+    }
+    lba28 = 0;
+    for (i = 0; i < 4u; i++) {
+        lba28 |= (uint32_t)id[60 * 2 + i] << (8u * i);
+    }
+    return (uint64_t)lba28;
+}
+
+static uint64_t ahci_dev_sectors(void) {
+    if (!g_ready) {
+        return 0;
+    }
+    return ahci_identify_sectors();
+}
+
+static int ahci_dev_read_many(uint64_t lba, void *buf, uint32_t sectors) {
+    uint8_t *out = (uint8_t *)buf;
+    uint32_t done = 0;
+
+    if (!g_ready || sectors == 0u) {
+        return -1;
+    }
+    if (ahci_lock() != 0) {
+        return -1;
+    }
+    while (done < sectors) {
+        uint32_t chunk = sectors - done;
+        uint32_t i;
+
+        if (chunk > sizeof(g_bounce) / 512u) {
+            chunk = sizeof(g_bounce) / 512u;
+        }
+        if (ahci_xfer(lba + done, chunk, 0) != 0) {
+            ahci_unlock();
+            return -1;
+        }
+        for (i = 0; i < chunk * 512u; i++) {
+            out[(uint64_t)done * 512ull + i] = g_bounce[i];
+        }
+        done += chunk;
+    }
+    ahci_unlock();
+    return 0;
+}
+
+static int ahci_dev_read(uint64_t lba, void *buf) {
+    return ahci_dev_read_many(lba, buf, 1u);
+}
+
+/* The mirror of read_many, through the same bounce buffer.
+ *
+ * The chunking is the bounce buffer's size and not the controller's: every
+ * transfer here is staged through g_bounce, so a run longer than it has to be
+ * split whatever the hardware could manage in one command. Splitting for a
+ * reason that is this kernel's rather than the device's is worth saying out
+ * loud - it is the number to raise if AHCI writes ever matter for speed. */
+static int ahci_dev_write_many(uint64_t lba, const void *buf,
+                                  uint32_t sectors) {
+    const uint8_t *in = (const uint8_t *)buf;
+    uint32_t done = 0;
+
+    if (!g_ready || sectors == 0u) {
+        return -1;
+    }
+    if (ahci_lock() != 0) {
+        return -1;
+    }
+    while (done < sectors) {
+        uint32_t chunk = sectors - done;
+        uint32_t i;
+
+        if (chunk > sizeof(g_bounce) / 512u) {
+            chunk = sizeof(g_bounce) / 512u;
+        }
+        for (i = 0; i < chunk * 512u; i++) {
+            g_bounce[i] = in[(uint64_t)done * 512ull + i];
+        }
+        if (ahci_xfer(lba + done, chunk, 1) != 0) {
+            ahci_unlock();
+            return -1;
+        }
+        done += chunk;
+    }
+    ahci_unlock();
+    return 0;
+}
+
+/* FLUSH CACHE EXT.
+ *
+ * The command was defined in this file from the beginning and never issued -
+ * one more of the declared-and-unused family this kernel keeps producing. It
+ * carries no data, so the byte count is zero and there is no PRDT entry.
+ */
+static int ahci_dev_barrier(void) {
+    int rc;
+
+    if (!g_ready) {
+        return -1;
+    }
+    if (ahci_lock() != 0) {
+        return -1;
+    }
+    rc = ahci_cmd((uint8_t)ATA_CMD_FLUSH_EX, 0, 0, 1, 0u);
+    ahci_unlock();
+    return rc;
+}
+
+static int ahci_dev_write(uint64_t lba, const void *buf) {
+    const uint8_t *in = (const uint8_t *)buf;
+    uint32_t i;
+    int rc;
+
+    if (!g_ready) {
+        return -1;
+    }
+    if (ahci_lock() != 0) {
+        return -1;
+    }
+    for (i = 0; i < 512u; i++) {
+        g_bounce[i] = in[i];
+    }
+    rc = ahci_xfer(lba, 1u, 1);
+    ahci_unlock();
+    return rc;
+}
+
+/* Its counters, on its own line (C7): ahci_irqs was an accessor kmain.c called
+ * through a weak default, beside the other disk's. The gate reads the name, not
+ * the line it sits on. */
+static void ahci_dev_report(vibeos_dev_write_fn out, void *ctx) {
+    vibeos_devline_t l;
+
+    vibeos_devline_start(&l, "[AHCI] ahci_irqs=");
+    vibeos_devline_hex(&l, ahci_dev_irqs());
+    vibeos_devline_str(&l, " timeouts=");
+    vibeos_devline_hex(&l, g_timeouts);
+    vibeos_devline_end(&l, out, ctx);
+}
+
+static int ahci_dev_irq_entry(void) {
+    ahci_dev_irq();
+    return 0;
+}
+
+/* The probe is the init, with the vector the registry assigned. */
+static int ahci_dev_probe(const vibeos_dev_env_t *env) {
+    g_vector = env->vector;
+    return ahci_dev_init();
+}
+
+static uint64_t ahci_dev_sectors_now(void) {
+    return ahci_dev_sectors();
+}
+
+static const vibeos_block_ops_t g_ahci_dev_ops = {
+    .read = ahci_dev_read,
+    .read_many = ahci_dev_read_many,
+    .write = ahci_dev_write,
+    .write_many = ahci_dev_write_many,
+    .barrier = ahci_dev_barrier,
+    .sectors = ahci_dev_sectors_now,
+    .timeouts = ahci_dev_timeouts,
+};
+
+/* A PCI device: its interrupt is the line it routes to env->vector, so no
+ * legacy line is declared. */
+static const vibeos_device_t g_ahci_dev_device = {
+    .name = "ahci",
+    .cls = VIBEOS_DEV_BLOCK,
+    .isa_irq = VIBEOS_DEVICE_NO_IRQ,
+    .probe = ahci_dev_probe,
+    .irq = ahci_dev_irq_entry,
+    .selftest = 0,
+    .report = ahci_dev_report,
+    .ops = &g_ahci_dev_ops,
+};
+VIBEOS_DEVICE(g_ahci_dev_device);

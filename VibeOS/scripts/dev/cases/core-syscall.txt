@@ -1,0 +1,29 @@
+# C4: every operation runs exactly the checks it declares.
+#
+# The cases below are C4's own sabotage list, run against
+# scripts/dev/check-syscall-checks.py, which holds include/vibeos/abi.h's
+# declarations against the dispatcher's call graph in both directions.
+#
+#  - "remove a check from a handler and confirm the enumeration names it": the
+#    two cases that took a check out of uname and clock_gettime lived here until
+#    stage 2b moved those checks into the rows; they are core-syscall-hoist.txt now.
+#  - "declare a check that is not run" / "run one that is not declared": the
+#    cases below, which change the *declaration* instead of the code.
+#  - "an operation no case dispatches": the fifth.
+#
+# Not run as cases, and said so rather than implied:
+#  - "add a second ABI and confirm no check was duplicated". The checks are
+#    declared per operation and the dispatcher switches on the operation, so a
+#    second ABI is a second classify function and a second table of numbers; it
+#    has no way to hold a check of its own. That is the design, and it will be
+#    demonstrated the day a second ABI exists - a sabotage that invents one to
+#    prove it cannot duplicate a check would be a test of the test.
+#  - "look the ABI up per call and confirm the perf ratchet fires". The ABI is
+#    read from the task (bound in hw_task_alloc) and the [PERF] syscall_min
+#    ratchet from C0 is the instrument; a per-call lookup that costs less than
+#    the ratchet's margin (5000 cycles against a 208-440 minimum) would not trip
+#    it, so this is a claim about margin, not a case.
+#
+# This file now holds no case of its own - it is the record of the two that were
+# not run. The runnable ones are core-syscall-hoist.txt (checks in the rows),
+# core-syscall-decl.txt (the declarations) and core-syscall-rows.txt (the rows).

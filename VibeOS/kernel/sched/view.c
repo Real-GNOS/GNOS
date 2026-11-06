@@ -1,0 +1,209 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* The task table, printed. Phase S-P0 of docs/sched/.
+ *
+ * This lives outside the architecture layer on purpose, and it is the first
+ * piece of the scheduler to do so. The rule for the rest of the rewrite is
+ * visible here in miniature: deciding *what to say about a task* is portable,
+ * and only *reading the machine's table* is not. arch_hw.c answers
+ * vibeos_task_describe and knows nothing about formatting.
+ *
+ * It matters more than tidiness. Every task defect this project has had was
+ * diagnosed by adding a print statement to an 8000-line file, booting, and
+ * reading serial output - and three of the fields printed below exist only
+ * because somebody had to do exactly that.
+ */
+
+#include "vibeos/sched_policy.h"
+#include "vibeos/task_stats.h"
+#include "vibeos/task.h"
+#include "vibeos/account.h"
+#include "vibeos/arch_x86_64.h"
+
+static void view_hex(uint64_t v) {
+    vibeos_x86_64_serial_print_hex(v);
+}
+
+static void view_str(const char *s) {
+    vibeos_x86_64_serial_puts(s ? s : "-");
+}
+
+void vibeos_task_print_table(void) {
+    uint32_t slots = vibeos_task_slots();
+    uint32_t i;
+
+    if (slots == 0u) {
+        vibeos_x86_64_serial_puts("[TASKS] no task table on this build\n");
+        return;
+    }
+
+    /* One line per task, assembled under one lock.
+     *
+     * A line built from a dozen serial_puts calls is a dozen critical
+     * sections, and this output is read next to three other cores writing
+     * their own. That has already produced a diagnostic that read as a
+     * contradiction, and a boot gate that reported failures which had not
+     * happened. */
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[TASKS] slot gen state pid tgid ppid cr3 "
+                              "flags cr3_set_by ready_by aspace_killed_by exe\n");
+    vibeos_x86_64_serial_unlock();
+
+    for (i = 0; i < slots; i++) {
+        vibeos_task_desc_t d;
+
+        if (vibeos_task_describe(i, &d) != 0) {
+            continue;
+        }
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[TASKS] ");
+        view_hex((uint64_t)d.slot);
+        vibeos_x86_64_serial_puts(" ");
+        view_hex((uint64_t)d.generation);
+        vibeos_x86_64_serial_puts(" ");
+        view_str(d.state_name);
+        vibeos_x86_64_serial_puts(" pid=");
+        view_hex((uint64_t)d.pid);
+        vibeos_x86_64_serial_puts(" tgid=");
+        view_hex((uint64_t)d.tgid);
+        vibeos_x86_64_serial_puts(" ppid=");
+        view_hex((uint64_t)d.ppid);
+        vibeos_x86_64_serial_puts(" cr3=");
+        view_hex(d.cr3);
+        vibeos_x86_64_serial_puts(d.is_user ? " user" : " kernel");
+        vibeos_x86_64_serial_puts(d.is_thread ? " thread" : "");
+        vibeos_x86_64_serial_puts(d.on_cpu ? " on-cpu" : "");
+        vibeos_x86_64_serial_puts(" cr3_by=");
+        view_str(d.cr3_set_by);
+        vibeos_x86_64_serial_puts(" ready_by=");
+        view_str(d.ready_by);
+        vibeos_x86_64_serial_puts(" aspace=");
+        view_str(d.aspace_killed_by);
+        {
+            const vibeos_task_account_t *acct = vibeos_account_task(d.slot);
+            if (acct) {
+                vibeos_x86_64_serial_puts(" ticks=0x");
+                view_hex(acct->ticks);
+                vibeos_x86_64_serial_puts(" runs=0x");
+                view_hex(acct->switches);
+                vibeos_x86_64_serial_puts(" maxwait=0x");
+                view_hex(acct->max_wait);
+            }
+        }
+        vibeos_x86_64_serial_puts(" state_by=");
+        view_str(vibeos_task_last_why(d.slot));
+        if (d.exe[0]) {
+            vibeos_x86_64_serial_puts(" exe=");
+            view_str(d.exe);
+        }
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+    }
+}
+
+void vibeos_task_print_stats(void) {
+    const vibeos_task_stats_t *s = vibeos_task_stats();
+
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[TASKS] created=0x");
+    view_hex(s->created);
+    vibeos_x86_64_serial_puts(" exited=0x");
+    view_hex(s->exited);
+    vibeos_x86_64_serial_puts(" reaped=0x");
+    view_hex(s->reaped);
+    vibeos_x86_64_serial_puts(" forks=0x");
+    view_hex(s->forks);
+    vibeos_x86_64_serial_puts(" threads=0x");
+    view_hex(s->threads);
+    vibeos_x86_64_serial_puts(" execs=0x");
+    view_hex(s->execs);
+    vibeos_x86_64_serial_puts(" slot_refused=0x");
+    view_hex(s->slot_refused);
+    /* Kernel stacks handed over by an exiting core and freed once it was
+     * running on another one. Reported because a deferred free that silently
+     * never happens is a leak that looks exactly like a fix, and the gate
+     * asserts it is not zero on a boot that exited anything. */
+    vibeos_x86_64_serial_puts(" dead_kstacks_freed=0x");
+    view_hex(s->dead_kstacks_freed);
+    vibeos_x86_64_serial_puts(" exit_migrated=0x");
+    view_hex(s->exit_migrated);
+    vibeos_x86_64_serial_puts(" pid_dead_thread_skipped=0x");
+    view_hex(s->pid_dead_thread_skipped);
+    vibeos_x86_64_serial_puts(" exit_leader_before_threads=0x");
+    view_hex(s->exit_leader_before_threads);
+    vibeos_x86_64_serial_puts(" exit_parent_told_late=0x");
+    view_hex(s->exit_parent_told_late);
+    /* What the scheduling policy has been charged: the gate asserts it moved,
+     * since a policy never charged picks by slot number (L2 step 4). */
+    vibeos_x86_64_serial_puts(" policy_charged=0x");
+    view_hex(vibeos_sched_policy_charged());
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+
+    /* Where the machine's time went.
+     *
+     * Charged plus idle must equal seen, exactly. It is an identity rather than
+     * a tolerance because every tick is charged to exactly one place, so a
+     * mismatch is not drift - it is a tick that went somewhere nobody can name,
+     * and every number a policy would be built on inherits that error. */
+    {
+        uint64_t charged = 0, idle = 0, seen = 0;
+        uint64_t per_cpu[8];
+        uint64_t dropped;
+        int balanced;
+        uint32_t c;
+
+        /* Snapshot everything before printing any of it. The first version read
+         * the totals, then walked the per-CPU counters - and ticks kept
+         * arriving in between, so it printed a core with more idle time than
+         * the whole machine. Two moments reported as one is the same mistake as
+         * a log line assembled from two writes. */
+        for (c = 0; c < 8u; c++) {
+            per_cpu[c] = vibeos_account_idle(c);
+        }
+        dropped = vibeos_account_dropped();
+        balanced = vibeos_account_balance(&charged, &idle, &seen) == 0;
+
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[TASKS] CPUTIME charged=0x");
+        view_hex(charged);
+        vibeos_x86_64_serial_puts(" idle=0x");
+        view_hex(idle);
+        vibeos_x86_64_serial_puts(" seen=0x");
+        view_hex(seen);
+        vibeos_x86_64_serial_puts(balanced ? " balanced=yes" : " balanced=NO");
+        vibeos_x86_64_serial_puts(" dropped=0x");
+        view_hex(dropped);
+        for (c = 0; c < 8u; c++) {
+            uint64_t ci = per_cpu[c];
+            if (ci == 0ull) {
+                continue;
+            }
+            vibeos_x86_64_serial_puts(" cpu");
+            view_hex((uint64_t)c);
+            vibeos_x86_64_serial_puts("_idle=0x");
+            view_hex(ci);
+        }
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+    }
+
+    /* The three that must be zero, on their own line and last, so the eye
+     * lands on them - and so the boot gate can match one pattern. */
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[TASKS] MUSTBEZERO illegal_transition=0x");
+    view_hex(s->illegal_transition);
+    vibeos_x86_64_serial_puts(" use_after_publish=0x");
+    view_hex(s->use_after_publish);
+    vibeos_x86_64_serial_puts(" tenancy_mismatch=0x");
+    view_hex(s->tenancy_mismatch);
+    vibeos_x86_64_serial_puts(" cr3_without_owner=0x");
+    view_hex(s->cr3_without_owner);
+    vibeos_x86_64_serial_puts(" exit_switch_irq_on=0x");
+    view_hex(s->exit_switch_irq_on);
+    vibeos_x86_64_serial_puts(" procstate_double_put=0x");
+    view_hex(s->procstate_double_put);
+    vibeos_x86_64_serial_puts(" files_double_leave=0x");
+    view_hex(s->files_double_leave);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}

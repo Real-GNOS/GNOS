@@ -1,0 +1,1387 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Host tests for compaction (plan phase P6, step 5).
+ *
+ * Compaction is the one operation in this subsystem that moves memory that is
+ * still in use, so the tests are weighted accordingly: two of them check that
+ * it works, and the rest check that it *refuses*. Getting a move wrong does
+ * not lose performance - it hands a running process the contents of a
+ * different page, which is the failure this whole rewrite exists to end.
+ *
+ * The refusals are therefore the specification, not the edge cases:
+ *
+ *   pinned            a page table or a DMA buffer must never move
+ *   writable          the copy-then-repoint window would lose a store
+ *   too many holders  a partly-moved frame is a state nothing can recover from
+ *   raced             the holder list changed, so what was read is not there
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "vibeos/vmspace.h"
+#include "vibeos/frame.h"
+#include "vibeos/rmap.h"
+#include "vibeos/mm_stats.h"
+#include "vibeos/mm_model.h"
+#include "vibeos/reclaim.h"
+#include "vibeos/swapmap.h"
+#include "vibeos/anon.h"
+
+int test_compact(void);
+void vibeos_rmap_set_base(uint64_t base_phys);
+
+#define CP_FRAMES 256u
+#define CP_BASE   0x900000ull
+
+static unsigned char *g_ram;
+static vibeos_frame_t g_ftable[CP_FRAMES];
+static unsigned char g_rpool[CP_FRAMES * sizeof(uint32_t) + 4096u];
+
+static int g_fail;
+
+#define CHECK(cond, what)                                                     \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            printf("  compact: FAIL %s\n", (what));                           \
+            g_fail++;                                                         \
+        }                                                                     \
+    } while (0)
+
+static void *cp_map(uint64_t phys) {
+    if (phys < CP_BASE || phys >= CP_BASE + (uint64_t)CP_FRAMES * 4096ull) {
+        return 0;
+    }
+    return g_ram + (phys - CP_BASE);
+}
+
+static uint64_t cp_alloc_table(void) {
+    return vibeos_frame_alloc(VIBEOS_FRAME_PAGE_TABLE);
+}
+
+static void cp_free_table(uint64_t phys) {
+    (void)vibeos_frame_put(phys);
+}
+
+/* A swap area that is memory, so a round trip through page-out and page-in
+ * can be checked byte for byte without a disk. */
+#define CP_SLOTS 32u
+static uint8_t g_swapbits[(CP_SLOTS + 7u) / 8u];
+static unsigned char g_swapdisk[CP_SLOTS][4096];
+static int g_swap_write_fails;
+/* What another core does while a page is being written to swap (M-056). */
+static void (*g_during_write)(void);
+
+static int cp_swap_io(void *ctx, uint32_t slot, void *page, int write) {
+    (void)ctx;
+    if (slot >= CP_SLOTS) {
+        return -1;
+    }
+    if (write) {
+        if (g_during_write) {
+            void (*fn)(void) = g_during_write;
+            g_during_write = 0;
+            fn();
+        }
+        if (g_swap_write_fails) {
+            return -1;
+        }
+        memcpy(g_swapdisk[slot], page, 4096);
+    } else {
+        memcpy(page, g_swapdisk[slot], 4096);
+    }
+    return 0;
+}
+
+static uint64_t g_shootdowns;
+
+static void cp_shootdown(uint64_t root_phys) {
+    (void)root_phys;
+    g_shootdowns++;
+}
+
+/* The two hooks a swapped-out entry needs from outside vmspace (M-063), as the
+ * kernel supplies them: a slot back to the map, and a page brought back in. */
+static void cp_swap_release(uint32_t slot) {
+    (void)vibeos_swap_free(slot);
+}
+
+static int cp_swap_bring_in(vibeos_vmspace_t *as, uint64_t va) {
+    int64_t slot = vibeos_vmspace_swap_slot(as, va);
+    uint64_t f;
+
+    if (slot < 0) {
+        return -1;
+    }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (f == 0u) {
+        return -1;
+    }
+    if (vibeos_vmspace_swap_in(as, va, f) != 0) {
+        (void)vibeos_frame_put(f);
+        return -1;
+    }
+    return 0;   /* the page-in gave the slot back itself */
+}
+
+static int cp_setup(void) {
+    vibeos_vmspace_backend_t be;
+
+    memset(g_ftable, 0, sizeof(g_ftable));
+    memset(g_ram, 0, (size_t)CP_FRAMES * 4096u);
+    memset(g_rpool, 0, sizeof(g_rpool));
+    vibeos_mm_stats_reset();
+    g_shootdowns = 0;
+
+    if (vibeos_frame_init(CP_BASE, (uint64_t)CP_FRAMES * 4096ull,
+                          g_ftable, CP_FRAMES, cp_map) != 0) {
+        return -1;
+    }
+    vibeos_rmap_set_base(CP_BASE);
+    if (vibeos_rmap_init(g_rpool, (uint64_t)sizeof(g_rpool), CP_FRAMES) != 0) {
+        return -1;
+    }
+    memset(&be, 0, sizeof(be));
+    be.map_phys = cp_map;
+    be.alloc_table = cp_alloc_table;
+    be.free_table = cp_free_table;
+    be.shootdown = cp_shootdown;
+    be.swap_write = vibeos_swap_write;
+    be.swap_read = vibeos_swap_read;
+    be.swap_release = cp_swap_release;
+    be.swap_bring_in = cp_swap_bring_in;
+    memset(g_swapdisk, 0, sizeof(g_swapdisk));
+    g_swap_write_fails = 0;
+    g_during_write = 0;
+    if (vibeos_swapmap_init(g_swapbits, CP_SLOTS, cp_swap_io, 0) != 0) {
+        return -1;
+    }
+    return vibeos_vmspace_init(&be);
+}
+
+#define VA_A 0x8000000000ull
+
+/* Map a frame the way the kernel does, which is decision D9: a caller that
+ * allocates *in order to map* hands the frame over and lets go, so the
+ * mapping's reference is the only one.
+ *
+ * The tests did not do this at first and every move was refused for the right
+ * reason - the frame had an owner that was not a mapping, namely the test
+ * itself. That is the same refusal that protects a cache page from being moved
+ * out from under the entry holding its address, so the tests were wrong and
+ * the layer was right. Arranging a test differently from the code it exercises
+ * is how a test comes to disagree with reality. */
+static int map_as_kernel_does(vibeos_vmspace_t *as, uint64_t va, uint64_t phys,
+                              vibeos_prot_t prot) {
+    if (vibeos_vmspace_map(as, va, phys, prot) != 0) {
+        return -1;
+    }
+    (void)vibeos_frame_put(phys);   /* D9: the mapping owns it now */
+    return 0;
+}
+
+/* --- it works ------------------------------------------------------------- */
+
+/* A read-only page moves, its contents arrive, and the mapping follows it. */
+static void test_move_carries_contents_and_mapping(void) {
+    vibeos_vmspace_t as;
+    uint64_t old_f, new_f;
+    unsigned char *p;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    old_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    new_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    CHECK(old_f && new_f, "two frames");
+
+    p = (unsigned char *)cp_map(old_f);
+    memset(p, 0xA5, 4096);
+
+    CHECK(map_as_kernel_does(&as, VA_A, old_f,
+                             VIBEOS_PROT_READ | VIBEOS_PROT_USER) == 0, "map");
+    CHECK(vibeos_rmap_count(old_f) == 1u, "one holder before");
+
+    CHECK(vibeos_vmspace_move_frame(old_f, new_f) == 0, "the move is accepted");
+
+    /* The contents arrived. */
+    {
+        unsigned char *q = (unsigned char *)cp_map(new_f);
+        int same = 1;
+        unsigned i;
+        for (i = 0; i < 4096u; i++) {
+            if (q[i] != 0xA5) { same = 0; break; }
+        }
+        CHECK(same, "contents copied");
+    }
+
+    /* The mapping followed, and the reverse map with it. */
+    {
+        uint64_t *pte = vibeos_vmspace_entry(&as, VA_A);
+        CHECK(pte != 0, "entry still there");
+        if (pte) {
+            CHECK((*pte & 0x000FFFFFFFFFF000ull) == new_f,
+                  "the entry points at the new frame");
+        }
+    }
+    CHECK(vibeos_rmap_count(new_f) == 1u, "the new frame has the holder");
+    CHECK(vibeos_rmap_count(old_f) == 0u, "the old frame has none");
+    CHECK(g_shootdowns >= 1u, "a shootdown was sent");
+    CHECK(vibeos_mm_stats()->compact_moved == 1u, "counted as moved");
+    CHECK(vibeos_mm_stats()->compact_mappings_moved == 1u, "one mapping moved");
+}
+
+/* Two address spaces sharing a read-only frame both follow it. A move that
+ * repointed one and not the other would leave two processes reading different
+ * memory through the same address - which is exactly the class of defect that
+ * makes this operation dangerous. */
+static void test_move_follows_every_holder(void) {
+    vibeos_vmspace_t a, b;
+    uint64_t old_f, new_f;
+
+    if (cp_setup() != 0) { printf("  compact: FAIL setup\n"); g_fail++; return; }
+    if (vibeos_vmspace_create(&a) != 0 || vibeos_vmspace_create(&b) != 0) {
+        printf("  compact: FAIL create\n"); g_fail++; return;
+    }
+    old_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    new_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+
+    (void)vibeos_vmspace_map(&a, VA_A, old_f,
+                             VIBEOS_PROT_READ | VIBEOS_PROT_USER);
+    (void)map_as_kernel_does(&b, VA_A, old_f,
+                             VIBEOS_PROT_READ | VIBEOS_PROT_USER);
+    CHECK(vibeos_rmap_count(old_f) == 2u, "two holders");
+
+    CHECK(vibeos_vmspace_move_frame(old_f, new_f) == 0, "accepted");
+    CHECK(vibeos_mm_stats()->compact_mappings_moved == 2u, "both moved");
+
+    {
+        uint64_t *pa = vibeos_vmspace_entry(&a, VA_A);
+        uint64_t *pb = vibeos_vmspace_entry(&b, VA_A);
+        CHECK(pa && (*pa & 0x000FFFFFFFFFF000ull) == new_f, "a follows");
+        CHECK(pb && (*pb & 0x000FFFFFFFFFF000ull) == new_f, "b follows");
+    }
+    CHECK(vibeos_rmap_count(new_f) == 2u, "both holders recorded on the new");
+    CHECK(vibeos_rmap_count(old_f) == 0u, "and none on the old");
+}
+
+/* --- it refuses ----------------------------------------------------------- */
+
+/* Pinned never moves. The safety refusal. */
+static void test_refuses_pinned(void) {
+    vibeos_vmspace_t as;
+    uint64_t old_f, new_f;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    old_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    new_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    (void)map_as_kernel_does(&as, VA_A, old_f,
+                             VIBEOS_PROT_READ | VIBEOS_PROT_USER);
+    vibeos_frame_set_flag(old_f, VIBEOS_FRAME_PINNED);
+
+    CHECK(vibeos_vmspace_move_frame(old_f, new_f) != 0, "refused");
+    CHECK(vibeos_mm_stats()->compact_refused_pinned == 1u, "counted as pinned");
+    CHECK(vibeos_mm_stats()->compact_moved == 0u, "and nothing moved");
+
+    /* And the entry is untouched - a refusal that had already copied or
+     * repointed something would be worse than an acceptance. */
+    {
+        uint64_t *pte = vibeos_vmspace_entry(&as, VA_A);
+        CHECK(pte && (*pte & 0x000FFFFFFFFFF000ull) == old_f,
+              "the mapping is exactly as it was");
+    }
+}
+
+/* A writable holder is refused, because the copy-then-repoint window would
+ * lose a store. This is the restriction that makes the window harmless rather
+ * than unlikely. */
+static void test_refuses_writable(void) {
+    vibeos_vmspace_t as;
+    uint64_t old_f, new_f;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    old_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    new_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    (void)map_as_kernel_does(&as, VA_A, old_f,
+                             VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                             VIBEOS_PROT_USER);
+
+    CHECK(vibeos_vmspace_move_frame(old_f, new_f) != 0, "refused");
+    CHECK(vibeos_mm_stats()->compact_refused_writable == 1u, "counted");
+    CHECK(vibeos_mm_stats()->compact_moved == 0u, "nothing moved");
+}
+
+/* One writable holder among several read-only ones is still a refusal, **in
+ * either order**.
+ *
+ * Both orders, because the first version of this test ran only one and a
+ * sabotage case walked straight through it. The reverse map inserts at the
+ * head, so the most recently mapped holder is examined first - and with the
+ * writable mapping added last, a check that stopped after one holder still
+ * found it and the test still passed. It was asserting the right thing about
+ * the wrong arrangement.
+ *
+ * A loop that stops early is the natural way to get this wrong, and on a real
+ * machine the writable holder is not reliably the one at the head. */
+static void writable_among_readonly(int writable_first, const char *what) {
+    vibeos_vmspace_t a, b;
+    uint64_t old_f, new_f;
+    vibeos_prot_t ro = (vibeos_prot_t)(VIBEOS_PROT_READ | VIBEOS_PROT_USER);
+    vibeos_prot_t rw = (vibeos_prot_t)(VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                                       VIBEOS_PROT_USER);
+
+    if (cp_setup() != 0) { printf("  compact: FAIL setup\n"); g_fail++; return; }
+    if (vibeos_vmspace_create(&a) != 0 || vibeos_vmspace_create(&b) != 0) {
+        printf("  compact: FAIL create\n"); g_fail++; return;
+    }
+    old_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    new_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+
+    if (writable_first) {
+        (void)vibeos_vmspace_map(&a, VA_A, old_f, rw);
+        (void)map_as_kernel_does(&b, VA_A, old_f, ro);
+    } else {
+        (void)vibeos_vmspace_map(&a, VA_A, old_f, ro);
+        (void)map_as_kernel_does(&b, VA_A, old_f, rw);
+    }
+    CHECK(vibeos_rmap_count(old_f) == 2u, "two holders");
+    CHECK(vibeos_vmspace_move_frame(old_f, new_f) != 0, what);
+    CHECK(vibeos_mm_stats()->compact_refused_writable == 1u, "counted");
+    CHECK(vibeos_rmap_count(old_f) == 2u, "both holders still on the old frame");
+}
+
+static void test_refuses_if_any_holder_is_writable(void) {
+    writable_among_readonly(0, "refused with the writable holder mapped last");
+    writable_among_readonly(1, "refused with the writable holder mapped first");
+}
+
+/* Moving a frame onto itself, or on an unaligned address, is refused before
+ * anything is touched. */
+static void test_refuses_nonsense(void) {
+    uint64_t f;
+
+    if (cp_setup() != 0) { printf("  compact: FAIL setup\n"); g_fail++; return; }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+
+    CHECK(vibeos_vmspace_move_frame(f, f) != 0, "onto itself");
+    CHECK(vibeos_vmspace_move_frame(f + 1ull, f) != 0, "unaligned source");
+    CHECK(vibeos_vmspace_move_frame(f, f + 1ull) != 0, "unaligned target");
+}
+
+/* A frame with a reference that is not a mapping is refused, and this is a
+ * safety refusal rather than a limitation.
+ *
+ * An allocated frame nobody has mapped still has an owner: whoever allocated
+ * it and kept the physical address - the page cache, a DMA buffer, a kernel
+ * structure. The reverse map cannot repoint those because it does not know
+ * they exist, so moving the contents would leave that holder reading the old
+ * frame while everything else reads the new one.
+ *
+ * This test was written the other way round at first, asserting that such a
+ * frame *should* move because it looked like the easiest case. The
+ * fragmentation test disproved it: the "moved" frame never became free,
+ * because the allocation reference stayed exactly where it was. That is the
+ * harmless face of the same defect. */
+static void test_refuses_untracked_reference(void) {
+    uint64_t old_f, new_f;
+    unsigned char *p;
+
+    if (cp_setup() != 0) { printf("  compact: FAIL setup\n"); g_fail++; return; }
+    old_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    new_f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    p = (unsigned char *)cp_map(old_f);
+    memset(p, 0x3C, 4096);
+
+    CHECK(vibeos_rmap_count(old_f) == 0u, "no holders");
+    CHECK(vibeos_frame_owners(old_f) == 1u, "but one owner");
+    CHECK(vibeos_vmspace_move_frame(old_f, new_f) != 0, "refused");
+    CHECK(vibeos_mm_stats()->compact_refused_untracked == 1u, "counted");
+    CHECK(vibeos_mm_stats()->compact_moved == 0u, "nothing moved");
+}
+
+/* --- the only honest test of compaction ----------------------------------- */
+
+/* Fragment memory deliberately, then ask for a contiguous run.
+ *
+ * The plan calls this the only honest test of compaction, because every other
+ * test here checks a mechanism in isolation. This one asks what a machine
+ * actually asks: there is plenty free and none of it in one piece - can a
+ * driver still get its buffer?
+ *
+ * The occupied frames are *mapped read-only*, not merely allocated, and that
+ * is the whole point rather than a detail. A plain allocated frame has an
+ * owner the reverse map cannot see and is correctly refused; what fragments a
+ * real machine and what compaction can actually move are both the mapped kind
+ * - page-cache pages and program text. Fragmenting with unmovable frames would
+ * be a test of the refusal, which is elsewhere.
+ */
+static void test_fragmented_then_contiguous(void) {
+    vibeos_vmspace_t as;
+    uint64_t held[CP_FRAMES];
+    uint32_t n = 0, i;
+    uint32_t before, after;
+    const uint32_t want = 8u;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    vibeos_reclaim_set_region(CP_BASE, CP_FRAMES);
+
+    /* Half the region, each frame mapped read-only at its own address. Not all
+     * of it: the address space needs page tables of its own, and an allocator
+     * with nothing left cannot build them. */
+    for (i = 0; i < CP_FRAMES; i++) {
+        uint64_t f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        if (!f) {
+            break;
+        }
+        if (map_as_kernel_does(&as, VA_A + (uint64_t)n * 4096ull, f,
+                               (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                               VIBEOS_PROT_USER)) != 0) {
+            break;
+        }
+        held[n++] = f;
+    }
+    CHECK(n > 32u, "enough mapped frames to fragment with");
+
+    /* Unmap every other one. Half free, and no two adjacent - the worst case,
+     * and the one a first-fit allocator can do nothing with. */
+    for (i = 0; i < n; i += 2u) {
+        (void)vibeos_vmspace_unmap(&as, VA_A + (uint64_t)i * 4096ull);
+        held[i] = 0;
+    }
+
+    before = vibeos_reclaim_compact(0u);   /* measures without moving */
+    CHECK(before < want, "fragmented: the largest run is shorter than we want");
+
+    after = vibeos_reclaim_compact(want);
+    CHECK(after >= want, "after compaction a run of the wanted length exists");
+    CHECK(vibeos_reclaim_stats()->compact_frames_moved > 0u,
+          "and it took actual moves to get there");
+}
+
+/* A window that cannot be cleared reports the truth rather than a success.
+ *
+ * Every odd frame is pinned, so no window of the wanted size can ever be
+ * emptied. The compactor must come back with a measurement that says so - a
+ * caller that was told "done" and then failed to allocate would have no way to
+ * find out why. */
+static void test_unclearable_window_is_honest(void) {
+    vibeos_vmspace_t as;
+    uint64_t held[CP_FRAMES];
+    uint32_t n = 0, i;
+    uint32_t after;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    vibeos_reclaim_set_region(CP_BASE, CP_FRAMES);
+
+    for (i = 0; i < CP_FRAMES; i++) {
+        uint64_t f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        if (!f) { break; }
+        if (map_as_kernel_does(&as, VA_A + (uint64_t)n * 4096ull, f,
+                               (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                               VIBEOS_PROT_USER)) != 0) {
+            break;
+        }
+        held[n++] = f;
+    }
+    for (i = 0; i < n; i += 2u) {
+        (void)vibeos_vmspace_unmap(&as, VA_A + (uint64_t)i * 4096ull);
+        held[i] = 0;
+    }
+    /* Everything still mapped is pinned, so nothing can move. */
+    for (i = 1; i < n; i += 2u) {
+        vibeos_frame_set_flag(held[i], VIBEOS_FRAME_PINNED);
+    }
+
+    after = vibeos_reclaim_compact(16u);
+    CHECK(after < 16u, "it reports the run it could not open");
+    CHECK(vibeos_mm_stats()->compact_refused_pinned > 0u,
+          "and says the frames were pinned");
+}
+
+/* --- swap: page-out and page-in ------------------------------------------- */
+
+/* A page goes out and comes back with its contents intact, and while it is out
+ * the entry is not present. That last part is the property page-out exists to
+ * establish: an entry that stayed present would let the program keep using a
+ * frame that has been given away. */
+static void test_swap_round_trip(void) {
+    vibeos_vmspace_t as;
+    uint64_t f, back;
+    uint32_t slot = 0;
+    unsigned char *p;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    p = (unsigned char *)cp_map(f);
+    memset(p, 0x6B, 4096);
+    CHECK(map_as_kernel_does(&as, VA_A, f,
+                             (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                             VIBEOS_PROT_WRITE |
+                                             VIBEOS_PROT_USER)) == 0, "map");
+
+    CHECK(vibeos_swap_alloc(&slot) == 0, "a slot");
+    CHECK(vibeos_vmspace_swap_out(&as, VA_A, slot) == 0, "paged out");
+    CHECK(vibeos_mm_stats()->swap_outs == 1u, "counted");
+
+    /* Out means out: not present, and the frame given back. */
+    {
+        uint64_t *pte = vibeos_vmspace_entry(&as, VA_A);
+        CHECK(pte && (*pte & 1ull) == 0ull, "the entry is not present");
+    }
+    CHECK(vibeos_vmspace_swap_slot(&as, VA_A) == (int64_t)slot,
+          "and it names the slot it went to");
+    CHECK(vibeos_frame_owners(f) == 0u, "the frame was released");
+
+    /* Deliberately scribble on the old frame before bringing the page back.
+     * If page-in read from memory rather than from the slot, this is what it
+     * would return - so the check below is about the disk and not about the
+     * frame happening to still hold the right bytes. */
+    memset(cp_map(f), 0xEE, 4096);
+
+    back = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    CHECK(vibeos_vmspace_swap_in(&as, VA_A, back) == 0, "paged in");
+    CHECK(vibeos_mm_stats()->swap_ins == 1u, "counted");
+    {
+        unsigned char *q = (unsigned char *)cp_map(back);
+        CHECK(q[0] == 0x6B && q[4095] == 0x6B, "the contents came back");
+        CHECK(vibeos_rmap_count(back) == 1u, "and the holder is recorded");
+        /* One mapping, one owner. Two meant a page that came back from swap
+         * outlived its process - 764 frames in the first boot that forced
+         * reclaim - and nothing here asked. */
+        CHECK(vibeos_frame_owners(back) == 1u,
+              "the mapping holds the allocation's reference, not a second one");
+        CHECK(!vibeos_swap_is_allocated(slot),
+              "and the page-in gave back the slot it came from");
+    }
+}
+
+/* A shared page is refused. After a fork the frame belongs to several address
+ * spaces, and evicting it means changing all of their entries - a different
+ * operation. Counted, so what a forking workload accumulates is visibly out of
+ * reach rather than quietly skipped. */
+static void test_swap_refuses_shared(void) {
+    vibeos_vmspace_t a, b;
+    uint64_t f;
+    uint32_t slot = 0;
+
+    if (cp_setup() != 0) { printf("  compact: FAIL setup\n"); g_fail++; return; }
+    if (vibeos_vmspace_create(&a) != 0 || vibeos_vmspace_create(&b) != 0) {
+        printf("  compact: FAIL create\n"); g_fail++; return;
+    }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    (void)vibeos_vmspace_map(&a, VA_A, f,
+                             (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                             VIBEOS_PROT_USER));
+    (void)map_as_kernel_does(&b, VA_A, f,
+                             (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                             VIBEOS_PROT_USER));
+    (void)vibeos_swap_alloc(&slot);
+
+    CHECK(vibeos_vmspace_swap_out(&a, VA_A, slot) != 0, "refused");
+    CHECK(vibeos_mm_stats()->swap_refused_shared == 1u, "counted as shared");
+    {
+        uint64_t *pte = vibeos_vmspace_entry(&a, VA_A);
+        CHECK(pte && (*pte & 1ull) == 1ull, "and the entry is untouched");
+    }
+}
+
+/* A pinned page is refused. Same list as compaction and reclaim: a page table
+ * or a buffer a device holds an address for. */
+static void test_swap_refuses_pinned(void) {
+    vibeos_vmspace_t as;
+    uint64_t f;
+    uint32_t slot = 0;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    (void)map_as_kernel_does(&as, VA_A, f,
+                             (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                             VIBEOS_PROT_WRITE |
+                                             VIBEOS_PROT_USER));
+    vibeos_frame_set_flag(f, VIBEOS_FRAME_PINNED);
+    (void)vibeos_swap_alloc(&slot);
+
+    CHECK(vibeos_vmspace_swap_out(&as, VA_A, slot) != 0, "refused");
+    CHECK(vibeos_mm_stats()->swap_refused_pinned == 1u, "counted as pinned");
+}
+
+/* A write that fails puts the mapping back.
+ *
+ * The page is not on disk and the entry no longer names the frame, so leaving
+ * it swapped would lose the page for good. Restoring the mapping loses nothing
+ * - the frame still holds the contents - and the next fault finds a normal
+ * page again. This is the recovery that has to exist because page-out unmaps
+ * before it writes. */
+static void test_swap_write_failure_restores(void) {
+    vibeos_vmspace_t as;
+    uint64_t f;
+    uint32_t slot = 0;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    memset(cp_map(f), 0x42, 4096);
+    (void)map_as_kernel_does(&as, VA_A, f,
+                             (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                             VIBEOS_PROT_WRITE |
+                                             VIBEOS_PROT_USER));
+    (void)vibeos_swap_alloc(&slot);
+    g_swap_write_fails = 1;
+
+    CHECK(vibeos_vmspace_swap_out(&as, VA_A, slot) != 0, "the page-out fails");
+    CHECK(vibeos_mm_stats()->swap_write_failed == 1u, "counted");
+    {
+        uint64_t *pte = vibeos_vmspace_entry(&as, VA_A);
+        CHECK(pte && (*pte & 1ull) == 1ull, "the mapping is back");
+        CHECK(pte && (*pte & 0x000FFFFFFFFFF000ull) == f,
+              "and names the same frame");
+    }
+    CHECK(vibeos_frame_owners(f) >= 1u, "the frame was not released");
+    CHECK(((unsigned char *)cp_map(f))[0] == 0x42, "with its contents");
+}
+
+/* Bringing in a page that is not swapped out is refused rather than
+ * overwriting a live mapping with whatever a slot happens to hold. */
+static void test_swap_in_of_a_present_page(void) {
+    vibeos_vmspace_t as;
+    uint64_t f, other;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    other = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    (void)map_as_kernel_does(&as, VA_A, f,
+                             (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                             VIBEOS_PROT_WRITE |
+                                             VIBEOS_PROT_USER));
+
+    CHECK(vibeos_vmspace_swap_in(&as, VA_A, other) != 0, "refused");
+    /* Refused *before* the device, not by it.
+     *
+     * Without this the test passed for the wrong reason: with the guard
+     * removed, page-in derives a slot number from the frame address, which is
+     * far outside the swap area, and the transfer fails anyway - so the
+     * sabotage case walked straight through a green test. What must hold is
+     * that a present entry is rejected without a read being attempted at all,
+     * which is the same property the swap map asserts for an unallocated slot.
+     */
+    CHECK(vibeos_mm_stats()->swap_read_failed == 0u,
+          "and no read was attempted");
+    CHECK(vibeos_vmspace_swap_slot(&as, VA_A) == -1,
+          "a present entry names no slot");
+    {
+        uint64_t *pte = vibeos_vmspace_entry(&as, VA_A);
+        CHECK(pte && (*pte & 0x000FFFFFFFFFF000ull) == f,
+              "the mapping still names its own frame");
+    }
+}
+
+/* --- the whole chain, end to end ------------------------------------------ */
+
+/* Pressure, then reclaim choosing the anonymous tier, then page-out, then a
+ * fault, then page-in, then the bytes.
+ *
+ * This is P5's step 4 as far as a host test can carry it. Every other test in
+ * this file exercises one link; this one asks whether the links are connected,
+ * which is a different question and the one that has caught the most in this
+ * subsystem. Reclaim can be right, page-out can be right, and the machine can
+ * still never swap anything because nothing ever called the second from the
+ * first.
+ */
+static vibeos_vmspace_t g_e2e_as;
+static uint64_t g_e2e_va[8];
+static uint32_t g_e2e_slots[8];
+static uint32_t g_e2e_n;
+
+/* The anonymous tier, as reclaim sees it: take up to `want` of the pages this
+ * address space holds and send them to swap. */
+/* A clean tier with a small, fixed stock.
+ *
+ * Present so that the two tiers are asked for *different* amounts: with no
+ * clean source the shortfall and the request are the same number, and a
+ * reclaim that asked the anonymous tier for the whole request rather than what
+ * was still missing would be indistinguishable from a correct one. That
+ * sabotage case walked through a green test until this existed. */
+static uint32_t g_e2e_clean_stock;
+static uint32_t g_e2e_anon_asked;
+
+static uint32_t e2e_drop_clean(uint32_t want) {
+    uint32_t n = want < g_e2e_clean_stock ? want : g_e2e_clean_stock;
+
+    g_e2e_clean_stock -= n;
+    return n;
+}
+
+static uint32_t e2e_evict_anon(uint32_t want) {
+    g_e2e_anon_asked = want;
+    uint32_t done = 0;
+    uint32_t i;
+
+    for (i = 0; i < g_e2e_n && done < want; i++) {
+        uint32_t slot;
+
+        if (g_e2e_va[i] == 0ull) {
+            continue;
+        }
+        if (vibeos_swap_alloc(&slot) != 0) {
+            break;      /* swap full: a condition, not a failure */
+        }
+        if (vibeos_vmspace_swap_out(&g_e2e_as, g_e2e_va[i], slot) != 0) {
+            (void)vibeos_swap_free(slot);
+            continue;
+        }
+        g_e2e_slots[i] = slot;
+        done++;
+    }
+    return done;
+}
+
+static void test_pressure_swaps_and_faults_back(void) {
+    uint32_t i;
+    uint32_t freed;
+
+    if (cp_setup() != 0 || vibeos_vmspace_create(&g_e2e_as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    /* Reclaim keeps its own statistics and cp_setup does not clear them, so
+     * they still hold whatever the earlier groups did. Cleared here rather
+     * than in cp_setup because two of those groups deliberately inspect them
+     * across calls. */
+    memset(vibeos_reclaim_stats(), 0, sizeof(vibeos_reclaim_stats_t));
+    vibeos_reclaim_set_free_source(0);          /* the real frame layer */
+    g_e2e_clean_stock = 2u;    /* the clean tier can supply two of the four */
+    g_e2e_anon_asked = 0xFFFFFFFFu;
+    vibeos_reclaim_set_clean_source(e2e_drop_clean);
+    vibeos_reclaim_set_anon_source(e2e_evict_anon);
+    (void)vibeos_reclaim_set_marks(4, 1);
+
+    /* Eight anonymous pages, each with its own recognisable byte, so a page
+     * that comes back holding a *different* page's contents is caught rather
+     * than merely a page that comes back wrong. */
+    g_e2e_n = 0;
+    for (i = 0; i < 8u; i++) {
+        uint64_t f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        uint64_t va = VA_A + (uint64_t)i * 4096ull;
+
+        if (!f) { break; }
+        memset(cp_map(f), (int)(0x10 + i), 4096);
+        if (map_as_kernel_does(&g_e2e_as, va, f,
+                               (vibeos_prot_t)(VIBEOS_PROT_READ |
+                                               VIBEOS_PROT_WRITE |
+                                               VIBEOS_PROT_USER)) != 0) {
+            break;
+        }
+        g_e2e_va[g_e2e_n] = va;
+        g_e2e_slots[g_e2e_n] = 0xFFFFFFFFu;
+        g_e2e_n++;
+    }
+    CHECK(g_e2e_n == 8u, "eight anonymous pages mapped");
+
+    /* Reclaim is asked for four, and has only the anonymous tier to get them
+     * from. */
+    freed = vibeos_reclaim_run(4u);
+    CHECK(freed == 4u, "reclaim freed four");
+    CHECK(vibeos_reclaim_stats()->freed_clean == 2u, "two from the clean tier");
+    CHECK(vibeos_reclaim_stats()->freed_anon == 2u, "two from the anonymous one");
+    CHECK(g_e2e_anon_asked == 2u,
+          "and swap was asked for the shortfall, not the whole request");
+    CHECK(vibeos_reclaim_stats()->skipped_no_swap == 0u,
+          "and nothing was out of reach");
+    CHECK(vibeos_mm_stats()->swap_outs == 2u, "two pages went out");
+
+    /* Each of those is now a fault waiting to happen. Bring them back the way
+     * a fault handler would and check the bytes - by index, so a page-in that
+     * mixed two slots up is caught. */
+    for (i = 0; i < g_e2e_n; i++) {
+        int64_t slot = vibeos_vmspace_swap_slot(&g_e2e_as, g_e2e_va[i]);
+        uint64_t fresh;
+
+        if (slot < 0) {
+            continue;   /* still mapped; reclaim only took four */
+        }
+        CHECK((uint32_t)slot == g_e2e_slots[i],
+              "the entry names the slot it was written to");
+
+        fresh = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        CHECK(fresh != 0ull, "a frame to bring it back into");
+        CHECK(vibeos_vmspace_swap_in(&g_e2e_as, g_e2e_va[i], fresh) == 0,
+              "paged back in");
+        CHECK(((unsigned char *)cp_map(fresh))[0] == (unsigned char)(0x10 + i),
+              "and it is this page's contents, not another's");
+    }
+    CHECK(vibeos_mm_stats()->swap_ins == 2u, "both came back");
+}
+
+/* With no swap area, the same pressure reports that it could not do anything -
+ * rather than appearing to succeed, or appearing to be broken.
+ *
+ * This is the state the kernel is actually in: there is no swap area on the
+ * boot media, so no anonymous source is registered, and skipped_no_swap counts
+ * every page reclaim was not allowed to take. A gate reading zero there would
+ * be reading a machine that has nothing to reclaim, not one that is working. */
+static void test_no_swap_area_is_reported(void) {
+    if (cp_setup() != 0) { printf("  compact: FAIL setup\n"); g_fail++; return; }
+    memset(vibeos_reclaim_stats(), 0, sizeof(vibeos_reclaim_stats_t));
+    vibeos_reclaim_set_clean_source(0);
+    vibeos_reclaim_set_anon_source(0);
+
+    CHECK(vibeos_reclaim_run(6u) == 0u, "nothing freed");
+    CHECK(vibeos_reclaim_stats()->freed_anon == 0u, "none from swap");
+    CHECK(vibeos_reclaim_stats()->skipped_no_swap == 6u,
+          "and all six are counted as out of reach");
+}
+
+/* rmap_mismatch: a reference held by the TLB quarantine is not a mismatch.
+ *
+ * Found reading the audit after a Release boot reported rmap_mismatch=1 with
+ * rmap_audit_torn=0. vibeos_vmspace_unmap removes the reverse-map entry
+ * immediately and gives the frame's reference to release_deferred, which keeps it
+ * until every core has flushed. A frame still mapped elsewhere therefore has one
+ * owner more than holders for that whole time - with the owner count perfectly
+ * still, so the audit's torn-sample bracket cannot see it - and a fork in that
+ * window counted a mismatch that is the design working.
+ *
+ * Here the quarantine never drains, so the window is held open deterministically:
+ * map a frame in two spaces, unmap it from one, fork the other. */
+static uint64_t g_q_held[16];
+static unsigned g_q_n;
+
+static void cp_quarantine_hold(uint64_t root_phys, uint64_t phys) {
+    (void)root_phys;
+    if (g_q_n < 16u) {
+        g_q_held[g_q_n++] = phys;
+    }
+}
+
+static uint32_t cp_quarantine_count(uint64_t phys) {
+    uint32_t n = 0;
+    unsigned i;
+    for (i = 0; i < g_q_n; i++) {
+        if (g_q_held[i] == phys) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void test_fork_audit_counts_quarantined_references(void) {
+    vibeos_vmspace_t as, other, child;
+    vibeos_vmspace_backend_t be;
+    uint64_t f;
+
+    if (cp_setup() != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    memset(&be, 0, sizeof(be));
+    be.map_phys = cp_map;
+    be.alloc_table = cp_alloc_table;
+    be.free_table = cp_free_table;
+    be.shootdown = cp_shootdown;
+    be.release_deferred = cp_quarantine_hold;
+    be.quarantined = cp_quarantine_count;
+    g_q_n = 0;
+    if (vibeos_vmspace_init(&be) != 0 || vibeos_vmspace_create(&as) != 0 ||
+        vibeos_vmspace_create(&other) != 0 || vibeos_vmspace_create(&child) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    CHECK(f != 0u, "a frame");
+    CHECK(map_as_kernel_does(&as, VA_A, f, VIBEOS_PROT_READ | VIBEOS_PROT_USER) == 0, "map");
+    CHECK(vibeos_vmspace_clone_cow(&other, &as) == 0, "share it");
+    CHECK(vibeos_vmspace_unmap(&other, VA_A) == 1, "unmap one side");
+    CHECK(g_q_n == 1u && vibeos_rmap_count(f) == 1u && vibeos_frame_owners(f) == 2u,
+          "the quarantine holds the reference, the reverse map does not");
+
+    vibeos_mm_stats()->rmap_mismatch = 0;
+    vibeos_mm_stats()->rmap_audit_torn = 0;
+    CHECK(vibeos_vmspace_clone_cow(&child, &as) == 0, "fork");
+    CHECK(vibeos_mm_stats()->rmap_mismatch == 0u,
+          "a reference in quarantine was reported as a mismatch");
+}
+
+/* ---- M-056: the swap-out protocol, with another core in the middle ---------- */
+
+#define PTE_W        0x2ull
+#define PTE_P        0x1ull
+
+static vibeos_vmspace_t g_sw_as;
+static uint64_t g_sw_seen;         /* the entry as another core saw it mid-write */
+static int64_t g_sw_seen_slot;
+static int g_sw_fault_rc;
+
+static void sw_look(void) {
+    uint64_t *pte = vibeos_vmspace_entry(&g_sw_as, VA_A);
+    g_sw_seen = pte ? *pte : 0;
+    g_sw_seen_slot = vibeos_vmspace_swap_slot(&g_sw_as, VA_A);
+}
+
+static void sw_store(void) {            /* a store: the write fault */
+    sw_look();
+    g_sw_fault_rc = vibeos_vmspace_fault(&g_sw_as, VA_A, 1);
+}
+
+static void sw_mprotect_ro(void) {
+    (void)vibeos_vmspace_protect(&g_sw_as, VA_A,
+                                 (vibeos_prot_t)(VIBEOS_PROT_READ | VIBEOS_PROT_USER));
+}
+
+static void sw_munmap(void) {
+    (void)vibeos_vmspace_unmap(&g_sw_as, VA_A);
+}
+
+static vibeos_vmspace_t g_sw_child;
+static void sw_fork(void) {
+    (void)vibeos_vmspace_clone_cow(&g_sw_child, &g_sw_as);
+}
+
+static uint64_t sw_setup(vibeos_prot_t prot, unsigned char fill) {
+    uint64_t f;
+    if (cp_setup() != 0 || vibeos_vmspace_create(&g_sw_as) != 0) {
+        return 0;
+    }
+    f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    memset(cp_map(f), fill, 4096);
+    if (map_as_kernel_does(&g_sw_as, VA_A, f, prot) != 0) {
+        return 0;
+    }
+    return f;
+}
+
+#define RW_USER ((vibeos_prot_t)(VIBEOS_PROT_READ | VIBEOS_PROT_WRITE | VIBEOS_PROT_USER))
+#define RO_USER ((vibeos_prot_t)(VIBEOS_PROT_READ | VIBEOS_PROT_USER))
+
+static void test_swapout_readable_while_written(void) {
+    uint64_t f = sw_setup(RW_USER, 0x31);
+    uint32_t slot = 0;
+
+    CHECK(f != 0 && vibeos_swap_alloc(&slot) == 0, "setup");
+    g_during_write = sw_look;
+    CHECK(vibeos_vmspace_swap_out(&g_sw_as, VA_A, slot) == 0, "paged out");
+    CHECK((g_sw_seen & PTE_P) && !(g_sw_seen & PTE_W) &&
+          (g_sw_seen & VIBEOS_PTE_SWAPOUT),
+          "while the page was being written it was present, read-only and marked");
+    CHECK(g_sw_seen_slot == -1,
+          "and nothing could read its slot yet - the old order said 'swapped' "
+          "before the slot held anything");
+    CHECK(vibeos_vmspace_swap_slot(&g_sw_as, VA_A) == (int64_t)slot, "then swapped");
+    CHECK(g_swapdisk[slot][0] == 0x31 && g_swapdisk[slot][4095] == 0x31,
+          "with the contents on the disk");
+}
+
+static void test_swapout_store_cancels(void) {
+    uint64_t f = sw_setup(RW_USER, 0x32);
+    uint32_t slot = 0;
+    uint64_t *pte;
+
+    CHECK(f != 0 && vibeos_swap_alloc(&slot) == 0, "setup");
+    g_sw_fault_rc = -9;
+    g_during_write = sw_store;
+    CHECK(vibeos_vmspace_swap_out(&g_sw_as, VA_A, slot) != 0,
+          "a store in the middle abandons the swap-out");
+    CHECK(g_sw_fault_rc == 1, "the store's fault was resolved, not a violation");
+    pte = vibeos_vmspace_entry(&g_sw_as, VA_A);
+    CHECK(pte && (*pte & PTE_P) && (*pte & PTE_W) && !(*pte & VIBEOS_PTE_SWAPOUT) &&
+          (*pte & 0x000FFFFFFFFFF000ull) == f,
+          "the page is where it was, writable, unmarked");
+    CHECK(vibeos_frame_owners(f) == 1u && vibeos_rmap_count(f) == 1u,
+          "and still owned and recorded");
+    CHECK(vibeos_mm_stats()->swap_out_cancelled == 1u &&
+          vibeos_mm_stats()->swap_out_raced == 1u, "both counted");
+    CHECK(vibeos_mm_stats()->swap_outs == 0u, "nothing went out");
+}
+
+static void test_swapout_mprotect_drops_marker(void) {
+    uint64_t f = sw_setup(RW_USER, 0x33);
+    uint32_t slot = 0;
+    uint64_t *pte;
+
+    CHECK(f != 0 && vibeos_swap_alloc(&slot) == 0, "setup");
+    g_during_write = sw_mprotect_ro;
+    CHECK(vibeos_vmspace_swap_out(&g_sw_as, VA_A, slot) != 0,
+          "an mprotect in the middle abandons the swap-out");
+    pte = vibeos_vmspace_entry(&g_sw_as, VA_A);
+    CHECK(pte && (*pte & PTE_P) && !(*pte & PTE_W) && !(*pte & VIBEOS_PTE_SWAPOUT),
+          "read-only, and the marker gone with the rebuild");
+    CHECK(vibeos_vmspace_fault(&g_sw_as, VA_A, 1) == 0,
+          "so a store to the now read-only page is a violation, not a write "
+          "granted back by a marker that outlived its swap-out");
+}
+
+static void test_swapout_munmap_mid_write(void) {
+    uint64_t f = sw_setup(RW_USER, 0x34);
+    uint32_t slot = 0;
+
+    CHECK(f != 0 && vibeos_swap_alloc(&slot) == 0, "setup");
+    g_during_write = sw_munmap;
+    CHECK(vibeos_vmspace_swap_out(&g_sw_as, VA_A, slot) != 0,
+          "an munmap in the middle abandons the swap-out");
+    CHECK(vibeos_vmspace_swap_slot(&g_sw_as, VA_A) == -1,
+          "no entry names the slot - munmap never saw one to free");
+    CHECK(vibeos_mm_stats()->swap_outs == 0u, "nothing went out");
+}
+
+static void test_swapout_fork_mid_write(void) {
+    uint64_t f = sw_setup(RW_USER, 0x35);
+    uint32_t slot = 0;
+    uint64_t *pp, *cp;
+
+    CHECK(f != 0 && vibeos_swap_alloc(&slot) == 0 &&
+          vibeos_vmspace_create(&g_sw_child) == 0, "setup");
+    g_during_write = sw_fork;
+    CHECK(vibeos_vmspace_swap_out(&g_sw_as, VA_A, slot) != 0,
+          "a fork in the middle abandons the swap-out");
+    pp = vibeos_vmspace_entry(&g_sw_as, VA_A);
+    cp = vibeos_vmspace_entry(&g_sw_child, VA_A);
+    CHECK(pp && cp && (*pp & PTE_P) && (*cp & PTE_P), "both mapped");
+    CHECK(pp && cp && (*pp & 0x200ull) && (*cp & 0x200ull) &&
+          !(*pp & VIBEOS_PTE_SWAPOUT) && !(*cp & VIBEOS_PTE_SWAPOUT),
+          "both copy-on-write, neither marked - the marked page was a writable "
+          "page, not a read-only one to share as it stood");
+    CHECK(vibeos_vmspace_fault(&g_sw_child, VA_A, 1) == 1,
+          "so the child's first store is a copy, not a kill");
+}
+
+static void test_swapout_readonly_page(void) {
+    uint64_t f = sw_setup(RO_USER, 0x36);
+    uint32_t slot = 0;
+
+    CHECK(f != 0 && vibeos_swap_alloc(&slot) == 0, "setup");
+    g_during_write = sw_look;
+    CHECK(vibeos_vmspace_swap_out(&g_sw_as, VA_A, slot) == 0, "paged out");
+    CHECK((g_sw_seen & PTE_P) && !(g_sw_seen & VIBEOS_PTE_SWAPOUT),
+          "a read-only page is never marked - the marker would promise it a write "
+          "bit it never had");
+}
+
+/* M-070: a read-only page goes out to swap between fork's reading of its entry
+ * and fork's taking of the frame.
+ *
+ * A read-only page - and a copy-on-write one whose other holder has gone is
+ * exactly that - is paged out with no marker: nobody can store to it, so there
+ * is nothing to stop. Fork does not change such an entry either; it shares the
+ * page as it stands. So neither operation writes anything the other would
+ * notice, and the page-out can commit and give the frame back in the few
+ * instructions between fork reading "present, frame F" and fork mapping F into
+ * the child. The child is then mapped onto a free frame, which the allocator
+ * hands to somebody else while the child still holds it.
+ *
+ * The hook is that page-out, at exactly that point. */
+static uint32_t g_fr_slot;
+static int g_fr_fired;
+static int g_fr_rc;
+
+static int g_fr_reuse;          /* and the frame is handed to somebody else at once */
+static uint64_t g_fr_other;
+
+static void fork_race_page_goes_out(uint64_t *pte) {
+    (void)pte;
+    if (!g_fr_fired) {
+        g_fr_fired = 1;
+        g_fr_rc = vibeos_vmspace_swap_out(&g_sw_as, VA_A, g_fr_slot);
+        if (g_fr_reuse) {
+            g_fr_other = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+            if (g_fr_other) {
+                memset(cp_map(g_fr_other), 0x99, 4096);
+            }
+        }
+    }
+}
+
+static void test_fork_while_readonly_page_goes_out(void) {
+    uint64_t f = sw_setup(RO_USER, 0x37);
+    uint64_t *pp, *cp;
+    const unsigned char *seen;
+    int rc;
+
+    CHECK(f != 0 && vibeos_swap_alloc(&g_fr_slot) == 0 &&
+          vibeos_vmspace_create(&g_sw_child) == 0, "setup");
+    g_fr_fired = 0;
+    g_fr_rc = -1;
+    vibeos_vmspace_set_fork_race_hook(fork_race_page_goes_out);
+    rc = vibeos_vmspace_clone_cow(&g_sw_child, &g_sw_as);
+    vibeos_vmspace_set_fork_race_hook(0);
+    CHECK(g_fr_fired && g_fr_rc == 0,
+          "the arrangement: the page really went out while fork was looking at it");
+    CHECK(rc == 0, "fork succeeds");
+    pp = vibeos_vmspace_entry(&g_sw_as, VA_A);
+    cp = vibeos_vmspace_entry(&g_sw_child, VA_A);
+    CHECK(pp && cp && (*cp & PTE_P), "the child has the page");
+    CHECK(pp && cp && (*pp & PTE_P) &&
+          (*pp & 0x000FFFFFFFFFF000ull) == (*cp & 0x000FFFFFFFFFF000ull),
+          "and the parent has it back, in the same frame - not the child on a "
+          "frame the page-out had already given away");
+    CHECK(cp && vibeos_frame_owners(*cp & 0x000FFFFFFFFFF000ull) == 2u,
+          "which both of them own");
+    seen = cp ? (const unsigned char *)cp_map(*cp & 0x000FFFFFFFFFF000ull) : 0;
+    CHECK(seen && seen[0] == 0x37 && seen[4095] == 0x37, "holding what the page held");
+    CHECK(vibeos_mm_stats()->frames_double_put == 0u, "and no frame released twice");
+    CHECK(vibeos_mm_stats()->fork_frame_gone == 1u && vibeos_mm_stats()->fork_swapped_in == 1u,
+          "counted: the frame was gone once, and the page was brought back once");
+    CHECK(!vibeos_swap_is_allocated(g_fr_slot), "the slot it went out to was given back once");
+}
+
+/* The same, with the released frame taken by somebody else before fork gets to
+ * it - which is what the allocator does with a frame just freed. Now the frame
+ * has an owner again, so a pin succeeds; what says it is no longer the page is
+ * the entry, which names a swap slot where it named this frame. */
+static void test_fork_while_readonly_page_goes_out_and_is_reused(void) {
+    uint64_t f = sw_setup(RO_USER, 0x38);
+    uint64_t *pp, *cp;
+    const unsigned char *seen;
+    int rc;
+
+    CHECK(f != 0 && vibeos_swap_alloc(&g_fr_slot) == 0 &&
+          vibeos_vmspace_create(&g_sw_child) == 0, "setup");
+    g_fr_fired = 0;
+    g_fr_reuse = 1;
+    g_fr_other = 0;
+    vibeos_vmspace_set_fork_race_hook(fork_race_page_goes_out);
+    rc = vibeos_vmspace_clone_cow(&g_sw_child, &g_sw_as);
+    vibeos_vmspace_set_fork_race_hook(0);
+    g_fr_reuse = 0;
+    CHECK(g_fr_fired && g_fr_rc == 0 && g_fr_other == f,
+          "the arrangement: the page went out and its frame was handed to somebody else");
+    CHECK(rc == 0, "fork succeeds");
+    pp = vibeos_vmspace_entry(&g_sw_as, VA_A);
+    cp = vibeos_vmspace_entry(&g_sw_child, VA_A);
+    CHECK(pp && cp && (*pp & PTE_P) && (*cp & PTE_P) &&
+          (*cp & 0x000FFFFFFFFFF000ull) != g_fr_other &&
+          (*pp & 0x000FFFFFFFFFF000ull) == (*cp & 0x000FFFFFFFFFF000ull),
+          "the child shares the parent's page, not the frame somebody else now has");
+    seen = cp ? (const unsigned char *)cp_map(*cp & 0x000FFFFFFFFFF000ull) : 0;
+    CHECK(seen && seen[0] == 0x38 && seen[4095] == 0x38, "holding what the page held");
+    CHECK(vibeos_frame_owners(g_fr_other) == 1u && ((const unsigned char *)cp_map(g_fr_other))[0] == 0x99,
+          "and the other owner's frame is its own, untouched");
+    CHECK(vibeos_mm_stats()->fork_entry_moved == 1u, "counted: the entry had moved under the pin");
+}
+
+/* Anonymous reclaim end to end, and its claims (M-056): every claim it takes is
+ * given back, so a teardown afterwards does not wait. */
+static uint64_t g_anon_relax_calls;
+static void anon_relax(uint64_t spins) {
+    g_anon_relax_calls++;
+    /* A claim that is never released would make the teardown below wait for
+     * ever, and a suite that hangs names nothing. Past a thousand spins this
+     * plays the reclaimer that finally lets go, and the assertion that no wait
+     * happened fails by name instead. */
+    if (spins > 1000u) {
+        vibeos_rmap_unclaim(g_sw_as.root_phys);
+    }
+}
+
+/* M-069: a page used since the hand last passed is spared once. The CPU sets
+ * the accessed bit; here the test sets it, which is the same fact. */
+static void test_anon_reclaim_spares_the_young(void) {
+    uint64_t f = sw_setup(RW_USER, 0x37);
+    uint64_t *e;
+
+    CHECK(f != 0, "setup");
+    vibeos_anon_set_map(cp_map);
+    e = vibeos_vmspace_entry(&g_sw_as, VA_A);
+    CHECK(e != 0, "the entry");
+    if (!e) {
+        return;
+    }
+    *e |= 0x20ull;   /* accessed */
+    CHECK(vibeos_anon_reclaim(1u) == 0u, "a page just used is not taken");
+    CHECK((*e & 0x20ull) == 0u, "but its mark is cleared");
+    CHECK(vibeos_anon_stats()->young >= 1u, "and counted");
+    CHECK(vibeos_anon_reclaim(1u) == 1u,
+          "and the next pass takes it, because nothing used it since");
+    CHECK(vibeos_rmap_stats()->unclaim_missing == 0u, "claims released once");
+}
+
+static void test_anon_reclaim_claims(void) {
+    uint64_t f = sw_setup(RW_USER, 0x37);
+
+    CHECK(f != 0, "setup");
+    vibeos_anon_set_map(cp_map);
+    g_anon_relax_calls = 0;
+    vibeos_rmap_set_relax(anon_relax);
+    /* Refused first - the disk will not take the page - which is the common
+     * path: most candidates are refused, and each refusal must give its claim
+     * back as surely as an eviction does. */
+    g_swap_write_fails = 1;
+    CHECK(vibeos_anon_reclaim(1u) == 0u, "a refused eviction");
+    g_swap_write_fails = 0;
+    CHECK(vibeos_anon_reclaim(1u) == 1u, "the page is evicted");
+    CHECK(vibeos_vmspace_swap_slot(&g_sw_as, VA_A) >= 0, "to swap");
+    CHECK(vibeos_rmap_stats()->claims >= 1u, "under a claim");
+    CHECK(vibeos_rmap_stats()->unclaim_missing == 0u, "released once");
+    CHECK(vibeos_vmspace_destroy(&g_sw_as) == 0, "the owner exits");
+    CHECK(g_anon_relax_calls == 0u,
+          "and its teardown did not wait: every claim was given back");
+    vibeos_rmap_set_relax(0);
+}
+
+/* M-063: a swapped-out entry is a mapping, and every operation on a mapping
+ * has to know it.
+ *
+ * Page-out and page-in were proved here long before anything forced reclaim on
+ * a machine, and they were proved on their own: nothing asked what munmap,
+ * teardown, mprotect or fork do to a page that is on disk. The first boot that
+ * sent pages to swap answered - every one of them was invisible to all four,
+ * and page-in made each page user-writable whatever it had been. */
+#define T_PTE_PRESENT 0x001ull
+#define T_PTE_WRITE   0x002ull
+#define T_PTE_USER    0x004ull
+#define T_PTE_ADDR    0x000FFFFFFFFFF000ull
+
+static uint32_t cp_swap_one(vibeos_vmspace_t *as, uint64_t va) {
+    uint32_t slot = 0;
+
+    CHECK(vibeos_swap_alloc(&slot) == 0, "a slot");
+    CHECK(vibeos_vmspace_swap_out(as, va, slot) == 0, "paged out");
+    return slot;
+}
+
+static uint64_t cp_map_new(vibeos_vmspace_t *as, uint64_t va, vibeos_prot_t prot,
+                           unsigned char fill) {
+    uint64_t f = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+
+    CHECK(f != 0u, "a frame");
+    memset(cp_map(f), fill, 4096);
+    CHECK(map_as_kernel_does(as, va, f, prot) == 0, "map");
+    return f;
+}
+
+static void test_swapped_entries_are_mappings(void) {
+    const vibeos_prot_t rwu = (vibeos_prot_t)(VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                                              VIBEOS_PROT_USER);
+    const vibeos_prot_t ru = (vibeos_prot_t)(VIBEOS_PROT_READ | VIBEOS_PROT_USER);
+    vibeos_vmspace_t as, child;
+    uint64_t *e;
+    uint32_t slot;
+
+    /* munmap takes a page in swap, and gives its slot back. */
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    (void)cp_map_new(&as, VA_A, rwu, 0x11);
+    slot = cp_swap_one(&as, VA_A);
+    CHECK(vibeos_vmspace_unmap(&as, VA_A) == 1, "munmap takes a page that is in swap");
+    CHECK(!vibeos_swap_is_allocated(slot), "and gives its slot back");
+    CHECK(vibeos_vmspace_swap_slot(&as, VA_A) < 0,
+          "and the entry no longer names a slot swap may give to somebody else");
+
+    /* A dying address space gives its slots back. */
+    (void)cp_map_new(&as, VA_A, rwu, 0x22);
+    slot = cp_swap_one(&as, VA_A);
+    CHECK(vibeos_vmspace_destroy(&as) == 0, "teardown");
+    CHECK(!vibeos_swap_is_allocated(slot), "a dying space gives its swap slots back");
+
+    /* Permissions go to swap and come back - the ones a page has as well as
+     * the ones it lacks. The checks below only ask that a bit does *not* come
+     * back; a swap-out that kept nothing at all passed every one of them, and
+     * was caught only by sabotage. */
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    (void)cp_map_new(&as, VA_A + 0x3000u, rwu, 0x66);
+    (void)cp_swap_one(&as, VA_A + 0x3000u);
+    CHECK(cp_swap_bring_in(&as, VA_A + 0x3000u) == 0, "an ordinary page paged back in");
+    e = vibeos_vmspace_entry(&as, VA_A + 0x3000u);
+    CHECK(e && (*e & T_PTE_PRESENT) && (*e & T_PTE_WRITE) && (*e & T_PTE_USER),
+          "an ordinary page comes back writable and user");
+
+    (void)cp_map_new(&as, VA_A, ru, 0x33);
+    (void)cp_swap_one(&as, VA_A);
+    CHECK(cp_swap_bring_in(&as, VA_A) == 0, "paged back in");
+    e = vibeos_vmspace_entry(&as, VA_A);
+    CHECK(e && (*e & T_PTE_PRESENT) && (*e & T_PTE_WRITE) == 0u,
+          "a read-only page comes back read-only");
+
+    (void)cp_map_new(&as, VA_A + 0x1000u, VIBEOS_PROT_NONE, 0x44);
+    (void)cp_swap_one(&as, VA_A + 0x1000u);
+    CHECK(cp_swap_bring_in(&as, VA_A + 0x1000u) == 0, "a guard paged back in");
+    e = vibeos_vmspace_entry(&as, VA_A + 0x1000u);
+    CHECK(e && (*e & T_PTE_PRESENT) && (*e & T_PTE_USER) == 0u,
+          "a PROT_NONE guard comes back a guard, not user memory");
+
+    /* mprotect of a page in swap is a permission change like any other. */
+    (void)cp_map_new(&as, VA_A + 0x2000u, rwu, 0x55);
+    (void)cp_swap_one(&as, VA_A + 0x2000u);
+    CHECK(vibeos_vmspace_protect(&as, VA_A + 0x2000u, ru) == 0,
+          "mprotect of a page in swap succeeds");
+    CHECK(cp_swap_bring_in(&as, VA_A + 0x2000u) == 0, "and it comes back");
+    e = vibeos_vmspace_entry(&as, VA_A + 0x2000u);
+    CHECK(e && (*e & T_PTE_PRESENT) && (*e & T_PTE_WRITE) == 0u,
+          "with the permission mprotect gave it, not the one it left with");
+
+    /* fork shares a page in swap by bringing it back. */
+    if (cp_setup() != 0 || vibeos_vmspace_create(&as) != 0 ||
+        vibeos_vmspace_create(&child) != 0) {
+        printf("  compact: FAIL setup\n"); g_fail++; return;
+    }
+    (void)cp_map_new(&as, VA_A, rwu, 0x5A);
+    slot = cp_swap_one(&as, VA_A);
+    CHECK(vibeos_vmspace_clone_cow(&child, &as) == 0,
+          "fork of a space with a page in swap");
+    e = vibeos_vmspace_entry(&child, VA_A);
+    CHECK(e && (*e & T_PTE_PRESENT), "the child has the page");
+    CHECK(e && ((unsigned char *)cp_map(*e & T_PTE_ADDR))[0] == 0x5A,
+          "with its contents");
+    CHECK(vibeos_mm_stats()->fork_swapped_in == 1u, "brought back once to be shared");
+    CHECK(!vibeos_swap_is_allocated(slot), "and its slot given back");
+}
+
+int test_compact(void) {
+    g_fail = 0;
+
+    g_ram = (unsigned char *)malloc((size_t)CP_FRAMES * 4096u);
+    if (!g_ram) {
+        printf("  compact: FAIL out of memory\n");
+        return 1;
+    }
+
+    test_move_carries_contents_and_mapping();
+    test_fork_audit_counts_quarantined_references();
+    test_move_follows_every_holder();
+    test_refuses_pinned();
+    test_refuses_writable();
+    test_refuses_if_any_holder_is_writable();
+    test_refuses_nonsense();
+    test_refuses_untracked_reference();
+    test_fragmented_then_contiguous();
+    test_unclearable_window_is_honest();
+    test_swap_round_trip();
+    test_swap_refuses_shared();
+    test_swap_refuses_pinned();
+    test_swap_write_failure_restores();
+    test_swap_in_of_a_present_page();
+    test_pressure_swaps_and_faults_back();
+    test_no_swap_area_is_reported();
+    test_swapout_readable_while_written();
+    test_swapout_store_cancels();
+    test_swapout_mprotect_drops_marker();
+    test_swapout_munmap_mid_write();
+    test_swapout_fork_mid_write();
+    test_swapout_readonly_page();
+    test_fork_while_readonly_page_goes_out();
+    test_fork_while_readonly_page_goes_out_and_is_reused();
+    test_anon_reclaim_claims();
+    test_anon_reclaim_spares_the_young();
+    test_swapped_entries_are_mappings();
+
+    free(g_ram);
+    g_ram = 0;
+
+    if (g_fail == 0) {
+        printf("  compact: 25 groups ok\n");
+    }
+    return g_fail == 0 ? 0 : 1;
+}

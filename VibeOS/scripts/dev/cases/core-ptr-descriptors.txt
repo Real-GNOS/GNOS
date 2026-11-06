@@ -1,0 +1,39 @@
+# C4 stage 2b: the pointer descriptors on the rows of fs.c.
+#
+# Every syscall argument that is a user pointer is declared in its row and checked
+# by the dispatcher; the handlers no longer check. So a row that loses its
+# descriptor is a syscall that writes or reads a pointer nobody validated, and
+# check-syscall-checks.py must name the operation. read and getdents are the two whose
+# only check was the descriptor; ioctl's are the conditional ones (a request code
+# decides whether the argument is a pointer at all).
+#
+# Target source: kernel/abi/linux/fs.c
+# Run: SABOTAGE_VERIFY="python3 scripts/dev/check-syscall-checks.py" python3 scripts/dev/sabotage.py kernel/abi/linux/fs.c scripts/dev/cases/core-ptr-descriptors.txt
+
+### getcwd stops checking its buffer
+# Not a descriptor since docs/abi/ A4: how many bytes getcwd writes is the
+# working directory's length, which only the kernel knows, so the handler asks
+# linux_user_ok itself - and removing that is what must go red now.
+--- old
+    if (!linux_user_ok(ubuf, n + 1u, 1)) {
+        return -VIBEOS_EFAULT;
+    }
++++ new
+
+### pipe stops declaring its result array
+--- old
+PTRS(OUT(0, 8)), linux_sys_pipe2(ARG(0), 0)
++++ new
+NOPTR, linux_sys_pipe2(ARG(0), 0)
+
+### getdents64 stops declaring its buffer
+--- old
+PTRS(OUT_BUF(1, 2)), linux_getdents(ARG(0), ARG(1), ARG(2), 0)
++++ new
+NOPTR, linux_getdents(ARG(0), ARG(1), ARG(2), 0)
+
+### fstat stops declaring its stat buffer
+--- old
+PTRS(OUT(1, sizeof(linux_stat_t))), linux_sys_fstat
++++ new
+NOPTR, linux_sys_fstat

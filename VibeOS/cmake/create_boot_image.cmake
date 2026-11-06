@@ -1,0 +1,393 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# create_boot_image.cmake - Generate EFI boot media layout artifacts
+
+set(ARTIFACTS_DIR "${CMAKE_BINARY_DIR}/artifacts")
+set(KERNEL_ELF "${ARTIFACTS_DIR}/vibeos_kernel.elf")
+set(BOOTLOADER_EFI "${ARTIFACTS_DIR}/bootloader.efi")
+set(LEGACY_BOOT_IMAGE "${ARTIFACTS_DIR}/vibeos_boot.img")
+set(EFI_ROOT_DIR "${ARTIFACTS_DIR}/efi_root")
+set(EFI_BOOT_DIR "${EFI_ROOT_DIR}/EFI/BOOT")
+set(EFI_BOOTX64 "${EFI_BOOT_DIR}/BOOTX64.EFI")
+set(EFI_KERNEL "${EFI_BOOT_DIR}/VIBEOSKR.ELF")
+set(EFI_STARTUP_NSH "${EFI_ROOT_DIR}/startup.nsh")
+set(EFI_ARCHIVE "${ARTIFACTS_DIR}/vibeos_efi_root.tar")
+
+if(NOT EXISTS "${KERNEL_ELF}")
+    message(FATAL_ERROR "Kernel ELF not found at ${KERNEL_ELF}")
+endif()
+
+if(NOT EXISTS "${BOOTLOADER_EFI}")
+    message(FATAL_ERROR "Bootloader EFI not found at ${BOOTLOADER_EFI}")
+endif()
+
+file(REMOVE_RECURSE "${EFI_ROOT_DIR}")
+file(MAKE_DIRECTORY "${EFI_BOOT_DIR}")
+
+# Real EFI filesystem layout (QEMU OVMF-compatible virtual FAT tree)
+file(COPY_FILE "${BOOTLOADER_EFI}" "${EFI_BOOTX64}" ONLY_IF_DIFFERENT)
+
+# Somewhere for swap to write. See scripts/make-swapfile.py for why it is a
+# file, why it is written in one go, and why nothing may assume it came out
+# contiguous - the kernel checks and refuses it if it did not.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_LIST_DIR}/../scripts/make-swapfile.py"
+                "${EFI_BOOT_DIR}/SWAPFILE.BIN" 8388608
+        RESULT_VARIABLE _swapfile_rc)
+    if(NOT _swapfile_rc EQUAL 0)
+        message(WARNING "swap file not staged (rc=${_swapfile_rc}); "
+                        "the boot will report SWAP_AREA slots=0")
+    endif()
+else()
+    message(WARNING "python3 not found: swap file not staged")
+endif()
+
+# A real ext2 image, made by the host's own mke2fs, for I5. Mounted through the
+# loop device rather than attached as a second disk - see
+# kernel/arch/x86_64/loopdev.c for why. Not fatal if e2fsprogs is missing: the
+# boot reports the image as absent rather than the build failing somewhere a
+# developer has to guess about.
+if(Python3_Interpreter_FOUND)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_LIST_DIR}/../scripts/make-fs-image.py"
+                ext2 "${EFI_BOOT_DIR}/EXT2.IMG" 2097152
+        RESULT_VARIABLE _ext2_rc)
+    if(NOT _ext2_rc EQUAL 0)
+        message(WARNING "ext2 image not staged (rc=${_ext2_rc})")
+    endif()
+    # ext4 as mkfs.ext4 makes it by default (docs/filesystem-design/ext4.md
+    # step 1): 8 MiB, the least that holds its journal.
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_LIST_DIR}/../scripts/make-fs-image.py"
+                ext4 "${EFI_BOOT_DIR}/EXT4.IMG" 8388608
+        RESULT_VARIABLE _ext4_rc)
+    if(NOT _ext4_rc EQUAL 0)
+        message(WARNING "ext4 image not staged (rc=${_ext4_rc})")
+    endif()
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_LIST_DIR}/../scripts/make-fs-image.py"
+                iso9660 "${EFI_BOOT_DIR}/ISO.IMG" 0
+        RESULT_VARIABLE _iso_rc)
+    if(NOT _iso_rc EQUAL 0)
+        message(WARNING "iso9660 image not staged (rc=${_iso_rc})")
+    endif()
+    # NTFS and exFAT. 16 MiB each: mkntfs refuses anything much smaller, and
+    # both are formatted by the tools everybody else uses for the same reason
+    # ext2 and ISO9660 are.
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_LIST_DIR}/../scripts/make-fs-image.py"
+                ntfs "${EFI_BOOT_DIR}/NTFS.IMG" 16777216
+        RESULT_VARIABLE _ntfs_rc)
+    if(NOT _ntfs_rc EQUAL 0)
+        message(WARNING "ntfs image not staged (rc=${_ntfs_rc})")
+    endif()
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_LIST_DIR}/../scripts/make-fs-image.py"
+                exfat "${EFI_BOOT_DIR}/EXFAT.IMG" 16777216
+        RESULT_VARIABLE _exfat_rc)
+    if(NOT _exfat_rc EQUAL 0)
+        message(WARNING "exfat image not staged (rc=${_exfat_rc})")
+    endif()
+    # FAT with VFAT long names, written by mtools (docs/abi/ A4): the boot volume's
+    # long names come from this project's own writer, so this is the image that
+    # can say the kernel's reader is wrong.
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_CURRENT_LIST_DIR}/../scripts/make-fs-image.py"
+                fat "${EFI_BOOT_DIR}/FATLONG.IMG" 16777216
+        RESULT_VARIABLE _fat_rc)
+    if(NOT _fat_rc EQUAL 0)
+        message(WARNING "fat image not staged (rc=${_fat_rc})")
+    endif()
+endif()
+file(COPY_FILE "${KERNEL_ELF}" "${EFI_KERNEL}" ONLY_IF_DIFFERENT)
+file(WRITE "${EFI_STARTUP_NSH}"
+    "fs0:\\EFI\\BOOT\\BOOTX64.EFI\n"
+)
+
+# Ship the init user program on the EFI media so the bootloader can load it from
+# the filesystem and hand it to the kernel as the initrd module.
+# PID 1 is the native init. The bring-up workload it supervises ships beside
+# it under its own name - it used to *be* INIT.ELF, which is why there was no
+# process left to supervise anything.
+set(USER_INIT_ELF "${CMAKE_BINARY_DIR}/vibeos_user_init")
+if(NOT VIBEOS_USE_NATIVE_INIT)
+    set(USER_INIT_ELF "${CMAKE_BINARY_DIR}/vibeos_user_hello")
+endif()
+
+# The supervised services named in init's manifest.
+foreach(svc_pair "vibeos_user_svc_ok:SVC_OK.ELF" "vibeos_user_svc_flap:SVC_FLAP.ELF" "vibeos_user_svc_crash:SVC_CRSH.ELF" "vibeos_user_svc_stress:SVC_STRS.ELF" "vibeos_user_svc_bomb:SVC_BOMB.ELF" "vibeos_user_svc_press:SVC_PRES.ELF" "vibeos_user_svc_reclaim:SVC_RECL.ELF")
+    string(REPLACE ":" ";" svc_parts "${svc_pair}")
+    list(GET svc_parts 0 svc_target)
+    list(GET svc_parts 1 svc_name)
+    if(EXISTS "${CMAKE_BINARY_DIR}/${svc_target}")
+        file(COPY_FILE "${CMAKE_BINARY_DIR}/${svc_target}"
+             "${EFI_BOOT_DIR}/${svc_name}" ONLY_IF_DIFFERENT)
+    endif()
+endforeach()
+
+set(SELFTEST_ELF "${CMAKE_BINARY_DIR}/vibeos_user_hello")
+if(EXISTS "${SELFTEST_ELF}")
+    file(COPY_FILE "${SELFTEST_ELF}" "${EFI_BOOT_DIR}/SELFTEST.ELF" ONLY_IF_DIFFERENT)
+endif()
+if(EXISTS "${USER_INIT_ELF}")
+    file(COPY_FILE "${USER_INIT_ELF}" "${EFI_BOOT_DIR}/INIT.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes init program: EFI/BOOT/INIT.ELF (native=${VIBEOS_USE_NATIVE_INIT})")
+else()
+    message(STATUS "Init program not found at ${USER_INIT_ELF}; kernel will use its built-in copy")
+endif()
+
+set(NATIVE_INIT_ELF "${CMAKE_BINARY_DIR}/vibeos_user_init")
+if(EXISTS "${NATIVE_INIT_ELF}")
+    file(COPY_FILE "${NATIVE_INIT_ELF}" "${EFI_BOOT_DIR}/NATIVE_INIT.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes native init candidate: EFI/BOOT/NATIVE_INIT.ELF")
+endif()
+
+# A second program on disk, for the init program to exec().
+set(USER_SH_ELF "${CMAKE_BINARY_DIR}/vibeos_user_sh")
+if(EXISTS "${USER_SH_ELF}")
+    file(COPY_FILE "${USER_SH_ELF}" "${EFI_BOOT_DIR}/SH.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes shell: EFI/BOOT/SH.ELF")
+endif()
+
+set(USER_NET_ELF "${CMAKE_BINARY_DIR}/vibeos_user_net")
+if(EXISTS "${USER_NET_ELF}")
+    file(COPY_FILE "${USER_NET_ELF}" "${EFI_BOOT_DIR}/NET.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes network client: EFI/BOOT/NET.ELF")
+endif()
+
+set(USER_TASK_ELF "${CMAKE_BINARY_DIR}/vibeos_user_task")
+if(EXISTS "${USER_TASK_ELF}")
+    file(COPY_FILE "${USER_TASK_ELF}" "${EFI_BOOT_DIR}/TASK.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes exec target: EFI/BOOT/TASK.ELF")
+endif()
+
+# An unmodified static Linux binary, if the build produced one. Nothing in it
+# was written for VibeOS: it is a normal Linux program compiled by musl-gcc,
+# and running it is the point of the whole Linux-ABI effort.
+set(MUSL_ELF "${CMAKE_BINARY_DIR}/musl_hello")
+if(EXISTS "${MUSL_ELF}")
+    file(COPY_FILE "${MUSL_ELF}" "${EFI_BOOT_DIR}/MUSL.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes an unmodified Linux binary: EFI/BOOT/MUSL.ELF")
+endif()
+
+# The same program built position-independent. An ET_DYN executable is placed
+# by the loader rather than by the file, so this is the one that says whether
+# VibeOS can do the placing.
+set(PIE_ELF "${CMAKE_BINARY_DIR}/musl_pie")
+if(EXISTS "${PIE_ELF}")
+    file(COPY_FILE "${PIE_ELF}" "${EFI_BOOT_DIR}/PIE.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes a position-independent Linux binary: EFI/BOOT/PIE.ELF")
+endif()
+
+# The NT personality's DLL and the first Windows program (docs/abi/windows.md
+# W1), under /win - a provisional place: where Windows' files live is the
+# filesystem hierarchy's decision, the roadmap's next item.
+set(WIN_NTDLL "${CMAKE_BINARY_DIR}/win/ntdll.dll")
+set(WIN_HELLO "${CMAKE_BINARY_DIR}/win/hello.exe")
+if(EXISTS "${WIN_NTDLL}" AND EXISTS "${WIN_HELLO}")
+    file(MAKE_DIRECTORY "${EFI_ROOT_DIR}/win")
+    file(COPY_FILE "${WIN_NTDLL}" "${EFI_ROOT_DIR}/win/ntdll.dll" ONLY_IF_DIFFERENT)
+    file(COPY_FILE "${WIN_HELLO}" "${EFI_ROOT_DIR}/win/hello.exe" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes the NT personality: /win/ntdll.dll and /win/hello.exe")
+endif()
+# Our C runtime (W2), beside ntdll. Nothing loads it before the loader learns
+# to load DLLs from disk, so its presence changes no boot.
+set(WIN_MSVCRT "${CMAKE_BINARY_DIR}/win/msvcrt.dll")
+if(EXISTS "${WIN_MSVCRT}")
+    file(MAKE_DIRECTORY "${EFI_ROOT_DIR}/win")
+    file(COPY_FILE "${WIN_MSVCRT}" "${EFI_ROOT_DIR}/win/msvcrt.dll" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes our C runtime: /win/msvcrt.dll")
+endif()
+# The placeholders for the DLLs not written yet, and the program that calls
+# into one (W2).
+foreach(WIN_EXTRA kernel32.dll user32.dll advapi32.dll gdi32.dll hid.dll imm32.dll
+                  setupapi.dll stubcall.exe)
+    if(EXISTS "${CMAKE_BINARY_DIR}/win/${WIN_EXTRA}")
+        file(MAKE_DIRECTORY "${EFI_ROOT_DIR}/win")
+        file(COPY_FILE "${CMAKE_BINARY_DIR}/win/${WIN_EXTRA}" "${EFI_ROOT_DIR}/win/${WIN_EXTRA}"
+             ONLY_IF_DIFFERENT)
+    endif()
+endforeach()
+
+# The dynamically linked one, plus the interpreter it names. Both are needed:
+# a dynamic executable without its loader is a file the kernel can parse and
+# refuse, which tests nothing about loading.
+#
+# The loader goes where the binary says it is: /lib/ld-musl-x86_64.so.1. Until
+# docs/abi/ A4 it was copied to EFI/BOOT/LDMUSL.SO and the kernel translated the
+# path, because its FAT driver read no long names; it reads them now, and the
+# ESP builder writes them (make_esp_image.py).
+set(DYN_ELF "${CMAKE_BINARY_DIR}/musl_dynamic")
+if(EXISTS "${DYN_ELF}")
+    set(MUSL_LOADER "/usr/lib/x86_64-linux-musl/libc.so")
+    if(EXISTS "${MUSL_LOADER}")
+        file(COPY_FILE "${DYN_ELF}" "${EFI_BOOT_DIR}/DYN.ELF" ONLY_IF_DIFFERENT)
+        file(MAKE_DIRECTORY "${EFI_ROOT_DIR}/lib")
+        file(COPY_FILE "${MUSL_LOADER}" "${EFI_ROOT_DIR}/lib/ld-musl-x86_64.so.1" ONLY_IF_DIFFERENT)
+        message(STATUS "EFI media includes a dynamic Linux binary and its loader: EFI/BOOT/DYN.ELF")
+    else()
+        message(STATUS "musl loader not found; skipping the dynamic Linux binary")
+    endif()
+endif()
+
+# /etc/passwd and /etc/group (docs/abi/ L3 step 3). A C library answers
+# getpwnam and getgrnam out of these two files and nothing else; without them
+# every program that asks who "nobody" is - which is every LTP test that drops
+# privileges - stops before it starts. Real files on the boot volume: there is
+# no account database behind them, and the kernel does not read them. The
+# names are the ones a small Linux system has, with Linux's customary numbers.
+file(MAKE_DIRECTORY "${EFI_ROOT_DIR}/etc")
+file(WRITE "${EFI_ROOT_DIR}/etc/passwd"
+"root:x:0:0:root:/:/bin/sh
+daemon:x:1:1:daemon:/:/bin/false
+bin:x:2:2:bin:/:/bin/false
+sys:x:3:3:sys:/:/bin/false
+nobody:x:65534:65534:nobody:/:/bin/false
+")
+file(WRITE "${EFI_ROOT_DIR}/etc/group"
+"root:x:0:
+daemon:x:1:
+bin:x:2:
+sys:x:3:
+users:x:100:
+nogroup:x:65533:
+nobody:x:65534:
+")
+
+# /etc/hosts and /etc/resolv.conf (docs/abi/ L5 step 4): what a C library's
+# getaddrinfo reads before it asks anybody. Without resolv.conf musl asks
+# 127.0.0.1, where nothing answers; 10.0.2.3 is QEMU's user network's resolver,
+# which asks the host's. "vibeos-host" is the host as the guest sees it, so a
+# program can name it without a DNS server.
+file(WRITE "${EFI_ROOT_DIR}/etc/hosts"
+"127.0.0.1 localhost
+10.0.2.2 vibeos-host
+")
+file(WRITE "${EFI_ROOT_DIR}/etc/resolv.conf"
+"nameserver 10.0.2.3
+")
+
+# Threads, through the library's own pthread implementation: one created and
+# joined, then four at once contending for a mutex.
+set(THR_ELF "${CMAKE_BINARY_DIR}/musl_threads")
+if(EXISTS "${THR_ELF}")
+    file(COPY_FILE "${THR_ELF}" "${EFI_BOOT_DIR}/THREADS.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes a threaded Linux binary: EFI/BOOT/THREADS.ELF")
+endif()
+
+# fork() from a process that still has a thread running - what exercises the
+# TLB shootdown. 8.3 names: TFORK, not MUSL_TFORK.
+# Threads and exec together. 8.3 name: TEXEC.
+set(TEXEC_ELF "${CMAKE_BINARY_DIR}/musl_texec")
+if(EXISTS "${TEXEC_ELF}")
+    file(COPY_FILE "${TEXEC_ELF}" "${EFI_BOOT_DIR}/TEXEC.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes a thread-and-exec Linux binary: EFI/BOOT/TEXEC.ELF")
+endif()
+
+set(TFORK_ELF "${CMAKE_BINARY_DIR}/musl_tfork")
+if(EXISTS "${TFORK_ELF}")
+    file(COPY_FILE "${TFORK_ELF}" "${EFI_BOOT_DIR}/TFORK.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes a threaded-fork Linux binary: EFI/BOOT/TFORK.ELF")
+endif()
+
+# A static BusyBox from the host, if one is installed. This is a real program
+# doing real work - open a file, read a directory, write to stdout - rather than
+# a test written to pass. It is not built here and nothing about it was chosen
+# by this project.
+find_program(VIBEOS_BUSYBOX busybox PATHS /usr/bin /bin NO_CACHE)
+if(VIBEOS_BUSYBOX)
+    file(READ "${VIBEOS_BUSYBOX}" BB_MAGIC LIMIT 4 HEX)
+    if(BB_MAGIC STREQUAL "7f454c46")
+        file(COPY_FILE "${VIBEOS_BUSYBOX}" "${EFI_BOOT_DIR}/BUSYBOX.ELF" ONLY_IF_DIFFERENT)
+        message(STATUS "EFI media includes BusyBox: EFI/BOOT/BUSYBOX.ELF")
+    endif()
+endif()
+
+# BusyBox decides which command it is from the name it was invoked under, so a
+# real installation is one binary and a symlink per applet. FAT has no symlinks,
+# so these are copies - the mechanism is the same, only the storage is dumber.
+# Together with PATH this is what lets a real shell find real commands.
+if(VIBEOS_BUSYBOX AND BB_MAGIC STREQUAL "7f454c46")
+    foreach(applet CAT LS ECHO WC)
+        file(COPY_FILE "${VIBEOS_BUSYBOX}" "${EFI_BOOT_DIR}/${applet}" ONLY_IF_DIFFERENT)
+    endforeach()
+    message(STATUS "EFI media includes BusyBox applets: cat, ls, echo, wc")
+endif()
+
+set(SIG_ELF "${CMAKE_BINARY_DIR}/musl_signal")
+if(EXISTS "${SIG_ELF}")
+    file(COPY_FILE "${SIG_ELF}" "${EFI_BOOT_DIR}/SIGNAL.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes the signal test: EFI/BOOT/SIGNAL.ELF")
+endif()
+
+set(EVENTS_ELF "${CMAKE_BINARY_DIR}/musl_events")
+if(EXISTS "${EVENTS_ELF}")
+    file(COPY_FILE "${EVENTS_ELF}" "${EFI_BOOT_DIR}/EVENTS.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes the event-loop test: EFI/BOOT/EVENTS.ELF")
+endif()
+
+set(SOCKETS_ELF "${CMAKE_BINARY_DIR}/musl_sockets")
+if(EXISTS "${SOCKETS_ELF}")
+    file(COPY_FILE "${SOCKETS_ELF}" "${EFI_BOOT_DIR}/SOCKETS.ELF" ONLY_IF_DIFFERENT)
+    message(STATUS "EFI media includes the sockets test: EFI/BOOT/SOCKETS.ELF")
+endif()
+
+# Keep legacy kernel-as-image artifact for direct-loader probes.
+file(COPY_FILE "${KERNEL_ELF}" "${LEGACY_BOOT_IMAGE}" ONLY_IF_DIFFERENT)
+
+# Archive the EFI tree for artifact portability.
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar cf "${EFI_ARCHIVE}" --format=gnutar "EFI"
+    WORKING_DIRECTORY "${EFI_ROOT_DIR}"
+    RESULT_VARIABLE EFI_ARCHIVE_RESULT
+)
+if(NOT EFI_ARCHIVE_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to create EFI root archive: ${EFI_ARCHIVE}")
+endif()
+
+file(SHA256 "${EFI_BOOTX64}" BOOTLOADER_SHA256)
+file(SHA256 "${EFI_KERNEL}" KERNEL_SHA256)
+file(SHA256 "${EFI_STARTUP_NSH}" STARTUP_NSH_SHA256)
+file(SHA256 "${EFI_ARCHIVE}" EFI_ARCHIVE_SHA256)
+
+set(BOOT_MANIFEST "${ARTIFACTS_DIR}/boot_manifest.txt")
+string(TIMESTAMP BOOT_ARTIFACTS_GENERATED_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
+file(SIZE "${EFI_BOOTX64}" BOOTLOADER_SIZE)
+file(SIZE "${EFI_KERNEL}" KERNEL_SIZE)
+file(SIZE "${EFI_STARTUP_NSH}" STARTUP_NSH_SIZE)
+file(SIZE "${EFI_ARCHIVE}" ARCHIVE_SIZE)
+file(WRITE "${BOOT_MANIFEST}"
+    "VibeOS Boot Artifacts Manifest\n"
+    "Generated (UTC): ${BOOT_ARTIFACTS_GENERATED_UTC}\n"
+    "\n"
+    "[legacy]\n"
+    "kernel_elf=${KERNEL_ELF}\n"
+    "boot_image=${LEGACY_BOOT_IMAGE}\n"
+    "\n"
+    "[efi_media]\n"
+    "root=${EFI_ROOT_DIR}\n"
+    "bootloader=${EFI_BOOTX64}\n"
+    "kernel=${EFI_KERNEL}\n"
+    "startup_nsh=${EFI_STARTUP_NSH}\n"
+    "archive=${EFI_ARCHIVE}\n"
+    "\n"
+    "[integrity]\n"
+    "bootloader_size=${BOOTLOADER_SIZE}\n"
+    "kernel_size=${KERNEL_SIZE}\n"
+    "startup_nsh_size=${STARTUP_NSH_SIZE}\n"
+    "archive_size=${ARCHIVE_SIZE}\n"
+    "bootloader_sha256=${BOOTLOADER_SHA256}\n"
+    "kernel_sha256=${KERNEL_SHA256}\n"
+    "startup_nsh_sha256=${STARTUP_NSH_SHA256}\n"
+    "archive_sha256=${EFI_ARCHIVE_SHA256}\n"
+)
+
+message(STATUS "EFI media root created at: ${EFI_ROOT_DIR}")

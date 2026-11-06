@@ -1,0 +1,1039 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Threads, through a real C library.
+ *
+ * Written against POSIX, not against VibeOS: pthread_create becomes clone()
+ * with CLONE_VM|CLONE_THREAD and the rest, and pthread_join sleeps on a futex
+ * until the exiting thread's kernel-side clear_child_tid write wakes it.
+ *
+ * Two stages, kept apart on purpose. One thread created and joined is the
+ * smaller claim, and it already needs two tasks in one address space, a
+ * thread-local base of its own, a scheduler that runs the new task, an exit
+ * that clears the word the joiner sleeps on, and a futex whose wait and wake
+ * meet. Four at once adds what only overlapping threads can show: shared
+ * memory under a lock that really contends, and each thread keeping its own
+ * thread-local while doing it.
+ *
+ * The counter is asserted, not printed. "The threads ran" and "the threads ran
+ * and lost no increment" are different claims, and a kernel can produce the
+ * first while failing the second.
+ *
+ * Five more stages ask whether the threads belong to one *process*, which the
+ * first two cannot see: both only ever create threads from main, and no worker
+ * touches process state, so a kernel that gives each thread a private copy of
+ * the process passes them. Every one of them was written before the kernel was
+ * changed and failed on it - that is how they are known to be able to.
+ *
+ *  - C5_MMAP: a thread maps memory, then main maps memory. One process has
+ *    one mapping cursor; a thread that copied it hands main the same base,
+ *    and main's fresh pages silently replace the thread's.
+ *  - C5_SIGACTION: a thread installs a handler, then main raises the signal.
+ *    Dispositions are the process's; a private copy leaves main on the
+ *    default action, which for SIGUSR1 is to die.
+ *  - C5_EXIT_GROUP: a thread calls exit_group(42) while main keeps running.
+ *    The whole process ends and the parent sees 42 - not 7 from main
+ *    finishing on its own, and not "killed by signal 9", which is what an
+ *    exit_group built by killing the siblings would report.
+ *  - C5_WNOHANG: waitpid(WNOHANG) on a child that is still running answers 0
+ *    at once. A kernel that drops wait4's options blocks until the child
+ *    exits; the child ends on its own, so that failure cannot stall the boot.
+ *  - C5_TKILL: a thread's id addresses that thread. pthread_kill(thread, 0)
+ *    must find it, and raise() inside it - tkill(gettid()) - must reach its
+ *    handler. A lookup that matches thread-group ids answers ESRCH.
+ *
+ * C5_SIGACTION and C5_EXIT_GROUP run in a forked child, because failing them
+ * kills or strands the process that fails, and every wait in every stage is
+ * bounded: this program is one line of a sequential boot script, and a hang
+ * here would read as every command after it having failed.
+ */
+#define _GNU_SOURCE   /* CPU_SET, sched_getcpu (C6_SCHED) */
+#include <errno.h>
+#include <pthread.h>
+#include <sched.h>
+#include <spawn.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static __thread int mine;   /* thread-local: the child must see its own */
+
+#define WORKERS 4
+#define BUMPS 2000
+
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static long counter;
+
+/* Several of these run at once, so the lock really contends - which is the
+ * only way FUTEX_WAIT is reached at all: an uncontended lock is taken with an
+ * atomic instruction and never enters the kernel. */
+static void *worker(void *arg)
+{
+    int i;
+
+    mine = (int)(long)arg;
+    for (i = 0; i < BUMPS; i++) {
+        pthread_mutex_lock(&lock);
+        counter++;
+        pthread_mutex_unlock(&lock);
+    }
+    return (void *)(long)mine;
+}
+
+static void *child(void *arg)
+{
+    mine = (int)(long)arg;
+    return (void *)(long)mine;
+}
+
+#define C5_LEN (64 * 1024)
+
+/* Map, fill, and hand the address back through join, so main can map after
+ * this thread has already advanced whatever cursor it holds. */
+static void *mmap_worker(void *arg)
+{
+    unsigned char *p;
+
+    (void)arg;
+    p = mmap(0, C5_LEN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        return 0;
+    }
+    memset(p, 0xA5, C5_LEN);
+    return p;
+}
+
+/* C5_FILES: one descriptor table per process. The pipe is made by a thread
+ * and read by main, and then main closes an end while another thread is
+ * waiting to write through it. With a table copied per thread the first read
+ * gets EBADF and the late write succeeds - each thread keeps its own. */
+static int files_pipe[2];
+static volatile int files_go;
+
+static void *files_opener(void *arg)
+{
+    (void)arg;
+    if (pipe(files_pipe) != 0) {
+        return (void *)1L;
+    }
+    if (write(files_pipe[1], "F", 1) != 1) {
+        return (void *)2L;
+    }
+    return 0;
+}
+
+static void *files_waiter(void *arg)
+{
+    while (!files_go) {
+        sched_yield();
+    }
+    return (void *)(long)write((int)(long)arg, "x", 1);
+}
+
+static volatile sig_atomic_t usr1_seen;
+
+static void on_usr1(int sig)
+{
+    (void)sig;
+    usr1_seen = 1;
+}
+
+static void *sigaction_worker(void *arg)
+{
+    struct sigaction sa;
+
+    (void)arg;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_usr1;
+    sigemptyset(&sa.sa_mask);
+    return (void *)(long)sigaction(SIGUSR1, &sa, 0);
+}
+
+static volatile int exit_group_go;
+
+static void *exit_group_worker(void *arg)
+{
+    (void)arg;
+    while (!exit_group_go) {
+        sched_yield();
+    }
+    syscall(SYS_exit_group, 42);   /* the raw call: no atexit, no stdio flush */
+    return 0;
+}
+
+/* Wait for a forked stage child and say what became of it. */
+static void report_child(const char *stage, pid_t pid, int want_code)
+{
+    int status = 0;
+
+    if (pid < 0) {
+        printf("THREADS_%s_FAIL: fork\n", stage);
+    } else if (waitpid(pid, &status, 0) != pid) {
+        printf("THREADS_%s_FAIL: waitpid\n", stage);
+    } else if (WIFSIGNALED(status)) {
+        printf("THREADS_%s_FAIL: killed by signal %d\n", stage, WTERMSIG(status));
+    } else if (WEXITSTATUS(status) != want_code) {
+        printf("THREADS_%s_FAIL: exited %d, expected %d\n", stage,
+               WEXITSTATUS(status), want_code);
+    } else {
+        printf("THREADS_%s_OK\n", stage);
+    }
+    fflush(stdout);
+}
+
+/* C5_TKILL: a signal addressed to a thread, not to its process. */
+static volatile sig_atomic_t usr2_seen;
+
+static void on_usr2(int sig)
+{
+    (void)sig;
+    usr2_seen = 1;
+}
+
+static volatile int tkill_release;
+
+/* raise() in musl is tkill(gettid()), so this is the smallest program that
+ * addresses a signal to a thread that is not the leader. It then waits for
+ * main by spinning rather than on a futex: a blocked wait here would not
+ * notice a signal on this kernel, which is a different defect and must not
+ * decide this stage. */
+static void *tkill_worker(void *arg)
+{
+    (void)arg;
+    raise(SIGUSR2);
+    while (!tkill_release) {
+        sched_yield();
+    }
+    return 0;
+}
+
+/* C5_EXIT_GROUP_BLOCKED: exit_group must end a sibling that is blocked in
+ * the kernel, not only one running in user space. */
+static pthread_mutex_t never_m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t never_c = PTHREAD_COND_INITIALIZER;
+
+static void *exit_group_later(void *arg)
+{
+    int n;
+
+    (void)arg;
+    for (n = 0; n < 20; n++) {      /* let main reach its wait first */
+        sched_yield();
+    }
+    syscall(SYS_exit_group, 42);
+    return 0;
+}
+
+/* report_child, but it cannot hang: on a kernel where the child never ends,
+ * a blocking waitpid would stall this program and every later line of the
+ * boot script. Polls with WNOHANG, which is why this stage came after the
+ * WNOHANG fix and not before it.
+ *
+ * Bounded by time, not by a number of yields. It was 400 yields, which is a
+ * stand-in for time that holds only while the machine is otherwise idle: once
+ * svc-press ran beside it, touching and unmapping 64 MiB, the child that
+ * exit_group had correctly ended was reaped on the line *after* this printed
+ * "never ended" - two boots in eight. Ten seconds is far past any honest exit
+ * and well inside the boot gate's patience for a quiet guest. */
+static long elapsed_ms(const struct timespec *from)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (long)(now.tv_sec - from->tv_sec) * 1000L +
+           (long)(now.tv_nsec - from->tv_nsec) / 1000000L;
+}
+
+static void report_child_bounded(const char *stage, pid_t pid, int want_code,
+                                 int seconds)
+{
+    int status = 0, ended = 0;
+    struct timespec start;
+
+    if (pid < 0) {
+        printf("THREADS_%s_FAIL: fork\n", stage);
+        fflush(stdout);
+        return;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while (elapsed_ms(&start) < (long)seconds * 1000L) {
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+            ended = 1;
+            break;
+        }
+        sched_yield();
+    }
+    if (!ended) {
+        printf("THREADS_%s_FAIL: the process never ended\n", stage);
+    } else if (WIFSIGNALED(status)) {
+        printf("THREADS_%s_FAIL: killed by signal %d\n", stage, WTERMSIG(status));
+    } else if (WEXITSTATUS(status) != want_code) {
+        printf("THREADS_%s_FAIL: exited %d, expected %d\n", stage,
+               WEXITSTATUS(status), want_code);
+    } else {
+        printf("THREADS_%s_OK\n", stage);
+    }
+    fflush(stdout);
+}
+
+/* C5_FUTEX_XPROC: a word at the same address in two processes. Every Linux
+ * program here links at 0x400000 and a forked child has its parent's layout
+ * exactly, so this global sits at one virtual address in both. */
+static volatile int xproc_word;
+
+/* C5_EXEC: a thread that execs. The image it loads is this program again,
+ * with an argument that makes it answer one question and exit. */
+static void *exec_worker(void *arg)
+{
+    char *const args[] = { (char *)"EFI/BOOT/THREADS.ELF",
+                           (char *)"exec-probe", 0 };
+
+    (void)arg;
+    execv(args[0], args);
+    return (void *)1L;   /* only if execv failed */
+}
+
+/* C6_VFORK: runs on the parent's memory, on a stack of its own, yields a few
+ * times so that a parent that did not wait would get there first, stores,
+ * and ends. */
+static volatile int g_vfork_seen;
+
+static int vfork_child(void *arg)
+{
+    int i;
+
+    (void)arg;
+    for (i = 0; i < 20; i++) {
+        sched_yield();
+    }
+    g_vfork_seen = 1;
+    _exit(7);
+}
+
+/* C6_SCHED: a thread that keeps running while membarrier's barriers go out,
+ * so there is another core of this process for them to reach. */
+static volatile int g_spin_stop;
+
+static void *spin_worker(void *arg)
+{
+    (void)arg;
+    while (!g_spin_stop) {
+    }
+    return 0;
+}
+
+/* C6_ABORT: a thread that waits for something that never comes. */
+static pthread_mutex_t g_never_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_never = PTHREAD_COND_INITIALIZER;
+
+static void *waits_on_nothing(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&g_never_lock);
+    for (;;) {
+        pthread_cond_wait(&g_never, &g_never_lock);
+    }
+    return 0;
+}
+
+/* C6_COND: wait for the broadcast, at most ten seconds. */
+static pthread_mutex_t g_cond_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cond = PTHREAD_COND_INITIALIZER;
+static int g_cond_ready, g_cond_go, g_cond_done;
+
+static void *cond_worker(void *arg)
+{
+    struct timespec until;
+
+    (void)arg;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 10;
+    pthread_mutex_lock(&g_cond_mutex);
+    g_cond_ready++;
+    while (!g_cond_go) {
+        if (pthread_cond_timedwait(&g_cond, &g_cond_mutex, &until) != 0) {
+            break;
+        }
+    }
+    if (g_cond_go) {
+        g_cond_done++;
+    }
+    pthread_mutex_unlock(&g_cond_mutex);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    /* Run as the image an exec'ing thread loaded. 23 when this image is its own
+     * process - getpid() equals gettid() - and 24 when it is still running as
+     * the thread it was, which is what a kernel that does not take over the
+     * leader's identity produces. */
+    if (argc > 1 && strcmp(argv[1], "exec-probe") == 0) {
+        return getpid() == (pid_t)syscall(SYS_gettid) ? 23 : 24;
+    }
+
+    pthread_t t;
+    void *ret = 0;
+
+    if (pthread_create(&t, 0, child, (void *)42L) != 0) {
+        printf("THREADS_FAIL: create\n");
+        fflush(stdout);
+        return 1;
+    }
+    printf("THREADS_CREATE_OK\n");
+    fflush(stdout);
+
+    if (pthread_join(t, &ret) != 0) {
+        printf("THREADS_FAIL: join\n");
+        fflush(stdout);
+        return 1;
+    }
+    /* Through the thread-local, so this also says the child had its own TLS
+     * rather than writing into its creator's. */
+    if ((long)ret != 42L) {
+        printf("THREADS_FAIL: thread returned %ld, expected 42\n", (long)ret);
+        fflush(stdout);
+        return 1;
+    }
+    printf("THREADS_STAGE1_OK: created and joined one thread, tls returned %ld\n",
+           (long)ret);
+    fflush(stdout);
+
+    /* Now several at once, which is a different question: threads that
+     * overlap, contend for a lock, and exit while others are still being
+     * created. */
+    /* Repeat count for the create-4/join-4 round. One by default, so the boot
+     * gate sees exactly the stage it always has. Set high (e.g. -DTHR_4WORKER_REPS=30
+     * at build) to multiply the number of thread first-schedules per boot when
+     * hunting the four-worker crash: it repeats the crashing path faithfully
+     * rather than adding unrelated work, which is the amplification that raises
+     * the rate without masking the window. */
+#ifndef THR_4WORKER_REPS
+#define THR_4WORKER_REPS 1
+#endif
+    {
+        pthread_t many[WORKERS];
+        long i, tls_ok = 1;
+        int rep;
+
+        for (rep = 0; rep < THR_4WORKER_REPS; rep++) {
+            counter = 0;   /* per-round, so the final check still equals WORKERS*BUMPS */
+            for (i = 0; i < WORKERS; i++) {
+                if (pthread_create(&many[i], 0, worker, (void *)i) != 0) {
+                    printf("THREADS_FAIL: create %ld\n", i);
+                    fflush(stdout);
+                    return 1;
+                }
+            }
+            for (i = 0; i < WORKERS; i++) {
+                void *r = 0;
+                if (pthread_join(many[i], &r) != 0) {
+                    printf("THREADS_FAIL: join %ld\n", i);
+                    fflush(stdout);
+                    return 1;
+                }
+                if ((long)r != i) {
+                    tls_ok = 0;   /* a thread saw another thread's thread-local */
+                }
+            }
+        }
+        printf("THREADS_OK: %d threads, counter=%ld expected=%d tls=%s\n",
+               WORKERS, counter, WORKERS * BUMPS, tls_ok ? "ok" : "shared");
+        fflush(stdout);
+    }
+
+    /* C5_MMAP. No failure returns early from here on: each stage reports,
+     * because a kernel that fails one of these usually fails the others for
+     * the same reason and the three lines together say which. */
+    {
+        pthread_t mt;
+        void *r = 0;
+        unsigned char *theirs, *ours;
+        long i, intact = 1;
+
+        if (pthread_create(&mt, 0, mmap_worker, 0) != 0 ||
+            pthread_join(mt, &r) != 0 || r == 0) {
+            printf("THREADS_C5_MMAP_FAIL: the thread could not map\n");
+        } else {
+            theirs = r;
+            ours = mmap(0, C5_LEN, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (ours == MAP_FAILED) {
+                printf("THREADS_C5_MMAP_FAIL: main could not map\n");
+            } else {
+                memset(ours, 0x5A, C5_LEN);
+                for (i = 0; i < C5_LEN; i++) {
+                    if (theirs[i] != 0xA5) {
+                        intact = 0;
+                        break;
+                    }
+                }
+                if (ours == theirs) {
+                    printf("THREADS_C5_MMAP_FAIL: main was given the thread's base %p\n",
+                           (void *)ours);
+                } else if (!intact) {
+                    printf("THREADS_C5_MMAP_FAIL: the thread's pages changed at +%ld\n", i);
+                } else {
+                    printf("THREADS_C5_MMAP_OK\n");
+                }
+            }
+        }
+        fflush(stdout);
+    }
+
+    /* C5_FILES */
+    {
+        pthread_t ft, wt;
+        void *r = (void *)1L, *w = 0;
+        char c = 0;
+
+        if (pthread_create(&ft, 0, files_opener, 0) != 0 ||
+            pthread_join(ft, &r) != 0 || r != 0) {
+            printf("THREADS_C5_FILES_FAIL: the thread could not make a pipe (%ld)\n",
+                   (long)r);
+        } else if (read(files_pipe[0], &c, 1) != 1 || c != 'F') {
+            printf("THREADS_C5_FILES_FAIL: a pipe a thread opened is not open in main\n");
+        } else if (pthread_create(&wt, 0, files_waiter,
+                                  (void *)(long)files_pipe[1]) != 0) {
+            printf("THREADS_C5_FILES_FAIL: create\n");
+            close(files_pipe[0]);
+            close(files_pipe[1]);
+        } else {
+            close(files_pipe[1]);
+            files_go = 1;
+            pthread_join(wt, &w);
+            if ((long)w != -1) {
+                printf("THREADS_C5_FILES_FAIL: a descriptor main closed was still open in a thread\n");
+            } else {
+                printf("THREADS_C5_FILES_OK\n");
+            }
+            close(files_pipe[0]);
+        }
+        fflush(stdout);
+    }
+
+    /* C5_SIGACTION, in a child: with the defect, the raise kills it. */
+    {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            pthread_t st;
+            void *r = (void *)1L;
+
+            if (pthread_create(&st, 0, sigaction_worker, 0) != 0 ||
+                pthread_join(st, &r) != 0 || r != 0) {
+                _exit(3);
+            }
+            raise(SIGUSR1);
+            _exit(usr1_seen ? 0 : 4);
+        }
+        report_child("C5_SIGACTION", pid, 0);
+    }
+
+    /* C5_EXIT_GROUP, in a child. Main spins a bounded number of yields - each
+     * is one timer tick, so this is about two seconds - and only exits 7 if
+     * nothing ended it first. */
+    {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            pthread_t et;
+            int n;
+
+            if (pthread_create(&et, 0, exit_group_worker, 0) != 0) {
+                _exit(3);
+            }
+            exit_group_go = 1;
+            for (n = 0; n < 200; n++) {
+                sched_yield();
+            }
+            syscall(SYS_exit_group, 7);
+        }
+        report_child("C5_EXIT_GROUP", pid, 42);
+    }
+
+    /* C5_WNOHANG. A child that lives about a second and exits on its own.
+     * WNOHANG asked immediately must answer 0 - no child has changed state -
+     * and not wait. On a kernel that ignores the option the call blocks until
+     * the child exits and returns its pid: a failure that is deterministic and
+     * bounded by the child's own lifetime, so it cannot stall the boot. If this
+     * ever flakes, lengthen the child rather than loosening the assertion. */
+    {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            int n;
+            for (n = 0; n < 100; n++) {
+                sched_yield();
+            }
+            _exit(0);
+        }
+        if (pid < 0) {
+            printf("THREADS_C5_WNOHANG_FAIL: fork\n");
+        } else {
+            int status = 0;
+            pid_t r = waitpid(pid, &status, WNOHANG);
+
+            if (r == 0) {
+                (void)waitpid(pid, &status, 0);   /* reap it for real */
+                printf("THREADS_C5_WNOHANG_OK\n");
+            } else if (r == pid) {
+                printf("THREADS_C5_WNOHANG_FAIL: waited for the child to exit\n");
+            } else {
+                printf("THREADS_C5_WNOHANG_FAIL: returned %d\n", (int)r);
+            }
+        }
+        fflush(stdout);
+    }
+
+    /* C5_TKILL. A thread's id must address that thread. Two checks, both
+     * deterministic: pthread_kill with signal 0 asks only whether the thread
+     * exists, and raise() inside the thread must reach the handler. */
+    {
+        struct sigaction sa;
+        pthread_t kt;
+        int n, r;
+
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = on_usr2;
+        sigemptyset(&sa.sa_mask);
+        (void)sigaction(SIGUSR2, &sa, 0);
+
+        if (pthread_create(&kt, 0, tkill_worker, 0) != 0) {
+            printf("THREADS_C5_TKILL_FAIL: create\n");
+        } else {
+            for (n = 0; n < 20; n++) {
+                sched_yield();
+            }
+            r = pthread_kill(kt, 0);
+            tkill_release = 1;
+            (void)pthread_join(kt, 0);
+            if (r != 0) {
+                printf("THREADS_C5_TKILL_FAIL: pthread_kill on a live thread returned %d\n", r);
+            } else if (!usr2_seen) {
+                printf("THREADS_C5_TKILL_FAIL: raise() in a thread never reached it\n");
+            } else {
+                printf("THREADS_C5_TKILL_OK\n");
+            }
+        }
+        fflush(stdout);
+    }
+
+    /* C5_EXIT_GROUP_BLOCKED. The leader has to be the blocked one. If the
+     * caller of exit_group were the leader it would exit 42 itself, the parent
+     * would reap 42, and a stuck worker would go unnoticed - a stage that
+     * passes on the defect. And the wait is a condition nobody signals, not
+     * pthread_join: the exiting thread's own clear_child_tid would wake a join
+     * and hide the defect. */
+    {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            pthread_t lt;
+
+            if (pthread_create(&lt, 0, exit_group_later, 0) != 0) {
+                _exit(3);
+            }
+            pthread_mutex_lock(&never_m);
+            for (;;) {
+                pthread_cond_wait(&never_c, &never_m);
+            }
+        }
+        report_child_bounded("C5_EXIT_GROUP_BLOCKED", pid, 42, 10);
+    }
+
+    /* C5_FUTEX_XPROC. The child waits on its own copy of xproc_word. The parent
+     * wakes the same virtual address in its own memory - which a kernel that
+     * keys waiters by address alone matches to the child. Then the parent ends
+     * the child with SIGKILL, which reaches a blocked waiter now that waits
+     * notice signals.
+     *
+     * Two signs of the defect, either enough: the parent's wake reports one
+     * waiter woken when it has none of its own, or the child wakes and exits 5.
+     * A slow child can only hide the defect - if it is not yet waiting when the
+     * wake happens, nothing is matched - never invent it, so this stage can pass
+     * wrongly but cannot fail wrongly. */
+    {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            xproc_word = 0;
+            if (syscall(SYS_futex, &xproc_word, 0 /* FUTEX_WAIT */, 0, 0, 0, 0) == 0) {
+                _exit(5);   /* woken, and nobody in this process woke us */
+            }
+            _exit(6);       /* the wait refused or was interrupted: not the question */
+        }
+        if (pid < 0) {
+            printf("THREADS_C5_FUTEX_XPROC_FAIL: fork\n");
+        } else {
+            int n, status = 0;
+            long woke;
+
+            for (n = 0; n < 50; n++) {   /* let the child reach its wait */
+                sched_yield();
+            }
+            woke = syscall(SYS_futex, &xproc_word, 1 /* FUTEX_WAKE */, 1, 0, 0, 0);
+            for (n = 0; n < 20; n++) {
+                sched_yield();
+            }
+            (void)kill(pid, SIGKILL);
+            (void)waitpid(pid, &status, 0);
+            if (woke != 0) {
+                printf("THREADS_C5_FUTEX_XPROC_FAIL: a wake in this process woke %ld waiter(s) in another\n",
+                       woke);
+            } else if (WIFEXITED(status) && WEXITSTATUS(status) == 5) {
+                printf("THREADS_C5_FUTEX_XPROC_FAIL: the child was woken by the parent's wake\n");
+            } else if (WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL) {
+                printf("THREADS_C5_FUTEX_XPROC_OK\n");
+            } else {
+                printf("THREADS_C5_FUTEX_XPROC_FAIL: child ended with status 0x%x\n", status);
+            }
+        }
+        fflush(stdout);
+    }
+
+    /* C5_EXEC. A thread execs while the leader spins a bounded number of
+     * yields and exits 7 only if nothing ended it. Linux ends every other
+     * thread on exec and the exec'ing one becomes the process, so the parent
+     * sees the new image's answer, 23. The wrong answers are distinct:
+     *   7   the leader survived the exec
+     *   24  the image runs, but still as the old thread
+     *   killed by 9: the leader's death reached the parent as the process's
+     * Bounded with WNOHANG: on the defect the exec'd image runs as a thread and
+     * a thread's exit never reaches the parent at all. */
+    {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            pthread_t xt;
+            int n;
+
+            if (pthread_create(&xt, 0, exec_worker, 0) != 0) {
+                _exit(3);
+            }
+            /* Bounded by time, not by yields - the same change as
+             * report_child_bounded's, for the same reason. It was 200 yields,
+             * and on a busy machine the leader used them up and exited 7
+             * before the worker reached execv at all: no [EXEC] line in the
+             * log, one boot in 25. Five seconds is past any honest exec and
+             * inside the ten the parent waits, so the defect this stage is for
+             * - an exec that leaves the leader running - still ends in 7. */
+            {
+                struct timespec t0;
+
+                clock_gettime(CLOCK_MONOTONIC, &t0);
+                for (n = 0; elapsed_ms(&t0) < 5000L; n++) {
+                    sched_yield();
+                }
+            }
+            syscall(SYS_exit_group, 7);
+        }
+        report_child_bounded("C5_EXEC", pid, 23, 10);
+    }
+
+    /* C6_ROBUST (docs/abi/ L6). A child process takes a process-shared
+     * robust mutex in a MAP_SHARED page and ends holding it. The kernel walks
+     * the list the C library registered with set_robust_list, marks the lock
+     * OWNER_DIED and wakes a waiter, so the parent's next lock returns
+     * EOWNERDEAD.
+     *
+     * A process and not a thread, and ended by _exit: a thread that returns
+     * goes through musl's pthread_exit, which walks the list in user space and
+     * marks the lock itself - the stage passed with the kernel's walk
+     * sabotaged away - and a thread that calls the exit system call itself
+     * skips musl's own bookkeeping and corrupts its thread-list lock, which
+     * hung the boot. A process that ends never runs the library's walk, and
+     * leaves nothing of its library behind. A timed lock, so that a kernel
+     * that never walks the list fails the stage in five seconds. */
+    {
+        pthread_mutex_t *robust = mmap(0, 4096, PROT_READ | PROT_WRITE,
+                                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        pthread_mutexattr_t ma;
+        struct timespec until;
+        int r, status = 0;
+        pid_t pid;
+
+        if (robust == MAP_FAILED) {
+            printf("THREADS_C6_ROBUST_FAIL: mmap\n");
+        } else {
+            pthread_mutexattr_init(&ma);
+            pthread_mutexattr_setrobust(&ma, PTHREAD_MUTEX_ROBUST);
+            pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
+            pthread_mutex_init(robust, &ma);
+            pid = fork();
+            if (pid == 0) {
+                pthread_mutex_lock(robust);
+                _exit(0);
+            }
+            if (pid < 0 || waitpid(pid, &status, 0) != pid) {
+                printf("THREADS_C6_ROBUST_FAIL: fork or wait\n");
+            } else {
+                clock_gettime(CLOCK_REALTIME, &until);
+                until.tv_sec += 5;
+                r = pthread_mutex_timedlock(robust, &until);
+                if (r == EOWNERDEAD) {
+                    pthread_mutex_consistent(robust);
+                    pthread_mutex_unlock(robust);
+                    printf("THREADS_C6_ROBUST_OK\n");
+                } else {
+                    printf("THREADS_C6_ROBUST_FAIL: locking after the owner died returned %d\n", r);
+                }
+            }
+        }
+        fflush(stdout);
+    }
+
+    /* C6_EXECROBUST (issue #143). The same lock, held across an execve rather
+     * than an exit: the list lives in the image that goes away, and Linux
+     * walks it before letting go. It was forgotten here, so the lock stayed
+     * owned by a thread that no longer held it and the parent's timed lock ran
+     * out. The child execs this program again, which answers and exits. */
+    {
+        pthread_mutex_t *robust = mmap(0, 4096, PROT_READ | PROT_WRITE,
+                                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        pthread_mutexattr_t ma;
+        struct timespec until;
+        int r, status = 0;
+        pid_t pid;
+
+        if (robust == MAP_FAILED) {
+            printf("THREADS_C6_EXECROBUST_FAIL: mmap\n");
+        } else {
+            pthread_mutexattr_init(&ma);
+            pthread_mutexattr_setrobust(&ma, PTHREAD_MUTEX_ROBUST);
+            pthread_mutexattr_setpshared(&ma, PTHREAD_PROCESS_SHARED);
+            pthread_mutex_init(robust, &ma);
+            pid = fork();
+            if (pid == 0) {
+                char *const args[] = { (char *)"EFI/BOOT/THREADS.ELF", (char *)"exec-probe", 0 };
+
+                pthread_mutex_lock(robust);
+                execv(args[0], args);
+                _exit(99);   /* only if execv failed */
+            }
+            if (pid < 0 || waitpid(pid, &status, 0) != pid) {
+                printf("THREADS_C6_EXECROBUST_FAIL: fork or wait\n");
+            } else {
+                clock_gettime(CLOCK_REALTIME, &until);
+                until.tv_sec += 5;
+                r = pthread_mutex_timedlock(robust, &until);
+                if (r == EOWNERDEAD) {
+                    pthread_mutex_consistent(robust);
+                    pthread_mutex_unlock(robust);
+                    printf("THREADS_C6_EXECROBUST_OK\n");
+                } else {
+                    printf("THREADS_C6_EXECROBUST_FAIL: locking after the owner exec'd returned %d (status %d)\n",
+                           r, status);
+                }
+            }
+        }
+        fflush(stdout);
+    }
+
+    /* C6_SCHED (docs/abi/ L6 step 2). What only the machine can say: a thread
+     * pinned to core 1 ends up on core 1 - the pickers honour the mask - and
+     * membarrier's barriers, which are IPIs to other cores, come back while
+     * another thread of this process is running. And a real-time policy set
+     * is the policy read back. In a child, so that pinning and SCHED_FIFO
+     * change nothing for the stages after it. Bounded by time throughout. */
+    {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            cpu_set_t set;
+            struct sched_param sp;
+            struct timespec t0;
+            pthread_t spin;
+            int cpu = -1;
+
+            CPU_ZERO(&set);
+            CPU_SET(1, &set);
+            if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+                _exit(10);
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            while (elapsed_ms(&t0) < 3000L && (cpu = sched_getcpu()) != 1) {
+                sched_yield();
+            }
+            if (cpu != 1) {
+                /* Pinned to core 1 and still not on it. Seen once in about
+                 * eighteen boots (docs/abi/ L7's validation) with nothing else
+                 * in the log, so say where it was, for how long, and what
+                 * the kernel says its mask is: "11" alone could not be
+                 * followed anywhere. */
+                char line[128];
+                cpu_set_t now;
+                int n;
+
+                CPU_ZERO(&now);
+                (void)sched_getaffinity(0, sizeof(now), &now);
+                n = snprintf(line, sizeof(line), "THREADS_C6_SCHED_DIAG cpu=%d after_ms=%ld mask_has_1=%d count=%d\n",
+                             cpu, elapsed_ms(&t0), CPU_ISSET(1, &now) ? 1 : 0, CPU_COUNT(&now));
+                if (n > 0) {
+                    (void)write(1, line, (size_t)n);
+                }
+                _exit(11);
+            }
+            CPU_ZERO(&set);
+            if (sched_getaffinity(0, sizeof(set), &set) != 0 || !CPU_ISSET(1, &set) || CPU_COUNT(&set) != 1) {
+                _exit(12);
+            }
+            g_spin_stop = 0;
+            if (pthread_create(&spin, 0, spin_worker, 0) != 0) {
+                _exit(13);
+            }
+            if (syscall(SYS_membarrier, 1 << 4 /* REGISTER_PRIVATE_EXPEDITED */, 0, 0) != 0 ||
+                syscall(SYS_membarrier, 1 << 3 /* PRIVATE_EXPEDITED */, 0, 0) != 0 ||
+                syscall(SYS_membarrier, 1 << 0 /* GLOBAL */, 0, 0) != 0) {
+                _exit(14);
+            }
+            g_spin_stop = 1;
+            pthread_join(spin, 0);
+            /* The system calls themselves: musl's sched_setscheduler and
+             * sched_getscheduler return ENOSYS on purpose (Linux's policy is
+             * a thread's and POSIX's a process's), which the first version of
+             * this stage measured instead of the kernel. */
+            sp.sched_priority = 10;
+            if (syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &sp) != 0 ||
+                syscall(SYS_sched_getscheduler, 0) != SCHED_FIFO) {
+                _exit(15);
+            }
+            _exit(31);
+        }
+        report_child_bounded("C6_SCHED", pid, 31, 15);
+    }
+
+    /* C6_VFORK (docs/abi/ L6 step 3). A child made with CLONE_VM|CLONE_VFORK
+     * runs on this process's memory while this thread waits: what it stores
+     * is here when clone returns, because clone did not return before it
+     * ended. Then posix_spawn, which musl builds on exactly that clone and
+     * which was ENOSYS until this step: this program again, as the exec
+     * probe, whose answer is 23. */
+    {
+        static char vfork_stack[16384] __attribute__((aligned(16)));
+        char *const args[] = { (char *)"EFI/BOOT/THREADS.ELF", (char *)"exec-probe", 0 };
+        int status = 0, ok = 1;
+        pid_t pid;
+
+        g_vfork_seen = 0;
+        pid = clone(vfork_child, vfork_stack + sizeof(vfork_stack),
+                    CLONE_VM | CLONE_VFORK | SIGCHLD, 0);
+        if (pid < 0) {
+            printf("THREADS_C6_VFORK_FAIL: clone with CLONE_VM|CLONE_VFORK: errno %d\n", errno);
+            ok = 0;
+        } else if (g_vfork_seen != 1) {
+            printf("THREADS_C6_VFORK_FAIL: clone returned before the child's store (%d)\n", g_vfork_seen);
+            ok = 0;
+        } else if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 7) {
+            printf("THREADS_C6_VFORK_FAIL: the vfork child ended with 0x%x\n", status);
+            ok = 0;
+        }
+        if (ok) {
+            int r = posix_spawn(&pid, args[0], 0, 0, args, 0);
+
+            if (r != 0) {
+                printf("THREADS_C6_VFORK_FAIL: posix_spawn returned %d\n", r);
+                ok = 0;
+            } else if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 23) {
+                printf("THREADS_C6_VFORK_FAIL: the spawned program ended with 0x%x\n", status);
+                ok = 0;
+            }
+        }
+        if (ok) {
+            printf("THREADS_C6_VFORK_OK\n");
+        }
+        fflush(stdout);
+    }
+
+    /* C6_ABORT (docs/abi/ L6 step 4). A process whose main thread aborts
+     * while another thread waits in pthread_cond_wait ends - all of it: the
+     * parent sees SIGABRT, and afterwards nothing answers to the pid. A fatal
+     * signal used to end only the thread that took it; glibc's abort in a
+     * cancelled thread left the other one blocked for ever, and the boot,
+     * which ends only when every user task has, never did. kill(pid, 0) is
+     * what tells a gone process from a reaped leader with a thread left. */
+    {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            pthread_t w;
+
+            if (pthread_create(&w, 0, waits_on_nothing, 0) != 0) {
+                _exit(3);
+            }
+            sched_yield();
+            abort();
+        }
+        if (pid < 0) {
+            printf("THREADS_C6_ABORT_FAIL: fork\n");
+        } else {
+            struct timespec t0;
+            int status = 0;
+            pid_t got = 0;
+
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            while (elapsed_ms(&t0) < 10000L && (got = waitpid(pid, &status, WNOHANG)) == 0) {
+                sched_yield();
+            }
+            /* No grace after the reap. There were fifty yields here for "the
+             * last thread is on its way out", and they hid the defect about
+             * one boot in fifteen (M-117): waitpid reported the leader while
+             * the other thread was still leaving. Linux reports a leader only
+             * once its group is empty, so the pid is gone the moment it is
+             * reaped. */
+            if (got != pid) {
+                printf("THREADS_C6_ABORT_FAIL: the aborted process never ended\n");
+                (void)kill(pid, SIGKILL);
+            } else if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGABRT) {
+                printf("THREADS_C6_ABORT_FAIL: it ended with 0x%x, not SIGABRT\n", status);
+            } else if (kill(pid, 0) == 0) {
+                printf("THREADS_C6_ABORT_FAIL: a thread of it outlived the process\n");
+                (void)kill(pid, SIGKILL);
+            } else {
+                printf("THREADS_C6_ABORT_OK\n");
+            }
+        }
+        fflush(stdout);
+    }
+
+    /* C6_COND. Four threads wait on one condition variable and a broadcast
+     * must release every one: the C library hands waiters from the condition
+     * to the mutex with FUTEX_REQUEUE, which was ENOSYS until L6. Bounded by a
+     * timed wait, so a waiter that is never woken fails rather than hangs. */
+    {
+        pthread_t ct[4];
+        int i, ok = 1;
+
+        g_cond_ready = 0;
+        g_cond_go = 0;
+        g_cond_done = 0;
+        for (i = 0; i < 4; i++) {
+            if (pthread_create(&ct[i], 0, cond_worker, 0) != 0) {
+                ok = 0;
+            }
+        }
+        pthread_mutex_lock(&g_cond_mutex);
+        while (g_cond_ready < 4) {
+            pthread_mutex_unlock(&g_cond_mutex);
+            sched_yield();
+            pthread_mutex_lock(&g_cond_mutex);
+        }
+        g_cond_go = 1;
+        pthread_cond_broadcast(&g_cond);
+        pthread_mutex_unlock(&g_cond_mutex);
+        for (i = 0; i < 4; i++) {
+            (void)pthread_join(ct[i], 0);
+        }
+        if (!ok || g_cond_done != 4) {
+            printf("THREADS_C6_COND_FAIL: %d of 4 waiters were released by the broadcast\n", g_cond_done);
+        } else {
+            printf("THREADS_C6_COND_OK\n");
+        }
+        fflush(stdout);
+    }
+    return 0;
+}

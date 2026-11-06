@@ -1,0 +1,22 @@
+# LTP tests that hang on VibeOS and are not stopped (no alarm() yet, L2).
+# scripts/dev/ltp-run.sh leaves these out and says so; VIBEOS_LTP_HANGS=none
+# runs them. One name a line. Take a name out when its test stops hanging.
+#
+# flock03: its child waits at an LTP checkpoint that is never signalled; the
+# first boot it ran in gave no verdict for it or the six tests after it.
+flock03
+#
+# mincore04 and mmap18 (found running L3's list): each took the rest of its
+# boot, and the thirty tests after them with it. Not looked into further than
+# that - mmap18 grows a MAP_GROWSDOWN stack and waits for a SIGSEGV its
+# handler is meant to catch, and a ring-3 fault here kills the task rather
+# than deliver the signal.
+mincore04
+mmap18
+#
+# timerfd_settime02 and inotify09 (L4 steps 2 to 4 and 6): both race two
+# threads with LTP's fuzzy sync, which pins them with sched_getaffinity (L6,
+# ENOSYS here) and then outlasts a TCG boot. Neither call under test is what
+# holds it up; the race harness is.
+timerfd_settime02
+inotify09

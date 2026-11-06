@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Generate the table of contents mdBook needs, from the docs that exist.
+
+    python3 scripts/dev/make-book-summary.py [docs-dir]
+
+mdBook requires a SUMMARY.md listing every page, and a hand-written one is a
+second place to remember: a document added without touching it is simply
+absent from the published site, silently. So it is generated, from the
+directory, every time the site is built.
+
+Titles come from each file's first heading rather than its filename, because
+the filenames are terse and the headings are what somebody browsing wants to
+read.
+"""
+import os
+import sys
+
+# Ordered because a table of contents is a reading order, not a directory
+# listing. Anything not named here follows, alphabetically.
+PREFERRED = [
+    "vision.md",
+    "architecture.md",
+    "software_architecture_specification.md",
+    "boot.md",
+    "kernel_design.md",
+    "memory_management.md",
+    "scheduler.md",
+    "syscalls.md",
+    "ipc.md",
+    "filesystem.md",
+    "networking.md",
+    "drivers.md",
+    "graphics.md",
+    "process_semantics.md",
+    "security.md",
+    "compatibility.md",
+    "userland.md",
+    "toolchain.md",
+    "development_tools.md",
+    "testing_strategy.md",
+]
+
+
+def title_of(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("# "):
+                    return line[2:].strip()
+    except OSError:
+        pass
+    base = os.path.basename(path)
+    return os.path.splitext(base)[0].replace("_", " ").title()
+
+
+def main():
+    docs = sys.argv[1] if len(sys.argv) > 1 else "docs"
+    top = sorted(f for f in os.listdir(docs)
+                 if f.endswith(".md") and f != "SUMMARY.md")
+
+    ordered = [f for f in PREFERRED if f in top]
+    ordered += [f for f in top if f not in ordered]
+
+    lines = ["# Summary", ""]
+    for f in ordered:
+        lines.append(f"- [{title_of(os.path.join(docs, f))}]({f})")
+
+    progress = os.path.join(docs, "implementation_progress")
+    if os.path.isdir(progress):
+        lines.append("")
+        lines.append("# Implementation progress")
+        lines.append("")
+        for f in sorted(os.listdir(progress)):
+            if f.endswith(".md"):
+                rel = f"implementation_progress/{f}"
+                lines.append(f"- [{title_of(os.path.join(docs, rel))}]({rel})")
+
+    # The plan directories, each split one concern per file.
+    #
+    # Listed in a deliberate reading order rather than alphabetically, because
+    # "phases" after "observability" is a sequence and P0 before architecture
+    # is not. The README comes first because it is the index.
+    #
+    # Driven by a table rather than by one hardcoded block per plan, which is
+    # what it was: docs/io/ existed for an hour before anybody noticed it was
+    # not in the book, and a detail file that is not in SUMMARY.md exists only
+    # for whoever finds it by accident. Adding a plan is now one row.
+    #
+    # sched/ and exec/ were missing from this table for a month (found
+    # 2026-09-29): both plans existed, were linked from the progress table,
+    # and were not in the book.
+    for plan_dir, plan_title in (("mm", "Memory management plan"),
+                                 ("sched", "Tasks and scheduling plan"),
+                                 ("exec", "Program loading plan"),
+                                 ("abi", "Syscalls and Linux ABI plan"),
+                                 ("io", "Storage and I/O plan"),
+                                 ("core", "Kernel core plan"),
+                                 ("devices", "Devices and peripherals")):
+        plan = os.path.join(docs, plan_dir)
+        if not os.path.isdir(plan):
+            continue
+        order = ["README.md", "architecture.md", "observability.md",
+                 "maintainability.md", "invariants.md", "phases.md",
+                 "decisions.md", "syscalls.md"]
+        present = [f for f in order if os.path.exists(os.path.join(plan, f))]
+        present += sorted(f for f in os.listdir(plan)
+                          if f.endswith(".md") and f not in order)
+        if present:
+            lines.append("")
+            lines.append("# " + plan_title)
+            lines.append("")
+            for f in present:
+                rel = f"{plan_dir}/{f}"
+                lines.append(f"- [{title_of(os.path.join(docs, rel))}]({rel})")
+
+    adrs = os.path.join(docs, "adrs")
+    if os.path.isdir(adrs):
+        entries = sorted(f for f in os.listdir(adrs) if f.endswith(".md"))
+        if entries:
+            lines.append("")
+            lines.append("# Architecture decisions")
+            lines.append("")
+            for f in entries:
+                rel = f"adrs/{f}"
+                lines.append(f"- [{title_of(os.path.join(docs, rel))}]({rel})")
+
+    # Superseded documents, last: a record of what was believed, not a
+    # description of the kernel. The README says which is which.
+    archive = os.path.join(docs, "archive")
+    if os.path.isdir(archive):
+        entries = ["README.md"] + sorted(f for f in os.listdir(archive)
+                                         if f.endswith(".md") and f != "README.md")
+        lines.append("")
+        lines.append("# Archive")
+        lines.append("")
+        for f in entries:
+            if os.path.exists(os.path.join(archive, f)):
+                rel = f"archive/{f}"
+                lines.append(f"- [{title_of(os.path.join(docs, rel))}]({rel})")
+
+    out = os.path.join(docs, "SUMMARY.md")
+    with open(out, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print(f"{out}: {len(lines)} lines")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

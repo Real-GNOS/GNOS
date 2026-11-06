@@ -1,0 +1,93 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+# x86_64 kernel entry point for QEMU q35
+# 
+# Multiboot2 header for QEMU direct kernel loading
+# Must be within first 32KB of executable
+.section .text
+.align 8
+
+# Multiboot2 header
+.global multiboot2_header
+multiboot2_header:
+    # Multiboot2 magic number
+    .long 0xE85250D6
+    
+    # Architecture (0 = i386)
+    .long 0
+    
+    # Header length (must be 8-byte aligned)
+    .long (multiboot2_header_end - multiboot2_header)
+    
+    # Checksum: -(magic + architecture + header_length)
+    # Calculated to make sum of all fields = 0
+    .long -(0xE85250D6 + 0 + (multiboot2_header_end - multiboot2_header))
+    
+    # Optional tags would go here (none for basic boot)
+    
+    # End tag (type=0, flags=0, size=8)
+    .short 0    # type=0 (end tag)
+    .short 0    # flags=0
+    .long 8     # size=8
+multiboot2_header_end:
+
+.align 4
+
+# Bootloader/QEMU sets up:
+#   RDI = vibeos_kernel_t *kernel (or 0 if QEMU)
+#   RSI = const vibeos_boot_info_t *boot_info (or 0 if QEMU)
+# Stack and data are set up by bootloader/QEMU
+# This entry point initializes the kernel
+
+.global _start
+_start:
+    # Set up stack using RIP-relative addressing (for 64-bit position independence)
+    lea stack_top(%rip), %rsp
+    
+    # Align stack to 16 bytes as required by System V AMD64 ABI
+    and $~15, %rsp
+    
+    # Handle Multiboot2 entry (QEMU)
+    # QEMU sets: EBX = magic (0x36d76289), EAX = pointer to multiboot info
+    cmp $0x36d76289, %ebx
+    
+    # If loaded by multiboot2, clear RDI/RSI (not set by QEMU)
+    jne .bootloader_mode
+    xor %rdi, %rdi
+    xor %rsi, %rsi
+    jmp .call_kmain
+    
+.bootloader_mode:
+    # RDI and RSI are already set by bootloader with kernel struct and boot_info
+    # RDX is unused (set to 0 by bootloader)
+    
+.call_kmain:
+    xor %rdx, %rdx
+
+    # Bring up real GDT/IDT/paging/scheduler before entering the C kernel.
+    # hw_early_init takes boot_info as its argument (for the initrd module);
+    # preserve RDI (kernel_t*) and RSI (boot_info*) across the call.
+    push %rdi
+    push %rsi
+    mov %rsi, %rdi
+    call vibeos_x86_64_hw_early_init
+    pop %rsi
+    pop %rdi
+
+    # Call kernel main with boot_info in RSI and kernel in RDI
+    call vibeos_kmain
+    
+    # If kmain returns (it shouldn't), halt
+    cli
+    hlt
+    jmp .
+
+# Boot stack. hw_early_init runs on this, and once the timer is enabled its
+# interrupt handler nests onto the same stack, so it needs real headroom.
+.section .bss
+.align 4096
+stack_base:
+    .space 16384
+stack_top:
+
+# Mark stack as non-executable to silence the linker warning.
+.section .note.GNU-stack,"",@progbits

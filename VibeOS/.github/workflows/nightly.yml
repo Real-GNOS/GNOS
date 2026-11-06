@@ -1,0 +1,665 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Nightly Deep Checks
+
+# The per-PR matrix answers "does one run work?". These answer the two
+# questions it cannot afford the time for: "does it work every time?" and
+# "does the parser survive input we did not write?".
+#
+# Intermittent failures are this project's dominant failure mode - a scheduler
+# race that appeared in roughly one boot in six, a DHCP lease that came out
+# zero about as often - so a single green run is not evidence.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+# What a job gets unless it asks for more. Each job that files an issue or
+# uploads to code scanning says so itself; this is the floor, written down so
+# it does not depend on the repository's setting.
+permissions:
+  contents: read
+
+jobs:
+  boot-repeatability:
+    name: Boot Smoke x5 (flakiness gate)
+    # module: arch core platform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Only what the crash collector needs. Spelled out rather than inherited:
+    # the default token permissions depend on a repository setting, and a
+    # reporter that silently cannot post is worse than one that is not wired
+    # up at all - it looks like there is nothing to report.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils ninja-build build-essential ovmf musl-tools busybox-static ntfs-3g exfatprogs mtools gcc-mingw-w64-x86-64
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVIBEOS_BUILD_TESTS=ON -DVIBEOS_BUILD_KERNEL_IMAGE=ON -DVIBEOS_REQUIRE_TLS=ON
+          cmake --build build --parallel
+          cmake --build build --target vibeos_image
+
+      - name: Boot Five Times, Fail If Any Run Fails
+        run: |
+          set -uo pipefail
+          failures=0
+          for i in $(seq 1 5); do
+            echo "::group::boot attempt $i"
+            if python3 scripts/qemu-cli-smoke-linux.py build 900; then
+              echo "attempt $i: pass"
+            else
+              failures=$((failures + 1))
+              echo "attempt $i: FAIL"
+              grep -o '^reason=.*' qemu-cli-summary.txt || true
+              cp qemu-cli-serial.log "serial-attempt-$i.log" || true
+            fi
+            echo "::endgroup::"
+          done
+          echo "failures=$failures of 5"
+          test "$failures" -eq 0
+
+      # Crashes from the failed attempts, collected into one issue rather than
+      # left in an artifact nobody downloads. Deliberately only here, on the
+      # nightly, and only when something actually failed: a collector that
+      # posts on every push stops being read.
+      #
+      # The reporter deduplicates by signature, so a bug that recurs for a
+      # fortnight updates one comment instead of adding fourteen, skips the
+      # crashes this boot provokes on purpose, and refuses to open more than
+      # three new reports in a run.
+      - name: Report crashes to the collector issue
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          python3 scripts/dev/report-crash.py serial-attempt-*.log --post || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: nightly-boot-logs
+          path: |
+            serial-attempt-*.log
+            qemu-cli-summary.txt
+          if-no-files-found: ignore
+
+  memory-soak:
+    name: Memory + Swap Soak (long run)
+    # module: mm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils ninja-build build-essential ovmf musl-tools busybox-static ntfs-3g exfatprogs mtools gcc-mingw-w64-x86-64
+
+      # Two boots at two round counts, because one figure cannot tell a fixed
+      # startup cost from a per-round leak - and those are the same number with
+      # opposite consequences on a machine that stays up. The comparison is the
+      # test; scripts/dev/soak-report.py holds the verdict, and the local
+      # scripts/dev/soak.sh calls the same one so there is a single definition
+      # of what a soak asserts.
+      #
+      # It also carries swap: this is the only job where the swap area, the
+      # round trip through the disk and the reclaim counters are read after a
+      # long run rather than after a boot that barely allocates anything.
+      - name: Boot at 120 rounds
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVIBEOS_BUILD_TESTS=ON -DVIBEOS_BUILD_KERNEL_IMAGE=ON \
+            -DVIBEOS_REQUIRE_TLS=ON -DVIBEOS_STRESS_ROUNDS=120
+          cmake --build build --parallel
+          cmake --build build --target vibeos_image
+          python3 scripts/qemu-cli-smoke-linux.py build 1800 || true
+          cp qemu-cli-serial.log soak-low.log
+
+      - name: Boot at 12000 rounds
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVIBEOS_BUILD_TESTS=ON -DVIBEOS_BUILD_KERNEL_IMAGE=ON \
+            -DVIBEOS_REQUIRE_TLS=ON -DVIBEOS_STRESS_ROUNDS=12000
+          cmake --build build --parallel
+          cmake --build build --target vibeos_image
+          python3 scripts/qemu-cli-smoke-linux.py build 1800 || true
+          cp qemu-cli-serial.log soak-high.log
+
+      # The boots above are allowed to fail; this is what decides. A wedged
+      # boot still produces a log, and a log that cannot support a verdict is
+      # reported as exactly that rather than as a pass.
+      - name: Did the loss grow with the work?
+        run: python3 scripts/dev/soak-report.py soak-low.log soak-high.log
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: nightly-soak-logs
+          path: |
+            soak-low.log
+            soak-high.log
+            qemu-cli-summary.txt
+          if-no-files-found: ignore
+
+  scheduler-torture:
+    name: Scheduler Torture (priorities, classes, affinity)
+    # module: sched
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential
+
+      # Sanitized, because the model catches wrong arithmetic and the sanitizer
+      # catches walking off the slot table while doing it - the same division
+      # of labour the memory manager's torture uses.
+      - name: Build (sanitized)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DVIBEOS_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          cmake --build build-asan --parallel --target vibeos_sched_torture
+
+      # Many seeds, because the properties that matter here are about orderings
+      # nobody thought of. Each seed prints on the first line, so a failure is
+      # replayed by passing it back.
+      - name: Torture the scheduler (400 seeds, sanitized)
+        run: |
+          set -uo pipefail
+          fails=0
+          for s in $(seq 1 400); do
+            if ! ./build-asan/vibeos_sched_torture "$s" 6000 > /tmp/st.log 2>&1; then
+              fails=$((fails + 1))
+              echo "::group::seed $s"
+              cat /tmp/st.log
+              echo "::endgroup::"
+            fi
+          done
+          echo "failing seeds: $fails of 400"
+          test "$fails" -eq 0
+
+      # Longer runs on a handful of seeds: some orderings only appear deep into
+      # a sequence, and a short run on many seeds does not reach them.
+      - name: Torture the scheduler (long runs)
+        run: |
+          set -euo pipefail
+          for s in 1 7 13 29 61; do
+            ./build-asan/vibeos_sched_torture "$s" 400000
+          done
+
+  tmpfs-torture:
+    name: tmpfs Torture (model + sanitizers)
+    # module: fs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential
+
+      # Sanitized: the model catches a wrong answer, the sanitizer a page used
+      # after tmpfs gave it back or a record written past its page.
+      - name: Build (sanitized)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug             -DVIBEOS_BUILD_TESTS=ON             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          cmake --build build-asan --parallel --target vibeos_tmpfs_torture vibeos_filelock_torture
+
+      # Many seeds against the model (docs/abi/ L1 step 2). Each prints its seed
+      # first, so a failure replays by passing it back.
+      - name: Torture tmpfs (300 seeds, sanitized)
+        run: |
+          set -uo pipefail
+          fails=0
+          for s in $(seq 1 300); do
+            if ! ./build-asan/vibeos_tmpfs_torture "$s" 4000 > /tmp/tt.log 2>&1; then
+              fails=$((fails + 1))
+              echo "::group::seed $s"
+              cat /tmp/tt.log
+              echo "::endgroup::"
+            fi
+          done
+          echo "failing seeds: $fails of 300"
+          test "$fails" -eq 0
+
+      # The file-lock table against a model that has no ranges in it (docs/abi/
+      # L1 step 6): splitting and joining are arithmetic on boundaries, and the
+      # model paints cells.
+      - name: Torture the file locks (300 seeds, sanitized)
+        run: |
+          set -uo pipefail
+          fails=0
+          for s in $(seq 1 300); do
+            if ! ./build-asan/vibeos_filelock_torture "$s" 5000 > /tmp/fl.log 2>&1; then
+              fails=$((fails + 1))
+              echo "::group::seed $s"
+              cat /tmp/fl.log
+              echo "::endgroup::"
+            fi
+          done
+          echo "failing seeds: $fails of 300"
+          test "$fails" -eq 0
+
+  registry-torture:
+    name: Registry Torture (model + sanitizers)
+    # The NT registry's core (docs/abi/windows.md W8 step 2). It is one part of
+    # kernel/abi, so it does not claim that module for check-nightly-coverage:
+    # the handlers around it have no torture of their own yet.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential
+
+      - name: Build (sanitized)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug             -DVIBEOS_BUILD_TESTS=ON             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          cmake --build build-asan --parallel --target vibeos_reg_torture
+
+      # Keys, values of every size class, renames, deletes and hives saved and
+      # loaded back, against a flat model of paths and seeded data, near its
+      # quota so that refusals are exercised too.
+      # About nine seconds a seed sanitized: a hundred fit the job's budget.
+      - name: Torture the registry (100 seeds, sanitized)
+        run: |
+          set -uo pipefail
+          fails=0
+          for s in $(seq 1 100); do
+            if ! ./build-asan/vibeos_reg_torture "$s" 1500 > /tmp/rt.log 2>&1; then
+              fails=$((fails + 1))
+              echo "::group::seed $s"
+              cat /tmp/rt.log
+              echo "::endgroup::"
+            fi
+          done
+          echo "failing seeds: $fails of 100"
+          test "$fails" -eq 0
+
+  storage-durability:
+    name: On-disk Log Torture (model + sanitizers)
+    # module: io
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential
+
+      - name: Build (sanitized)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DVIBEOS_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          cmake --build build-asan --parallel --target vibeos_logsink_torture
+
+      # The log has to survive the machine, so the operation that matters is
+      # the power cut, and it happens at moments no case file would have
+      # thought of. The model keeps its own account of the ring and never reads
+      # the sink's state, so a disagreement is a real question rather than the
+      # subsystem agreeing with itself.
+      - name: Torture the log sink (300 seeds, sanitized)
+        run: |
+          set -uo pipefail
+          fails=0
+          for s in $(seq 1 300); do
+            if ! ./build-asan/vibeos_logsink_torture "$s" 5000 > /tmp/lt.log 2>&1; then
+              fails=$((fails + 1))
+              echo "::group::seed $s"
+              cat /tmp/lt.log
+              echo "::endgroup::"
+            fi
+          done
+          echo "failing seeds: $fails of 300"
+          test "$fails" -eq 0
+
+      # A long run wraps the ring tens of thousands of times, which is where a
+      # sequence that drifts by one shows up.
+      - name: Torture the log sink (long runs)
+        run: |
+          set -euo pipefail
+          for s in 1 5 11 23; do
+            ./build-asan/vibeos_logsink_torture "$s" 300000
+          done
+
+  diagnostics-torture:
+    name: Kernel Log and Crash Records Torture (model + sanitizers)
+    # module: diag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential
+
+      - name: Build (sanitized)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DVIBEOS_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          cmake --build build-asan --parallel --target vibeos_diag_torture
+
+      # The log is the instrument every other phase is verified with, so it is
+      # the one module whose defects falsify evidence rather than cause it. Every
+      # line every sink receives is checked against a model that formats it
+      # independently - through refusals, nested reentry, panics and many wraps
+      # of the ring.
+      - name: Torture the kernel log (300 seeds, sanitized)
+        run: |
+          set -uo pipefail
+          fails=0
+          for s in $(seq 1 300); do
+            if ! ./build-asan/vibeos_diag_torture "$s" 6000 > /tmp/dt.log 2>&1; then
+              fails=$((fails + 1))
+              echo "::group::seed $s"
+              cat /tmp/dt.log
+              echo "::endgroup::"
+            fi
+          done
+          echo "failing seeds: $fails of 300"
+          test "$fails" -eq 0
+
+      # Long runs wrap the 2048-event ring many times over, which is where an
+      # index that drifts by one shows up.
+      - name: Torture the kernel log (long runs)
+        run: |
+          set -euo pipefail
+          for s in 1 7 19 43; do
+            ./build-asan/vibeos_diag_torture "$s" 200000
+          done
+
+  gui-torture:
+    name: Graphical Shell Torture (model + ThreadSanitizer)
+    # module: io
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential
+
+      # Two builds, because the two sanitizers cannot share one: address and
+      # undefined for the single-threaded model, where a write outside a
+      # buffer is the defect being looked for; thread for the writers and the
+      # repaints, where a race is reported whether or not it happened to
+      # corrupt anything on this run. The GUI had no lock before C7 and two of
+      # its three callers run on any core.
+      - name: Build (sanitized)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DVIBEOS_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          cmake --build build-asan --parallel --target vibeos_gui_torture
+          cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DVIBEOS_BUILD_TESTS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g"
+          cmake --build build-tsan --parallel --target vibeos_gui_torture
+
+      - name: Torture the terminal and the geometry (200 seeds, ASan+UBSan)
+        run: |
+          set -uo pipefail
+          fails=0
+          for s in $(seq 1 200); do
+            if ! ./build-asan/vibeos_gui_torture "$s" 2000 0 > /tmp/gt.log 2>&1; then
+              fails=$((fails + 1))
+              echo "::group::seed $s"
+              cat /tmp/gt.log
+              echo "::endgroup::"
+            fi
+          done
+          echo "failing seeds: $fails of 200"
+          test "$fails" -eq 0
+
+      - name: Torture the lock (threads, ThreadSanitizer)
+        run: |
+          set -euo pipefail
+          for s in 1 3 7 11 19; do
+            TSAN_OPTIONS="halt_on_error=1" ./build-tsan/vibeos_gui_torture "$s" 50 8
+          done
+
+  memory-manager:
+    name: Memory Manager Torture (model + sanitizers)
+    # module: mm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The boot job answers "does the machine come up?". This answers the
+    # question that job structurally cannot: is the memory manager's idea of
+    # who owns a frame the same as the truth?
+    #
+    # Every hard defect in this subsystem has been a reference count that was
+    # self-consistent and wrong about the world - the kernel believed nobody
+    # owned a frame while a live process ran from it - and one boot cannot see
+    # that, because the damage surfaces later, in an unrelated program, about
+    # one boot in thirty. The torture test keeps an independent model and
+    # compares after every operation, so the disagreement is caught at the
+    # operation that caused it rather than three programs later.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential
+
+      # Two builds on purpose: the model catches wrong arithmetic, the
+      # sanitizers catch walking off the descriptor table while doing it.
+      # Neither finds the other's failures.
+      - name: Build (sanitized)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DVIBEOS_BUILD_TESTS=ON -DVIBEOS_BUILD_KERNEL_IMAGE=OFF \
+            -DVIBEOS_ENABLE_TLS=OFF \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake --build build-asan --parallel
+
+      - name: Host tests under AddressSanitizer and UBSan
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        run: ./build-asan/vibeos_kernel_tests
+
+      # Long sequences, many seeds. A failure prints the seed that produced it,
+      # so it is replayed with `vibeos_mm_torture <seed> <rounds>` rather than
+      # investigated as a story about something that happened once.
+      - name: Torture the memory manager (sanitized, 150 seeds)
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        run: bash scripts/dev/mm-torture.sh build-asan 150 6000
+
+      - name: Build (release) and torture harder
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVIBEOS_BUILD_TESTS=ON -DVIBEOS_BUILD_KERNEL_IMAGE=OFF \
+            -DVIBEOS_ENABLE_TLS=OFF
+          cmake --build build-rel --parallel
+          # Unsanitized, so the rounds are cheap: this is the pass that gets
+          # enough sequences to matter.
+          bash scripts/dev/mm-torture.sh build-rel 1200 20000
+
+  fuzz-protocols:
+    name: Fuzz the Receive Path
+    # module: net
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang
+
+      - name: Build Fuzz Target
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-fuzz -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DVIBEOS_BUILD_FUZZERS=ON \
+            -DVIBEOS_BUILD_TESTS=OFF \
+            -DVIBEOS_BUILD_KERNEL_IMAGE=OFF \
+            -DVIBEOS_ENABLE_TLS=OFF
+          cmake --build build-fuzz --parallel
+
+      - name: Fuzz
+        run: |
+          set -euo pipefail
+          mkdir -p fuzz-corpus
+          ./build-fuzz/fuzz_inet_input fuzz-corpus \
+            -max_total_time=900 -max_len=1514 -print_final_stats=1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: failure()
+        with:
+          name: fuzz-crash
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
+
+  corpus-needs:
+    name: Corpus (needs against docs/abi/corpus.md, answers against Linux)
+    # Measures the corpus programs on Linux, not the kernel, so it declares no
+    # kernel module: it covers the plan in docs/abi/, not a subsystem.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential musl-tools strace busybox-static qemu-system-x86 qemu-utils ovmf mtools
+
+      # The musl test programs are part of the corpus; the full build is what
+      # produces them, as it does for the boot image.
+      - name: Build
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVIBEOS_BUILD_TESTS=ON -DVIBEOS_BUILD_KERNEL_IMAGE=ON
+          cmake --build build --parallel
+
+      # A program's needs are a property of the program and its C library. If
+      # they moved - a new busybox-static, a new musl - the checked-in lists and
+      # docs/abi/corpus.md no longer describe the corpus, and this says which
+      # workload changed and how. The fresh lists are uploaded either way: if the
+      # difference is this runner's kernel rather than the programs, they are
+      # the ones to check in (tests/corpus/README.md).
+      # SQLite and Lua from their pinned, hash-checked sources. LTP is left out
+      # here: its list of built tests is recorded separately and takes a few
+      # minutes more to build than everything else in this job.
+      - name: Build the third-party corpus
+        run: bash scripts/dev/corpus-build.sh build --no-ltp
+
+      - name: Measure the corpus
+        run: |
+          set -euo pipefail
+          bash scripts/dev/corpus-measure.sh build /tmp/corpus-needs
+
+      - name: Compare with the checked-in needs
+        run: python3 scripts/dev/corpus-report.py --check /tmp/corpus-needs
+
+      # docs/abi/ L1 step 8. tests/corpus/l1-expected.txt is what Linux
+      # answered the workloads with when it was checked in; if this runner's
+      # BusyBox answers differently now, the boot below would be compared with
+      # a stale oracle, so that is found out first and by name.
+      - name: Linux still answers the workloads the same way
+        run: bash scripts/dev/corpus-expect.sh build --check
+
+      # And the boot, with SQLite and Lua staged - which no other job builds -
+      # and required: here "absent" is a failure.
+      - name: Boot and run the corpus (SQLite and Lua required)
+        run: |
+          set -uo pipefail
+          VIBEOS_SMOKE_CORPUS=require python3 scripts/qemu-cli-smoke-linux.py build 400
+          grep -o '^reason=.*' qemu-cli-summary.txt
+          grep -q cli_and_network_verified qemu-cli-summary.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: corpus-boot-log
+          path: |
+            qemu-cli-serial.log
+            qemu-cli-summary.txt
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: corpus-needs
+          path: /tmp/corpus-needs
+          if-no-files-found: warn

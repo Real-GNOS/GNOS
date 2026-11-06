@@ -1,0 +1,1879 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* L1: address spaces.
+ *
+ * The only writer of page-table entries. See include/vibeos/vmspace.h for why
+ * that matters and docs/mm/phases.md P2 for the order this was built in.
+ *
+ * The shape of the file is deliberate: every function that walks the tables
+ * goes through `walk`, and every function that changes an entry goes through
+ * `set_leaf` or `clear_leaf`. There is no second path. The defect this layer
+ * exists to close survived four fixes precisely because there were several
+ * places that each decided, independently and by inspection, whether a frame
+ * belonged to the address space being torn down.
+ */
+
+#include "vibeos/vmspace.h"
+#include "vibeos/frame.h"
+#include "vibeos/mm_stats.h"
+#include "vibeos/rmap.h"
+
+#define PTE_PRESENT (1ull << 0)
+#define PTE_WRITE   (1ull << 1)
+#define PTE_USER    (1ull << 2)
+#define PTE_PS      (1ull << 7)
+#define PTE_NX      (1ull << 63)
+
+#define PTE_ADDR_MASK 0x000FFFFFFFFFF000ull
+
+/* The copy-on-write mark. This layer does not resolve copy-on-write faults yet
+ * - that is phase P5 - but it sets the mark in fork, must not destroy it when
+ * permissions change, and must not grant write access over the top of one.
+ * Named here rather than written as a number in three places. */
+#define PTE_COW_BIT (1ull << 9)   /* must equal PTE_COW in arch_hw.c */
+
+static vibeos_vmspace_backend_t g_be;
+
+/* Which operation this core is inside, for the diagnostics that report a frame
+ * being released under a live mapping.
+ *
+ * Per core, and that is not tidiness. It was one global written by ten entry
+ * points from every core, so `FREE_WHILE_MAPPED ... during cow-fault` named
+ * whatever operation *some* core had most recently begun. A CI failure was read
+ * with that field this week and the reading may simply have been another core's
+ * word - which is the same defect as the mapper count that two cores overwrote,
+ * in the same subsystem, in a diagnostic rather than in the kernel.
+ *
+ * The core identity is registered rather than assumed, as the log sink's is:
+ * this file is portable and has no business knowing how a CPU says who it is.
+ * Before anything registers, everything lands in slot 0, which is correct on
+ * the boot processor and honest everywhere else. */
+#define VMSPACE_MAX_CPUS 8u
+static const char *g_op_by_cpu[VMSPACE_MAX_CPUS] = {"none"};
+static uint32_t (*g_cpu_id)(void);
+
+void vibeos_vmspace_set_cpu_id(uint32_t (*fn)(void)) {
+    g_cpu_id = fn;
+}
+
+static uint32_t vm_cpu(void) {
+    uint32_t id = g_cpu_id ? g_cpu_id() : 0u;
+    return (id < VMSPACE_MAX_CPUS) ? id : 0u;
+}
+
+static void vm_op(const char *what) {
+    g_op_by_cpu[vm_cpu()] = what;
+}
+
+const char *vibeos_vmspace_current_op(void) {
+    const char *op = g_op_by_cpu[vm_cpu()];
+    return op ? op : "none";
+}
+static int g_ready;
+
+int vibeos_vmspace_init(const vibeos_vmspace_backend_t *backend) {
+    if (!backend || !backend->map_phys || !backend->alloc_table) {
+        return -1;
+    }
+    g_be = *backend;
+    g_ready = 1;
+    return 0;
+}
+
+uint64_t vibeos_vmspace_leaf_flags(vibeos_prot_t prot) {
+    uint64_t f = PTE_PRESENT;
+
+    /* PROT_NONE is a mapping, not a refusal.
+     *
+     * A C library builds a thread stack by asking for stack plus guard as one
+     * PROT_NONE region and then making the usable part accessible, so refusing
+     * it breaks pthread_create before it ever reaches clone(). The pages are
+     * mapped and present, simply without PTE_USER, which faults from ring 3
+     * exactly as a guard should. */
+    if (prot & VIBEOS_PROT_WRITE) {
+        f |= PTE_WRITE;
+    }
+    if (prot & VIBEOS_PROT_USER) {
+        f |= PTE_USER;
+    }
+    /* Execute permission is a grant, not a default (M-036). The entry used to be
+     * built without PTE_NX whatever was asked for, so every user page - the
+     * stack, the heap, a PROT_READ mapping - was executable and write-xor-
+     * execute was a property of the API and not of the CPU. NX is set unless
+     * PROT_EXEC was requested; it needs EFER.NXE, which the arch layer enables
+     * on every core before any address space carries the bit. */
+    if (!(prot & VIBEOS_PROT_EXEC)) {
+        f |= PTE_NX;
+    }
+    if (prot & VIBEOS_PROT_SHARED) {
+        f |= VIBEOS_PTE_SHARED;
+    }
+    return f;
+}
+
+/* ---- walking ------------------------------------------------------------ */
+
+static uint64_t *table_at(uint64_t phys) {
+    return (uint64_t *)g_be.map_phys(phys & PTE_ADDR_MASK);
+}
+
+/* Find the leaf entry for `va`, optionally creating the tables on the way.
+ *
+ * Returns null when a level is missing and `create` is zero, when a table
+ * cannot be allocated, or when a 2 MiB leaf blocks the path - the last of which
+ * is not an error the high window can produce and is handled by the low-window
+ * carving below. */
+static uint64_t *walk(vibeos_vmspace_t *as, uint64_t va, int create) {
+    static const uint32_t shifts[3] = {39u, 30u, 21u};
+    uint64_t *tbl = as->root;
+    uint32_t level;
+
+    for (level = 0; level < 3u; level++) {
+        uint32_t idx = (uint32_t)((va >> shifts[level]) & 0x1FFu);
+
+        if ((tbl[idx] & PTE_PRESENT) == 0u) {
+            uint64_t page;
+            if (!create) {
+                return 0;
+            }
+            page = g_be.alloc_table();
+            if (!page) {
+                return 0;
+            }
+            /* Intermediate entries carry USER because access is the AND of the
+             * bits along the path: the leaf is what decides, and an
+             * intermediate that says no would make a PROT_NONE guard page and
+             * a kernel page indistinguishable from ring 3's point of view.
+             * They deliberately do not carry the ownership bit - they are
+             * tables, not user frames, and destroy frees them by structure. */
+            tbl[idx] = (page & PTE_ADDR_MASK) | PTE_PRESENT | PTE_WRITE | PTE_USER;
+        } else if (tbl[idx] & PTE_PS) {
+            return 0;   /* a large leaf stands here; the caller must split it */
+        }
+        tbl = table_at(tbl[idx]);
+        if (!tbl) {
+            return 0;
+        }
+    }
+    return &tbl[(va >> 12) & 0x1FFu];
+}
+
+uint64_t *vibeos_vmspace_entry(vibeos_vmspace_t *as, uint64_t va) {
+    if (!g_ready || !as || !as->root) {
+        return 0;
+    }
+    return walk(as, va, 0);
+}
+
+/* Mapped means present or in swap: a swapped page keeps its permissions and
+ * comes back on the next touch, so to mprotect it is as mapped as a resident
+ * one (M-063). A page munmap has freed is neither. */
+int vibeos_vmspace_mapped(vibeos_vmspace_t *as, uint64_t va) {
+    uint64_t *e = vibeos_vmspace_entry(as, va);
+    return e && (*e & (PTE_PRESENT | VIBEOS_PTE_SWAPPED)) != 0u;
+}
+
+int vibeos_vmspace_resident(vibeos_vmspace_t *as, uint64_t va) {
+    uint64_t *e = vibeos_vmspace_entry(as, va);
+    uint64_t v = e ? __atomic_load_n(e, __ATOMIC_ACQUIRE) : 0u;
+
+    if (v & PTE_PRESENT) {
+        return 1;
+    }
+    return (v & VIBEOS_PTE_SWAPPED) ? 0 : -1;
+}
+
+/* ---- the low window ------------------------------------------------------
+ *
+ * Below the identity limit the kernel reaches memory by its physical address,
+ * and the tables covering that region are shared by every address space and use
+ * 2 MiB pages. There is nowhere to put a 4 KiB user entry without first making
+ * private copies, so this walks down un-sharing exactly as much as it must:
+ * the shared PDPT, then the shared page directory for that GiB, then the 2 MiB
+ * leaf, which is split into 512 identity entries reproducing the same mapping
+ * at finer granularity.
+ *
+ * Those 512 entries are the reason this layer exists. They are present and
+ * writable and belong to the kernel, and a teardown that decided ownership by
+ * looking at them freed the kernel's identity map. They do not carry the
+ * ownership bit, so nothing has to reason about them ever again.
+ */
+static int unshare_low(vibeos_vmspace_t *as, uint64_t va, uint64_t **out_pt) {
+    uint32_t gi  = (uint32_t)((va >> 30) & 0x1FFu);
+    uint32_t pdi = (uint32_t)((va >> 21) & 0x1FFu);
+    uint64_t *pdpt, *pd;
+
+    pdpt = table_at(as->root[0]);
+    if (!pdpt) {
+        return -1;
+    }
+    if (g_be.shared_pdpt && pdpt == g_be.shared_pdpt) {
+        uint64_t page = g_be.alloc_table();
+        uint64_t *priv;
+        uint32_t i;
+        if (!page) {
+            return -1;
+        }
+        priv = table_at(page);
+        if (!priv) {
+            return -1;
+        }
+        for (i = 0; i < 512u; i++) {
+            priv[i] = g_be.shared_pdpt[i];
+        }
+        as->root[0] = (page & PTE_ADDR_MASK) | PTE_PRESENT | PTE_WRITE | PTE_USER;
+        pdpt = priv;
+    }
+
+    pd = table_at(pdpt[gi]);
+    if (g_be.shared_pd) {
+        const uint64_t *shared = g_be.shared_pd(gi);
+        if (shared && pd == shared) {
+            uint64_t page = g_be.alloc_table();
+            uint64_t *priv;
+            uint32_t i;
+            if (!page) {
+                return -1;
+            }
+            priv = table_at(page);
+            if (!priv) {
+                return -1;
+            }
+            for (i = 0; i < 512u; i++) {
+                priv[i] = shared[i];
+            }
+            pdpt[gi] = (page & PTE_ADDR_MASK) | PTE_PRESENT | PTE_WRITE | PTE_USER;
+            pd = priv;
+        }
+    }
+    if (!pd) {
+        return -1;
+    }
+
+    if ((pd[pdi] & PTE_PRESENT) == 0u || (pd[pdi] & PTE_PS) != 0u) {
+        uint64_t region = ((uint64_t)gi << 30) | ((uint64_t)pdi << 21);
+        uint64_t page = g_be.alloc_table();
+        uint64_t *priv;
+        uint32_t i;
+        if (!page) {
+            return -1;
+        }
+        priv = table_at(page);
+        if (!priv) {
+            return -1;
+        }
+        for (i = 0; i < 512u; i++) {
+            /* Same physical address, same supervisor-only access, finer
+             * granularity. No PTE_USER: this is still the kernel's memory. And
+             * no ownership bit: the kernel did not get these frames from this
+             * address space and must not lose them when it dies. */
+            priv[i] = (region + (uint64_t)i * 4096ull) | PTE_PRESENT | PTE_WRITE;
+        }
+        pd[pdi] = (page & PTE_ADDR_MASK) | PTE_PRESENT | PTE_WRITE | PTE_USER;
+        *out_pt = priv;
+        return 0;
+    }
+
+    *out_pt = table_at(pd[pdi]);
+    return *out_pt ? 0 : -1;
+}
+
+/* ---- create and destroy -------------------------------------------------- */
+
+int vibeos_vmspace_create(vibeos_vmspace_t *out) {
+    uint64_t page;
+
+    if (!g_ready || !out) {
+        return -1;
+    }
+    page = g_be.alloc_table();
+    if (!page) {
+        return -1;
+    }
+    out->root_phys = page;
+    out->root = table_at(page);
+    if (!out->root) {
+        g_be.free_table(page);
+        out->root_phys = 0;
+        return -1;
+    }
+    /* Slot 0 is the kernel's identity map: shared, supervisor-only, and never
+     * freed by this layer. */
+    out->root[0] = g_be.kernel_pml4e;
+    return 0;
+}
+
+/* Walk one page table, releasing what this address space owns, and say whether
+ * the table itself was private to it.
+ *
+ * A table is private when this layer allocated it, which is every table below
+ * the top level that is not one of the backend's shared ones. Rather than test
+ * against the shared list at every level - which is the inference this rewrite
+ * removes - the caller tracks it structurally: a table reached through an entry
+ * this layer wrote is private, and the only entries this layer does not write
+ * are slot 0 of the root and the backend's shared tables, both known by
+ * identity at the one place they are installed. */
+static void release_pt(uint64_t *pt) {
+    uint32_t i;
+
+    for (i = 0; i < 512u; i++) {
+        if ((pt[i] & PTE_PRESENT) && (pt[i] & VIBEOS_PTE_OWNED)) {
+            /* Stop pointing at it, then let go - the same rule as map and the
+             * fault. Teardown is the least exposed of the three, because the
+             * address space is dying and nothing runs on it, but a rule with an
+             * exception is a rule somebody will apply the exception to. */
+            uint64_t phys = pt[i] & PTE_ADDR_MASK;
+
+            pt[i] = 0;
+            (void)vibeos_frame_put(phys);
+            vibeos_mm_stats()->unmaps++;
+        } else if ((pt[i] & PTE_PRESENT) == 0u && (pt[i] & VIBEOS_PTE_SWAPPED)) {
+            /* A page this space had sent to swap. Its slot is the space's as
+             * much as a frame is, and it used to stay allocated for the rest of
+             * the boot - one per swapped page of every process that exited
+             * (M-063). */
+            uint32_t slot = (uint32_t)((pt[i] & PTE_ADDR_MASK) >> 12);
+
+            pt[i] = 0;
+            if (g_be.swap_release) {
+                g_be.swap_release(slot);
+            }
+            vibeos_mm_stats()->swap_dropped++;
+        }
+    }
+}
+
+static void release_pd(uint64_t *pd, const uint64_t *shared) {
+    uint32_t i;
+
+    for (i = 0; i < 512u; i++) {
+        uint64_t e = pd[i];
+        uint64_t *pt;
+
+        if ((e & PTE_PRESENT) == 0u || (e & PTE_PS) != 0u) {
+            continue;   /* absent, or a 2 MiB identity leaf that is not ours */
+        }
+        if (shared && (shared[i] & PTE_ADDR_MASK) == (e & PTE_ADDR_MASK)) {
+            continue;   /* still the kernel's table; we never copied it */
+        }
+        pt = table_at(e);
+        if (pt) {
+            release_pt(pt);
+        }
+        g_be.free_table(e & PTE_ADDR_MASK);
+        pd[i] = 0;
+    }
+}
+
+int vibeos_vmspace_destroy(vibeos_vmspace_t *as) {
+    uint32_t slot, gi;
+    vm_op("destroy");
+
+    if (!g_ready || !as || !as->root) {
+        return -1;
+    }
+
+    /* Forget the holders before the frames are released, not after.
+     *
+     * Every other path in this file removes a frame's reverse-map holder before
+     * it drops the owner reference - map_raw, the copy-on-write fault, unmap all
+     * do it in that order, because the opposite leaves a frame the count says
+     * nobody owns while a mapping still names it. Teardown did it backwards: the
+     * release_pt walk below drops an owner per frame, and forget_root ran only
+     * after the whole sweep, so between them a frame this process shared had its
+     * owner released while its holder for this root was still recorded. A fork
+     * audit on another core sampling that frame saw holders > owners, both
+     * standing still, and reported rmap_mismatch on a teardown in progress -
+     * which is what CI's clang/Release smoke caught (holders=3, owners=2). Doing
+     * it first restores the invariant, and it is done unconditionally here so a
+     * teardown that fails half way still leaves nothing behind for the next
+     * tenant of this recycled root. */
+    vibeos_rmap_forget_root(as->root_phys);
+
+    for (slot = 0; slot < 512u; slot++) {
+        uint64_t *pdpt;
+        int slot_is_kernel = (slot == 0u);
+
+        if ((as->root[slot] & PTE_PRESENT) == 0u) {
+            continue;
+        }
+        /* Slot 0 is the kernel's, unless this process had pages in the low
+         * window and unshare_low replaced it with a private copy. Comparing
+         * against the entry create() installed is exact and needs no reasoning
+         * about addresses. */
+        if (slot_is_kernel &&
+            (as->root[slot] & PTE_ADDR_MASK) ==
+            (g_be.kernel_pml4e & PTE_ADDR_MASK)) {
+            continue;
+        }
+        pdpt = table_at(as->root[slot]);
+        if (!pdpt) {
+            continue;
+        }
+        for (gi = 0; gi < 512u; gi++) {
+            uint64_t e = pdpt[gi];
+            uint64_t *pd;
+            const uint64_t *shared = 0;
+
+            if ((e & PTE_PRESENT) == 0u || (e & PTE_PS) != 0u) {
+                continue;
+            }
+            if (slot_is_kernel && g_be.shared_pd) {
+                shared = g_be.shared_pd(gi);
+                if (shared && (shared == table_at(e))) {
+                    continue;   /* never copied; the kernel still owns it */
+                }
+            }
+            pd = table_at(e);
+            if (pd) {
+                release_pd(pd, shared);
+            }
+            g_be.free_table(e & PTE_ADDR_MASK);
+            pdpt[gi] = 0;
+        }
+        g_be.free_table(as->root[slot] & PTE_ADDR_MASK);
+        as->root[slot] = 0;
+    }
+
+    g_be.free_table(as->root_phys);
+    as->root = 0;
+    as->root_phys = 0;
+    return 0;
+}
+
+/* ---- map and unmap ------------------------------------------------------- */
+
+int vibeos_vmspace_map(vibeos_vmspace_t *as, uint64_t va, uint64_t pa,
+                       vibeos_prot_t prot) {
+    return vibeos_vmspace_map_raw(as, va, pa, vibeos_vmspace_leaf_flags(prot));
+}
+
+int vibeos_vmspace_map_raw(vibeos_vmspace_t *as, uint64_t va, uint64_t pa,
+                           uint64_t leaf) {
+    uint64_t *pte = 0;
+    vm_op("map");
+
+    if (!g_ready || !as || !as->root || (va & 0xFFFull) || (pa & 0xFFFull)) {
+        return -1;
+    }
+
+    if (g_be.identity_limit != 0ull && va < g_be.identity_limit) {
+        uint64_t *pt = 0;
+        if (unshare_low(as, va, &pt) != 0) {
+            return -1;
+        }
+        pte = &pt[(va >> 12) & 0x1FFu];
+    } else {
+        pte = walk(as, va, 1);
+        if (!pte) {
+            return -1;
+        }
+    }
+
+
+    /* Take the reference *before* the entry is visible, not after.
+     *
+     * The other order published a mapping that no count knew about yet, and
+     * every other core can see a page-table entry the instant it is stored.
+     * During fork that window is wide enough to matter: a core resolving a
+     * copy-on-write fault on the same frame reads owners == 1, concludes it is
+     * the only owner, and keeps the shared page writable - so parent and child
+     * end up writing the same memory. The mirror case is worse: the same read
+     * lets a release take the count to zero while the freshly published entry
+     * still points at the frame, which is a page reclaimed while a live process
+     * maps it.
+     *
+     * Both were observed: the stress service saw a child read its parent's
+     * value, and the release watch named the frame and the process that still
+     * mapped it. Counting first costs nothing and closes the window entirely -
+     * an extra reference on a mapping that then fails to be installed is a
+     * leak, and a leak is the direction this subsystem chooses on purpose. */
+    {
+        /* A compare-exchange, like every other store to an entry in this file.
+         *
+         * This was a plain read-modify-write, and two cores mapping the same
+         * address both read the old entry, both took a reference, both stored,
+         * and both released what had been there - one release too many for a
+         * single mapping, which puts a frame on the free list while somebody
+         * still holds it. The reference is taken before the exchange and given
+         * back if the exchange loses, so a frame is never published without a
+         * count and never counted without being published.
+         *
+         * Replacing an owned entry releases what it held, and only after the
+         * new entry is in place: this address space has to stop pointing at a
+         * frame before it can let go of it. */
+        uint64_t old;
+        uint64_t desired = (pa & PTE_ADDR_MASK) | leaf | PTE_PRESENT |
+                           VIBEOS_PTE_OWNED;
+
+        for (;;) {
+            old = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+            vibeos_frame_get(pa & PTE_ADDR_MASK);
+            if (__atomic_compare_exchange_n(pte, &old, desired, 0,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_RELAXED)) {
+                break;
+            }
+            (void)vibeos_frame_put(pa & PTE_ADDR_MASK);
+        }
+
+        /* The holder is recorded next to the reference that was just taken,
+         * and the previous holder is forgotten next to the reference that is
+         * about to be given back.
+         *
+         * Placed here rather than in a wrapper because the pairing is the
+         * invariant: every vibeos_frame_get in this file publishes an entry and
+         * every vibeos_frame_put retires one, so a holder recorded anywhere
+         * else would be a holder the count does not know about - which is the
+         * exact defect this map exists to make visible. Keeping the two lines
+         * adjacent means a future edit that moves one has to look at the
+         * other. */
+        (void)vibeos_rmap_add(pa & PTE_ADDR_MASK, as->root_phys, va);
+
+        if ((old & PTE_PRESENT) && (old & VIBEOS_PTE_OWNED)) {
+            (void)vibeos_rmap_remove(old & PTE_ADDR_MASK, as->root_phys, va);
+            (void)vibeos_frame_put(old & PTE_ADDR_MASK);
+            vibeos_mm_stats()->unmaps++;
+        }
+    }
+    vibeos_mm_stats()->maps++;
+
+    if (g_be.invlpg) {
+        g_be.invlpg(va);
+    }
+    return 0;
+}
+
+int vibeos_vmspace_protect(vibeos_vmspace_t *as, uint64_t va,
+                           vibeos_prot_t prot) {
+    uint64_t *pte;
+    vm_op("protect");
+    uint64_t before, installed = 0;
+
+    if (!g_ready || !as || !as->root) {
+        return -1;
+    }
+    pte = walk(as, va, 0);
+    /* A swapped-out page is mapped: its permissions live in the entry's
+     * ignored bits and come back with it (M-063). Refusing it made mprotect
+     * fail on a page that reclaim happened to have taken. */
+    if (!pte || (*pte & (PTE_PRESENT | VIBEOS_PTE_SWAPPED)) == 0u) {
+        return -1;   /* not mapped: a permission change is not a mapping */
+    }
+    /* Compare-exchange, not read-modify-write.
+     *
+     * This used to be four plain accesses - read `before`, clear two bits, set
+     * two more - and every one of them raced a copy-on-write fault on another
+     * core. The permission bits are the small half of that. The large half is
+     * that a fault installs a *different physical address*, so a store built
+     * from a value read before it lands puts the old frame back into the entry:
+     * the mapping then points at a frame the fault has already released, which
+     * is a page reclaimed while a live process maps it.
+     *
+     * The copy-on-write bit is re-read each attempt for the same reason. It was
+     * sampled once into `before` and consulted afterwards, so a page that
+     * became shared during the call could be granted write and stop being
+     * copy-on-write without anything copying it.
+     *
+     * The loop cannot spin: each turn either wins or observes a value another
+     * core stored, and the paths that store here are bounded per fault. */
+    for (;;) {
+        uint64_t desired;
+
+        before = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+        if ((before & (PTE_PRESENT | VIBEOS_PTE_SWAPPED)) == 0u) {
+            return -1;   /* unmapped under us: not a permission change */
+        }
+        /* The swap-out marker goes too: it promises a write bit back to the
+         * next store, and after an mprotect that promise is this call's to
+         * make, not the swap-out's (M-056). */
+        desired = before & ~(PTE_USER | PTE_WRITE | PTE_NX | VIBEOS_PTE_SWAPOUT);
+        if (!(prot & VIBEOS_PROT_EXEC)) {
+            desired |= PTE_NX;   /* PROT_NONE too: nothing to execute either */
+        }
+        if (prot != VIBEOS_PROT_NONE) {
+            if (prot & VIBEOS_PROT_USER) {
+                desired |= PTE_USER;
+            }
+            if ((prot & VIBEOS_PROT_WRITE) && (before & PTE_COW_BIT) == 0u) {
+                desired |= PTE_WRITE;
+            }
+        }
+        if (__atomic_compare_exchange_n(pte, &before, desired, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            /* The exchange installed `desired`; nothing else may be stored
+             * here. A "confirming" store after a winning compare-exchange is
+             * the original defect wearing a fix's clothes - it overwrites
+             * whatever another core did in between - and it was written into
+             * this function before being caught on the next read. */
+            installed = desired;
+            break;
+        }
+    }
+
+    if (g_be.invlpg) {
+        g_be.invlpg(va);
+    }
+    /* Narrowing needs the other cores told; widening does not, because a stale
+     * entry that is more restrictive only costs a spurious fault, and the fault
+     * handler recognises an already-permitted access and simply invalidates. */
+    /* Against what this call installed, not against a fresh read of the entry.
+     * Re-reading asks "is it narrower than before *now*", which another core
+     * can have changed again - and the question that decides whether the other
+     * cores must be told is whether *this* change narrowed anything. */
+    if (g_be.shootdown && (before & (PTE_USER | PTE_WRITE)) &
+                          ~(installed & (PTE_USER | PTE_WRITE))) {
+        g_be.shootdown(as->root_phys);
+    }
+    return 0;
+}
+
+int vibeos_vmspace_unmap(vibeos_vmspace_t *as, uint64_t va) {
+    uint64_t *pte;
+    uint64_t entry;
+    vm_op("unmap");
+
+    if (!g_ready || !as || !as->root) {
+        return -1;
+    }
+    pte = walk(as, va, 0);
+    if (!pte) {
+        return 0;
+    }
+    entry = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    if ((entry & PTE_PRESENT) == 0u && (entry & VIBEOS_PTE_SWAPPED)) {
+        /* A page in swap is unmapped like any other (M-063). It used to be
+         * skipped as "not present": the entry stayed, still naming its slot,
+         * the slot was never freed - and a later access to the unmapped
+         * address would have brought back a page from a slot that swap had
+         * since given to somebody else. */
+        uint64_t expected = entry;
+
+        if (!__atomic_compare_exchange_n(pte, &expected, 0ull, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return 0;   /* brought back in, or unmapped, by somebody else */
+        }
+        if (g_be.swap_release) {
+            g_be.swap_release((uint32_t)((entry & PTE_ADDR_MASK) >> 12));
+        }
+        vibeos_mm_stats()->swap_dropped++;
+        return 1;
+    }
+    if ((entry & PTE_PRESENT) == 0u) {
+        return 0;
+    }
+    if ((entry & VIBEOS_PTE_OWNED) == 0u) {
+        /* Present, and not ours. An identity-split entry, or a table shared
+         * with the kernel. Left exactly as it is: this is the case that used to
+         * be freed on the strength of it being present and writable. */
+        return 0;
+    }
+    {
+        /* Clear it with a compare-exchange, and release only if this core is
+         * the one that cleared it.
+         *
+         * Two threads unmapping the same address both read the same entry, both
+         * store zero, and both release - two references dropped for one
+         * mapping, which puts the frame on the free list while somebody still
+         * has it. The same race as the copy-on-write fault, and the same
+         * answer: the store decides who owns the release. */
+        uint64_t expected = entry;
+
+        if (!__atomic_compare_exchange_n(pte, &expected, 0ull, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return 0;   /* somebody else unmapped it; theirs to release */
+        }
+        if (g_be.invlpg) {
+            g_be.invlpg(va);
+        }
+        (void)vibeos_rmap_remove(entry & PTE_ADDR_MASK, as->root_phys, va);
+        /* invlpg above covered this core. It says nothing about the others, and
+         * a thread of the same process on another core can still hold the old
+         * translation - so releasing the frame here hands it to the allocator
+         * while somebody can still write through the stale entry.
+         *
+         * When a backend supplies release_deferred, the frame goes to it and is
+         * released once every core has provably dropped the translation. When
+         * none is supplied - a host test, a uniprocessor - the immediate put is
+         * correct and is what happens. */
+        if (g_be.release_deferred) {
+            g_be.release_deferred(as->root_phys, entry & PTE_ADDR_MASK);
+        } else {
+            (void)vibeos_frame_put(entry & PTE_ADDR_MASK);
+        }
+        vibeos_mm_stats()->unmaps++;
+    }
+    return 1;
+}
+
+/* ---- fork ---------------------------------------------------------------- */
+
+/* Visit every leaf this address space owns, with the virtual address it sits
+ * at. Shared by fork and by the inspection count, so the two cannot disagree
+ * about what "owned" means - and they are the two places most likely to drift,
+ * because one is on a hot path and the other is not. */
+static int foreach_leaf(vibeos_vmspace_t *as, int swapped_too,
+                        int (*fn)(vibeos_vmspace_t *, uint64_t, uint64_t *, void *),
+                        void *ctx) {
+    uint32_t slot, gi, pdi, i;
+
+    for (slot = 0; slot < 512u; slot++) {
+        uint64_t *pdpt;
+        if ((as->root[slot] & PTE_PRESENT) == 0u) {
+            continue;
+        }
+        pdpt = table_at(as->root[slot]);
+        if (!pdpt) {
+            continue;
+        }
+        for (gi = 0; gi < 512u; gi++) {
+            uint64_t *pd;
+            if ((pdpt[gi] & PTE_PRESENT) == 0u || (pdpt[gi] & PTE_PS)) {
+                continue;
+            }
+            pd = table_at(pdpt[gi]);
+            if (!pd) {
+                continue;
+            }
+            for (pdi = 0; pdi < 512u; pdi++) {
+                uint64_t *pt;
+                if ((pd[pdi] & PTE_PRESENT) == 0u || (pd[pdi] & PTE_PS)) {
+                    continue;
+                }
+                pt = table_at(pd[pdi]);
+                if (!pt) {
+                    continue;
+                }
+                for (i = 0; i < 512u; i++) {
+                    uint64_t va;
+                    if (!((pt[i] & PTE_PRESENT) && (pt[i] & VIBEOS_PTE_OWNED)) &&
+                        !(swapped_too && (pt[i] & PTE_PRESENT) == 0u &&
+                          (pt[i] & VIBEOS_PTE_SWAPPED))) {
+                        continue;
+                    }
+                    va = ((uint64_t)slot << 39) | ((uint64_t)gi << 30) |
+                         ((uint64_t)pdi << 21) | ((uint64_t)i << 12);
+                    if (fn(as, va, &pt[i], ctx) != 0) {
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* The entries this space owns and has resident. Fork alone also wants the ones
+ * it has in swap (M-063); everything else - the audit, the count - is about
+ * frames, and a page on disk has none. */
+static int foreach_owned(vibeos_vmspace_t *as,
+                         int (*fn)(vibeos_vmspace_t *, uint64_t, uint64_t *, void *),
+                         void *ctx) {
+    return foreach_leaf(as, 0, fn, ctx);
+}
+
+/* Fork's injection point, for an interleaving a harness cannot produce.
+ *
+ * clone_one's exchange can lose to a copy-on-write fault resolving on another
+ * core, and what it does with the value it finds is the whole of the defect
+ * fixed in ab5d7f4. The window is a few instructions wide, so a test stores
+ * into the entry here instead, at exactly the point a fault would have.
+ *
+ * Declared above its user rather than beside the fault's hook, because this is
+ * one long translation unit and a helper used above its definition compiles as
+ * an implicit declaration under gcc and fails under clang with a message that
+ * names neither. That happened to this very hook on its first build.
+ *
+ * Compiled in, like the fault's hook: an injection point that exists only in a
+ * build nobody runs proves nothing about the build everybody runs. Null unless
+ * a test sets it. */
+static void (*g_fork_race_hook)(uint64_t *pte);
+
+void vibeos_vmspace_set_fork_race_hook(void (*fn)(uint64_t *pte)) {
+    g_fork_race_hook = fn;
+}
+
+static int clone_one(vibeos_vmspace_t *src, uint64_t va, uint64_t *pte, void *ctx) {
+    vibeos_vmspace_t *dst = (vibeos_vmspace_t *)ctx;
+    /* Read once, atomically, and act on that value.
+     *
+     * This was a plain load, and the read-only and already-COW branches below
+     * commit to the `phys` it yields without ever re-validating it - they take
+     * a reference on that frame and map it into the child. A plain load of a
+     * word another core is compare-exchanging is exactly the read this file
+     * spends the rest of its length avoiding. */
+    uint64_t entry;
+    uint64_t phys;
+    uint64_t flags;
+    uint32_t tries = 0;
+
+again:
+    entry = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    /* A page in swap has no frame to share. Bring it back first - and again if
+     * reclaim takes it before the share, which it may: a resident page with one
+     * owner is exactly what the anonymous tier looks for. The walk used to skip
+     * such entries, and the child got an address space with a hole where the
+     * page belonged (M-063). */
+    if ((entry & PTE_PRESENT) == 0u) {
+        if ((entry & VIBEOS_PTE_SWAPPED) == 0u) {
+            return 0;   /* unmapped under us: nothing to share */
+        }
+        if (!g_be.swap_bring_in || tries++ >= 8u ||
+            g_be.swap_bring_in(src, va) != 0) {
+            vibeos_mm_stats()->fork_swapped_failed++;
+            return -1;
+        }
+        vibeos_mm_stats()->fork_swapped_in++;
+        goto again;
+    }
+
+    /* Three cases, and conflating the last two is a silent disaster.
+     *
+     *   writable        -> becomes copy-on-write on both sides
+     *   already COW     -> stays copy-on-write; it is read-only because it is
+     *                      shared, not because the program may not write it
+     *   read-only       -> shared as is; it can never be written, so it never
+     *                      needs duplicating, and marking it would turn a
+     *                      genuine protection fault into a silent success
+     *
+     * A second fork sees the first fork's pages as read-only. Treating them as
+     * the third case drops the mark, and the page becomes permanently
+     * unwritable for everyone - a shell that runs two commands and dies on the
+     * third. */
+    /* Retry until the entry this child is built from is one this call put
+     * there, or one it does not need to change.
+     *
+     * The failure branch used to *adopt* whatever the losing exchange found and
+     * carry on. That is correct only if the new value is still shareable, and
+     * the value the fault path installs most often is not: the sole-owner fast
+     * path makes the entry writable and private, with no copy-on-write mark.
+     * Adopting that maps the child read-only and **unmarked** on a frame the
+     * parent now writes freely, which breaks the guarantee fork exists to make
+     * in two directions at once -
+     *
+     *   the parent's stores land in memory the child can see, and
+     *   the child's first store faults on an entry with no COW bit, which the
+     *   fault handler correctly reads as a protection violation and kills it
+     *   for touching memory it owns.
+     *
+     * Looping instead converts that entry to copy-on-write like any other, so
+     * parent and child leave here marked the same way.
+     *
+     * It terminates: each turn either wins the exchange or observes a value
+     * another core stored, and the stores that reach this entry are bounded by
+     * the faults in flight on it. An entry that stops being present is left
+     * alone - unmapped under a fork is not this function's to resolve. */
+    /* Deliberately without re-reading `entry` afterwards.
+     *
+     * The point is to make the exchange *lose*, which needs the entry to change
+     * between clone_one's load and its compare-exchange. The first version of
+     * this hook re-loaded, so the exchange always won and the sabotaged and
+     * fixed kernels behaved identically - a test asserting the right property
+     * about an arrangement in which the defect cannot appear, which is the
+     * sixth time this project has recorded that shape. */
+    if (g_fork_race_hook) {
+        g_fork_race_hook(pte);
+    }
+    for (;;) {
+        uint64_t desired;
+
+        /* A page a swap-out has marked is a writable page whose write bit is
+         * away for the moment: shared as it stands, parent and child would both
+         * hold it read-only and without copy-on-write, and the child would be
+         * killed on its first legitimate store (M-056). Converting it also
+         * changes the parent's entry, so the swap-out's final exchange fails
+         * and it is abandoned. */
+        if ((entry & PTE_PRESENT) == 0u ||
+            ((entry & PTE_WRITE) == 0u && (entry & VIBEOS_PTE_SWAPOUT) == 0u)) {
+            break;   /* nothing to convert: shared as it stands */
+        }
+        /* A shared mapping stays what it is on both sides (L3): the parent
+         * keeps its write bit and the child is given one below. Converting it
+         * would be a private mapping that says it is shared - each side's
+         * first store would take a copy, and neither would see the other's
+         * again. */
+        if (entry & VIBEOS_PTE_SHARED) {
+            break;
+        }
+        desired = (entry & ~(PTE_WRITE | VIBEOS_PTE_SWAPOUT)) | PTE_COW_BIT;
+        if (__atomic_compare_exchange_n(pte, &entry, desired, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            entry = desired;
+            break;
+        }
+        /* `entry` now holds what is really there; decide again against it. */
+    }
+    /* Swapped out while being converted: what the entry holds now is a slot
+     * number, not a frame, and sharing it would map the child onto whatever
+     * frame has that address. Start again, which brings it back. */
+    if ((entry & PTE_PRESENT) == 0u) {
+        goto again;
+    }
+    phys = entry & PTE_ADDR_MASK;
+    flags = entry & (PTE_PRESENT | PTE_USER | PTE_NX);
+    if (entry & PTE_COW_BIT) {
+        flags |= PTE_COW_BIT;
+        if (g_be.invlpg) {
+            g_be.invlpg(va);
+        }
+    }
+    if (entry & VIBEOS_PTE_SHARED) {
+        flags |= VIBEOS_PTE_SHARED | (entry & PTE_WRITE);
+    }
+
+    /* Pin the frame, then confirm the entry still names it (M-070).
+     *
+     * `entry` was read some instructions ago, and for a page that needed no
+     * conversion - read-only, or copy-on-write already - nothing this function
+     * did since would make anybody else's exchange fail. A page-out is exactly
+     * such an "anybody": it marks only writable pages, so a read-only one with
+     * a single owner goes to swap with no trace in the entry until its final
+     * exchange, and that exchange succeeds against the value read here. Then
+     * the frame is released, and this function mapped it into the child anyway
+     * - a free frame, which the allocator hands to somebody else while the
+     * child still holds it. From there it is whatever the frame becomes: when
+     * it became a page table, two address spaces named one swap slot, which is
+     * the double release the swap map counted about one boot in ten once every
+     * process had sixty cold stack pages its last fork had left
+     * copy-on-write.
+     *
+     * So: a reference only if the frame still has an owner - a free frame is
+     * not resurrected - and then the entry again. If it still holds the value
+     * this was built from, the parent's own reference kept the frame alive
+     * from that read to this pin, and the pin keeps it alive across the
+     * mapping. If it changed, the page went somewhere; start over, which
+     * brings it back. A page-out that commits after the pin is harmless: it
+     * gives back the parent's reference and the child keeps the frame. */
+    if (!vibeos_frame_try_get(phys)) {
+        vibeos_mm_stats()->fork_frame_gone++;
+        if (tries++ >= 64u) {
+            return -1;
+        }
+        goto again;
+    }
+    if (__atomic_load_n(pte, __ATOMIC_ACQUIRE) != entry) {
+        (void)vibeos_frame_put(phys);
+        vibeos_mm_stats()->fork_entry_moved++;
+        if (tries++ >= 64u) {
+            return -1;
+        }
+        goto again;
+    }
+    /* The reference is taken by the mapping, as it is everywhere else. There is
+     * deliberately no explicit count here: a future path that shares a frame
+     * cannot forget to do something it never had to remember. The pin above is
+     * given back either way. */
+    if (vibeos_vmspace_map_raw(dst, va, phys, flags) != 0) {
+        (void)vibeos_frame_put(phys);
+        return -1;
+    }
+    (void)vibeos_frame_put(phys);
+    if (entry & VIBEOS_PTE_SHARED) {
+        vibeos_mm_stats()->fork_kept_shared++;
+    } else {
+        vibeos_mm_stats()->cow_shared++;
+    }
+    (void)src;
+    return 0;
+}
+
+/* Every frame the child now shares must be counted twice.
+ *
+ * Checked here rather than waited for at a release, and that is the whole
+ * point. "More mappers than owners" is discovered today when somebody frees
+ * the frame, which happens about one boot in sixteen and a long way from
+ * whatever lost the reference - so the message names a victim and never a
+ * cause. The invariant it violates, though, is established exactly here: after
+ * clone_cow, a frame the parent still maps and the child now maps as well has
+ * at least two owners. A parent that has since exec'd or exited can push it
+ * back to one legitimately, but that cannot happen before this returns.
+ *
+ * Counted rather than refused: the address space is already built, and a
+ * refusal here would leave a half-forked child, which is worse than a number
+ * the gate reads. */
+static uint32_t g_fork_audits;
+
+static int audit_one(vibeos_vmspace_t *as, uint64_t va, uint64_t *pte,
+                     void *ctx) {
+    uint64_t entry = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    (void)as; (void)va; (void)ctx;
+
+    if ((entry & PTE_PRESENT) && (entry & VIBEOS_PTE_OWNED)) {
+        uint64_t phys = entry & PTE_ADDR_MASK;
+
+        if (vibeos_frame_owners(phys) < 2u) {
+            vibeos_mm_stats()->fork_undercounted++;
+        }
+        /* Holders against owners, which is the whole reason the reverse map
+         * exists.
+         *
+         * These are the same quantity counted two ways: every owned entry is
+         * one reference and one holder. When they disagree, somebody holds a
+         * page nothing is counting - `mappers=2, owners=1` - and until now that
+         * could only be discovered at a release, one boot in sixteen and a long
+         * way from whatever lost the reference. Here it is checked where the
+         * mapping was just made.
+         *
+         * Only when the list is not truncated: a frame whose holders exceeded
+         * the node pool has a list shorter than the truth by design, and
+         * reporting that as a mismatch would turn a reported degradation into a
+         * false defect. exhausted says when that has happened at all. */
+        if (vibeos_rmap_stats()->exhausted == 0u) {
+            /* The two quantities live behind two different locks, so a single
+             * sample of each is not a comparison - it is two comparisons made
+             * at two instants, and between them a thread of the parent on
+             * another core can exec, exit, munmap or fork again and move both.
+             *
+             * That is not a hypothesis. The clang Debug job reported
+             * rmap_mismatch=1 on a boot where every other MUSTBEZERO counter
+             * was clean and both Release jobs were green - Debug being the
+             * slow build is exactly what widens this window. A detector that
+             * cannot tell "these disagree at rest" from "the world moved under
+             * the read" reports the second as the first, and this file's own
+             * notes say the first question when a detector fires is whether
+             * the detector is right.
+             *
+             * So: bracket the rmap read with two reads of the owner count. If
+             * the owners moved, the sample was torn and says nothing; count
+             * that separately so a torn sample stays visible rather than being
+             * silently dropped. If they held still, the disagreement is real.
+             */
+            uint8_t before = vibeos_frame_owners(phys);
+            uint32_t holders = vibeos_rmap_count(phys);
+            /* And the references the TLB quarantine is holding. An unmap
+             * removes the holder at once and the owner only when every core has
+             * flushed, so for that long one owner has no holder - with the
+             * owner count still, which the bracket cannot tell from a real
+             * mismatch. Only references actually held are added: a frame the
+             * quarantine does not hold is judged exactly as before. */
+            uint32_t held = g_be.quarantined ? g_be.quarantined(phys) : 0u;
+            uint8_t after = vibeos_frame_owners(phys);
+            /* Bracket the holder side too, not only the owners. The first
+             * version watched owners alone, so a holder or quarantine reference
+             * that moved between its read and here - with owners netting back to
+             * the same value - read as a mismatch when it was another torn
+             * sample. All three quantities must have held still for the
+             * disagreement to be about the world at rest rather than in motion.
+             * rmap-bare-ok: this second read is not a decision - it is compared
+             * against the first `holders` only to catch a torn sample, and the
+             * real cross-check against owners is the `holders + held` line below. */
+            uint32_t holders2 = vibeos_rmap_count(phys);
+            uint32_t held2 = g_be.quarantined ? g_be.quarantined(phys) : 0u;
+
+            if (before != after || holders != holders2 || held != held2) {
+                vibeos_mm_stats()->rmap_audit_torn++;
+            } else if (holders + held > (uint32_t)before) {
+                /* Only the dangerous direction. More mappings than references
+                 * is a page held by something the count does not know, which
+                 * ends in a free-while-mapped; more references than mappings is
+                 * the safe direction - a reference with no mapping frees nothing
+                 * early, and shows up as a frame leak if it is real. Reporting
+                 * both made teardown a false positive: it drops each frame's
+                 * owner and forgets its holder in two steps, and whichever runs
+                 * first, an audit on another core in the gap saw the two
+                 * disagree. Teardown now forgets the holders first (the safe
+                 * direction, ignored here); a genuine lost reference still trips
+                 * this, because that is holders > owners. */
+                vibeos_mm_stats()->rmap_mismatch++;
+                vibeos_mm_stats()->rmap_mm_phys = phys;
+                vibeos_mm_stats()->rmap_mm_holders = holders;
+                vibeos_mm_stats()->rmap_mm_held = held;
+                vibeos_mm_stats()->rmap_mm_owners = (uint32_t)before;
+                /* Enumerate the holders and ask the one question that decides
+                 * whether this is the reverse map over-counting a single
+                 * mapping or a genuinely lost owner reference: are two of them
+                 * the same (root, va)? */
+                {
+                    /* rmap-bare-ok: diagnostic only, inside a branch the owner
+                     * cross-check above already gated - this enumerates the
+                     * holders to describe the mismatch, it decides nothing. */
+                    vibeos_rmap_holder_t hs[8];
+                    uint32_t n = vibeos_rmap_holders(phys, hs, 8u);
+                    uint32_t a, b, dup = 0u;
+                    for (a = 0u; a < n; a++) {
+                        for (b = a + 1u; b < n; b++) {
+                            if (hs[a].root_phys == hs[b].root_phys &&
+                                hs[a].va == hs[b].va) {
+                                dup = 1u;
+                            }
+                        }
+                    }
+                    vibeos_mm_stats()->rmap_mm_dup = dup;
+                    if (n > 0u) {
+                        vibeos_mm_stats()->rmap_mm_h0_root = hs[0].root_phys;
+                        vibeos_mm_stats()->rmap_mm_h0_va = hs[0].va;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+int vibeos_vmspace_clone_cow(vibeos_vmspace_t *dst, vibeos_vmspace_t *src) {
+    vm_op("fork");
+    if (!g_ready || !dst || !src || !dst->root || !src->root) {
+        return -1;
+    }
+    if (foreach_leaf(src, 1, clone_one, dst) != 0) {
+        return -1;
+    }
+    /* The first few forks only.
+     *
+     * Auditing every one wedged the boot outright: this walks the whole child
+     * address space and takes the frame lock once per page, on a path that
+     * already runs with interrupts masked, and BusyBox forks constantly. The
+     * defect is not rare among forks - it is rare among *boots* - so a bounded
+     * sample early in the boot is as likely to see it as an unbounded one, and
+     * costs nothing after the first few. */
+    if (g_fork_audits < 8u) {
+        g_fork_audits++;
+        (void)foreach_owned(dst, audit_one, 0);
+    }
+    if (g_be.shootdown) {
+        g_be.shootdown(src->root_phys);
+    }
+    return 0;
+}
+
+/* ---- faults -------------------------------------------------------------- */
+
+/* Copy 4 KiB between two frames, through whatever the backend calls memory. */
+static int copy_frame(uint64_t dst, uint64_t src) {
+    uint64_t *d = (uint64_t *)g_be.map_phys(dst);
+    const uint64_t *s = (const uint64_t *)g_be.map_phys(src);
+    uint32_t i;
+
+    if (!d || !s) {
+        return -1;
+    }
+    for (i = 0; i < 4096u / 8u; i++) {
+        d[i] = s[i];
+    }
+    return 0;
+}
+
+static void (*g_race_hook)(uint64_t phys);
+
+
+void vibeos_vmspace_set_race_hook(void (*fn)(uint64_t phys)) {
+    g_race_hook = fn;
+}
+
+int vibeos_vmspace_fault(vibeos_vmspace_t *as, uint64_t va, int write) {
+    uint64_t *pte;
+    uint64_t entry, expected, desired, phys, fresh;
+
+    vm_op("cow-fault");
+    if (!g_ready || !as || !as->root || !write) {
+        return 0;
+    }
+    pte = walk(as, va, 0);
+    if (!pte) {
+        return 0;
+    }
+
+    /* Read the entry once, and act on that value.
+     *
+     * Two threads of one process can fault on the same page at the same
+     * instant, and re-reading *pte at each step lets each of them make a
+     * decision based on a world the other has already changed. Every store back
+     * is a compare-exchange against this value, so a core that lost the race
+     * discovers it instead of overwriting the winner. */
+    entry = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    if ((entry & PTE_PRESENT) == 0u) {
+        return 0;
+    }
+
+    /* A swap-out is writing this page out and took its write bit to do it
+     * (M-056). The store wins: give the bit back and let the instruction run
+     * again. The swap-out's final exchange then finds the entry changed and
+     * gives up, so the store is never lost and the page never reaches swap with
+     * contents older than what the program has written. A lost exchange here
+     * means somebody else already changed the entry; retrying the instruction
+     * faults again against whatever they left, which is decided then. */
+    if ((entry & VIBEOS_PTE_SWAPOUT) && (entry & PTE_WRITE) == 0u) {
+        expected = entry;
+        desired = (entry | PTE_WRITE) & ~VIBEOS_PTE_SWAPOUT;
+        if (__atomic_compare_exchange_n(pte, &expected, desired, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            vibeos_mm_stats()->swap_out_cancelled++;
+        }
+        if (g_be.invlpg) {
+            g_be.invlpg(va);
+        }
+        return 1;
+    }
+
+    /* Already writable: another thread resolved this page on another core and
+     * this one faulted on a translation that had not caught up. Without this
+     * the page looks like a plain read-only mapping - no copy-on-write mark,
+     * because the other core cleared it - and the task is killed for a
+     * violation it did not commit. */
+    if ((entry & PTE_WRITE) && (entry & PTE_USER)) {
+        if (g_be.invlpg) {
+            g_be.invlpg(va);
+        }
+        return 1;
+    }
+
+    if ((entry & PTE_COW_BIT) == 0u || (entry & VIBEOS_PTE_OWNED) == 0u) {
+        return 0;   /* not a shared page: a genuine protection violation */
+    }
+    phys = entry & PTE_ADDR_MASK;
+
+    /* Sole owner: take the write permission back rather than copying. The
+     * common case once the other side has exec'd or exited, and copying there
+     * would waste a page and a copy for nothing. */
+    if (vibeos_frame_owners(phys) <= 1u) {
+        expected = entry;
+        desired = phys | PTE_PRESENT | PTE_WRITE | PTE_USER | VIBEOS_PTE_OWNED |
+                  (entry & (PTE_NX | VIBEOS_PTE_LOCKED));   /* execute permission and mlock stay */
+        if (g_race_hook) {
+            g_race_hook(phys);
+        }
+        if (__atomic_compare_exchange_n(pte, &expected, desired, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            /* Re-check, because the exchange above could not have guarded this.
+             *
+             * The decision to widen this entry to writable rests on the frame
+             * having exactly one owner. That fact lives in the reference count,
+             * not in the page-table entry, so a compare-exchange on the entry
+             * proves nothing about it: a fork on another core can take a
+             * reference to this frame in the window and leave the entry byte
+             * for byte identical. The already-COW branch of clone_one does
+             * exactly that - it shares the frame and never writes to the source
+             * entry at all, so there is nothing for the exchange to notice.
+             *
+             * The result was a process holding a *writable* mapping of a frame
+             * another address space held copy-on-write: one side's writes
+             * appearing in the other's private page. That is the defect the
+             * stress service reports as "the child could not keep its own copy"
+             * and, when the frame is later reused, as a page holding a value
+             * from a different round entirely.
+             *
+             * Undoing is safe precisely because no TLB has seen the writable
+             * form yet: it is installed and withdrawn before any invlpg, and
+             * the faulting instruction has not been retried. */
+            if (vibeos_frame_owners(phys) > 1u) {
+                uint64_t installed = desired;
+
+                if (__atomic_compare_exchange_n(pte, &installed, entry, 0,
+                                                __ATOMIC_ACQ_REL,
+                                                __ATOMIC_RELAXED)) {
+                    vibeos_mm_stats()->cow_exclusive_lost++;
+                    goto copy;   /* it is shared after all */
+                }
+                /* Lost the undo: another core has resolved this page since,
+                 * and whatever it decided is newer than what we know. */
+            }
+        }
+        /* Either we granted the write or somebody else already did; the
+         * instruction is retried and will succeed or fault again honestly. */
+        if (g_be.invlpg) {
+            g_be.invlpg(va);
+        }
+        return 1;
+    }
+
+copy:
+
+    fresh = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (!fresh) {
+        return 0;   /* out of memory; nothing dropped, so nothing to undo (I5) */
+    }
+    if (copy_frame(fresh, phys) != 0) {
+        (void)vibeos_frame_put(fresh);
+        return 0;
+    }
+
+    /* Install the copy only if the entry is still the one we read.
+     *
+     * This is the race that survived the ordering fix. Two threads of the same
+     * process faulting on one page both reached this point, both allocated a
+     * copy, both stored, and both released the shared frame - so one reference
+     * was dropped for a mapping that only ever existed once, and the frame went
+     * back on the free list while the other process was still running from it.
+     *
+     * It fits the numbers the detector reported. With a page shared three ways
+     * - a parent and two children - two threads of one child each drop a
+     * reference for the single mapping they share, leaving two address spaces
+     * holding the frame and one reference counted: mappers=2 owners=1, which is
+     * what the log said.
+     *
+     * Losing the exchange is not a failure. The other core has already made
+     * this page writable and private; our copy is unused, and the shared frame
+     * was never ours to release. */
+    expected = entry;
+    desired = (fresh & PTE_ADDR_MASK) | PTE_PRESENT | PTE_WRITE | PTE_USER |
+              VIBEOS_PTE_OWNED | (entry & (PTE_NX | VIBEOS_PTE_LOCKED));
+    if (!__atomic_compare_exchange_n(pte, &expected, desired, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        (void)vibeos_frame_put(fresh);
+        if (g_be.invlpg) {
+            g_be.invlpg(va);
+        }
+        return 1;
+    }
+
+    /* We won: this address space has stopped pointing at the shared frame, so
+     * now it may let go of it - and it holds a different frame at the same
+     * address, which the reverse map has to be told in both directions. A copy
+     * that recorded the new holder without forgetting the old one would leave
+     * the shared frame looking like it has one more holder than it does, and
+     * compaction would then move a page on behalf of an address space that
+     * stopped pointing at it. */
+    (void)vibeos_rmap_add(fresh & PTE_ADDR_MASK, as->root_phys, va);
+    (void)vibeos_rmap_remove(phys, as->root_phys, va);
+    (void)vibeos_frame_put(phys);
+    if (g_be.invlpg) {
+        g_be.invlpg(va);
+    }
+
+    /* Not about permissions: the page's *physical address* just changed. A
+     * thread of this same process on another core still has the old frame
+     * cached, so from here on it reads and writes a page nobody else can see -
+     * it never observes anything this thread stores.
+     *
+     * Not theory. A test that forks with a worker thread running, then sets a
+     * flag the worker is spinning on, hung outright: the flag lived on a page
+     * fork had marked copy-on-write, the parent's store copied it, and the
+     * worker watched the original frame for a change that could never arrive. */
+    if (g_be.shootdown) {
+        g_be.shootdown(as->root_phys);
+    }
+    vibeos_mm_stats()->cow_copied++;
+    return 1;
+}
+
+/* ---- swap ---------------------------------------------------------------- */
+
+#define PTE_SWAPPED VIBEOS_PTE_SWAPPED
+
+/* The entry for `va` once it is in memory: brought back from swap if it was
+ * there. 0 if nothing is mapped, or it could not be brought back (*failed). */
+static uint64_t *resident_entry(vibeos_vmspace_t *as, uint64_t va, int *failed) {
+    uint32_t tries = 0;
+
+    *failed = 0;
+    for (;;) {
+        uint64_t *pte = walk(as, va, 0);
+        uint64_t e = pte ? __atomic_load_n(pte, __ATOMIC_ACQUIRE) : 0u;
+
+        if (e & PTE_PRESENT) {
+            return (e & VIBEOS_PTE_OWNED) ? pte : 0;
+        }
+        if ((e & VIBEOS_PTE_SWAPPED) == 0u) {
+            return 0;
+        }
+        if (!g_be.swap_bring_in || tries++ >= 8u || g_be.swap_bring_in(as, va) != 0) {
+            *failed = 1;
+            return 0;
+        }
+    }
+}
+
+int vibeos_vmspace_populate(vibeos_vmspace_t *as, uint64_t va, int write) {
+    uint64_t *pte;
+    int failed;
+
+    vm_op("populate");
+    if (!g_ready || !as || !as->root) {
+        return -1;
+    }
+    pte = resident_entry(as, va, &failed);
+    if (!pte) {
+        return failed ? -1 : 1;
+    }
+    /* A page shared copy-on-write is made this process's own, as a store to
+     * it would: the copy-on-write fault, which says whether it did. */
+    if (write && !(__atomic_load_n(pte, __ATOMIC_ACQUIRE) & PTE_WRITE) &&
+        vibeos_vmspace_fault(as, va, 1) != 1) {
+        return -1;
+    }
+    return 0;
+}
+
+int vibeos_vmspace_set_locked(vibeos_vmspace_t *as, uint64_t va, int locked) {
+    vm_op("mlock");
+    if (!g_ready || !as || !as->root) {
+        return -1;
+    }
+    for (;;) {
+        int failed;
+        uint64_t *pte = locked ? resident_entry(as, va, &failed) : walk(as, va, 0);
+        uint64_t e, want;
+
+        if (!pte) {
+            return (locked && failed) ? -1 : 1;
+        }
+        e = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+        if ((e & PTE_PRESENT) == 0u) {
+            if (!locked) {
+                return 1;   /* in swap: it carries no lock there to take off */
+            }
+            continue;       /* taken between the look and the mark: bring it back */
+        }
+        want = locked ? (e | VIBEOS_PTE_LOCKED) : (e & ~VIBEOS_PTE_LOCKED);
+        if (want == e ||
+            __atomic_compare_exchange_n(pte, &e, want, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return 0;
+        }
+    }
+}
+
+int vibeos_vmspace_move(vibeos_vmspace_t *as, uint64_t from, uint64_t to) {
+    uint64_t *src, *dst, e, zero = 0;
+    int failed;
+
+    vm_op("mremap");
+    if (!g_ready || !as || !as->root || (from & 0xFFFull) || (to & 0xFFFull) || from == to) {
+        return -1;
+    }
+    /* The destination's tables first: if they cannot be had, nothing has been
+     * touched. Above the identity window only - a mapping is not moved into
+     * the tables every address space shares. */
+    if (g_be.identity_limit != 0ull && to < g_be.identity_limit) {
+        return -1;
+    }
+    dst = walk(as, to, 1);
+    if (!dst) {
+        return -1;
+    }
+    for (;;) {
+        src = resident_entry(as, from, &failed);
+        if (!src) {
+            return failed ? -1 : 1;
+        }
+        e = __atomic_load_n(src, __ATOMIC_ACQUIRE);
+        if ((e & PTE_PRESENT) == 0u) {
+            continue;
+        }
+        if (__atomic_compare_exchange_n(src, &e, 0ull, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            break;
+        }
+    }
+    /* A swap-out that had marked it is abandoned by the exchange above; the
+     * write permission its mark stood for goes back in. */
+    if (e & VIBEOS_PTE_SWAPOUT) {
+        e = (e | PTE_WRITE) & ~VIBEOS_PTE_SWAPOUT;
+    }
+    if (!__atomic_compare_exchange_n(dst, &zero, e, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        /* Something is mapped at the destination: the caller's mistake. Put
+         * the page back where it was. */
+        uint64_t none = 0;
+        (void)__atomic_compare_exchange_n(src, &none, e, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+        return -1;
+    }
+    (void)vibeos_rmap_add(e & PTE_ADDR_MASK, as->root_phys, to);
+    (void)vibeos_rmap_remove(e & PTE_ADDR_MASK, as->root_phys, from);
+    if (g_be.invlpg) {
+        g_be.invlpg(from);
+        g_be.invlpg(to);
+    }
+    return 0;
+}
+
+int64_t vibeos_vmspace_swap_slot(vibeos_vmspace_t *as, uint64_t va) {
+    uint64_t *pte;
+    uint64_t e;
+
+    if (!g_ready || !as || !as->root) {
+        return -1;
+    }
+    pte = walk(as, va, 0);
+    if (!pte) {
+        return -1;
+    }
+    e = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    if ((e & PTE_PRESENT) || (e & PTE_SWAPPED) == 0u) {
+        return -1;
+    }
+    return (int64_t)((e & PTE_ADDR_MASK) >> 12);
+}
+
+int vibeos_vmspace_swap_out(vibeos_vmspace_t *as, uint64_t va, uint32_t slot) {
+    uint64_t *pte, entry, phys, desired, marked;
+
+    vm_op("swap-out");
+    if (!g_ready || !as || !as->root) {
+        return -1;
+    }
+    pte = walk(as, va, 0);
+    if (!pte) {
+        return -1;
+    }
+    entry = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    if ((entry & PTE_PRESENT) == 0u || (entry & VIBEOS_PTE_OWNED) == 0u) {
+        return -1;
+    }
+    phys = entry & PTE_ADDR_MASK;
+
+    if (vibeos_frame_test_flag(phys, VIBEOS_FRAME_PINNED)) {
+        vibeos_mm_stats()->swap_refused_pinned++;
+        return -1;
+    }
+    /* mlock: the program asked for this page to be here. */
+    if (entry & VIBEOS_PTE_LOCKED) {
+        vibeos_mm_stats()->swap_refused_locked++;
+        return -1;
+    }
+    /* A shared mapping stays resident, even while this is its only holder (L3).
+     * The entry in swap would name a slot; a fork would bring the page back
+     * and share the frame, which works - but the mark that says "shared" has
+     * no place in a swapped entry, and a page that came back without it would
+     * be private from then on. Refused rather than taught to carry it: what
+     * shares memory here is small. */
+    if (entry & VIBEOS_PTE_SHARED) {
+        vibeos_mm_stats()->swap_refused_shared++;
+        return -1;
+    }
+    /* One holder only. After a fork a frame belongs to several address spaces
+     * and evicting it means changing all of their entries - a different
+     * operation from this one, and one that needs every holder's TLB dealt
+     * with before the frame is released. Counted rather than silently skipped:
+     * the pages a forking workload accumulates are exactly the ones a swap
+     * that cannot do this will never reclaim, and that should be visible. */
+    if (vibeos_frame_owners(phys) != 1u || vibeos_rmap_count(phys) != 1u) {
+        vibeos_mm_stats()->swap_refused_shared++;
+        return -1;
+    }
+
+    /* Stop the writers, not the readers (M-056).
+     *
+     * This used to mark the entry "swapped" first and write the page second, on
+     * the argument that a store in between would fault on "swapped" and be
+     * delayed rather than lost. It was not delayed: the fault found a swapped
+     * entry and read the slot - before the write had put anything in it. And a
+     * munmap in the same window freed a slot that was still being written into,
+     * for the next eviction to be handed.
+     *
+     * Now the entry stays present while the page is written. A writable page
+     * loses its write bit and gains the marker, and every core is told, so none
+     * can still store through a cached writable entry; a read-only page needs
+     * nothing, because nobody can store to it. */
+    marked = entry;
+    if (entry & PTE_WRITE) {
+        marked = (entry & ~PTE_WRITE) | VIBEOS_PTE_SWAPOUT;
+        if (!__atomic_compare_exchange_n(pte, &entry, marked, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return -1;   /* somebody else changed it; theirs to deal with */
+        }
+        if (g_be.invlpg) {
+            g_be.invlpg(va);
+        }
+        if (g_be.shootdown) {
+            g_be.shootdown(as->root_phys);
+        }
+    }
+
+    /* The contents, with every store now faulting - and cancelling this. */
+    if (g_be.swap_write && g_be.swap_write(slot, g_be.map_phys(phys)) != 0) {
+        /* Not on disk. Put the write bit back if the entry is still the one
+         * this call marked; if it is not, whoever changed it rebuilt it and the
+         * marker went with their change. */
+        uint64_t expect = marked;
+        if (marked != entry) {
+            (void)__atomic_compare_exchange_n(pte, &expect, entry, 0,
+                                              __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+        }
+        vibeos_mm_stats()->swap_write_failed++;
+        return -1;
+    }
+
+    /* Commit, from exactly the entry this call left. NX rides along in a
+     * not-present entry, where the hardware ignores it, so a page swapped out
+     * and back in is not quietly made executable.
+     *
+     * The exchange is the whole guarantee: a store that cancelled, a munmap, a
+     * fork, an mprotect or a compaction all change the entry, and then this
+     * fails and the page stays where it is - its slot, written for nothing, is
+     * the caller's to give back. */
+    /* The permissions go with the page, in bits the CPU ignores while the
+     * entry is not present, and come back with it. Only NX used to, and
+     * swap-in made every page user-writable: a read-only page, or a PROT_NONE
+     * guard, came back from swap as ordinary writable memory (M-063).
+     * `entry` is the entry before the swap-out marked it, so its write bit is
+     * the page's own. */
+    desired = ((uint64_t)slot << 12) | PTE_SWAPPED |
+              (entry & (PTE_NX | PTE_USER | PTE_WRITE | PTE_COW_BIT));
+    {
+        uint64_t expect = marked;
+        if (!__atomic_compare_exchange_n(pte, &expect, desired, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            vibeos_mm_stats()->swap_out_raced++;
+            return -1;
+        }
+    }
+    /* No core may still read through a translation of the frame about to be
+     * released: the entry was present until the exchange. */
+    if (g_be.invlpg) {
+        g_be.invlpg(va);
+    }
+    if (g_be.shootdown) {
+        g_be.shootdown(as->root_phys);
+    }
+
+    (void)vibeos_rmap_remove(phys, as->root_phys, va);
+    (void)vibeos_frame_put(phys);
+    vibeos_mm_stats()->swap_outs++;
+    return 0;
+}
+
+#define PTE_ACCESSED (1ull << 5)   /* set by the CPU on every access */
+
+int vibeos_vmspace_clear_young(vibeos_vmspace_t *as, uint64_t va) {
+    uint64_t *pte, entry;
+
+    if (!g_ready || !as || !as->root) {
+        return 0;
+    }
+    pte = walk(as, va, 0);
+    if (!pte) {
+        return 0;
+    }
+    for (;;) {
+        entry = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+        if ((entry & PTE_PRESENT) == 0u || (entry & PTE_ACCESSED) == 0u) {
+            return 0;
+        }
+        /* Compare-exchange, like every other change to an entry here: a fault
+         * or a swap-out on another core may be writing it. */
+        if (__atomic_compare_exchange_n(pte, &entry, entry & ~PTE_ACCESSED, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return 1;
+        }
+    }
+}
+
+int vibeos_vmspace_swap_in(vibeos_vmspace_t *as, uint64_t va, uint64_t frame) {
+    uint64_t *pte, entry, desired;
+    uint32_t slot;
+
+    vm_op("swap-in");
+    if (!g_ready || !as || !as->root || frame == 0ull) {
+        return -1;
+    }
+    pte = walk(as, va, 0);
+    if (!pte) {
+        return -1;
+    }
+    entry = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+    if ((entry & PTE_PRESENT) || (entry & PTE_SWAPPED) == 0u) {
+        return -1;   /* not swapped out; nothing to bring back */
+    }
+    slot = (uint32_t)((entry & PTE_ADDR_MASK) >> 12);
+
+    if (g_be.swap_read && g_be.swap_read(slot, g_be.map_phys(frame)) != 0) {
+        vibeos_mm_stats()->swap_read_failed++;
+        return -1;   /* nothing changed: the entry still names the slot (I5) */
+    }
+
+    /* With the permissions it left with, which swap-out kept in the entry's
+     * ignored bits. This used to restore every page writable and user, on the
+     * reasoning that an anonymous page was writable when it left - true of
+     * most, false of a read-only mapping and of a PROT_NONE guard, which came
+     * back as ordinary memory (M-063). */
+    desired = (frame & PTE_ADDR_MASK) | PTE_PRESENT | VIBEOS_PTE_OWNED |
+              (entry & (PTE_NX | PTE_USER | PTE_WRITE | PTE_COW_BIT));
+    /* The mapping takes over the reference the caller allocated the frame
+     * with; it does not take another. It used to - a vibeos_frame_get here on
+     * top of the allocation's reference, which the fault handler never gave
+     * back - so every page that came back from swap had two owners and one
+     * mapping, and outlived its process. The first load to force reclaim on a
+     * machine lost 764 frames in a boot that had brought 756 pages back. On
+     * failure nothing was taken, and the caller frees what it allocated. */
+    if (!__atomic_compare_exchange_n(pte, &entry, desired, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        return -1;   /* another core brought it in first */
+    }
+    /* The slot this call consumed - the one it read, from the entry it just
+     * replaced - goes back here and nowhere else. The caller used to free a
+     * slot it had read from the entry *before* calling, and between the two
+     * reads a sibling thread can bring the page in and reclaim send it out
+     * again to another slot: the caller then freed the old slot a second time
+     * and the new one was never freed (a double free the swap map counted
+     * under load, M-063). Nobody outside knows which slot this was; nobody
+     * outside frees it. */
+    if (g_be.swap_release) {
+        g_be.swap_release(slot);
+    }
+    (void)vibeos_rmap_add(frame, as->root_phys, va);
+    if (g_be.invlpg) {
+        g_be.invlpg(va);
+    }
+    vibeos_mm_stats()->swap_ins++;
+    return 0;
+}
+
+/* ---- compaction ---------------------------------------------------------- */
+
+/* At most this many holders are moved in one go. A frame with more than this
+ * is refused rather than partly moved: a frame whose mappings disagree about
+ * where it is would hand two processes different memory under one address, and
+ * "partly compacted" is not a state anything here could recover from. */
+#define MOVE_MAX_HOLDERS 32u
+
+int vibeos_vmspace_move_frame(uint64_t old_phys, uint64_t new_phys) {
+    vibeos_rmap_holder_t holders[MOVE_MAX_HOLDERS];
+    uint32_t n, i, total;
+
+    vm_op("compact");
+    if (!g_ready || old_phys == new_phys) {
+        return -1;
+    }
+    if ((old_phys & 0xFFFull) || (new_phys & 0xFFFull)) {
+        return -1;
+    }
+
+    /* Pinned is checked first and separately from everything else, because it
+     * is the refusal that protects rather than the one that optimises. */
+    if (vibeos_frame_test_flag(old_phys, VIBEOS_FRAME_PINNED)) {
+        vibeos_mm_stats()->compact_refused_pinned++;
+        return -1;
+    }
+
+    /* rmap-bare-ok: this read decides nothing, it only bounds the array below.
+     * The reverse map is best effort, so an under-recorded holder makes `total`
+     * smaller and this bound passes more often - and the cross-check against
+     * vibeos_frame_owners a few lines down still refuses the move. See
+     * include/vibeos/rmap.h for why no decision may rest on the count alone. */
+    total = vibeos_rmap_count(old_phys);
+    if (total > MOVE_MAX_HOLDERS) {
+        vibeos_mm_stats()->compact_refused_many++;
+        return -1;
+    }
+    /* Every reference must be a mapping this can repoint.
+     *
+     * A frame with more owners than holders has a reference held by something
+     * that is not a page-table entry - whoever allocated it and kept the
+     * physical address: the page cache, a DMA buffer, a kernel structure. The
+     * reverse map cannot repoint those because it does not know they exist, so
+     * moving the contents would leave the holder reading the old frame while
+     * everything else reads the new one.
+     *
+     * This was missing from the first version, and the fragmentation test
+     * found it by failing for the right reason: an unmapped allocated frame
+     * was "moved" and then never became free, because the allocation reference
+     * stayed exactly where it was. That is the harmless face of it. The
+     * harmful one is a cache page moved out from under the entry that still
+     * names its address. */
+    if (vibeos_frame_owners(old_phys) != vibeos_rmap_count(old_phys)) {
+        vibeos_mm_stats()->compact_refused_untracked++;
+        return -1;
+    }
+
+    n = vibeos_rmap_holders(old_phys, holders, MOVE_MAX_HOLDERS);
+    if (n != total) {
+        /* The list changed under us, so what was read is not what is there.
+         * Refusing is the only safe answer: moving on a stale list would leave
+         * whichever mapping appeared afterwards pointing at the old frame. */
+        vibeos_mm_stats()->compact_refused_raced++;
+        return -1;
+    }
+
+    /* Every holder must be read-only. See the header: the copy-then-repoint
+     * window loses a write, and this is the check that makes the window
+     * harmless rather than an argument that it is unlikely. */
+    for (i = 0; i < n; i++) {
+        vibeos_vmspace_t as;
+        uint64_t *pte;
+
+        as.root_phys = holders[i].root_phys;
+        as.root = table_at(holders[i].root_phys);
+        if (!as.root) {
+            vibeos_mm_stats()->compact_refused_raced++;
+            return -1;
+        }
+        pte = walk(&as, holders[i].va, 0);
+        if (!pte) {
+            vibeos_mm_stats()->compact_refused_raced++;
+            return -1;
+        }
+        {
+            uint64_t e = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+            if ((e & PTE_PRESENT) == 0u ||
+                (e & PTE_ADDR_MASK) != (old_phys & PTE_ADDR_MASK)) {
+                vibeos_mm_stats()->compact_refused_raced++;
+                return -1;
+            }
+            if (e & PTE_WRITE) {
+                vibeos_mm_stats()->compact_refused_writable++;
+                return -1;
+            }
+        }
+    }
+
+    /* Contents first. Nothing points at the new frame yet, so a reader of the
+     * old one is still correct throughout this. */
+    if (copy_frame(new_phys, old_phys) != 0) {
+        return -1;
+    }
+
+    /* Then the mappings, one compare-exchange each against the entry that was
+     * checked above. A holder that changed since is left alone and the move is
+     * abandoned for that entry - it now points somewhere the mover does not
+     * own, and forcing it would be the mover overwriting somebody else's
+     * decision. */
+    for (i = 0; i < n; i++) {
+        vibeos_vmspace_t as;
+        uint64_t *pte, e, desired;
+
+        as.root_phys = holders[i].root_phys;
+        as.root = table_at(holders[i].root_phys);
+        if (!as.root) {
+            continue;
+        }
+        pte = walk(&as, holders[i].va, 0);
+        if (!pte) {
+            continue;
+        }
+        e = __atomic_load_n(pte, __ATOMIC_ACQUIRE);
+        if ((e & PTE_ADDR_MASK) != (old_phys & PTE_ADDR_MASK)) {
+            continue;
+        }
+        desired = (e & ~PTE_ADDR_MASK) | (new_phys & PTE_ADDR_MASK);
+
+        /* The reference moves with the mapping, and in that order: the new
+         * frame gains an owner before the old one loses it, so the count never
+         * dips through a value that would let a release take the old frame
+         * while this entry still names it. */
+        vibeos_frame_get(new_phys);
+        if (__atomic_compare_exchange_n(pte, &e, desired, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            (void)vibeos_rmap_add(new_phys, as.root_phys, holders[i].va);
+            (void)vibeos_rmap_remove(old_phys, as.root_phys, holders[i].va);
+            (void)vibeos_frame_put(old_phys);
+            if (g_be.shootdown) {
+                g_be.shootdown(as.root_phys);
+            }
+            vibeos_mm_stats()->compact_mappings_moved++;
+        } else {
+            (void)vibeos_frame_put(new_phys);
+        }
+    }
+
+    vibeos_mm_stats()->compact_moved++;
+    return 0;
+}
+
+/* ---- inspection ---------------------------------------------------------- */
+
+static int count_one(vibeos_vmspace_t *as, uint64_t va, uint64_t *pte, void *ctx) {
+    (void)as; (void)va; (void)pte;
+    (*(uint64_t *)ctx)++;
+    return 0;
+}
+
+uint64_t vibeos_vmspace_owned_count(vibeos_vmspace_t *as) {
+    uint64_t n = 0;
+
+    if (!g_ready || !as || !as->root) {
+        return 0;
+    }
+    /* The same walk fork uses. Four nested loops written twice is how two
+     * pieces of code come to disagree about what "owned" means, and one of
+     * these is on a hot path while the other is not - which is exactly the
+     * pair that drifts. */
+    (void)foreach_owned(as, count_one, &n);
+    return n;
+}

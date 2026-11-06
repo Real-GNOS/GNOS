@@ -1,0 +1,172 @@
+# The queue and the completion contract (I6, first half).
+#
+# Host tests: bash scripts/dev/check.sh tests build-gcc-Release
+#
+# Nothing here is asynchronous yet, and that is deliberate. Both drivers are
+# still synchronous, so a request handed to enqueue() is completed before
+# enqueue returns. What arrives first is the *contract* - completed exactly
+# once, never when not in flight, callback outside the lock - because those are
+# the three things an interrupt-driven driver breaks if they are not already
+# established, and all three become invisible once the driver and the caller
+# stop sharing a call stack.
+#
+# There is deliberately no list. A queue with at most one entry in it would be
+# code that exists and is never exercised, which is the defect this project
+# produces most often.
+
+case: a second completion is delivered instead of refused
+  in vibeos_blk_complete, drop the VIBEOS_BLK_REQ_DONE check
+  expect: FAIL:blkqueue "a second completion was not counted"
+  why it matters: by the time a duplicate arrives the owner may have reused the
+    request, so the second callback delivers somebody else's completion against
+    a live request. With an interrupt in the picture there is nothing else to
+    give that away.
+
+case: a stray completion is accepted
+  in vibeos_blk_complete, drop the IN_FLIGHT check
+  expect: FAIL:blkqueue "a stray completion ran a callback"
+  why it matters: this is what an interrupt naming the wrong tag looks like
+    from the layer's side - a completion for a request nobody submitted.
+
+case: the callback runs holding the queue lock
+  in vibeos_blk_complete, take the lock around the callback
+  expect: FAIL:blkqueue "the completion callback ran holding the queue lock"
+  why it matters: the first thing a real completion callback does is submit the
+    next request. Doing that from inside the lock that guards the queue is a
+    deadlock on the day the queue acquires a real lock, and the day it acquires
+    one is not the day anybody will be looking for this.
+
+case: the synchronous entry point carries a callback
+  in vibeos_blk_submit, remove the `if (!g_in_enqueue)` clearing of done
+  expect: a SEGFAULT in the existing block-layer tests, not a clean failure
+  why it matters: this happened. Every caller written before I6 builds its
+    request field by field and knows nothing about `done`, so that field holds
+    whatever was on the stack - and the layer called it. The host tests crashed
+    immediately, which is the good outcome; on a machine it is a jump to stack
+    rubbish inside the block layer.
+
+    The fix is not to memset at every caller. The synchronous entry point owns
+    the claim "there is no callback here", so it enforces it - which is the
+    rule this project wrote down after interp_base: clear the field in the
+    function that owns the contract.
+
+# ---- what is NOT here yet ---------------------------------------------------
+#
+# Interrupt-driven completion for virtio-blk and AHCI, and therefore a real
+# queue with a real lock, requests in flight across a return, and completions
+# arriving on a different core than the submitter. Those are the second half of
+# I6. The cases above are the ones that can be written before that exists, and
+# writing them first is the point: they are the invariants the second half has
+# to preserve, stated while they are still cheap to check.
+
+# ---- the interrupt, which is routed and does not arrive --------------------
+
+case: the completion counters stop being reported
+  in kmain.c, remove blk_irqs / blk_irq_completions / blk_poll_completions
+  expect: blk_completion_counters_missing
+  why it matters: "the number is zero" and "there is no number" are different
+    failures, and this driver is currently in the first state on purpose.
+
+case: neither counter is reached
+  in virtio_blk.c, remove the attribution after the wait loop
+  expect: blk_completions_unaccounted
+  why it matters: this happened. The first version of the attribution was
+    written by a script that died on an assertion *before* writing the file, so
+    the loop was never modified and both counters read zero - which is
+    indistinguishable from an interrupt that never fires, and is what sent the
+    next hour in the wrong direction. Every transfer must be accounted for by
+    one of the two or the counters are measuring nothing.
+
+case: the interrupt stops arriving
+  in arch_hw.c, remove the vector-43 branch from the interrupt dispatcher
+  expect: blk_interrupt_never_fired
+  why it matters: this is not a hypothetical case, it is what the whole
+    investigation was. The branch had never been added - the script that was
+    meant to add it died on an earlier assertion and wrote nothing - so
+    vibeos_x86_64_virtio_blk_irq was never called and every counter read zero.
+    Which is indistinguishable from a device that raises no interrupt, and sent
+    three fixes, four measurements and a full IOAPIC probe in the wrong
+    direction.
+
+    The interrupt had been arriving the whole time. The device raises about
+    twenty thousand a boot and ends roughly sixty per cent of the waits.
+
+    Second time in one investigation that a script died before writing and the
+    resulting zero was read as evidence. The lesson is not "check the script" -
+    it is that a counter which nothing increments and a counter which reports
+    nothing happening look identical, so a new counter needs one deliberate
+    check that it can be non-zero before any conclusion is drawn from its being
+    zero.
+
+# What was eliminated, so the next attempt does not start from the top:
+#
+#   the device has an INTA pin (config 0x3D reads 1);
+#   INTx is now enabled - bit 10 of the command register is clear, and it was
+#     NOT before: this driver used to OR into whatever UEFI left there, and
+#     UEFI leaves Interrupt Disable set. A real fix, kept;
+#   the redirection entry is level-triggered and active low, which is what a
+#     PCI line needs and what the ISA routing path did not do. A real fix,
+#     kept, and the reason vibeos_x86_64_ioapic_route_pci now exists;
+#   the Line register says 11 and routing 11 delivers nothing. Routing GSI
+#     16..19 as well - the usual q35 mapping for PCI INTA..D, since this kernel
+#     does not parse the ACPI _PRT - delivers nothing either. So the mapping is
+#     not the remaining problem, or not only it.
+#
+# Then those two were measured, with vibeos_x86_64_irq_probe, and both came
+# back clean:
+#
+#   [APIC] probe gsi=0xb redir_lo=0xa02b redir_hi=0x0 svr=0x1ff
+#          pic_mask=0xffff iso_count=0x5
+#
+# redir_lo 0xa02b is vector 43, level triggered, active low, unmasked, fixed
+# delivery, physical destination - exactly right. The local APIC is
+# software-enabled (svr bit 8). Both 8259s are fully masked. Vector 43 has an
+# IDT entry; 48 are wired.
+#
+# And the measurement that actually split the question: routing EVERY GSI 0..23
+# to vector 43 still produced zero interrupts. So it is not the mapping, not
+# the trigger mode, not the mask, not the IDT and not the local APIC.
+#
+#   *** The device is not raising an interrupt at all. ***
+#
+# That moves the next investigation to the other side of the wire, where it
+# should have started. Candidates: VIRTQ_AVAIL_F_NO_INTERRUPT in avail->flags -
+# this driver never writes that field and the queue lives in .bss, so it should
+# be zero, which is worth confirming rather than assuming, since assuming is
+# what cost the previous three attempts - and MSI-X, which QEMU's
+# virtio-blk-pci advertises by default and which changes how the device
+# signals.
+#
+# The probe stays. It answers three questions in one line and it is the reason
+# this entry ends with a fact instead of another guess.
+
+case: AHCI stops raising interrupts
+  in ahci.c, remove the PxIE write or the HBA_GHC_IE bit
+  expect: ahci_interrupt_never_fired
+  why it matters: PxIE and GHC.IE are both zero out of reset, so a routed line
+    with either clear delivers nothing - the same silence virtio-blk cost an
+    hour on, and the reason this driver was done second and as a port rather
+    than as an investigation. AHCI carries the log disk on every boot, so it
+    does real work whichever controller the boot disk is on.
+
+case: the AHCI handler acknowledges in the wrong order
+  in vibeos_x86_64_ahci_irq, clear HBA_IS before PxIS
+  expect: ahci_irqs stops at 1 - the first interrupt arrives and no more
+  why it matters: the controller re-asserts its own bit while the port is still
+    asserting, so clearing the controller first leaves it believing the port is
+    active and it never raises another. A hang that looks exactly like a device
+    that stopped working.
+
+case: the wait halts before interrupts are enabled
+  in ahci_may_halt, drop the RFLAGS.IF test
+  expect: the boot stops in kernel_early_init
+  why it matters: virtio-blk learned this one the hard way. Most disk reads
+    happen during bring-up, where there is no timer and interrupts are off, so
+    a halt there is a machine that never resumes.
+
+case: the AHCI counter stops being reported
+  in kmain.c, remove ahci_irqs from the WAITS line
+  expect: ahci_irq_counter_missing
+  why it matters: the same distinction as everywhere else here - "the number is
+    zero" and "there is no number" are different failures, and this
+    investigation spent an hour on exactly that confusion.

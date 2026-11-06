@@ -1,0 +1,33 @@
+# Target source: kernel/abi/linux/futex.c (futex), kernel/abi/linux/proc.c (TLS), kernel/abi/linux/mm.c (mprotect), kernel/arch/x86_64/arch_hw.c (the rest); kernel/arch/x86_64/task_life.c (the join word, which moved with exit)
+
+### the join word is cleared after the context switch, so nobody is woken
+--- old
+    if (dying >= 0 && g_tasks[dying].id.clear_child_tid != 0u) {
+        uint64_t addr = g_tasks[dying].id.clear_child_tid;
+        uint32_t why = HW_RANGE_OK;
++++ new
+    if (0) {
+        uint64_t addr = g_tasks[dying].id.clear_child_tid;
+        uint32_t why = HW_RANGE_OK;
+
+### a thread gets its creator's TLS instead of its own
+--- old
+                   (flags & LINUX_CLONE_SETTLS) ? tls : ks_tls_get(me));
++++ new
+                   ks_tls_get(me));
+
+### futex wait sleeps without checking the value first
+--- old
+        if (cur != words[i].expected) {
+            ks_unlock(&g_futex_lock);
++++ new
+        if (0) {
+            ks_unlock(&g_futex_lock);
+
+### mprotect leaves a reserved page unreachable from ring 3
+--- old
+    p = (vibeos_prot_t)(VIBEOS_PROT_READ | VIBEOS_PROT_USER);
+    if (prot & LINUX_PROT_WRITE) {
++++ new
+    p = (vibeos_prot_t)(VIBEOS_PROT_READ);
+    if (prot & LINUX_PROT_WRITE) {

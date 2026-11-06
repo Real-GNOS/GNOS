@@ -1,0 +1,26 @@
+# Target source: kernel/core/kmain.c
+
+### Ctrl-C on the serial console is discarded as an ordinary control byte
+--- old
+        if (ch == 3) {
++++ new
+        if (0) {
+
+# Deliberately not a case: removing the call to console_interrupt() below
+# leaves the boot green, and that is a fact about the boot rather than a hole
+# in the gate. By the time the kernel CLI runs, userland has finished - the
+# instrumentation says so outright, "delivered=0 newest_pid=0" - so there is
+# no foreground process for Ctrl-C to reach and nothing an assertion here
+# could observe. Gating delivery needs a live foreground job at the moment the
+# key arrives, which this boot does not have; see init_system.md.
+#
+# The case was written, run, and came back NOT RED. It is recorded here rather
+# than deleted, because the next person to add it will otherwise rediscover
+# the same thing by hand.
+
+# 2026-09-11: delivery of a signal to a task blocked in the kernel has now been
+# observed, though not through Ctrl-C. THREADS_C5_EXIT_GROUP_BLOCKED leaves the
+# leader in a futex wait nobody will end and kills it from a sibling; it was red
+# until blocking waits started asking hw_signal_interrupts, and every one of them
+# had ignored signals until then - console read included. So the absence this
+# file records was not only a gap in the gate: there was nothing to observe.

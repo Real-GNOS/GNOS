@@ -1,0 +1,367 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef VIBEOS_INET_H
+#define VIBEOS_INET_H
+
+/* A real TCP/IP stack: Ethernet, ARP, IPv4, ICMP, UDP, TCP, plus a DHCP client
+ * and a DNS resolver.
+ *
+ * The stack is portable: it never touches hardware. It is handed received
+ * frames, it emits frames through a transmit callback, and it is driven forward
+ * in time by a periodic poll. That keeps every protocol decision - checksums,
+ * the ARP cache, the TCP state machine, retransmission - testable on the host
+ * while the same code runs on metal behind a virtio-net driver.
+ *
+ * Addresses are host byte order in this API (a uint32_t IPv4 address reads
+ * a.b.c.d from most significant byte down); wire byte order is applied inside.
+ */
+
+#include <stdint.h>
+#include <stddef.h>
+#include "vibeos/net_policy.h"
+
+#define VIBEOS_INET_MAX_SOCKETS 16u
+#define VIBEOS_INET_ARP_ENTRIES 8u
+#define VIBEOS_INET_DNS_CACHE_ENTRIES 8u
+#define VIBEOS_INET_MTU 1514u        /* Ethernet frame incl. header, no FCS */
+#define VIBEOS_INET_RXBUF 4096u      /* per-socket receive buffer            */
+#define VIBEOS_INET_TXBUF 4096u      /* per-socket unacknowledged send data  */
+#define VIBEOS_INET_BACKLOG 4u
+#define VIBEOS_INET_OOO_SLOTS 4u     /* out-of-order TCP segments held per socket */
+#define VIBEOS_INET_TCP_MSS 1024u
+#define VIBEOS_INET_DNS_PENDING 4u   /* concurrent DNS queries                    */
+#define VIBEOS_INET_LOOP_SLOTS 16u   /* loopback packets waiting for the next poll */
+
+/* How long a closing connection is kept before its slot is reclaimed. Real
+ * TIME_WAIT is 2*MSL; a minimal stack on a virtual link uses a short, bounded
+ * value so sockets cannot accumulate. */
+#define VIBEOS_INET_TIME_WAIT_MS 4000ull
+
+/* Socket types. */
+enum {
+    VIBEOS_INET_SOCK_NONE = 0,
+    VIBEOS_INET_SOCK_UDP = 1,
+    VIBEOS_INET_SOCK_TCP = 2
+};
+
+/* TCP connection states (RFC 793). */
+enum {
+    VIBEOS_TCP_CLOSED = 0,
+    VIBEOS_TCP_LISTEN,
+    VIBEOS_TCP_SYN_SENT,
+    VIBEOS_TCP_SYN_RECEIVED,
+    VIBEOS_TCP_ESTABLISHED,
+    VIBEOS_TCP_FIN_WAIT_1,
+    VIBEOS_TCP_FIN_WAIT_2,
+    VIBEOS_TCP_CLOSE_WAIT,
+    VIBEOS_TCP_CLOSING,
+    VIBEOS_TCP_LAST_ACK,
+    VIBEOS_TCP_TIME_WAIT
+};
+
+/* Errors returned by the socket calls (negative). */
+#define VIBEOS_INET_EAGAIN 1
+#define VIBEOS_INET_EINVAL 2
+#define VIBEOS_INET_ECONNRESET 3
+#define VIBEOS_INET_ENOTCONN 4
+#define VIBEOS_INET_ETIMEDOUT 5
+#define VIBEOS_INET_ENOBUFS 6
+#define VIBEOS_INET_EPIPE 7      /* this side's FIN is out: nothing more to send */
+#define VIBEOS_INET_EADDRINUSE 8 /* another socket holds the port                */
+#define VIBEOS_INET_EISCONN 9    /* connected already                            */
+
+typedef struct vibeos_arp_entry {
+    uint32_t ip;
+    uint8_t mac[6];
+    uint8_t valid;
+    uint64_t expires_ms;
+} vibeos_arp_entry_t;
+
+typedef struct vibeos_dns_cache_entry {
+    char name[64];
+    uint32_t ip;
+    uint64_t expires_ms;
+    uint8_t valid;
+} vibeos_dns_cache_entry_t;
+
+typedef struct vibeos_inet_socket {
+    uint8_t type;            /* VIBEOS_INET_SOCK_*                          */
+    uint8_t state;           /* TCP state; unused for UDP                   */
+    uint8_t used;
+    uint8_t reset;           /* peer sent RST                               */
+    uint16_t local_port;
+    uint16_t remote_port;
+    uint32_t remote_ip;
+    uint32_t owner_pid;         /* 0 while owned by the kernel/control plane */
+    uint32_t reuse_uid;         /* who asked to share the port (M-130)      */
+
+    /* TCP sequence state. */
+    uint32_t snd_una;        /* oldest unacknowledged byte                  */
+    uint32_t snd_nxt;        /* next byte to send                           */
+    uint32_t rcv_nxt;        /* next byte expected                          */
+    uint16_t snd_wnd;        /* peer's advertised window                    */
+    uint8_t fin_sent;
+    uint8_t fin_received;
+    uint8_t fin_queued;      /* nothing more to send: the FIN follows the data */
+    uint8_t closed;          /* its owner let go (vibeos_inet_close): the slot may
+                              * be reclaimed once the exchange ends, not before */
+    uint8_t shut_rd;         /* shutdown(SHUT_RD): reads end once rx is empty  */
+    uint8_t bound;           /* a port is this socket's: bind, listen, connect, a send */
+    uint8_t reuse;           /* VIBEOS_INET_REUSE_*: who else may bind the port   */
+    uint8_t udp_peer;        /* a connected datagram socket: remote_* is its peer */
+    uint32_t local_ip;       /* what bind named; 0 is any                    */
+
+    /* Retransmission of the single outstanding send window. */
+    uint64_t rto_deadline_ms;
+    uint32_t rto_ms;
+    uint32_t retries;
+
+    uint8_t rx[VIBEOS_INET_RXBUF];
+    uint32_t rx_len;
+    uint8_t tx[VIBEOS_INET_TXBUF];
+    uint32_t tx_len;         /* bytes queued but not yet acknowledged        */
+
+    /* Out-of-order TCP segments, held until the gap ahead of them is filled.
+     * Without this a single reordered or lost segment forces the peer to
+     * retransmit everything after it. */
+    struct {
+        uint32_t seq;
+        uint32_t len;
+        uint8_t used;
+        uint8_t data[VIBEOS_INET_TCP_MSS];
+    } ooo[VIBEOS_INET_OOO_SLOTS];
+
+    /* Deadline for a connection sitting in TIME_WAIT or waiting for a final
+     * ACK; when it passes the slot is reclaimed. 0 when not armed. */
+    uint64_t close_deadline_ms;
+
+    /* UDP datagrams are queued in the same rx buffer, each one framed as
+     * [len:2][src ip:4][src port:2][payload], so a socket can hold several and
+     * recvfrom returns exactly one per call. */
+    uint32_t last_src_ip;
+    uint16_t last_src_port;
+    uint32_t udp_dropped;    /* datagrams discarded because the queue was full */
+
+    /* Unique per allocation (from net->sock_gen_seq); 0 means never allocated.
+     * Distinguishes this socket from a later tenant of the same slot (H-028). */
+    uint32_t gen;
+
+    /* Listening sockets hand completed connections to accept(). */
+    int backlog[VIBEOS_INET_BACKLOG];
+    uint32_t backlog_len;
+    int parent;              /* index of the listening socket, or -1         */
+    uint32_t parent_gen;     /* the listener's `gen` when the SYN arrived; the
+                              * final ACK requires the parent slot to still hold
+                              * that same listener before queueing (H-028)      */
+} vibeos_inet_socket_t;
+
+/* Frame transmit hook, provided by the driver. Returns 0 on success. */
+typedef int (*vibeos_inet_tx_fn)(void *ctx, const void *frame, uint32_t len);
+
+typedef struct vibeos_inet {
+    uint8_t mac[6];
+    uint32_t ip;
+    uint32_t netmask;
+    uint32_t gateway;
+    uint32_t dns;
+
+    vibeos_inet_tx_fn tx;
+    void *tx_ctx;
+    vibeos_net_policy_t *policy;
+
+    uint64_t now_ms;
+    uint16_t next_ephemeral;
+    uint16_t ip_id;
+    /* Monotonic allocation stamp handed to every socket at sock_alloc, so a
+     * slot index alone can no longer identify a socket across reuse: a child in
+     * SYN_RECEIVED remembers its listener's stamp and rechecks it on the final
+     * ACK, defeating the ABA where the listener is closed and its slot taken by
+     * an unrelated socket before the handshake completes (H-028). */
+    uint32_t sock_gen_seq;
+
+    vibeos_arp_entry_t arp[VIBEOS_INET_ARP_ENTRIES];
+    /* The address the last ARP request asked for, and until when a reply to it
+     * is accepted. Only a reply to a request the stack sent may change the
+     * hardware address of a neighbour it already knows (M-008). */
+    uint32_t arp_pending_ip;
+    uint64_t arp_pending_until_ms;
+    vibeos_inet_socket_t sockets[VIBEOS_INET_MAX_SOCKETS];
+
+    /* One in-flight ICMP echo, so `ping` can report a round trip. */
+    uint16_t ping_id;
+    uint16_t ping_seq;
+    uint32_t ping_peer;
+    uint8_t ping_pending;
+    uint8_t ping_replied;
+    uint64_t ping_sent_ms;
+    uint64_t ping_rtt_ms;
+
+    /* DHCP client. States 4 and 5 are renewing and rebinding: a lease is not
+     * permanent, and one that is never renewed silently expires. */
+    uint8_t dhcp_state;      /* 0 idle, 1 discover, 2 request, 3 bound,
+                                4 renewing, 5 rebinding                       */
+    uint32_t dhcp_xid;
+    uint32_t dhcp_offer_ip;
+    uint32_t dhcp_server;
+    uint64_t dhcp_retry_ms;
+    uint64_t dhcp_t1_ms;     /* renew at this time  */
+    uint64_t dhcp_t2_ms;     /* rebind at this time */
+    uint64_t dhcp_expire_ms; /* lease is gone after this */
+    uint32_t dhcp_lease_secs;
+    uint64_t dhcp_renewals;
+
+    /* One in-flight DNS query, with bounded retries. */
+    uint16_t dns_id;
+    uint16_t dns_port;       /* local port the pending query was sent from   */
+    uint32_t dns_query_seq;  /* queries issued; an input to the next id      */
+    uint8_t dns_pending;
+    uint8_t dns_done;
+    uint8_t dns_retries;
+    uint64_t dns_retry_ms;
+    uint32_t dns_result;
+    char dns_name[64];
+    vibeos_dns_cache_entry_t dns_cache[VIBEOS_INET_DNS_CACHE_ENTRIES];
+    uint64_t dns_timeouts;
+
+    /* Counters, so the system can report what the link actually did. */
+    uint64_t rx_frames;
+    uint64_t tx_frames;
+    uint64_t rx_dropped;
+    uint64_t arp_replies;
+    uint64_t tcp_retransmits;
+    /* MUST BE ZERO. A completed TCP handshake whose parent listener slot was,
+     * by the time of the final ACK, holding a *different* socket - the listener
+     * closed and its slot reused mid-handshake (H-028's slot-index ABA). The
+     * guard drops the child instead of queueing it onto the stranger's accept
+     * queue, and this counts the drops that were the ABA rather than a listener
+     * that simply went away. Zero on any honest boot; test_inet_tcp_accept_aba
+     * drives it non-zero on purpose. */
+    uint64_t sock_stale_parent;
+    /* MUST BE ZERO. A blocking socket syscall - accept, connect, recvfrom -
+     * whose file descriptor was closed and its slot reused by another thread of
+     * the process while it slept, so the descriptor named a different socket on
+     * wake than the one the call was made for (M-020, the slot-index ABA in the
+     * FD table). The syscall returns EBADF instead of acting on the stranger;
+     * this counts those. Zero unless a thread pulls a descriptor out from under
+     * a sibling's blocking call. */
+    uint64_t sock_fd_aba;
+
+    /* The secret every identifier a reply is matched on is derived from - TCP
+     * initial sequence numbers (H-008), the DHCP xid (H-009), the DNS id and
+     * source port (M-007). Zero until the platform supplies one. */
+    uint64_t secret[2];
+
+    uint8_t scratch[VIBEOS_INET_MTU];
+
+    /* Loopback (docs/abi/ L5): a packet for 127.0.0.0/8 or for this machine's
+     * own address never reaches the device. It waits here, whole, and the
+     * next vibeos_inet_poll feeds it to the input path - not at once, because
+     * the sender is in the middle of changing the very socket a reply would be
+     * matched against (connect sends its SYN before it is SYN_SENT's to
+     * answer). A full ring drops, as a wire would, and TCP sends again. */
+    uint32_t loop_head, loop_count;
+    uint64_t loop_frames, loop_dropped;
+    struct {
+        uint16_t len;
+        uint8_t pkt[VIBEOS_INET_MTU];
+    } loop[VIBEOS_INET_LOOP_SLOTS];
+    uint8_t loop_rx[VIBEOS_INET_MTU];
+} vibeos_inet_t;
+
+/* ---- lifecycle ---------------------------------------------------------- */
+
+int vibeos_inet_init(vibeos_inet_t *net, const uint8_t mac[6],
+                     vibeos_inet_tx_fn tx, void *tx_ctx);
+void vibeos_inet_set_addr(vibeos_inet_t *net, uint32_t ip, uint32_t netmask,
+                          uint32_t gateway, uint32_t dns);
+/* The secret the stack derives unguessable identifiers from. It has no
+ * entropy of its own - it is portable code - so the platform supplies this once
+ * after init, from the best source it has. */
+void vibeos_inet_set_secret(vibeos_inet_t *net, uint64_t k0, uint64_t k1);
+void vibeos_inet_set_policy(vibeos_inet_t *net, vibeos_net_policy_t *policy);
+
+/* Feed one received Ethernet frame. Returns 0 if it was consumed. */
+int vibeos_inet_input(vibeos_inet_t *net, const void *frame, uint32_t len);
+
+/* Advance time: ARP expiry, TCP retransmission, DHCP retries. */
+void vibeos_inet_poll(vibeos_inet_t *net, uint64_t now_ms);
+
+/* ---- sockets ------------------------------------------------------------ */
+
+int vibeos_inet_socket(vibeos_inet_t *net, int type);
+int vibeos_inet_socket_set_owner(vibeos_inet_t *net, int sock, uint32_t owner_pid);
+int vibeos_inet_socket_owner(const vibeos_inet_t *net, int sock, uint32_t *out_owner_pid);
+int vibeos_inet_bind(vibeos_inet_t *net, int sock, uint16_t port);
+int vibeos_inet_connect(vibeos_inet_t *net, int sock, uint32_t ip, uint16_t port);
+int vibeos_inet_listen(vibeos_inet_t *net, int sock);
+int vibeos_inet_accept(vibeos_inet_t *net, int sock);
+long vibeos_inet_send(vibeos_inet_t *net, int sock, const void *buf, uint32_t len);
+long vibeos_inet_recv(vibeos_inet_t *net, int sock, void *buf, uint32_t len);
+long vibeos_inet_sendto(vibeos_inet_t *net, int sock, const void *buf, uint32_t len,
+                        uint32_t ip, uint16_t port);
+long vibeos_inet_recvfrom(vibeos_inet_t *net, int sock, void *buf, uint32_t len,
+                          uint32_t *out_ip, uint16_t *out_port);
+
+/* docs/abi/ L5 step 1: the BSD calls as Linux has them.
+ *
+ * bind_addr names an address (0 for any) and a port (0 for one of the stack's
+ * own); a socket bound already is EINVAL, and a port another socket holds is
+ * EADDRINUSE unless both asked for reuse and neither listens. A receive with
+ * VIBEOS_INET_PEEK leaves what it read where it was; a datagram's *full_len is
+ * its whole length, for MSG_TRUNC. names says where the socket is and who its
+ * peer is, 1 if it has one. A datagram socket may connect, which names its
+ * peer for sends without an address. */
+#define VIBEOS_INET_PEEK 0x1u
+int vibeos_inet_bind_addr(vibeos_inet_t *net, int sock, uint32_t ip, uint16_t port);
+/* SO_REUSEADDR: another may bind the port unless it is listening.
+ * SO_REUSEPORT: another that asked for it too may bind it, listening or not
+ * (#60). Linux also asks that both belong to one user; the stack does not know
+ * users, and that half is not here. */
+#define VIBEOS_INET_REUSE_ADDR 1u
+#define VIBEOS_INET_REUSE_PORT 2u
+/* `uid`: whose socket it is, for SO_REUSEPORT - Linux shares a port only
+ * between sockets of one effective user (M-130). */
+int vibeos_inet_set_reuse(vibeos_inet_t *net, int sock, int how, uint32_t uid);
+long vibeos_inet_recv_ex(vibeos_inet_t *net, int sock, void *buf, uint32_t len, uint32_t flags);
+long vibeos_inet_recvfrom_ex(vibeos_inet_t *net, int sock, void *buf, uint32_t len, uint32_t flags,
+                             uint32_t *out_ip, uint16_t *out_port, uint32_t *full_len);
+int vibeos_inet_names(const vibeos_inet_t *net, int sock, uint32_t *lip, uint16_t *lport,
+                      uint32_t *rip, uint16_t *rport);
+int vibeos_inet_close(vibeos_inet_t *net, int sock);
+/* Half a close (docs/abi/ L4 step 7, for httpd and nc): VIBEOS_INET_SHUT_WR sends
+ * the FIN and leaves the socket open for what the peer still sends;
+ * VIBEOS_INET_SHUT_RD ends reads once what has arrived is read. -ENOTCONN for a
+ * socket that is not connected. */
+#define VIBEOS_INET_SHUT_RD 1
+#define VIBEOS_INET_SHUT_WR 2
+int vibeos_inet_shutdown(vibeos_inet_t *net, int sock, int how);
+int vibeos_inet_close_owned(vibeos_inet_t *net, int sock, uint32_t owner_pid);
+uint32_t vibeos_inet_release_owner_sockets(vibeos_inet_t *net, uint32_t owner_pid);
+int vibeos_inet_socket_state(const vibeos_inet_t *net, int sock);
+/* Whether `dst` is reached without the gateway: on the interface's network,
+ * the broadcast address, or this machine. What SO_DONTROUTE allows. */
+int vibeos_inet_on_link(const vibeos_inet_t *net, uint32_t dst);
+
+/* What a socket can do now without waiting (docs/abi/ L4), as Linux's tcp_poll
+ * and udp_poll say it: VIBEOS_INET_READY_*, 0 for a socket that is not there.
+ * Under the caller's network lock, like every call here. */
+#define VIBEOS_INET_READY_IN    0x1u   /* a receive returns now: data, the end, an error;
+                                        * for a listener, a connection to accept      */
+#define VIBEOS_INET_READY_OUT   0x2u   /* a send takes something now                  */
+#define VIBEOS_INET_READY_HUP   0x4u   /* nothing more either way, or never connected */
+#define VIBEOS_INET_READY_ERR   0x8u   /* the connection was reset                    */
+#define VIBEOS_INET_READY_RDHUP 0x10u  /* the peer closed its half                    */
+uint32_t vibeos_inet_ready(const vibeos_inet_t *net, int sock);
+
+/* ---- utilities ---------------------------------------------------------- */
+
+int vibeos_inet_ping(vibeos_inet_t *net, uint32_t ip);
+int vibeos_inet_ping_result(const vibeos_inet_t *net, uint64_t *out_rtt_ms);
+int vibeos_inet_dhcp_start(vibeos_inet_t *net);
+int vibeos_inet_dhcp_bound(const vibeos_inet_t *net);
+int vibeos_inet_resolve(vibeos_inet_t *net, const char *name);
+int vibeos_inet_resolve_result(const vibeos_inet_t *net, uint32_t *out_ip);
+
+uint16_t vibeos_inet_checksum(const void *data, uint32_t len);
+uint32_t vibeos_inet_parse_ip(const char *s);
+
+#endif

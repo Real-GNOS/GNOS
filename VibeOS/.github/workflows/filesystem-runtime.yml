@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Filesystem Runtime Gate
+
+on:
+  pull_request:
+    paths:
+      - "kernel/arch/x86_64/arch_hw.c"
+      - "kernel/fs/fat.c"
+      - "kernel/fs/**"
+      - "include/vibeos/**"
+      - "user/prog/**"
+      - "scripts/qemu-*.py"
+      - "scripts/qemu-*.sh"
+      - "cmake/**"
+      - ".github/workflows/filesystem-runtime.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "kernel/arch/x86_64/arch_hw.c"
+      - "kernel/fs/fat.c"
+      - "kernel/fs/**"
+      - "include/vibeos/**"
+      - "user/prog/**"
+      - "scripts/qemu-*.py"
+      - "scripts/qemu-*.sh"
+      - "cmake/**"
+      - ".github/workflows/filesystem-runtime.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: filesystem-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  filesystem-runtime:
+    name: Filesystem runtime / Clang Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Harden The Runner
+        # Every outbound connection and process this job makes, recorded:
+        # the jobs a pull request triggers run code somebody else wrote, and
+        # what that code does is the one thing a scan of its text cannot
+        # tell. Audit, not block, until a few runs say which endpoints are
+        # this build's own (2026-11-05).
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # ntfs-3g, exfatprogs and mtools build the NTFS, exFAT and long-name FAT images the boot
+          # mounts and the gate asserts; without them both report "no image".
+          sudo apt-get install -y qemu-system-x86 qemu-utils ninja-build build-essential clang ovmf xorriso musl-tools busybox-static ntfs-3g exfatprogs mtools gcc-mingw-w64-x86-64
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DVIBEOS_BUILD_TESTS=ON \
+            -DVIBEOS_BUILD_KERNEL_IMAGE=ON \
+            -DVIBEOS_REQUIRE_TLS=ON
+
+      - name: Build and host tests
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          cmake --build build --target vibeos_image
+
+      - name: Boot-to-CLI filesystem smoke (virtio-blk)
+        run: |
+          set -euo pipefail
+          chmod +x scripts/qemu-cli-smoke-linux.py
+          python3 scripts/qemu-cli-smoke-linux.py build 900
+
+      # The same boot on a SATA controller. VibeOS could only talk to
+      # virtio-blk for a long time, which is what QEMU offers and no desktop
+      # hypervisor does, so the appliances imported, booted, and then could not
+      # read their own disk - and nothing caught it because CI only ever ran
+      # the controller QEMU defaults to. The driver that nobody runs is the one
+      # that ships broken.
+      - name: Boot-to-CLI filesystem smoke (AHCI/SATA)
+        env:
+          VIBEOS_SMOKE_DISK: ahci
+        run: |
+          set -euo pipefail
+          python3 scripts/qemu-cli-smoke-linux.py build 900
+
+      - name: Upload filesystem diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: filesystem-runtime-diagnostics
+          path: |
+            build/artifacts/**
+            build/Testing/**/Test.xml
+            qemu-cli-serial.log
+            qemu-cli-err.log
+            qemu-cli-summary.txt
+          if-no-files-found: warn

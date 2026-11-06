@@ -1,0 +1,1216 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef VIBEOS_LINUX_LAYOUT_H
+#define VIBEOS_LINUX_LAYOUT_H
+
+/* Linux's x86-64 structures and numbers, as this kernel reads and writes them
+ * (docs/abi/ A5, invariant 8).
+ *
+ * Every structure a Linux handler copies to or from user memory is declared
+ * here, and every constant a handler compares a user's argument against. They
+ * used to be byte offsets and bare numbers in each handler - `rec[18]`,
+ * `STAT_OFF_UID 28u`, `domain != 2u` for AF_INET - with TIOCGPGRP and AT_FDCWD
+ * spelled twice, and each was exactly as right as whoever typed it.
+ *
+ * Nothing here is taken from Linux's headers: the kernel is freestanding and
+ * builds on hosts that have none. What makes the copy trustworthy is
+ * tests/kernel/linux_layout_tests.c, which compiles against the host's own
+ * uapi headers and compares every field's offset and size, every structure's
+ * size and every constant with Linux's. check-linux-layout.py fails the build
+ * when something is declared here that the test does not compare - so a field
+ * added without its check is refused rather than trusted.
+ *
+ * Linux's own names are used for fields, so the test reads as a comparison of
+ * like with like. Padding is named and compared too: a pad that moves means a
+ * field after it moved.
+ *
+ * Personality-neutral values that happen to be Linux's - the file layer's
+ * VIBEOS_O_* flags, the errno numbers, signal numbers - stay where they are and
+ * are compared by the same test. */
+
+#include <stdint.h>
+
+/* ---- structures --------------------------------------------------------------------- */
+
+/* struct stat (asm/stat.h), what fstat and newfstatat write. */
+typedef struct {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint64_t st_nlink;
+    uint32_t st_mode;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint32_t pad0;
+    uint64_t st_rdev;
+    int64_t st_size;
+    int64_t st_blksize;
+    int64_t st_blocks;
+    uint64_t st_atime;
+    uint64_t st_atime_nsec;
+    uint64_t st_mtime;
+    uint64_t st_mtime_nsec;
+    uint64_t st_ctime;
+    uint64_t st_ctime_nsec;
+    int64_t unused[3];
+} linux_stat_t;
+
+/* struct __kernel_timespec (linux/time_types.h): clock_gettime. */
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+} linux_timespec_t;
+
+/* struct new_utsname (linux/utsname.h): uname. */
+typedef struct {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+} linux_utsname_t;
+
+/* struct sysinfo (linux/sysinfo.h). Its trailing _f[] is zero bytes long on a
+ * 64-bit machine, so the size is what alignment makes of mem_unit. */
+typedef struct {
+    int64_t uptime;
+    uint64_t loads[3];
+    uint64_t totalram;
+    uint64_t freeram;
+    uint64_t sharedram;
+    uint64_t bufferram;
+    uint64_t totalswap;
+    uint64_t freeswap;
+    uint16_t procs;
+    uint16_t pad;
+    uint64_t totalhigh;
+    uint64_t freehigh;
+    uint32_t mem_unit;
+} linux_sysinfo_t;
+
+/* struct sockaddr_in (linux/in.h). Port and address are in network order. */
+typedef struct {
+    uint16_t sin_family;
+    uint16_t sin_port;
+    uint32_t sin_addr;
+    uint8_t sin_zero[8];
+} linux_sockaddr_in_t;
+
+/* struct iovec (linux/uio.h): readv and writev. */
+typedef struct {
+    uint64_t iov_base;
+    uint64_t iov_len;
+} linux_iovec_t;
+
+/* struct rlimit64 (linux/resource.h): prlimit64. */
+typedef struct {
+    uint64_t rlim_cur;
+    uint64_t rlim_max;
+} linux_rlimit64_t;
+
+/* The kernel's struct sigaction (asm/signal.h on x86-64), which is not the C
+ * library's: handler, flags, restorer, then an 8-byte mask. rt_sigaction. */
+typedef struct {
+    uint64_t sa_handler;
+    uint64_t sa_flags;
+    uint64_t sa_restorer;
+    uint64_t sa_mask;
+} linux_sigaction_t;
+
+/* One getdents64 record: this header, the name and its NUL, padded to 8.
+ * Linux does not export struct linux_dirent64, so the test compares it with the
+ * C library's struct dirent64, which readdir hands out as the kernel wrote it. */
+typedef struct {
+    uint64_t d_ino;
+    int64_t d_off;
+    uint16_t d_reclen;
+    uint8_t d_type;
+    char d_name[];
+} linux_dirent64_t;
+
+/* struct statx_timestamp and struct statx (linux/stat.h). Linux keeps adding
+ * fields at the end, into what used to be spare, so only the part this kernel
+ * fills is declared field by field; `rest` is whatever follows, up to the size
+ * - which is 256 bytes and has not changed. */
+typedef struct {
+    int64_t tv_sec;
+    uint32_t tv_nsec;
+    int32_t pad;
+} linux_statx_timestamp_t;
+
+typedef struct {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t spare0;
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    linux_statx_timestamp_t stx_atime;
+    linux_statx_timestamp_t stx_btime;
+    linux_statx_timestamp_t stx_ctime;
+    linux_statx_timestamp_t stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t rest[14];
+} linux_statx_t;
+
+/* struct statfs (asm-generic/statfs.h): statfs and fstatfs. */
+typedef struct {
+    int64_t f_type;
+    int64_t f_bsize;
+    int64_t f_blocks;
+    int64_t f_bfree;
+    int64_t f_bavail;
+    int64_t f_files;
+    int64_t f_ffree;
+    int32_t f_fsid[2];
+    int64_t f_namelen;
+    int64_t f_frsize;
+    int64_t f_flags;
+    int64_t f_spare[4];
+} linux_statfs_t;
+
+/* struct open_how (linux/openat2.h): openat2. */
+typedef struct {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+} linux_open_how_t;
+
+/* struct utimbuf (linux/utime.h) and struct __kernel_old_timeval
+ * (linux/time_types.h): utime, and utimes and futimesat. */
+typedef struct {
+    int64_t actime;
+    int64_t modtime;
+} linux_utimbuf_t;
+
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_usec;
+} linux_timeval_t;
+
+/* struct timex (linux/timex.h): adjtimex's and clock_adjtime's - the clock's
+ * discipline, as NTP sets it. The padding is Linux's unnamed alignment and its
+ * eleven reserved ints. */
+typedef struct {
+    uint32_t modes;
+    int32_t pad0;
+    int64_t offset;
+    int64_t freq;
+    int64_t maxerror;
+    int64_t esterror;
+    int32_t status;
+    int32_t pad1;
+    int64_t constant;
+    int64_t precision;
+    int64_t tolerance;
+    linux_timeval_t time;
+    int64_t tick;
+    int64_t ppsfreq;
+    int64_t jitter;
+    int32_t shift;
+    int32_t pad2;
+    int64_t stabil;
+    int64_t jitcnt;
+    int64_t calcnt;
+    int64_t errcnt;
+    int64_t stbcnt;
+    int32_t tai;
+    int32_t pad3[11];
+} linux_timex_t;
+#define LINUX_ADJ_OFFSET_SS_READ 0xa001u
+/* uapi's names, which are not the kernel's own: ADJ_OFFSET_SINGLESHOT here is
+ * the old adjtime() form, ADJ_OFFSET (0x0001) with the kernel-internal
+ * ADJ_ADJTIME bit (0x8000) that no header exports. */
+#define LINUX_ADJ_OFFSET            0x0001u
+#define LINUX_ADJ_OFFSET_SINGLESHOT 0x8001u
+#define LINUX_STA_UNSYNC         0x0040
+#define LINUX_TIME_ERROR         5
+
+/* struct flock (asm-generic/fcntl.h): fcntl's record locks. */
+typedef struct {
+    int16_t l_type;
+    int16_t l_whence;
+    int64_t l_start;
+    int64_t l_len;
+    int32_t l_pid;
+} linux_flock_t;
+
+/* One getdents record, the call before getdents64: this header, the name and
+ * its NUL, padding, and the type in the record's last byte. Linux exports no
+ * declaration of it and no C library uses it, so the test asks the host's
+ * kernel for a directory and reads the answer through this structure. */
+typedef struct {
+    uint64_t d_ino;
+    uint64_t d_off;
+    uint16_t d_reclen;
+    char d_name[];
+} linux_dirent_t;
+
+/* struct termios (asm-generic/termbits.h) - the kernel's, which is shorter
+ * than the C library's - and struct winsize (asm-generic/termios.h): the
+ * terminal's modes and size, by ioctl. */
+typedef struct {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t c_line;
+    uint8_t c_cc[19];
+} linux_termios_t;
+
+typedef struct {
+    uint16_t ws_row;
+    uint16_t ws_col;
+    uint16_t ws_xpixel;
+    uint16_t ws_ypixel;
+} linux_winsize_t;
+
+/* struct pollfd (asm-generic/poll.h): poll. */
+typedef struct {
+    int32_t fd;
+    int16_t events;
+    int16_t revents;
+} linux_pollfd_t;
+
+/* __kernel_fd_set (linux/posix_types.h): select's three sets, a bit per
+ * descriptor in 64-bit words. A call reads only as many words as its nfds
+ * needs, so a smaller set in user memory is fine. */
+#define LINUX_FD_SETSIZE 1024
+typedef struct {
+    uint64_t fds_bits[LINUX_FD_SETSIZE / 64];
+} linux_fd_set_t;
+
+/* ---- constants ---------------------------------------------------------------------- */
+
+/* clone() flags that decide whether it is a fork or a thread (linux/sched.h). */
+#define LINUX_CLONE_VM             0x00000100u
+#define LINUX_CLONE_FS             0x00000200u
+#define LINUX_CLONE_FILES          0x00000400u
+#define LINUX_CLONE_SIGHAND        0x00000800u
+#define LINUX_CLONE_VFORK          0x00004000u
+#define LINUX_CLONE_PARENT         0x00008000u
+#define LINUX_CLONE_THREAD         0x00010000u
+#define LINUX_CLONE_SYSVSEM        0x00040000u
+#define LINUX_CLONE_SETTLS         0x00080000u
+#define LINUX_CLONE_PARENT_SETTID  0x00100000u
+#define LINUX_CLONE_CHILD_CLEARTID 0x00200000u
+#define LINUX_CLONE_CHILD_SETTID   0x01000000u
+#define LINUX_CLONE_PIDFD          0x00001000u
+#define LINUX_CLONE_INTO_CGROUP    0x200000000ull
+#define LINUX_CLONE_NEWNS          0x00020000u
+/* clone()'s low byte: the signal the parent is sent when the child ends. */
+#define LINUX_CSIGNAL              0x000000ffu
+#define LINUX_CLONE_ARGS_SIZE_VER0 64u
+
+/* struct clone_args (linux/sched.h): clone3's arguments, version 2. */
+typedef struct {
+    uint64_t flags;
+    uint64_t pidfd;
+    uint64_t child_tid;
+    uint64_t parent_tid;
+    uint64_t exit_signal;
+    uint64_t stack;
+    uint64_t stack_size;
+    uint64_t tls;
+    uint64_t set_tid;
+    uint64_t set_tid_size;
+    uint64_t cgroup;
+} linux_clone_args_t;
+
+/* waitid (linux/wait.h): which children, and what to report. */
+#define LINUX_P_ALL       0
+#define LINUX_P_PID       1
+#define LINUX_P_PGID      2
+#define LINUX_P_PIDFD     3
+#define LINUX_WSTOPPED    0x00000002u
+#define LINUX_WEXITED     0x00000004u
+#define LINUX_WNOWAIT     0x01000000u
+/* pidfd_open's one flag (linux/pidfd.h): O_NONBLOCK. */
+#define LINUX_PIDFD_NONBLOCK 0x00000800u
+/* getrandom's flags (linux/random.h). */
+#define LINUX_GRND_NONBLOCK 0x0001u
+#define LINUX_GRND_RANDOM   0x0002u
+#define LINUX_GRND_INSECURE 0x0004u
+/* eventfd2's, timerfd's and signalfd4's flags (linux/eventfd.h, timerfd.h,
+ * signalfd.h): their own and O_NONBLOCK and O_CLOEXEC under other names. */
+#define LINUX_EFD_SEMAPHORE        0x00000001u
+#define LINUX_EFD_NONBLOCK         0x00000800u
+#define LINUX_EFD_CLOEXEC          0x00080000u
+#define LINUX_TFD_TIMER_ABSTIME    0x00000001u
+#define LINUX_TFD_TIMER_CANCEL_ON_SET 0x00000002u
+#define LINUX_TFD_NONBLOCK         0x00000800u
+#define LINUX_TFD_CLOEXEC          0x00080000u
+#define LINUX_SFD_NONBLOCK         0x00000800u
+#define LINUX_SFD_CLOEXEC          0x00080000u
+
+/* epoll (linux/eventpoll.h): the operations, the flags beside the poll bits, and
+ * the event record - packed on x86-64, twelve bytes, which is the one place the
+ * kernel's own layout of it differs from a natural C struct. */
+#define LINUX_EPOLL_CLOEXEC        0x00080000u
+#define LINUX_EPOLL_CTL_ADD        1u
+#define LINUX_EPOLL_CTL_DEL        2u
+#define LINUX_EPOLL_CTL_MOD        3u
+#define LINUX_EPOLLEXCLUSIVE       0x10000000u
+#define LINUX_EPOLLWAKEUP          0x20000000u
+#define LINUX_EPOLLONESHOT         0x40000000u
+#define LINUX_EPOLLET              0x80000000u
+typedef struct __attribute__((packed)) {
+    uint32_t events;
+    uint64_t data;
+} linux_epoll_event_t;
+
+/* inotify (linux/inotify.h): the events, the flags of a watch, init1's flags,
+ * and the record's header - a name follows it, padded with zeroes to a multiple
+ * of the header. */
+#define LINUX_IN_ACCESS        0x00000001u
+#define LINUX_IN_MODIFY        0x00000002u
+#define LINUX_IN_ATTRIB        0x00000004u
+#define LINUX_IN_CLOSE_WRITE   0x00000008u
+#define LINUX_IN_CLOSE_NOWRITE 0x00000010u
+#define LINUX_IN_OPEN          0x00000020u
+#define LINUX_IN_MOVED_FROM    0x00000040u
+#define LINUX_IN_MOVED_TO      0x00000080u
+#define LINUX_IN_CREATE        0x00000100u
+#define LINUX_IN_DELETE        0x00000200u
+#define LINUX_IN_DELETE_SELF   0x00000400u
+#define LINUX_IN_MOVE_SELF     0x00000800u
+#define LINUX_IN_UNMOUNT       0x00002000u
+#define LINUX_IN_Q_OVERFLOW    0x00004000u
+#define LINUX_IN_IGNORED       0x00008000u
+#define LINUX_IN_ONLYDIR       0x01000000u
+#define LINUX_IN_DONT_FOLLOW   0x02000000u
+#define LINUX_IN_EXCL_UNLINK   0x04000000u
+#define LINUX_IN_MASK_CREATE   0x10000000u
+#define LINUX_IN_MASK_ADD      0x20000000u
+#define LINUX_IN_ISDIR         0x40000000u
+#define LINUX_IN_ONESHOT       0x80000000u
+#define LINUX_IN_NONBLOCK      0x00000800u
+#define LINUX_IN_CLOEXEC       0x00080000u
+typedef struct {
+    int32_t wd;
+    uint32_t mask;
+    uint32_t cookie;
+    uint32_t len;
+} linux_inotify_event_t;
+
+/* struct signalfd_siginfo (linux/signalfd.h): what a read of a signalfd
+ * returns, one 128-byte record per signal taken. */
+typedef struct {
+    uint32_t ssi_signo;
+    int32_t ssi_errno;
+    int32_t ssi_code;
+    uint32_t ssi_pid;
+    uint32_t ssi_uid;
+    int32_t ssi_fd;
+    uint32_t ssi_tid;
+    uint32_t ssi_band;
+    uint32_t ssi_overrun;
+    uint32_t ssi_trapno;
+    int32_t ssi_status;
+    int32_t ssi_int;
+    uint64_t ssi_ptr;
+    uint64_t ssi_utime;
+    uint64_t ssi_stime;
+    uint64_t ssi_addr;
+    uint16_t ssi_addr_lsb;
+    uint16_t pad2;
+    int32_t ssi_syscall;
+    uint64_t ssi_call_addr;
+    uint32_t ssi_arch;
+    uint8_t pad[28];
+} linux_signalfd_siginfo_t;
+
+/* The random devices' ioctl that says how much entropy the pool holds
+ * (linux/random.h): _IOR('R', 0x00, int). */
+#define LINUX_RNDGETENTCNT  0x80045200u
+
+/* *at calls (linux/fcntl.h). AT_FDCWD arrives zero-extended: VIBEOS_ARG_INT. */
+#define LINUX_AT_FDCWD       (-100)
+#define LINUX_AT_SYMLINK_NOFOLLOW 0x100
+#define LINUX_AT_REMOVEDIR   0x200
+#define LINUX_AT_EMPTY_PATH  0x1000
+#define LINUX_AT_EACCESS     0x200   /* faccessat2; the same bit as AT_REMOVEDIR */
+#define LINUX_AT_SYMLINK_FOLLOW 0x400
+#define LINUX_AT_NO_AUTOMOUNT 0x800
+#define LINUX_AT_STATX_SYNC_TYPE 0x6000
+
+/* access (the C library's unistd.h). */
+#define LINUX_R_OK 4
+#define LINUX_W_OK 2
+#define LINUX_X_OK 1
+
+/* renameat2 (linux/fs.h). */
+#define LINUX_RENAME_NOREPLACE (1u << 0)
+#define LINUX_RENAME_EXCHANGE  (1u << 1)
+#define LINUX_RENAME_WHITEOUT  (1u << 2)
+
+/* statx (linux/stat.h): what stat has always reported, and the bit that must
+ * be clear in a mask. */
+#define LINUX_STATX_BASIC_STATS 0x000007ffu
+#define LINUX_STATX_RESERVED    0x80000000u
+
+/* utimensat (the C library's sys/stat.h): "now" and "leave it", in tv_nsec. */
+#define LINUX_UTIME_NOW  ((1l << 30) - 1l)
+#define LINUX_UTIME_OMIT ((1l << 30) - 2l)
+
+/* Every open flag Linux has (asm-generic/fcntl.h): openat2 refuses a bit outside
+ * these, where open ignores it. Linux keeps this as VALID_OPEN_FLAGS, inside
+ * the kernel; the test compares it with the flags themselves, or-ed. */
+#define LINUX_OPEN_VALID 0x7fffc3u
+
+/* openat2's resolve flags (linux/openat2.h). */
+#define LINUX_RESOLVE_NO_XDEV       0x01
+#define LINUX_RESOLVE_NO_MAGICLINKS 0x02
+#define LINUX_RESOLVE_NO_SYMLINKS   0x04
+#define LINUX_RESOLVE_BENEATH       0x08
+#define LINUX_RESOLVE_IN_ROOT       0x10
+#define LINUX_RESOLVE_CACHED        0x20
+
+/* statfs's f_flags (the C library's sys/statvfs.h). */
+#define LINUX_ST_RDONLY 1
+
+/* fcntl commands (asm-generic/fcntl.h, linux/fcntl.h). */
+#define LINUX_F_DUPFD          0
+#define LINUX_F_GETFD          1
+#define LINUX_F_SETFD          2
+#define LINUX_F_GETFL          3
+#define LINUX_F_SETFL          4
+#define LINUX_F_GETLK          5
+#define LINUX_F_SETLK          6
+#define LINUX_F_SETLKW         7
+#define LINUX_F_DUPFD_CLOEXEC  1030
+#define LINUX_F_SETPIPE_SZ     1031
+#define LINUX_F_GETPIPE_SZ     1032
+#define LINUX_F_OFD_GETLK      36
+#define LINUX_F_OFD_SETLK      37
+#define LINUX_F_OFD_SETLKW     38
+
+/* struct flock's l_type, and flock's operations (asm-generic/fcntl.h). */
+#define LINUX_F_RDLCK 0
+#define LINUX_F_WRLCK 1
+#define LINUX_F_UNLCK 2
+#define LINUX_LOCK_SH 1
+#define LINUX_LOCK_EX 2
+#define LINUX_LOCK_NB 4
+#define LINUX_LOCK_UN 8
+
+/* setxattr's flags and limits (linux/xattr.h, linux/limits.h). */
+#define LINUX_XATTR_CREATE   1
+#define LINUX_XATTR_REPLACE  2
+#define LINUX_XATTR_NAME_MAX 255
+#define LINUX_XATTR_SIZE_MAX 65536
+
+/* fallocate modes (linux/falloc.h) and posix_fadvise advice (linux/fadvise.h):
+ * the one mode honoured, and the largest advice there is. */
+#define LINUX_FALLOC_FL_KEEP_SIZE 0x01
+#define LINUX_POSIX_FADV_NOREUSE  5
+
+/* ioctl requests (asm-generic/ioctls.h): the terminal's, and the four any
+ * descriptor answers. The process-group pair is the file layer's
+ * (VIBEOS_IOCTL_*). */
+#define LINUX_TCGETS     0x5401u
+#define LINUX_TCSETS     0x5402u
+#define LINUX_TCSETSW    0x5403u
+#define LINUX_TCSETSF    0x5404u
+#define LINUX_TIOCGWINSZ 0x5413u
+#define LINUX_TIOCSWINSZ 0x5414u
+#define LINUX_FIONREAD   0x541Bu
+#define LINUX_FIONBIO    0x5421u
+#define LINUX_FIONCLEX   0x5450u
+#define LINUX_FIOCLEX    0x5451u
+
+/* poll's events (asm-generic/poll.h). */
+#define LINUX_POLLIN   0x0001
+#define LINUX_POLLOUT  0x0004
+#define LINUX_POLLERR  0x0008
+#define LINUX_POLLHUP  0x0010
+#define LINUX_POLLNVAL 0x0020
+#define LINUX_POLLRDNORM 0x0040
+#define LINUX_POLLWRNORM 0x0100
+#define LINUX_POLLPRI    0x0002
+#define LINUX_POLLRDBAND 0x0080
+#define LINUX_POLLWRBAND 0x0200
+#define LINUX_POLLRDHUP  0x2000
+
+/* close_range flags (linux/close_range.h). */
+#define LINUX_CLOSE_RANGE_UNSHARE (1u << 1)
+#define LINUX_CLOSE_RANGE_CLOEXEC (1u << 2)
+
+/* getdents64 record types (the C library's dirent.h): the file type in the
+ * mode, moved down - what the C library calls IFTODT. */
+#define LINUX_DT_DIR 4u
+#define LINUX_DT_REG 8u
+#define LINUX_DT_LNK 10u
+#define LINUX_DT_OF(mode) (((mode) & 0170000u) >> 12)
+
+/* futex operations (linux/futex.h). */
+#define LINUX_FUTEX_WAIT 0
+#define LINUX_FUTEX_WAKE 1
+/* Not set: the word may be shared between processes, and is named by what it
+ * is rather than where the caller maps it. */
+#define LINUX_FUTEX_PRIVATE_FLAG 128
+/* The rest (docs/abi/ L6). */
+#define LINUX_FUTEX_REQUEUE      3
+#define LINUX_FUTEX_CMP_REQUEUE  4
+#define LINUX_FUTEX_WAKE_OP      5
+#define LINUX_FUTEX_WAIT_BITSET  9
+#define LINUX_FUTEX_WAKE_BITSET  10
+#define LINUX_FUTEX_CLOCK_REALTIME 256
+#define LINUX_FUTEX_BITSET_MATCH_ANY 0xffffffffu
+/* A robust lock word: the owner's tid, and two marks above it. */
+#define LINUX_FUTEX_WAITERS      0x80000000u
+#define LINUX_FUTEX_OWNER_DIED   0x40000000u
+#define LINUX_FUTEX_TID_MASK     0x3fffffffu
+#define LINUX_ROBUST_LIST_LIMIT  2048
+/* WAKE_OP's operation and comparison, packed into val3. */
+#define LINUX_FUTEX_OP_SET       0
+#define LINUX_FUTEX_OP_ADD       1
+#define LINUX_FUTEX_OP_OR        2
+#define LINUX_FUTEX_OP_ANDN      3
+#define LINUX_FUTEX_OP_XOR       4
+#define LINUX_FUTEX_OP_OPARG_SHIFT 8
+#define LINUX_FUTEX_OP_CMP_EQ    0
+#define LINUX_FUTEX_OP_CMP_NE    1
+#define LINUX_FUTEX_OP_CMP_LT    2
+#define LINUX_FUTEX_OP_CMP_LE    3
+#define LINUX_FUTEX_OP_CMP_GT    4
+#define LINUX_FUTEX_OP_CMP_GE    5
+/* futex2 (futex_wait, futex_wake, futex_requeue, futex_waitv). */
+#define LINUX_FUTEX2_SIZE_U32    0x02
+#define LINUX_FUTEX2_SIZE_MASK   0x03
+#define LINUX_FUTEX2_NUMA        0x04
+#define LINUX_FUTEX2_PRIVATE     128
+#define LINUX_FUTEX_WAITV_MAX    128
+
+typedef struct {
+    uint64_t val;
+    uint64_t uaddr;
+    uint32_t flags;
+    uint32_t __reserved;
+} linux_futex_waitv_t;
+
+/* set_robust_list's head: the list, where in each entry the lock word is, and
+ * the entry being added or removed when the thread died. */
+typedef struct {
+    uint64_t next;
+    int64_t futex_offset;
+    uint64_t list_op_pending;
+} linux_robust_list_head_t;
+
+/* Scheduling (linux/sched.h, linux/sched/types.h; docs/abi/ L6 step 2). */
+#define LINUX_SCHED_NORMAL   0u
+#define LINUX_SCHED_FIFO     1u
+#define LINUX_SCHED_RR       2u
+#define LINUX_SCHED_BATCH    3u
+#define LINUX_SCHED_IDLE     5u
+#define LINUX_SCHED_DEADLINE 6u
+#define LINUX_SCHED_RESET_ON_FORK 0x40000000u
+#define LINUX_SCHED_FLAG_RESET_ON_FORK  0x01u
+#define LINUX_SCHED_FLAG_KEEP_POLICY    0x08u
+#define LINUX_SCHED_FLAG_KEEP_PARAMS    0x10u
+#define LINUX_SCHED_FLAG_UTIL_CLAMP_MIN 0x20u
+#define LINUX_SCHED_FLAG_UTIL_CLAMP_MAX 0x40u
+#define LINUX_SCHED_FLAG_ALL            0x7Fu
+#define LINUX_SCHED_ATTR_SIZE_VER0 48u
+
+typedef struct {
+    int32_t sched_priority;
+} linux_sched_param_t;
+
+typedef struct {
+    uint32_t size;
+    uint32_t sched_policy;
+    uint64_t sched_flags;
+    int32_t sched_nice;
+    uint32_t sched_priority;
+    uint64_t sched_runtime;
+    uint64_t sched_deadline;
+    uint64_t sched_period;
+    uint32_t sched_util_min;
+    uint32_t sched_util_max;
+} linux_sched_attr_t;
+
+/* I/O priorities (linux/ioprio.h). */
+#define LINUX_IOPRIO_CLASS_SHIFT 13u
+#define LINUX_IOPRIO_CLASS_NONE  0u
+#define LINUX_IOPRIO_CLASS_RT    1u
+#define LINUX_IOPRIO_CLASS_BE    2u
+#define LINUX_IOPRIO_CLASS_IDLE  3u
+#define LINUX_IOPRIO_WHO_PROCESS 1u
+#define LINUX_IOPRIO_WHO_PGRP    2u
+#define LINUX_IOPRIO_WHO_USER    3u
+
+/* membarrier (linux/membarrier.h). */
+#define LINUX_MEMBARRIER_CMD_QUERY                                0u
+#define LINUX_MEMBARRIER_CMD_GLOBAL                               (1u << 0)
+#define LINUX_MEMBARRIER_CMD_GLOBAL_EXPEDITED                     (1u << 1)
+#define LINUX_MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED            (1u << 2)
+#define LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED                    (1u << 3)
+#define LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED           (1u << 4)
+#define LINUX_MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE          (1u << 5)
+#define LINUX_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE (1u << 6)
+#define LINUX_MEMBARRIER_CMD_GET_REGISTRATIONS                    (1u << 9)
+
+/* mmap protection and flags (asm-generic/mman-common.h). */
+#define LINUX_PROT_NONE     0x0
+#define LINUX_PROT_READ     0x1
+#define LINUX_PROT_WRITE    0x2
+#define LINUX_PROT_EXEC     0x4
+#define LINUX_PROT_SEM      0x8
+#define LINUX_PROT_GROWSDOWN 0x01000000
+#define LINUX_PROT_GROWSUP  0x02000000
+#define LINUX_MAP_SHARED    0x01
+#define LINUX_MAP_PRIVATE   0x02
+#define LINUX_MAP_SHARED_VALIDATE 0x03
+#define LINUX_MAP_TYPE      0x0f
+#define LINUX_MAP_FIXED     0x10
+#define LINUX_MAP_ANONYMOUS 0x20
+#define LINUX_MAP_FIXED_NOREPLACE 0x100000
+#define LINUX_MAP_LOCKED    0x2000
+/* The flags Linux's mmap has always accepted (its LEGACY_MAP_MASK, the huge
+ * page sizes included) and MAP_FIXED_NOREPLACE. MAP_SHARED_VALIDATE exists to
+ * refuse everything else; 0x200 and 0x400 are in nobody's list. */
+#define LINUX_MAP_KNOWN     0xfc17f97fu
+/* clock_nanosleep: the clocks one can sleep on, and "until", not "for". */
+#define LINUX_CLOCK_REALTIME  0
+#define LINUX_CLOCK_MONOTONIC 1
+#define LINUX_CLOCK_BOOTTIME  7
+#define LINUX_TIMER_ABSTIME   1
+
+/* The rest of Linux's clocks (linux/time.h): the two CPU-time clocks, and the
+ * variants of the machine's clock that differ on Linux by what they promise -
+ * here they are all the one clock the timer keeps. */
+#define LINUX_CLOCK_PROCESS_CPUTIME_ID 2
+#define LINUX_CLOCK_THREAD_CPUTIME_ID  3
+#define LINUX_CLOCK_MONOTONIC_RAW      4
+#define LINUX_CLOCK_REALTIME_COARSE    5
+#define LINUX_CLOCK_MONOTONIC_COARSE   6
+#define LINUX_CLOCK_REALTIME_ALARM     8
+#define LINUX_CLOCK_BOOTTIME_ALARM     9
+#define LINUX_CLOCK_TAI                11
+
+/* Timers (docs/abi/ L2 step 3). */
+/* struct itimerval (linux/time.h): setitimer, getitimer. */
+typedef struct {
+    linux_timeval_t it_interval;
+    linux_timeval_t it_value;
+} linux_itimerval_t;
+
+/* struct __kernel_itimerspec (linux/time_types.h): timer_settime. */
+typedef struct {
+    linux_timespec_t it_interval;
+    linux_timespec_t it_value;
+} linux_itimerspec_t;
+
+/* struct sigevent (asm-generic/siginfo.h): how timer_create is to say so. The
+ * thread id is a member of a union Linux names through a macro, so ours has
+ * its own name; the rest is padding to 64 bytes. */
+typedef struct {
+    uint64_t sigev_value;
+    int32_t sigev_signo;
+    int32_t sigev_notify;
+    int32_t notify_tid;
+    uint8_t rest[44];
+} linux_sigevent_t;
+
+/* struct tms (linux/times.h): times(). Clock ticks, in USER_HZ. */
+typedef struct {
+    int64_t tms_utime;
+    int64_t tms_stime;
+    int64_t tms_cutime;
+    int64_t tms_cstime;
+} linux_tms_t;
+
+/* struct timezone (linux/time.h): gettimeofday's second argument, always zero. */
+typedef struct {
+    int32_t tz_minuteswest;
+    int32_t tz_dsttime;
+} linux_timezone_t;
+
+#define LINUX_ITIMER_REAL    0
+#define LINUX_ITIMER_VIRTUAL 1
+#define LINUX_ITIMER_PROF    2
+#define LINUX_SIGEV_SIGNAL    0
+#define LINUX_SIGEV_NONE      1
+#define LINUX_SIGEV_THREAD    2
+#define LINUX_SIGEV_THREAD_ID 4
+#define LINUX_SI_TIMER        (-2)
+/* madvise, mlock, mremap, memfd_create (L3 step 4). */
+#define LINUX_MADV_NORMAL      0
+#define LINUX_MADV_RANDOM      1
+#define LINUX_MADV_SEQUENTIAL  2
+#define LINUX_MADV_WILLNEED    3
+#define LINUX_MADV_DONTNEED    4
+#define LINUX_MADV_FREE        8
+#define LINUX_MADV_DONTDUMP    16
+#define LINUX_MADV_DODUMP      17
+#define LINUX_MADV_COLD        20
+#define LINUX_MADV_PAGEOUT     21
+#define LINUX_MADV_POPULATE_READ  22
+#define LINUX_MADV_POPULATE_WRITE 23
+#define LINUX_MLOCK_ONFAULT    0x01
+#define LINUX_MCL_CURRENT      1
+#define LINUX_MCL_FUTURE       2
+#define LINUX_MCL_ONFAULT      4
+#define LINUX_MREMAP_MAYMOVE   1
+#define LINUX_MREMAP_FIXED     2
+#define LINUX_MFD_CLOEXEC       0x0001u
+#define LINUX_MFD_ALLOW_SEALING 0x0002u
+#define LINUX_MFD_NAME_MAX      249u    /* NAME_MAX less "memfd:" */
+#define LINUX_MS_ASYNC      1
+#define LINUX_MS_INVALIDATE 2
+#define LINUX_MS_SYNC       4
+
+/* prctl and arch_prctl (linux/prctl.h, asm/prctl.h). */
+#define LINUX_PR_SET_NAME 15
+#define LINUX_PR_GET_NAME 16
+#define LINUX_ARCH_SET_GS 0x1001
+#define LINUX_ARCH_SET_FS 0x1002
+#define LINUX_ARCH_GET_FS 0x1003
+#define LINUX_ARCH_GET_GS 0x1004
+
+/* Sockets (the C library's sys/socket.h: uapi does not carry these). */
+#define LINUX_AF_INET     2u
+#define LINUX_SOCK_STREAM 1u
+/* shutdown's `how`, and the socket options setsockopt accepts (docs/abi/ L4
+ * step 7: what httpd and nc set). */
+#define LINUX_SHUT_RD      0u
+#define LINUX_SHUT_WR      1u
+#define LINUX_SHUT_RDWR    2u
+#define LINUX_SOL_SOCKET   1u
+#define LINUX_SO_REUSEADDR 2u
+#define LINUX_SO_KEEPALIVE 9u
+#define LINUX_SOCK_DGRAM  2u
+
+/* The rest of the BSD API (docs/abi/ L5): families, the type's flags, a send's
+ * and a receive's flags, control messages, and what UIO_MAXIOV says. */
+#define LINUX_AF_UNSPEC        0u
+#define LINUX_AF_UNIX          1u
+#define LINUX_SOCK_RAW         3u
+#define LINUX_SOCK_SEQPACKET   5u
+#define LINUX_SOCK_NONBLOCK    0x00000800u
+#define LINUX_SOCK_CLOEXEC     0x00080000u
+#define LINUX_MSG_OOB          0x00000001u
+#define LINUX_MSG_PEEK         0x00000002u
+#define LINUX_MSG_CTRUNC       0x00000008u
+#define LINUX_MSG_TRUNC        0x00000020u
+#define LINUX_MSG_DONTWAIT     0x00000040u
+#define LINUX_MSG_WAITALL      0x00000100u
+#define LINUX_MSG_ERRQUEUE     0x00002000u
+#define LINUX_MSG_NOSIGNAL     0x00004000u
+#define LINUX_MSG_WAITFORONE   0x00010000u
+#define LINUX_MSG_CMSG_CLOEXEC 0x40000000u
+#define LINUX_SCM_RIGHTS       1
+#define LINUX_SCM_CREDENTIALS  2
+#define LINUX_UIO_MAXIOV       1024u
+
+/* Socket options (asm-generic/socket.h, linux/in.h, linux/tcp.h). */
+#define LINUX_SO_DEBUG         1
+#define LINUX_SO_TYPE          3
+#define LINUX_SO_ERROR         4
+#define LINUX_SO_DONTROUTE     5
+#define LINUX_SO_BROADCAST     6
+#define LINUX_SO_SNDBUF        7
+#define LINUX_SO_RCVBUF        8
+#define LINUX_SO_SNDBUFFORCE   32
+#define LINUX_SO_RCVBUFFORCE   33
+#define LINUX_SO_OOBINLINE     10
+#define LINUX_SO_LINGER        13
+#define LINUX_SO_REUSEPORT     15
+#define LINUX_SO_PASSCRED      16
+#define LINUX_SO_PEERCRED      17
+#define LINUX_SO_RCVLOWAT      18
+#define LINUX_SO_RCVTIMEO_OLD  20
+#define LINUX_SO_SNDTIMEO_OLD  21
+#define LINUX_SO_ACCEPTCONN    30
+#define LINUX_SO_PROTOCOL      38
+#define LINUX_SO_DOMAIN        39
+#define LINUX_IPPROTO_IP       0
+#define LINUX_IPPROTO_TCP      6
+#define LINUX_IPPROTO_UDP      17
+#define LINUX_TCP_NODELAY      1
+
+/* struct sockaddr_un (linux/un.h). */
+#define LINUX_UNIX_PATH_MAX 108u
+typedef struct {
+    uint16_t sun_family;
+    char sun_path[LINUX_UNIX_PATH_MAX];
+} linux_sockaddr_un_t;
+
+/* struct msghdr and struct mmsghdr (the C library's; the kernel's
+ * user_msghdr is the same bytes), struct cmsghdr, struct ucred, struct linger. */
+typedef struct {
+    uint64_t msg_name;
+    uint32_t msg_namelen;
+    uint32_t pad0;
+    uint64_t msg_iov;
+    uint64_t msg_iovlen;
+    uint64_t msg_control;
+    uint64_t msg_controllen;
+    int32_t msg_flags;
+    int32_t pad1;
+} linux_msghdr_t;
+
+typedef struct {
+    linux_msghdr_t msg_hdr;
+    uint32_t msg_len;
+    uint32_t pad0;
+} linux_mmsghdr_t;
+
+typedef struct {
+    uint64_t cmsg_len;
+    int32_t cmsg_level;
+    int32_t cmsg_type;
+} linux_cmsghdr_t;
+
+typedef struct {
+    int32_t pid;
+    uint32_t uid;
+    uint32_t gid;
+} linux_ucred_t;
+
+typedef struct {
+    int32_t l_onoff;
+    int32_t l_linger;
+} linux_linger_t;
+
+/* wait4 options (linux/wait.h). The last three are Linux's __WNOTHREAD,
+ * __WALL and __WCLONE; a leading double underscore is the C library's. */
+#define LINUX_WNOHANG    0x00000001u
+#define LINUX_WUNTRACED  0x00000002u
+#define LINUX_WCONTINUED 0x00000008u
+#define LINUX_WNOTHREAD  0x20000000u
+#define LINUX_WALL       0x40000000u
+#define LINUX_WCLONE     0x80000000u
+
+/* What a handler is handed (docs/abi/ L2): the frame Linux builds on the
+ * stack - a return address, a ucontext and a siginfo - is read by C libraries
+ * and by programs. musl's thread cancellation rewrites the saved rip in it, and
+ * a SIGSEGV handler that recovers does the same; rt_sigreturn reads it back.
+ * Until L2 the frame here was private to this kernel and nothing could. */
+
+/* stack_t (asm/signal.h): sigaltstack, and uc_stack. */
+typedef struct {
+    uint64_t ss_sp;
+    int32_t ss_flags;
+    uint64_t ss_size;
+} linux_stack_t;
+
+/* struct sigcontext (asm/sigcontext.h), x86-64. */
+typedef struct {
+    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags;
+    uint16_t cs, gs, fs, ss;
+    uint64_t err, trapno, oldmask, cr2;
+    uint64_t fpstate;       /* the FXSAVE area, or 0 for none */
+    uint64_t reserved1[8];
+} linux_sigcontext_t;
+
+/* struct ucontext (asm/ucontext.h): the kernel's, which ends at uc_sigmask -
+ * the C library's ucontext_t goes on, and nothing past here is the kernel's. */
+typedef struct {
+    uint64_t uc_flags;
+    uint64_t uc_link;
+    linux_stack_t uc_stack;
+    linux_sigcontext_t uc_mcontext;
+    uint64_t uc_sigmask;
+} linux_ucontext_t;
+
+/* siginfo_t (asm-generic/siginfo.h): 128 bytes, of which what a field means
+ * depends on the signal and si_code. Linux's is a union; this is the one
+ * arrangement of it that every field used here fits, and the two that overlay
+ * others - a fault's si_addr, SIGCHLD's si_status - are written through the
+ * helpers below. The fields are not called si_pid and so on because those
+ * are macros in every C library's header, naming the union's members. */
+typedef struct {
+    int32_t si_signo;
+    int32_t si_errno;
+    int32_t si_code;
+    int32_t pad0;        /* unnamed in Linux: the union is 8-aligned       */
+    int32_t pid;         /* kill, sigqueue, SIGCHLD; si_addr's low half    */
+    uint32_t uid;        /* the sender's real user; si_addr's high half    */
+    uint64_t value;      /* sigqueue's value; si_status is its low half    */
+    int64_t utime;       /* SIGCHLD                                        */
+    int64_t stime;
+    uint8_t rest[80];
+} linux_siginfo_t;
+
+static inline void linux_si_set_addr(linux_siginfo_t *o, uint64_t addr) {
+    o->pid = (int32_t)(uint32_t)addr;
+    o->uid = (uint32_t)(addr >> 32);
+}
+static inline uint64_t linux_si_addr(const linux_siginfo_t *o) {
+    return (uint64_t)(uint32_t)o->pid | ((uint64_t)o->uid << 32);
+}
+static inline void linux_si_set_status(linux_siginfo_t *o, int32_t status) {
+    o->value = (uint64_t)(uint32_t)status;
+}
+
+/* The handler's flags and the alternate stack's (asm-generic/signal-defs.h,
+ * asm/signal.h, linux/signal.h). */
+#define LINUX_SA_SIGINFO     0x00000004u
+#define LINUX_SA_ONSTACK     0x08000000u
+#define LINUX_SA_NODEFER     0x40000000u
+#define LINUX_SA_RESETHAND   0x80000000u
+#define LINUX_SS_ONSTACK     1
+#define LINUX_SS_DISABLE     2
+#define LINUX_SS_AUTODISARM  (1u << 31)
+#define LINUX_MINSIGSTKSZ    2048u
+
+/* si_code (asm-generic/siginfo.h). */
+#define LINUX_SI_USER        0
+#define LINUX_SI_KERNEL      0x80
+#define LINUX_SI_QUEUE       (-1)
+#define LINUX_SI_TKILL       (-6)
+#define LINUX_SEGV_MAPERR    1
+#define LINUX_SEGV_ACCERR    2
+#define LINUX_BUS_ADRALN     1
+#define LINUX_FPE_INTDIV     1
+#define LINUX_FPE_FLTINV     7
+#define LINUX_ILL_ILLOPN     2
+#define LINUX_CLD_EXITED     1
+#define LINUX_CLD_KILLED     2
+
+/* uc_flags (asm/ucontext.h): the frame carries ss, and sigreturn is to put it
+ * back exactly. */
+#define LINUX_UC_SIGCONTEXT_SS    0x2u
+#define LINUX_UC_STRICT_RESTORE_SS 0x4u
+
+/* rt_sigprocmask (asm-generic/signal-defs.h). */
+#define LINUX_SIG_BLOCK   0
+#define LINUX_SIG_UNBLOCK 1
+#define LINUX_SIG_SETMASK 2
+
+/* prlimit64 resources (asm-generic/resource.h). */
+#define LINUX_RLIMIT_CPU        0
+#define LINUX_RLIMIT_FSIZE      1
+#define LINUX_RLIMIT_DATA       2
+#define LINUX_RLIMIT_STACK      3
+#define LINUX_RLIMIT_CORE       4
+#define LINUX_RLIMIT_RSS        5
+#define LINUX_RLIMIT_NPROC      6
+#define LINUX_RLIMIT_NOFILE     7
+#define LINUX_RLIMIT_MEMLOCK    8
+#define LINUX_RLIMIT_AS         9
+#define LINUX_RLIMIT_LOCKS      10
+#define LINUX_RLIMIT_SIGPENDING 11
+#define LINUX_RLIMIT_MSGQUEUE   12
+#define LINUX_RLIMIT_NICE       13
+#define LINUX_RLIMIT_RTPRIO     14
+#define LINUX_RLIMIT_RTTIME     15
+#define LINUX_RLIM_NLIMITS      16
+#define LINUX_RLIM64_INFINITY 0xFFFFFFFFFFFFFFFFull
+
+/* getpriority, setpriority (linux/resource.h) and getrusage's who. */
+#define LINUX_PRIO_PROCESS    0
+#define LINUX_PRIO_PGRP       1
+#define LINUX_PRIO_USER       2
+#define LINUX_RUSAGE_SELF     0
+#define LINUX_RUSAGE_CHILDREN (-1)
+#define LINUX_RUSAGE_THREAD   1
+
+/* struct rusage (linux/resource.h): two timevals and fourteen counters. */
+typedef struct {
+    linux_timeval_t ru_utime;
+    linux_timeval_t ru_stime;
+    int64_t ru_maxrss;
+    int64_t ru_ixrss;
+    int64_t ru_idrss;
+    int64_t ru_isrss;
+    int64_t ru_minflt;
+    int64_t ru_majflt;
+    int64_t ru_nswap;
+    int64_t ru_inblock;
+    int64_t ru_oublock;
+    int64_t ru_msgsnd;
+    int64_t ru_msgrcv;
+    int64_t ru_nsignals;
+    int64_t ru_nvcsw;
+    int64_t ru_nivcsw;
+} linux_rusage_t;
+
+/* System V IPC (linux/ipc.h, msg.h, sem.h, shm.h; docs/abi/ L7). x86-64 has
+ * only the 64-bit structures: the C libraries pass a command without IPC_64,
+ * and Linux, which has no older layout here to tell it from, refuses the bit
+ * like any other unknown command. The limits this kernel keeps are its own and
+ * live with the handlers (linux_internal.h); these are Linux's numbers. */
+#define LINUX_IPC_PRIVATE 0
+#define LINUX_IPC_CREAT   01000
+#define LINUX_IPC_EXCL    02000
+#define LINUX_IPC_NOWAIT  04000
+#define LINUX_IPC_RMID    0
+#define LINUX_IPC_SET     1
+#define LINUX_IPC_STAT    2
+#define LINUX_IPC_INFO    3
+#define LINUX_IPC_64      0x0100
+
+typedef struct {
+    int32_t key;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t cuid;
+    uint32_t cgid;
+    uint32_t mode;
+    uint16_t seq;
+    uint16_t pad2;
+    uint64_t unused1;
+    uint64_t unused2;
+} linux_ipc64_perm_t;
+
+#define LINUX_MSG_STAT     11
+#define LINUX_MSG_INFO     12
+#define LINUX_MSG_STAT_ANY 13
+#define LINUX_MSG_NOERROR  010000
+#define LINUX_MSG_EXCEPT   020000
+#define LINUX_MSG_COPY     040000
+
+typedef struct {
+    linux_ipc64_perm_t msg_perm;
+    int64_t msg_stime;
+    int64_t msg_rtime;
+    int64_t msg_ctime;
+    uint64_t msg_cbytes;
+    uint64_t msg_qnum;
+    uint64_t msg_qbytes;
+    int32_t msg_lspid;
+    int32_t msg_lrpid;
+    uint64_t unused4;
+    uint64_t unused5;
+} linux_msqid64_ds_t;
+
+typedef struct {
+    int32_t msgpool;
+    int32_t msgmap;
+    int32_t msgmax;
+    int32_t msgmnb;
+    int32_t msgmni;
+    int32_t msgssz;
+    int32_t msgtql;
+    uint16_t msgseg;
+} linux_msginfo_t;
+
+#define LINUX_GETPID       11
+#define LINUX_GETVAL       12
+#define LINUX_GETALL       13
+#define LINUX_GETNCNT      14
+#define LINUX_GETZCNT      15
+#define LINUX_SETVAL       16
+#define LINUX_SETALL       17
+#define LINUX_SEM_STAT     18
+#define LINUX_SEM_INFO     19
+#define LINUX_SEM_STAT_ANY 20
+#define LINUX_SEM_UNDO     0x1000
+
+typedef struct {
+    uint16_t sem_num;
+    int16_t sem_op;
+    int16_t sem_flg;
+} linux_sembuf_t;
+
+typedef struct {
+    linux_ipc64_perm_t sem_perm;
+    int64_t sem_otime;
+    uint64_t unused1;
+    int64_t sem_ctime;
+    uint64_t unused2;
+    uint64_t sem_nsems;
+    uint64_t unused3;
+    uint64_t unused4;
+} linux_semid64_ds_t;
+
+typedef struct {
+    int32_t semmap;
+    int32_t semmni;
+    int32_t semmns;
+    int32_t semmnu;
+    int32_t semmsl;
+    int32_t semopm;
+    int32_t semume;
+    int32_t semusz;
+    int32_t semvmx;
+    int32_t semaem;
+} linux_seminfo_t;
+
+#define LINUX_SHM_RDONLY    010000
+#define LINUX_SHM_RND       020000
+#define LINUX_SHM_REMAP     040000
+#define LINUX_SHM_EXEC      0100000
+#define LINUX_SHM_HUGETLB   04000
+#define LINUX_SHM_NORESERVE 010000
+#define LINUX_SHM_LOCK      11
+#define LINUX_SHM_UNLOCK    12
+#define LINUX_SHM_STAT      13
+#define LINUX_SHM_INFO      14
+#define LINUX_SHM_STAT_ANY  15
+/* The kernel's own bits above the permissions, as IPC_STAT reports them
+ * (glibc's sys/shm.h names them; uapi does not). */
+#define LINUX_SHM_DEST      01000
+#define LINUX_SHM_LOCKED    02000
+
+typedef struct {
+    linux_ipc64_perm_t shm_perm;
+    uint64_t shm_segsz;
+    int64_t shm_atime;
+    int64_t shm_dtime;
+    int64_t shm_ctime;
+    int32_t shm_cpid;
+    int32_t shm_lpid;
+    uint64_t shm_nattch;
+    uint64_t unused4;
+    uint64_t unused5;
+} linux_shmid64_ds_t;
+
+typedef struct {
+    uint64_t shmmax;
+    uint64_t shmmin;
+    uint64_t shmmni;
+    uint64_t shmseg;
+    uint64_t shmall;
+    uint64_t unused1;
+    uint64_t unused2;
+    uint64_t unused3;
+    uint64_t unused4;
+} linux_shminfo64_t;
+
+typedef struct {
+    int32_t used_ids;
+    uint64_t shm_tot;
+    uint64_t shm_rss;
+    uint64_t shm_swp;
+    uint64_t swap_attempts;
+    uint64_t swap_successes;
+} linux_shm_info_t;
+
+/* POSIX message queues (linux/mqueue.h; docs/abi/ L7 step 4): a queue's
+ * attributes, the priority bound, and the code a notification carries. */
+typedef struct {
+    int64_t mq_flags;
+    int64_t mq_maxmsg;
+    int64_t mq_msgsize;
+    int64_t mq_curmsgs;
+    int64_t reserved[4];
+} linux_mq_attr_t;
+
+#define LINUX_MQ_PRIO_MAX 32768
+#define LINUX_SI_MESGQ    (-3)
+
+/* sync_file_range's flags (glibc's fcntl.h). */
+#define LINUX_SYNC_FILE_RANGE_WAIT_BEFORE 1
+#define LINUX_SYNC_FILE_RANGE_WRITE       2
+#define LINUX_SYNC_FILE_RANGE_WAIT_AFTER  4
+
+/* splice's flags (glibc's fcntl.h; uapi does not export them). */
+#define LINUX_SPLICE_F_MOVE     1
+#define LINUX_SPLICE_F_NONBLOCK 2
+#define LINUX_SPLICE_F_MORE     4
+#define LINUX_SPLICE_F_GIFT     8
+
+#endif

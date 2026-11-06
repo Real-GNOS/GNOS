@@ -1,0 +1,218 @@
+core-process - threads that are not one process
+
+C5's first step, and the reason it came before the plan said it would. Four
+external findings and one found while reading them are one defect:
+`hw_sys_clone_thread` copies `hw_proc_t` by value (`child->proc = parent->proc`),
+so everything that belongs to a process becomes a private copy per thread.
+
+  H-004  the region list: two heads into one pool, freed nodes reused
+  H-005  exit_group ends only the calling thread
+  M-003  signal dispositions: sigaction in one thread does not reach another
+  new    the mmap cursor: two threads map at the same base, and the second
+         mapping silently replaces the first thread's pages
+  known  descriptors: copied, and the source already says so
+
+The tests are stages of tests/linux/musl_threads.c. They were written before
+the kernel was touched and each was run against the unchanged kernel first.
+
+---
+
+case 1: a thread's mapping cursor is private
+  test:    THREADS_C5_MMAP
+  reason:  thread_mmap_reused_a_base
+  expect on the defect: main's mmap returns the base the thread already used
+  ran:     yes, against the unchanged kernel, and red:
+               THREADS_C5_MMAP_FAIL: main was given the thread's base 0x80040d2000
+           Deterministic - no concurrency is needed, because the thread has
+           already exited by the time main maps. Main's cursor simply never
+           moved.
+
+---
+
+case 2: signal dispositions are per thread
+  test:    THREADS_C5_SIGACTION
+  reason:  thread_sigaction_not_shared
+  expect on the defect: the forked child dies by SIGUSR1 (10), because main
+           never saw the handler its thread installed. SIGUSR1's default
+           action here is to kill - checked in hw_signal_default_kills before
+           this was written, since a default of "ignore" would have made this
+           stage unable to fail.
+  ran:     yes, against the unchanged kernel, and red:
+               THREADS_C5_SIGACTION_FAIL: killed by signal 10
+
+---
+
+case 3: exit_group ends one thread
+  test:    THREADS_C5_EXIT_GROUP
+  reason:  thread_exit_group_left_siblings
+  expect on the defect: the child exits 7, from main finishing its bounded
+           spin, instead of 42.
+  and the wrong fix: an exit_group built by SIGKILLing the siblings reports
+           "killed by signal 9" for the leader, because waitpid builds the
+           status from the leader's exit_code and exit_signal. The stage
+           requires 42 so that fix cannot pass.
+  ran:     yes, against the unchanged kernel, and red:
+               THREADS_C5_EXIT_GROUP_FAIL: exited 7, expected 42
+
+---
+
+the run that established all three
+  One boot, build rc=0, musl_threads newer than its source, serial log newer
+  than its source - checked, because a stale THREADS.ELF prints no C5 lines and
+  would have read as three did_not_report failures proving nothing. The three
+  stages that already existed stayed OK on the same boot, which is the point:
+  they cannot see this defect.
+
+the run that turned them green
+  After hw_procstate_t: all three stages OK on the first build, then
+  check.sh all build-clang-Release VERDICT=green (rc=0, warnings=0, clang 0/0,
+  host tests pass, every check ok, 3/3 boots), then twelve boots with the
+  failure logs kept outside /tmp - 12 pass, 0 fail, tlb quarantine overflow 0
+  on every one. The three older THREADS stages stayed OK throughout.
+
+  Not re-sabotaged afterwards, deliberately: the stronger direction was already
+  shown - each stage red on the unchanged kernel, for the reason it was written
+  for - and breaking the fix again would reproduce exactly that.
+
+---
+
+case 4: a stage that prints nothing
+  reasons: threads_c5_mmap_did_not_report, threads_c5_sigaction_did_not_report,
+           threads_c5_exit_group_did_not_report
+  why:     a missing marker is a failure, not a pass. THREADS.ELF is one line
+           of a sequential boot script, so a stage that hangs would otherwise
+           read as every later command having failed - which is why every wait
+           in these stages is bounded.
+  ran:     not yet
+
+---
+
+case 5: wait4 ignores its options
+  test:    THREADS_C5_WNOHANG
+  reason:  wait4_ignored_wnohang
+  defect:  `case LSYS_wait4` calls hw_sys_waitpid(a1, a2); the options argument
+           never arrives and WNOHANG appears nowhere in the kernel.
+  expect on the defect: the WNOHANG call blocks until the child exits and
+           returns its pid.
+  why it cannot stall the boot: the child exits on its own after about a
+           second, so the defect produces a failure line, not a hung script.
+  why it goes first: every bounded wait in a later test depends on it. init and
+           svc_bomb pass options 0 - checked - so the fix does not change the
+           supervisor. BusyBox's shell may pass WNOHANG, so its stages are the
+           ones to watch after the fix.
+  ran:     yes, against the kernel before the fix, and red:
+               THREADS_C5_WNOHANG_FAIL: waited for the child to exit
+           The three step-0 stages stayed OK on the same boot, and the boot did
+           not stall - the bound held.
+  and green, after the fix: THREADS_C5_WNOHANG_OK on the first build, with the
+           BusyBox stages - the ones that could pass WNOHANG - still passing;
+           check.sh all VERDICT=green; twelve boots: 11 pass, 1 fail.
+
+---
+
+case 6: a thread id addresses nothing
+  test:    THREADS_C5_TKILL
+  reason:  tkill_missed_a_live_thread
+  defect:  hw_task_by_tid is `return hw_task_by_pid(tid);`, which matches tgid.
+           A non-leader's tid matches no tgid, so tkill and tgkill answer ESRCH
+           for a thread that exists. For the leader's own tid it returns the
+           first member of the group in slot order, which can be a thread - so
+           tgkill's `pid != tgid` check can refuse even the leader.
+  and the everyday consequence: raise() in musl is tkill(gettid()), so raise()
+           from any thread but the leader fails.
+  expect on the defect: pthread_kill(live thread, 0) returns ESRCH (3).
+  why signal 0 and a spinning worker: signal 0 tests existence without
+           delivery, and the worker waits by spinning - a blocked wait on this
+           kernel does not notice signals, which is a separate defect that must
+           not decide this stage.
+  ran:     yes, against the kernel before the fix, and red:
+               THREADS_C5_TKILL_FAIL: pthread_kill on a live thread returned 3
+           3 is ESRCH: the thread existed and the lookup could not find it.
+  and green, after the fix: THREADS_C5_TKILL_OK on the first build - both
+           pthread_kill(thread, 0) and raise() inside the thread;
+           check.sh all VERDICT=green; twelve boots: 11 pass, 1 fail.
+
+---
+
+case 7: a blocked sibling survives exit_group
+  test:    THREADS_C5_EXIT_GROUP_BLOCKED
+  reason:  thread_blocked_sibling_survived_exit_group
+  defect:  SIGKILL is delivered on the way back to ring 3, and no blocking wait
+           in the kernel reads sig_pending - futex, pipes, waitpid and console
+           read all go straight back to sleep when a signal wakes them. So
+           exit_group ends a sibling running in user space, and one in
+           pthread_join on the exiting thread (whose clear_child_tid wakes it),
+           but not one waiting on anything else.
+  expect on the defect: THREADS_C5_EXIT_GROUP_BLOCKED_FAIL: the process never
+           ended - and the stuck child is left holding a task slot for the rest
+           of that boot, which the fix removes.
+  why the leader and not a worker: a blocked worker with the leader calling
+           exit_group lets the leader exit 42 and be reaped; the stage would
+           pass on the defect.
+  why bounded: polled with WNOHANG, so the stage came after the WNOHANG fix.
+  ran:     yes, against the kernel before the fix, and red:
+               THREADS_C5_EXIT_GROUP_BLOCKED_FAIL: the process never ended
+           The prediction about the stuck child was half right. It disturbed
+           no later stage - the boot script ran to VIBEOS_SELFTEST_DONE and init
+           reported every service - but the kernel only leaves userland once
+           every user task has retired, and this one never would. So the gate
+           reported missing:CLI_READY, and the named failure was only in the
+           log: missing: reasons are raised while driving the CLI, before the
+           invariants are evaluated. Worth knowing for every red stage: a
+           defect that leaves a process alive hides its own diagnosis.
+           Since then the gate appends stage_failures= to a missing-marker
+           reason, so the same run would now report
+           missing:CLI_READY ... stage_failures=THREADS_C5_EXIT_GROUP_BLOCKED_FAIL.
+  and green, after the fix: THREADS_C5_EXIT_GROUP_BLOCKED_OK;
+           check.sh all VERDICT=green; twelve boots: 11 pass, 1 fail.
+
+---
+
+case 8: a futex wake crosses processes
+  test:    THREADS_C5_FUTEX_XPROC
+  reason:  futex_wake_crossed_processes
+  defect:  the waiter table is keyed by user virtual address alone -
+           hw_futex_waiter_t holds used, addr, task and woken, and
+           hw_futex_wake matches `addr` - while every Linux program links at
+           0x400000 and a forked child has its parent's layout exactly. A wake
+           in one process can end a wait in another.
+  not claimed: that this causes the stack-poison crash in the four-worker
+           stage. musl's primitives re-check their condition after every
+           wakeup, so a spurious wake alone does not make pthread_join return
+           early. It is a defect on its own terms.
+  expect on the defect: the parent's FUTEX_WAKE reports a waiter woken, and
+           the child exits 5.
+  can pass wrongly: if the child is not yet waiting when the parent wakes,
+           nothing is matched and the child is simply killed. A slow child hides
+           the defect; it never invents it.
+  ran:     yes, against the kernel before the fix, and red through the
+           stronger of its two signs - the parent, with no waiter of its own on
+           that address, was told its wake had woken one:
+               THREADS_C5_FUTEX_XPROC_FAIL: a wake in this process woke 1 waiter(s) in another
+  and green, after the fix: THREADS_C5_FUTEX_XPROC_OK - the wake matched
+           nothing and the child died by SIGKILL; check.sh all VERDICT=green;
+           twelve boots: 10 pass, 2 (both the known four-worker family: the same unhandled write inside THREADS as fail-7 before the fix, shifted by the new stage's 0x320 bytes) fail.
+
+---
+
+case 9: exec from a thread (H-006)
+  test:    THREADS_C5_EXEC
+  reason:  thread_exec_left_siblings_or_identity
+  defect:  execve replaced the calling task's process and address space and
+           touched nothing else: the siblings kept running the old image, and
+           pid, tgid and is_thread stayed as they were. For a non-leader that
+           means the exec'd program runs with is_thread = 1, and a thread's exit
+           is released at once instead of left as a zombie - so its exit code
+           can never reach the parent.
+  expect on the defect: exited 7 - the leader keeps running the old image, and
+           the new image's exit is invisible.
+  and the two wrong fixes the code 23 rules out:
+           24: siblings ended, but getpid() != gettid() in the new image;
+           killed by 9: the leader's SIGKILL surfaced to the parent as the
+           process dying, while the new image had only just started.
+  bounded: WNOHANG, 600 yields.
+  ran:     yes, red on the kernel before the fix - the new image loaded and
+           the leader was still there to exit 7:
+               THREADS_C5_EXEC_FAIL: exited 7, expected 23
+           green after: THREADS_C5_EXEC_OK; check.sh all VERDICT=green;
+           twelve boots: 12 pass, 0 fail.

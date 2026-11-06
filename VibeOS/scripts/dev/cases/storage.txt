@@ -1,0 +1,61 @@
+# Target source: kernel/fs/storage.c
+
+### partition offset ignored, volume probed at sector zero
+--- old
+            st->volume[st->volume_count].first_lba = st->table.entry[i].first_lba;
++++ new
+            st->volume[st->volume_count].first_lba = 0;
+
+### a disk with no partition table is not examined
+--- old
+    if (st->table.count == 0u) {
+        st->volume_count = 1;
+        st->volume[0].first_lba = 0;
+        st->volume[0].sector_count = disk_sectors;
+        storage_probe_volume(&st->volume[0], cache);
+    } else {
++++ new
+    if (0) {
+
+### a driver that refused the volume is recorded as having mounted it
+--- old
+        if (d->mount(&v->mount, bc, v->first_lba, v->sector_count,
+                     v->fs_state) == 0) {
++++ new
+        if ((d->mount(&v->mount, bc, v->first_lba, v->sector_count,
+                     v->fs_state), 1)) {
+
+### mounted volumes not counted
+--- old
+    for (i = 0; i < st->volume_count; i++) {
+        if (st->volume[i].fs_name != 0) {
+            st->mounted_count++;
+        }
+    }
++++ new
+
+### first mounted volume reported without checking it mounted
+--- old
+    for (i = 0; i < st->volume_count; i++) {
+        if (st->volume[i].fs_name != 0) {
+            return &st->volume[i].mount;
+        }
+    }
+    return 0;
++++ new
+    for (i = 0; i < st->volume_count; i++) {
+        return &st->volume[i].mount;
+    }
+    return 0;
+
+### a driver is found by a prefix of its name (C7)
+--- old
+        if (n[k] == 0 && name[k] == 0) {
++++ new
+        if (n[k] == 0) {
+
+### a driver the scan could not mount through is registered (C7)
+--- old
+    if (drv == 0 || drv->name == 0 || drv->mount == 0) {
++++ new
+    if (drv == 0 || drv->name == 0) {

@@ -1,0 +1,279 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef VIBEOS_NT_INTERNAL_H
+#define VIBEOS_NT_INTERNAL_H
+
+/* What the NT handlers share (docs/abi/windows.md W1).
+ *
+ * The same rules as the Linux handlers': nothing here names the architecture -
+ * the kernel is reached through vibeos/ksvc.h alone, so these files run on the
+ * host against tests/kernel/ksvc_fake.c - every user pointer is judged before it
+ * is used, and every structure copied to or from a program is declared in
+ * vibeos/nt_layout.h. */
+
+#include <stdint.h>
+
+#include "vibeos/ksvc.h"
+#include "vibeos/abi.h"
+#include "vibeos/abi_nt.h"
+#include "vibeos/abi_rows.h"
+#include "vibeos/nt_layout.h"
+#include "vibeos/procstate.h"
+#include "vibeos/fdtable.h"
+#include "vibeos/file.h"
+/* For the kernel's error numbers (VIBEOS_E*), which the file layer answers in
+ * whichever personality asked - they are Linux's numbers because Linux was the
+ * first to need them, and nt_status_of_errno is where NT translates them. */
+#include "vibeos/abi_linux.h"
+
+/* A table of rows, as LINUX_DEFINE_SYSCALLS makes one: X(nr, name, op, ptrs,
+ * expr), with the number spelled VIBEOS_NT_NR_<name>. */
+#define NT_DEFINE_SERVICES(topic, LIST) VIBEOS_DEFINE_SYSCALLS(nt, topic, LIST)
+
+/* A buffer whose length is another argument. Windows' lengths are ULONG, and in
+ * its calling convention the upper half of a register holding a 32-bit
+ * argument is whatever the caller left there - so the length is read as 32
+ * bits, never 64, by the descriptor and by the handler alike. */
+#define NT_OUT_BUF(a, la) PTR_(a, VIBEOS_PTR_WRITE | VIBEOS_PTR_LEN32, (la) + 1, 1, 0, 0, 0)
+#define NT_IN_BUF(a, la)  PTR_(a, VIBEOS_PTR_LEN32, (la) + 1, 1, 0, 0, 0)
+#define NT_ARG32(i)       ((uint64_t)(uint32_t)ARG(i))
+
+/* An NTSTATUS as a handler returns it: zero-extended, as rax carries it. */
+#define NT_STATUS(s) ((long)(uint32_t)(s))
+
+/* The one call site of ks_user_ok for this personality (dispatch.c). */
+int nt_user_ok(uint64_t base, uint64_t len, int write);
+/* Copies to and from the calling program's memory: 0, or -1 for a range that
+ * is not the program's or a page that faulted (dispatch.c). */
+int nt_copy_in(void *dst, uint64_t src, uint64_t len);
+int nt_copy_out(uint64_t dst, const void *src, uint64_t len);
+/* Who is asking: the calling process's credentials, root for the kernel
+ * itself (file.c). */
+void nt_cred(vibeos_cred_t *out);
+/* The calling thread's x87/SSE state into and out of a CONTEXT in the
+ * program's memory, at FltSave (thread.c). 0, or -1. */
+int nt_context_fpu_out(uint64_t ctx_u);
+int nt_context_fpu_in(uint64_t ctx_u, uint32_t flags);
+
+/* A handle, as W1 has them: a descriptor of the process's table, (fd + 1) * 4.
+ * Windows' handles are multiples of four counted from four, and the program's
+ * standard handles - set from descriptors 0, 1 and 2 when it starts - are the
+ * ones W1 uses. W2's object manager replaces this with handles of their own;
+ * until then a handle and a descriptor are the same entry, which is why NT and
+ * Linux code may share the table without disagreeing about it. The reference
+ * returned is the caller's to put. */
+vibeos_file_t *nt_file_get(uint64_t handle, uint32_t need, uint32_t *granted);
+uint64_t nt_handle_of_fd(uint32_t fd);
+
+/* An errno a file operation answered, as the NTSTATUS Windows gives for it. */
+uint32_t nt_status_of_errno(long err);
+
+/* ---- the object manager (object.c, W2) --------------------------------------------- */
+
+#define NT_OB_MAX 256u
+/* The most objects one process may have made and still have alive: a quarter of
+ * the table, as M-092 bounds the timers - one process making events in a loop
+ * took all 256 and every other process's NtCreate failed (M-110). */
+#define NT_OB_PER_PROCESS (NT_OB_MAX / 4u)
+#define NT_NAME_MAX 128u   /* characters of a whole path; more is refused */
+
+struct nt_ob;
+
+/* The keys a keyed event tracks at once: a key with a waiter or a release
+ * pending holds a slot (W5 step 7). */
+#define NT_KEYED_SLOTS 16u
+
+/* An NT object type: a description type's operations carry one. */
+typedef struct vibeos_nt_type {
+    const char *name;            /* "Event", as NtQueryObject names it        */
+    uint32_t all_access;         /* what GENERIC_ALL and MAXIMUM_ALLOWED give */
+    uint32_t generic_read;
+    uint32_t generic_write;
+    uint32_t generic_execute;
+    /* Waiting, under the object lock: is it signalled for thread `tid`, and
+     * what acquiring it costs. Null for a type nobody waits on. */
+    int (*signaled)(struct nt_ob *o, uint32_t tid);
+    uint32_t (*acquire)(struct nt_ob *o, uint32_t tid);   /* a WAIT_0 or ABANDONED_WAIT_0 offset */
+} nt_type_t;
+
+/* One object's state. The description is the object; this is what it holds. */
+typedef struct nt_ob {
+    uint32_t used;
+    uint32_t owner;               /* the process that made it, for its share     */
+    vibeos_file_t *file;          /* no reference: the description owns the slot */
+    uint16_t name[NT_NAME_MAX];
+    uint32_t name_len;            /* characters; 0 for an unnamed object         */
+    uint32_t name_ci;
+    uint32_t waiters;             /* threads in a wait naming it now             */
+    union {
+        struct {
+            uint32_t kind;        /* VIBEOS_NT_NOTIFICATION_EVENT or _SYNCHRONIZATION_ */
+            int32_t state;
+            uint32_t pulses;      /* every NtPulseEvent: a waiter that saw it begin
+                                   * and end while it waited is satisfied by it    */
+        } ev;
+        struct {
+            uint32_t owner;       /* thread id, 0 when free                     */
+            uint32_t count;       /* recursion                                   */
+            uint32_t abandoned;
+        } mu;
+        struct {
+            int32_t count;
+            int32_t max;
+        } sem;
+        struct {
+            uint32_t kind;        /* NotificationTimer 0, SynchronizationTimer 1 */
+            uint32_t armed;
+            uint32_t state;
+            uint64_t due;         /* in ticks                                  */
+            uint64_t period;      /* in ticks; 0 for a one-shot timer          */
+        } tm;
+        struct {
+            uint64_t key[NT_KEYED_SLOTS];
+            uint32_t waiting[NT_KEYED_SLOTS];
+            uint32_t released[NT_KEYED_SLOTS];
+        } ke;
+        struct {
+            int slot;             /* the task, -1 until it is made             */
+            uint32_t seq;         /* and which tenancy of the slot it is       */
+            uint32_t tid;
+            uint32_t pid;
+            uint64_t teb;
+            uint32_t exit_code;   /* STILL_ACTIVE until it ends                */
+            uint32_t ended;       /* it ended through NtTerminateThread        */
+            uint64_t start;       /* the routine it was made with              */
+            uint32_t hidden;      /* THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER     */
+        } th;
+        struct {
+            int slot;             /* the process's first task                  */
+            uint32_t seq;         /* and which tenancy of the slot it is       */
+            uint32_t pid;
+            uint32_t exit_code;   /* STILL_ACTIVE until it is seen to end      */
+            uint32_t ended;
+        } pr;
+        struct {
+            vibeos_file_t *file;  /* a reference: the image's file             */
+            uint64_t image_size;  /* an image's span, a data section's size */
+            uint32_t data;        /* a data section (W3), not an image        */
+            uint32_t shared;      /* its views map the file's own pages       */
+            uint32_t protect;     /* the section's page protection            */
+            uint32_t attributes;  /* SEC_*, as NtQuerySection reports them    */
+        } sec;
+    } u;
+} nt_ob_t;
+
+typedef struct {
+    uint16_t chars[NT_NAME_MAX];
+    uint32_t len;
+    int insensitive;
+} nt_name_t;
+
+void nt_ob_lock(void);
+void nt_ob_unlock(void);
+void nt_ob_reset(void);
+nt_ob_t *nt_ob_of(const vibeos_file_t *f);
+/* Every live object of `ops`'s type, to `fn` - under the object lock, which the
+ * caller holds (W5: a thread's end told to its handles). */
+void nt_ob_each(const vibeos_file_ops_t *ops, void (*fn)(nt_ob_t *o, void *ctx), void *ctx);
+void nt_ob_release(vibeos_file_t *f);   /* a type's release */
+
+/* OBJECT_ATTRIBUTES from a program: the name and the attributes. A status. */
+uint32_t nt_read_attributes(uint64_t oa, nt_name_t *out, uint32_t *attributes);
+/* A new object of `ops`'s type, or - for a name that exists - the one there,
+ * with OBJECT_NAME_EXISTS; the reference is the caller's. */
+uint32_t nt_ob_create(const vibeos_file_ops_t *ops, const nt_name_t *name, uint32_t attributes,
+                      vibeos_file_t **out, int *existed,
+                      void (*init)(struct nt_ob *o, const void *ctx), const void *ctx);
+uint32_t nt_ob_open(const vibeos_file_ops_t *ops, const nt_name_t *name, vibeos_file_t **out);
+/* What `want` grants of `ops`'s type: the generic rights mapped onto its own. */
+uint32_t nt_map_access(const vibeos_file_ops_t *ops, uint32_t want);
+uint32_t nt_map_access_with(const nt_type_t *t, uint32_t want);
+/* Reset (set = 0) or set an event handle for an I/O (sync.c). */
+uint32_t nt_io_event(uint64_t h, int set);
+/* Committed read-write memory of the calling process's, `size` bytes, placed
+ * by the kernel, and giving it back (memory.c): a thread's TEB and stack (W5). */
+uint32_t nt_alloc_rw(uint64_t size, uint64_t *base);
+/* A process a memory call is about, held for the call: its state, its address
+ * space - pinned when it is another's, so an exit or exec there cannot free
+ * the tables under the call - and the slot and tenancy of a task of it (W7). */
+typedef struct {
+    vibeos_procstate_t *ps;
+    vibeos_vmspace_t v;
+    int pin;   /* -1: the caller's own, nothing held */
+    int slot;
+    uint32_t seq;
+} nt_mm_t;
+#define NT_MM_NONE { 0, { 0, 0 }, -1, -1, 0 }
+/* The handle must grant `need`; the pseudo-handle for oneself grants all. */
+uint32_t nt_mm_get(uint64_t process, uint32_t need, nt_mm_t *m);
+void nt_mm_put(nt_mm_t *m);
+uint32_t nt_mm_alloc_rw(nt_mm_t *m, uint64_t size, uint64_t *base);
+void nt_mm_free(nt_mm_t *m, uint64_t base, uint64_t size);
+uint32_t nt_mm_write(nt_mm_t *m, uint64_t va, void *src, uint64_t len);
+
+/* ---- the registry (key.c, W8 step 3) ------------------------------------------------ */
+
+extern const vibeos_file_ops_t g_nt_key_ops;
+/* As a reboot leaves it: pending changes written, started again from its
+ * hives at the next call. */
+void nt_reg_restart(void);
+void nt_free_alloc(uint64_t base, uint64_t size);
+extern const vibeos_file_ops_t g_nt_thread_ops;
+/* A handle in *out for the thread in `slot` - a new process's first (W6). */
+uint32_t nt_thread_handle_for(int slot, uint32_t want, uint64_t out);
+/* A CONTEXT's integer and control registers, to and from the machine's
+ * (thread.c): NtGetContextThread, NtContinue, the APC and exception frames. */
+void nt_context_from_regs(const vibeos_uregs_t *r, uint8_t *ctx, uint32_t flags);
+void nt_context_to_regs(const uint8_t *ctx, vibeos_uregs_t *r, uint32_t flags);
+/* Ticks since boot as a FILETIME: 100 ns since 1601, on the clock NtQuerySystemTime uses. */
+uint64_t nt_ticks_to_filetime(uint64_t ticks);
+/* Is there a file to run at `path`, a VFS path, for the calling process?
+ * A status: NtCreateUserProcess refuses before it makes anything (W6). */
+uint32_t nt_image_present(const char *path);
+/* The process state a process handle names, with a reference the caller gives
+ * back with ks_procstate_put - pinned, so a process that ends meanwhile leaves
+ * the structure where it is (W6: a handle duplicated into it). A status. */
+uint32_t nt_process_ps_get(uint64_t h, uint32_t need, vibeos_procstate_t **out);
+/* The same, and the slot and tenancy of a task of that process: what an
+ * address space is pinned by (ks_aspace_pin, W7 step 1). */
+uint32_t nt_process_ps_slot_get(uint64_t h, uint32_t need, vibeos_procstate_t **out, int *slot,
+                                uint32_t *seq);
+/* An NT path - "\??\C:\..." - as the VFS path it names. A status. */
+uint32_t nt_vfs_path(const nt_name_t *n, char *out, uint32_t cap);
+/* A handle for `f`, taking over the caller's reference (released on failure). */
+uint32_t nt_handle_install(vibeos_file_t *f, uint32_t access, uint32_t attributes,
+                           uint64_t *handle);
+/* The description `h` names - of `ops`'s type, if not null - and the handle's
+ * granted rights, which must include `need`. The reference is the caller's. */
+uint32_t nt_handle_ref(uint64_t h, const vibeos_file_ops_t *ops, uint32_t need,
+                       vibeos_file_t **out, uint32_t *granted);
+uint32_t nt_close_handle(uint64_t h);
+
+/* ---- memory (memory.c, W3) ---------------------------------------------------------- */
+
+/* A PAGE_* protection as a region's, or -1 for one Windows refuses. `copy_ok`:
+ * whether the copy-on-write pair is allowed - by views and protection changes,
+ * not by private memory being allocated. */
+int nt_prot_to_region(uint32_t page, int copy_ok, vibeos_prot_t *out);
+
+/* ---- creating objects and waiting on them (sync.c) ---------------------------------- */
+
+/* NtCreate<type> and NtOpen<type>'s shared part. `init` sets a new object's
+ * state from `args`; an existing named object keeps its own. */
+long nt_create_common(const vibeos_file_ops_t *ops, uint64_t handle_u, uint32_t want,
+                      uint64_t oa, int open_only,
+                      void (*init)(nt_ob_t *o, const void *ctx), const void *ctx);
+/* Wait for `n` handles - all, or any - until the timeout (a user pointer to an
+ * NT time, 0 for none). An NTSTATUS. */
+long nt_wait(uint32_t n, const uint64_t *handles, int all, int alertable, uint64_t timeout_u);
+/* APCs (apc.c, W5 step 4): is one queued for `slot`; how an alertable wait
+ * ends - USER_APC for a queued APC, ALERTED for the alert, 0 for neither; and
+ * the delivery a service's result asks for - USER_APC with an APC queued
+ * sends the frame into ntdll for it. */
+int nt_apc_pending(int slot);
+uint32_t nt_alertable_end(int me);
+long nt_apc_after(ks_regs_t *frame, long result);
+/* The thread a handle names, granted `need`: its slot and tenancy (thread.c). */
+uint32_t nt_thread_target(uint64_t h, uint32_t need, int *slot, uint32_t *seq);
+extern const vibeos_file_ops_t g_nt_event_ops;
+
+#endif

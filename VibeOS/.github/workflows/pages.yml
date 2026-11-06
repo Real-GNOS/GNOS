@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Documentation Site
+
+# The design documents are the part of this project that explains why anything
+# is the way it is, and they have been readable only by cloning the repository.
+# This publishes them.
+#
+# The table of contents is generated from the directory on every build rather
+# than committed. A hand-maintained one is a second place to remember, and a
+# document added without touching it is not "missing from the menu", it is
+# absent from the site with nothing to say so.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+      - 'scripts/dev/make-book-summary.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time, and never cancel one half-done: a cancelled deploy
+# can leave the site serving a partial build.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install mdBook
+        run: |
+          set -euo pipefail
+          version=0.4.40
+          url="https://github.com/rust-lang/mdBook/releases/download/v${version}/mdbook-v${version}-x86_64-unknown-linux-gnu.tar.gz"
+          # The binary that publishes the book runs with pages: write, so it is
+          # checked like a pinned action rather than taken from whatever the
+          # URL serves today (external review, 2026-10-07). The release has
+          # no published digest; this is the tarball's, taken 2026-10-07.
+          sha=9ef07fd288ba58ff3b99d1c94e6d414d431c9a61fdb20348e5beb74b823d546b
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL -o mdbook.tar.gz "$url"
+          echo "$sha  mdbook.tar.gz" | sha256sum -c -
+          tar -xzf mdbook.tar.gz -C "$HOME/.local/bin"
+          rm mdbook.tar.gz
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Generate the table of contents
+        run: python3 scripts/dev/make-book-summary.py docs
+
+      - name: Build
+        run: mdbook build docs
+
+      - name: Check every listed page exists
+        # mdBook is happy to publish a menu entry pointing at nothing. A
+        # generated summary makes that unlikely rather than impossible, and a
+        # site with dead links is worse than no site.
+        run: |
+          set -euo pipefail
+          missing=0
+          while read -r page; do
+            [ -f "docs/$page" ] || { echo "missing: $page"; missing=1; }
+          done < <(grep -oP '\]\(\K[^)]+' docs/SUMMARY.md)
+          [ "$missing" -eq 0 ]
+
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+        with:
+          # Turn Pages on rather than requiring somebody to find the setting.
+          # Without this the first run fails with "Get Pages site failed... Not
+          # Found", which reads like a broken workflow and is in fact a
+          # repository that has never had Pages enabled.
+          enablement: true
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: docs/book
+
+  deploy:
+    needs: build
+    # Publishing is this job's alone: the build job reads the tree and nothing
+    # more (zizmor, excessive-permissions).
+    permissions:
+      pages: write
+      id-token: write
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

@@ -1,0 +1,1578 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Storage and I/O bring-up: what the machine does with its disks at boot.
+ *
+ * Cut out of arch_hw.c, which had grown to eleven thousand lines - two and a
+ * half thousand of them added in the few days this plan was supposed to be
+ * making it smaller. The extraction plan says the length of that file is the
+ * completion criterion and not a side effect, and this is the first cut that
+ * pays back debt created after the plan was written rather than before it.
+ *
+ * What lives here: swap bring-up, the write proof, the on-disk log sink and
+ * its console tail, the filesystem images that had never been mounted, the
+ * scratch device, the volume scan and the mount report. All of it runs once,
+ * from the boot path, and none of it is reached from a syscall - which is why
+ * it separates cleanly and why it should not have been in there in the first
+ * place.
+ *
+ * The seam is deliberately narrow: eight names in from arch_hw.c and seven
+ * out. They are declared in arch_hw_internal.h rather than duplicated here,
+ * for the reason cut 1 established - a second declaration is a second thing to
+ * keep in step.
+ */
+
+#include "vibeos/arch_x86_64.h"
+#include "vibeos/blkdev.h"
+#include "vibeos/exfat.h"
+#include "vibeos/fat.h"
+#include "vibeos/ext2.h"
+#include "vibeos/anon.h"
+#include "vibeos/frame.h"
+#include "vibeos/io_stats.h"
+#include "vibeos/iso9660.h"
+#include "vibeos/klog.h"
+#include "vibeos/logsink.h"
+#include "vibeos/ntfs.h"
+#include "vibeos/parttab.h"
+#include "vibeos/partition.h"
+#include "vibeos/reclaim.h"
+#include "vibeos/storage.h"
+#include "vibeos/swaparea.h"
+#include "vibeos/swapmap.h"
+#include "vibeos/tmpfs.h"
+#include "vibeos/procfs.h"
+#include "vibeos/devfs.h"
+#include "vibeos/swapmap.h"
+#include "vibeos/vfs.h"
+
+#include "arch_hw_internal.h"
+
+/* ---- swap ---------------------------------------------------------------- */
+
+/* The block move the swap area is given, and the only way it reaches a disk.
+ *
+ * Routed through vibeos_blk_read/write rather than the driver, so a swap
+ * transfer is bounds-checked against the device exactly like every other
+ * request and shows up in the same counters. A swap path with its own private
+ * road to the hardware would be a second definition of what a block request
+ * means, which is how this project got its worst bugs. */
+static int hw_swap_block(void *ctx, uint32_t device, uint64_t lba,
+                         uint32_t count, void *buf, int write) {
+    (void)ctx;
+    /* The wrappers return 0 or -1; the reason lands in the io stats, which the
+     * boot gate already asserts. Nothing is added here, deliberately - a swap
+     * transfer that failed is not a different kind of failure from any other
+     * block request, and giving it its own vocabulary would be a second
+     * definition of what a block error means. */
+    if (write) {
+        return vibeos_blk_write(device, lba, count, buf) == 0 ? 0 : -1;
+    }
+    return vibeos_blk_read(device, lba, count, buf) == 0 ? 0 : -1;
+}
+
+/* ---- writes that are proved (I4 step 2) -----------------------------------
+ *
+ * A boot writes to this disk - about thirty sectors, through the shell's
+ * `mkdir DOCS` - and until now *nothing checked any of it*. That is worse than
+ * not writing at all: the machine modifies a medium with no evidence that what
+ * it wrote is what comes back, and a defect there is silent until some later
+ * boot cannot mount.
+ *
+ * So: write a file, read it back, compare byte for byte.
+ *
+ * ## What the pattern is, and why it is not a constant
+ *
+ * Each byte carries its own offset. A constant survives every interesting
+ * failure this can have - a write that landed one sector early, a read that
+ * returned a neighbouring sector, a multi-sector transfer that lost its last
+ * sector and left the previous contents - because all of those hand back bytes
+ * that are equal to what was expected. An offset-dependent pattern fails all
+ * of them, and says *where*.
+ *
+ * The size crosses a sector boundary and is not a multiple of one. A file that
+ * is exactly N sectors never exercises the tail, and the tail is where a
+ * length confused with a byte count shows up - which this project has already
+ * had once, in the FAT reader that returned the size the directory claimed.
+ *
+ * ## What it does not prove
+ *
+ * That the bytes reached the *medium*. Everything here could be served from
+ * the block cache, and with I2's write-through policy the device was written
+ * too - but this check cannot tell the difference. Only a reboot can, and that
+ * is step 3.
+ */
+/* At the root, and not in a subdirectory, for a reason about the medium
+ * rather than about the kernel.
+ *
+ * This runs at mount time, and at mount time the root holds exactly EFI and
+ * STARTUP.NSH: the `docs` directory staged on the host is not presented to the
+ * guest at all, and DOCS/NOTES.TXT exists later only because the boot script
+ * creates it. The first version wrote to DOCS/ and was refused for the honest
+ * reason that the parent did not exist yet - which the refusal now says in
+ * those words.
+ *
+ * It is not a weaker test. The property being checked is that bytes written to
+ * this medium come back, and the root exercises the same allocation, the same
+ * chain walk and the same directory update. A subdirectory adds a second
+ * directory lookup and nothing else, and I4b brings the volume work that would
+ * make it worth testing separately. */
+#define HW_WRITE_PROOF_PATH  "WRPROOF.BIN"
+#define HW_WRITE_PROOF_BYTES 1300u
+
+static uint8_t g_write_proof[HW_WRITE_PROOF_BYTES];
+
+static uint8_t hw_write_proof_byte(uint32_t i) {
+    /* Two terms, so neither a shift of the whole file nor a swap of two
+     * sectors can produce a matching run. */
+    return (uint8_t)((i * 7u) ^ (i >> 8) ^ 0x5Au);
+}
+
+void hw_write_proof(void) {
+    const char *verdict = "not attempted";
+    uint32_t i;
+    long n;
+
+    for (i = 0; i < HW_WRITE_PROOF_BYTES; i++) {
+        g_write_proof[i] = hw_write_proof_byte(i);
+    }
+    if (vibeos_fs_write_file(&g_rootfs, HW_WRITE_PROOF_PATH, g_write_proof,
+                             HW_WRITE_PROOF_BYTES) < 0) {
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[IO] WRITE_PROOF write refused: ");
+        vibeos_x86_64_serial_puts(vibeos_fat_write_why());
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+        verdict = "FAILED: write refused";
+    } else if (vibeos_blk_barrier((uint32_t)vibeos_x86_64_blk_device()) != 0) {
+        /* Asked for, and the answer believed. A barrier the device refused
+         * means the bytes may still be in its volatile cache, so a read that
+         * follows proves nothing about the medium - and reporting OK here
+         * would be the check lying about the one thing it exists to say. */
+        verdict = "FAILED: the device would not give a barrier";
+    } else {
+        /* Cleared first, so a read that returns nothing at all cannot pass by
+         * leaving the buffer holding what was just written to it. */
+        for (i = 0; i < HW_WRITE_PROOF_BYTES; i++) {
+            g_write_proof[i] = 0;
+        }
+        n = vibeos_fs_read_file(&g_rootfs, HW_WRITE_PROOF_PATH, g_write_proof,
+                                HW_WRITE_PROOF_BYTES);
+        if (n != (long)HW_WRITE_PROOF_BYTES) {
+            verdict = "FAILED: read gave the wrong length";
+        } else {
+            int bad = -1;
+            for (i = 0; i < HW_WRITE_PROOF_BYTES; i++) {
+                if (g_write_proof[i] != hw_write_proof_byte(i)) {
+                    bad = (int)i;
+                    break;
+                }
+            }
+            verdict = (bad < 0) ? "OK" : "FAILED: contents differ";
+            if (bad >= 0) {
+                vibeos_x86_64_serial_lock();
+                vibeos_x86_64_serial_puts("[IO] WRITE_PROOF first_bad_offset=0x");
+                vibeos_x86_64_serial_print_hex((uint64_t)(uint32_t)bad);
+                vibeos_x86_64_serial_puts(" got=0x");
+                vibeos_x86_64_serial_print_hex((uint64_t)g_write_proof[bad]);
+                vibeos_x86_64_serial_puts(" want=0x");
+                vibeos_x86_64_serial_print_hex(
+                    (uint64_t)hw_write_proof_byte((uint32_t)bad));
+                vibeos_x86_64_serial_puts("\n");
+                vibeos_x86_64_serial_unlock();
+            }
+        }
+    }
+
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[IO] WRITE_PROOF bytes=0x");
+    vibeos_x86_64_serial_print_hex((uint64_t)HW_WRITE_PROOF_BYTES);
+    vibeos_x86_64_serial_puts(" ");
+    vibeos_x86_64_serial_puts(verdict);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}
+
+/* Every mount, once everything has attached.
+ *
+ * A function rather than a block inside one of the bring-ups, because it has
+ * to run after all of them and the first version ran inside the scratch one -
+ * which reported one mount on a machine that had two, and would have reported
+ * two on a machine that has three. */
+/* The tail of the on-disk log, newest first.
+ *
+ * Printed rather than returned: the caller is a console command and the point
+ * is to be read by a person looking at a machine that has just come back.
+ *
+ * Records from *this* boot are shown too, because there is no clean line
+ * between them - the sequence numbers are continuous across a reset, which is
+ * the property that makes the medium worth having. The sequence is printed so
+ * a reader can see where one machine stopped and the next started. */
+void vibeos_x86_64_logdisk_tail(uint32_t want) {
+    vibeos_logsink_record_t r;
+    uint32_t i;
+    uint32_t shown = 0;
+
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[LOGDISK] newest first, capacity=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_capacity());
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+
+    for (i = 0; i < want; i++) {
+        char text[VIBEOS_LOGSINK_PAYLOAD + 1u];
+        uint32_t k;
+
+        if (vibeos_logsink_read(i, &r) != 0) {
+            break;
+        }
+        for (k = 0; k < r.len && k < VIBEOS_LOGSINK_PAYLOAD; k++) {
+            text[k] = (r.text[k] >= 32u && r.text[k] < 127u)
+                    ? (char)r.text[k] : '.';
+        }
+        text[k] = 0;
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[LOGDISK] seq=0x");
+        vibeos_x86_64_serial_print_hex(r.seq);
+        vibeos_x86_64_serial_puts(" ");
+        vibeos_x86_64_serial_puts(text);
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+        shown++;
+    }
+
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[LOGDISK] shown=0x");
+    vibeos_x86_64_serial_print_hex(shown);
+    vibeos_x86_64_serial_puts(" written=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_stats()->records_written);
+    vibeos_x86_64_serial_puts(" failed=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_stats()->write_failed);
+    vibeos_x86_64_serial_puts(" truncated=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_stats()->truncated);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}
+
+void hw_mount_report(void) {
+    uint32_t k;
+    for (k = 0; k < vibeos_fs_mount_count(); k++) {
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[IO] MOUNTED at=");
+        vibeos_x86_64_serial_puts(vibeos_fs_mount_path(k));
+        vibeos_x86_64_serial_puts(" type=");
+        vibeos_x86_64_serial_puts(vibeos_fs_type(vibeos_fs_mount_at(k)));
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+    }
+}
+
+/* ---- the kernel log, on a medium that outlives the machine (I5b) ----------
+ *
+ * The second disk, not the boot one. A log that lives on the filesystem is
+ * unwritable exactly when it is most wanted, and that is not a hypothetical
+ * here: every hard defect in this project was diagnosed from a serial log, and
+ * on an appliance with no serial cable a wedge currently leaves nothing at all.
+ *
+ * Straight at the block layer, never through the block cache. A cache holding
+ * the last few lines when the power goes is the one failure this cannot have.
+ */
+static int g_logsink_dev = -1;
+
+static int hw_logsink_read(void *ctx, uint64_t lba, void *buf) {
+    (void)ctx;
+    return (g_logsink_dev < 0)
+         ? -1 : vibeos_blk_read((uint32_t)g_logsink_dev, lba, 1u, buf);
+}
+
+static int hw_logsink_read_many(void *ctx, uint64_t lba, void *buf,
+                                uint32_t sectors) {
+    (void)ctx;
+    return (g_logsink_dev < 0)
+         ? -1 : vibeos_blk_read((uint32_t)g_logsink_dev, lba, sectors, buf);
+}
+
+static int hw_logsink_write(void *ctx, uint64_t lba, const void *buf) {
+    (void)ctx;
+    return (g_logsink_dev < 0)
+         ? -1 : vibeos_blk_write((uint32_t)g_logsink_dev, lba, 1u, buf);
+}
+
+/* The disk as a sink of the kernel log (kernel/diag/klog.c): every event, not
+ * only the ones the serial level lets through - the point of the medium is the
+ * quiet lines nobody was printing when the machine stopped. A boot raises a few
+ * dozen, so the cost is a few dozen sector writes against the thousands of reads
+ * a boot already does. The module keeps a write from logging into itself: the
+ * block layer logs when it refuses a request. */
+static int hw_disk_sink_write(void *ctx, const char *line, uint32_t len) {
+    (void)ctx;
+    return vibeos_logsink_write(line, len);
+}
+
+static const vibeos_klog_sink_t g_disk_sink = {
+    .name = "disk",
+    .min_level = VIBEOS_LOG_DEBUG,
+    .prefix = 0,
+    .numbered = 0,
+    .newline = 0,
+    .guard_reentry = 1,   /* the block layer logs a refused request */
+    .write = hw_disk_sink_write,
+    .ctx = 0,
+};
+
+void hw_logsink_bringup(void) {
+    const char *verdict = "no second disk on this machine";
+    vibeos_logsink_dev_t dev;
+    vibeos_logsink_record_t prev;
+    vibeos_blk_driver_t info;
+    int have_prev = 0;
+    int dev_no;
+
+    /* The first disk that is not the boot disk. A log on the medium the machine
+     * is running from is the arrangement this phase exists to stop.
+     *
+     * This used to be adapter 1, on the same assumption blk.c used to make -
+     * that adapter 0 is the boot disk. Both were wrong in the same
+     * configuration and for the same reason, one file apart: with the ESP on
+     * AHCI, adapter 1 *is* the boot disk, so the log sink wrote over it. QEMU's
+     * vvfat said "Tried to write to protected bootsector" and the boot came
+     * back with io_medium=73 - a fault whose message names a bootsector and
+     * whose cause is a hardcoded 1 in a log. Ask which one it is. */
+    {
+        uint32_t i, boot = vibeos_x86_64_blk_boot_adapter();
+        dev_no = -1;
+        for (i = 0; i < vibeos_x86_64_blk_adapter_count(); i++) {
+            if (i != boot) {
+                dev_no = vibeos_x86_64_blk_adapter_device(i);
+                break;
+            }
+        }
+    }
+    if (dev_no >= 0 && vibeos_blk_info((uint32_t)dev_no, &info) == 0) {
+        g_logsink_dev = dev_no;
+        vibeos_logsink_set_cpu_id(vibeos_x86_64_cpu_id);
+        dev.read = hw_logsink_read;
+        dev.read_many = hw_logsink_read_many;
+        dev.write = hw_logsink_write;
+        dev.ctx = 0;
+        dev.sectors = info.sectors;
+
+        verdict = "FAILED: attach";
+        if (vibeos_logsink_attach(&dev) == 0) {
+            /* What the previous machine left, read *before* this boot writes
+             * anything - otherwise the newest record is this boot own and the
+             * check proves only that a write followed by a read works. */
+            have_prev = (vibeos_logsink_read(0, &prev) == 0);
+
+            verdict = "FAILED: write";
+            if (vibeos_logsink_write("VIBEOS boot mark", 16u) == 0) {
+                /* Registered only once the medium has taken a line: before
+                 * that it would refuse every one, and each refusal is a
+                 * must-be-zero. */
+                verdict = (vibeos_klog_add_sink(&g_disk_sink) >= 0)
+                        ? "OK" : "FAILED: register";
+            }
+        }
+    }
+
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[IO] LOGSINK result=");
+    vibeos_x86_64_serial_puts(verdict);
+    vibeos_x86_64_serial_puts(" capacity=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_capacity());
+    vibeos_x86_64_serial_puts(" prev_seq=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_stats()->highest_seq_seen);
+    vibeos_x86_64_serial_puts(" written=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_stats()->records_written);
+    vibeos_x86_64_serial_puts(" failed=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_stats()->write_failed);
+    vibeos_x86_64_serial_puts(" bad=0x");
+    vibeos_x86_64_serial_print_hex(vibeos_logsink_stats()->bad_records);
+    /* The previous boot last line, which is the entire point of the feature.
+     * "previous=none" on a fresh medium, and the gate reads the difference
+     * between the two runs rather than either one on its own. */
+    vibeos_x86_64_serial_puts(" previous=");
+    if (have_prev) {
+        uint32_t k;
+        for (k = 0; k < prev.len && k < 64u; k++) {
+            char c[2];
+            c[0] = (prev.text[k] >= 32u && prev.text[k] < 127u)
+                 ? (char)prev.text[k] : '.';
+            c[1] = 0;
+            vibeos_x86_64_serial_puts(c);
+        }
+    } else {
+        vibeos_x86_64_serial_puts("none");
+    }
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}
+
+/* ---- filesystems that had never run (I5) ----------------------------------
+ *
+ * ext2 and ISO9660, mounted from images the *host's* own mkfs tools built, and
+ * read from.
+ *
+ * The point of the phase is that these drivers had never been given anything
+ * to parse. An image this project wrote itself would only prove the driver and
+ * the writer agree with each other - and they would, because the same
+ * misreading of the layout goes into both. The one artefact neither side of
+ * the test controls is the one worth mounting.
+ *
+ * Attached through the loop device rather than as second disks, because a
+ * second physical device needs virtio-blk to stop being a singleton.
+ *
+ * The file each image carries has its own offset in every byte, so a read that
+ * returned the wrong block cannot match - which a file full of a constant
+ * would.
+ *
+ * A table rather than one function per filesystem. The first version was one
+ * function, and the second filesystem would have been a copy of it with four
+ * names changed - which is how a check ends up asserted for one member of a
+ * family and not the others.
+ */
+#define HW_FSIMAGE_SLOTS 8u
+
+typedef struct hw_fsimage {
+    const char *name;
+    const char *image;
+    const char *at;
+    /* The file to read back, or 0 when this filesystem image cannot be given
+     * one. exFAT is the case: exfatprogs ships no tool that writes into an
+     * image without mounting it, and mounting needs root and FUSE. Mounting a
+     * real mkfs.exfat volume and reading its root is still far more than that
+     * driver had ever done; claiming a byte comparison that did not happen
+     * would be worse than the gap, so the row says so and the boot reports
+     * "OK (no marker)" rather than "OK". */
+    const char *marker;
+    /* Where the filesystem starts on the image. Zero for all but FAT, whose
+     * driver reads a first sector of zero as "the boot volume"; the mtools
+     * image carries its filesystem 1 MiB in, as a partition would. */
+    uint64_t first_lba;
+    /* The mounted driver's state, which a mount by name needs the caller to
+     * keep - the same storage a volume gives it. */
+    uint64_t state[VIBEOS_FS_STATE_BYTES / 8u];
+
+    uint8_t slot_data[HW_FSIMAGE_SLOTS][512];
+    vibeos_block_slot_t slots[HW_FSIMAGE_SLOTS];
+    vibeos_blockdev_t dev;
+    vibeos_blockcache_t bc;
+    vibeos_fsmount_t mnt;
+    int device;
+} hw_fsimage_t;
+
+static int hw_fsimage_read(void *ctx, uint64_t lba, void *buf) {
+    hw_fsimage_t *e = (hw_fsimage_t *)ctx;
+    return (e == 0 || e->device < 0)
+         ? -1 : vibeos_blk_read((uint32_t)e->device, lba, 1u, buf);
+}
+
+/* Mounted by the driver's name, through the same table the volume scan uses
+ * (C7). This used to name each driver - its state, a mount wrapper and its ops
+ * - which made this file one of the four a new filesystem had to edit. */
+static hw_fsimage_t g_fsimages[] = {
+    { "ext2",    "EFI/BOOT/EXT2.IMG",  "/ext2",  "HELLO.TXT", 0ull, {0},
+      {{0}}, {{0}}, {0}, {0}, {0}, -1 },
+    /* mkfs.ext4's defaults: extents, 64bit, flex_bg, metadata_csum (docs/
+     * filesystem-design/ext4.md step 1). */
+    { "ext4",    "EFI/BOOT/EXT4.IMG",  "/ext4",  "HELLO.TXT", 0ull, {0},
+      {{0}}, {{0}}, {0}, {0}, {0}, -1 },
+    { "iso9660", "EFI/BOOT/ISO.IMG",   "/iso",   "HELLO.TXT", 0ull, {0},
+      {{0}}, {{0}}, {0}, {0}, {0}, -1 },
+    { "ntfs",    "EFI/BOOT/NTFS.IMG",  "/ntfs",  "HELLO.TXT", 0ull, {0},
+      {{0}}, {{0}}, {0}, {0}, {0}, -1 },
+    { "exfat",   "EFI/BOOT/EXFAT.IMG", "/exfat", 0,           0ull, {0},
+      {{0}}, {{0}}, {0}, {0}, {0}, -1 },
+    /* VFAT long names as mtools writes them (docs/abi/ A4): the marker is reached
+     * through a long-named directory, so the lookup walks two long names. */
+    { "fat",     "EFI/BOOT/FATLONG.IMG", "/fatlong",
+      "long directory name/a_long_marker_name.txt", 2048ull, {0},
+      {{0}}, {{0}}, {0}, {0}, {0}, -1 },
+};
+
+static long g_fsimage_got;
+
+static void hw_fsimage_bringup(hw_fsimage_t *e) {
+    static uint8_t rd[4096];
+    const char *verdict = "no image";
+    uint64_t sectors = 0;
+    int dev;
+    uint32_t i;
+
+    /* Cleared by the function that owns the contract, not at each place that
+     * sets it. The exFAT row never reads a file, so without this it reported
+     * the *previous* row byte count - a field written on one path and read on
+     * all of them, which is a trap this project has paid for before. */
+    g_fsimage_got = 0;
+
+    dev = vibeos_x86_64_loop_attach(e->image, &sectors);
+    if (dev < 0) {
+        /* Say which refusal it was. The first version reported every one of
+         * them as "no image on this medium", and for a boot that sentence was
+         * false: two images were on the disk and the loop device had run out
+         * of slots. */
+        verdict = vibeos_x86_64_loop_why();
+    }
+    if (dev >= 0) {
+        e->device = dev;
+        for (i = 0; i < HW_FSIMAGE_SLOTS; i++) {
+            e->slots[i].data = e->slot_data[i];
+        }
+        e->dev.read = hw_fsimage_read;
+        /* The loop device is read-only, and says so by having no write at all
+         * (blockdev.h: "may be NULL: a read-only device") rather than by a
+         * write that fails: a device that accepts a write it does not perform
+         * tells the caller its bytes are safe, and ext4's mount looks here to
+         * decide whether the volume gets the writing operations. */
+        e->dev.write = 0;
+        e->dev.flush = 0;
+        e->dev.ctx = e;
+        e->dev.sectors = sectors;
+
+        verdict = "FAILED: cache";
+        if (vibeos_blockcache_init(&e->bc, &e->dev, e->slots,
+                                   HW_FSIMAGE_SLOTS) == 0) {
+            verdict = "FAILED: mount";
+            const vibeos_fs_driver_t *drv = vibeos_storage_driver(e->name);
+
+            if (drv && drv->mount(&e->mnt, &e->bc, e->first_lba, sectors, e->state) == 0) {
+                long got;
+
+                if (e->marker == 0) {
+                    /* Mounted, and there is nothing to read back. Said
+                     * distinctly rather than folded into OK: the gate should
+                     * be able to tell a driver that parsed a superblock from
+                     * one that also returned a file. */
+                    verdict = "OK (no marker)";
+                    (void)vibeos_fs_attach(e->at, &e->mnt);
+                    goto report;
+                }
+                verdict = "FAILED: read";
+                for (i = 0; i < sizeof(rd); i++) {
+                    rd[i] = 0;
+                }
+                got = vibeos_fs_read_file(&e->mnt, e->marker, rd, sizeof(rd));
+                /* A short read and a missing file are different failures and
+                 * used to arrive as the same word. */
+                g_fsimage_got = got;
+                if (got == (long)sizeof(rd)) {
+                    int same = 1;
+                    for (i = 0; i < sizeof(rd); i++) {
+                        uint8_t want = (uint8_t)(((i * 7u) ^ (i >> 8) ^ 0x5Au));
+                        if (rd[i] != want) {
+                            same = 0;
+                            break;
+                        }
+                    }
+                    verdict = same ? "OK" : "FAILED: contents differ";
+                    if (same) {
+                        (void)vibeos_fs_attach(e->at, &e->mnt);
+                    }
+                }
+            }
+        }
+    }
+
+report:
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[IO] FSIMAGE name=");
+    vibeos_x86_64_serial_puts(e->name);
+    vibeos_x86_64_serial_puts(" sectors=0x");
+    vibeos_x86_64_serial_print_hex(sectors);
+    vibeos_x86_64_serial_puts(" got=0x");
+    vibeos_x86_64_serial_print_hex((uint64_t)g_fsimage_got);
+    vibeos_x86_64_serial_puts(" result=");
+    vibeos_x86_64_serial_puts(verdict);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}
+
+void hw_fsimages_bringup(void) {
+    uint32_t i;
+    for (i = 0; i < sizeof(g_fsimages) / sizeof(g_fsimages[0]); i++) {
+        hw_fsimage_bringup(&g_fsimages[i]);
+    }
+}
+
+/* ---- a scratch device, and what it is for (I4c) ---------------------------
+ *
+ * I4c writes partition tables. The plan says, at the top of its own section,
+ * that this is the one phase that can lose a user's data - so it gets a device
+ * that is not anybody's disk.
+ *
+ * ## Why RAM and not a second disk
+ *
+ * A second QEMU disk was the first plan and it needs something else first:
+ * every piece of virtio-blk's state is a global - the queue, the descriptors,
+ * the request struct, the lock - so a second device means making that driver
+ * per-instance. That is a real refactor of *the driver the machine boots
+ * from*, and doing it inside a phase about writing partition tables would mean
+ * two risky changes verified by one result.
+ *
+ * A RAM-backed device gives the same coverage where it matters. What I4c has
+ * to prove is that the partition writer, the block layer and the cache do the
+ * right thing; the driver underneath only moves sectors, and I4 already proves
+ * that it moves them correctly. What this does *not* prove is that a real
+ * medium keeps a table across a power cut, and that was never in reach of a
+ * single boot anyway - it is the same gap I4 step 3 has.
+ *
+ * ## It is registered, so it is a real device
+ *
+ * Not a special case threaded through the writer. It goes through
+ * vibeos_blk_register like any driver, gets a device number, and is
+ * bounds-checked by the same code - which means the test exercises the path a
+ * real disk would take rather than a shortcut built for it.
+ */
+/* 4 MiB.
+ *
+ * Sized by the format test rather than by the partition test. FAT12, FAT16 and
+ * FAT32 are the same header and a reader tells them apart by cluster count
+ * alone, so a partition small enough to land under 4085 clusters is silently a
+ * FAT12 volume however carefully the fields were filled in. Six thousand
+ * sectors puts it comfortably inside FAT16, and the formatter refuses anything
+ * that would not. */
+#define HW_SCRATCH_SECTORS 8192u
+
+static uint8_t g_scratch[HW_SCRATCH_SECTORS][512];
+static int g_scratch_device = -1;
+
+static int hw_scratch_submit(void *ctx, vibeos_blk_request_t *req) {
+    uint32_t i;
+
+    (void)ctx;
+    for (i = 0; i < req->sectors; i++) {
+        uint64_t lba = req->lba + i;
+        uint8_t *p = (uint8_t *)req->buf + (uint64_t)i * 512ull;
+        if (lba >= HW_SCRATCH_SECTORS) {
+            /* Reached only if the layer above let it through, which it does
+             * not - the check is here because a driver that trusts its caller
+             * is one bad caller away from writing past its own array. */
+            req->sectors_done = i;
+            req->result = VIBEOS_BLK_OUT_OF_RANGE;
+            return -1;
+        }
+        if (req->write) {
+            uint32_t k;
+            for (k = 0; k < 512u; k++) {
+                g_scratch[lba][k] = p[k];
+            }
+        } else {
+            uint32_t k;
+            for (k = 0; k < 512u; k++) {
+                p[k] = g_scratch[lba][k];
+            }
+        }
+    }
+    req->sectors_done = req->sectors;
+    return 0;
+}
+
+static int hw_scratch_read(void *ctx, uint64_t lba, void *buf) {
+    (void)ctx;
+    return (g_scratch_device < 0)
+         ? -1
+         : vibeos_blk_read((uint32_t)g_scratch_device, lba, 1u, buf);
+}
+
+static int hw_scratch_write(void *ctx, uint64_t lba, const void *buf) {
+    (void)ctx;
+    return (g_scratch_device < 0)
+         ? -1
+         : vibeos_blk_write((uint32_t)g_scratch_device, lba, 1u, buf);
+}
+
+static int hw_scratch_flush(void *ctx) {
+    (void)ctx;
+    return 0;   /* RAM has no volatile cache below it */
+}
+
+/* Partition the scratch device, read the table back, and say so.
+ *
+ * The round trip is the test: a writer that produces a table only it can read
+ * is indistinguishable from a correct one until another tool looks at the
+ * disk, and by then the disk is somebody's. So the write goes through
+ * vibeos_parttab_write_mbr and the read back through the ordinary
+ * vibeos_partition_parse_mbr, with no shared state between them.
+ */
+static uint8_t g_scratch_slot_data[8][512];
+static vibeos_block_slot_t g_scratch_slots[8];
+static vibeos_blockdev_t g_scratch_dev;
+static vibeos_blockcache_t g_scratch_bc;
+
+void hw_scratch_bringup(void) {
+    vibeos_blk_driver_t drv;
+    uint32_t device = 0;
+    const char *verdict = "not attempted";
+    uint32_t i;
+
+    for (i = 0; i < 8u; i++) {
+        g_scratch_slots[i].data = g_scratch_slot_data[i];
+    }
+    drv.name = "scratch-ram";
+    drv.sector_bytes = 512u;
+    drv.sectors = HW_SCRATCH_SECTORS;
+    drv.submit = hw_scratch_submit;
+    drv.barrier = 0;      /* nothing below it holds writes */
+    drv.ctx = 0;
+    if (vibeos_blk_register(&drv, &device) != 0) {
+        return;
+    }
+    g_scratch_device = (int)device;
+
+    g_scratch_dev.read = hw_scratch_read;
+    g_scratch_dev.write = hw_scratch_write;
+    g_scratch_dev.flush = hw_scratch_flush;
+    g_scratch_dev.ctx = 0;
+    g_scratch_dev.sectors = HW_SCRATCH_SECTORS;
+    if (vibeos_blockcache_init(&g_scratch_bc, &g_scratch_dev,
+                               g_scratch_slots, 8u) != 0) {
+        return;
+    }
+
+    {
+        vibeos_parttable_t want;
+        vibeos_parttab_guard_t guard;
+        uint32_t sum = 0;
+        vibeos_parttab_result_t r;
+        int table_ok = 0;
+
+        for (i = 0; i < sizeof(want); i++) {
+            ((uint8_t *)&want)[i] = 0;
+        }
+        for (i = 0; i < sizeof(guard); i++) {
+            ((uint8_t *)&guard)[i] = 0;
+        }
+        /* A signature in the sector the table will share, so the round trip
+         * also proves the writer edited it rather than replacing it - the
+         * failure that quietly unbootables a disk it was asked to
+         * repartition. */
+        {
+            uint8_t sec[512];
+            for (i = 0; i < 512u; i++) {
+                sec[i] = (uint8_t)(i ^ 0x3Cu);
+            }
+            (void)vibeos_blockcache_write(&g_scratch_bc, 0, sec);
+            (void)vibeos_blockcache_flush(&g_scratch_bc);
+        }
+
+        want.count = 2;
+        want.entry[0].first_lba = 64;   want.entry[0].sector_count = 6000;
+        want.entry[0].mbr_type = 0x06u;   /* FAT16 */
+        want.entry[1].first_lba = 6144; want.entry[1].sector_count = 1024;
+        want.entry[1].mbr_type = 0x0Cu;
+
+        if (vibeos_parttab_checksum(&g_scratch_bc, HW_SCRATCH_SECTORS,
+                                    &sum) != 0) {
+            verdict = "FAILED: no checksum";
+        } else {
+            r = vibeos_parttab_write_mbr(&g_scratch_bc, HW_SCRATCH_SECTORS,
+                                         &want, &guard, sum);
+            if (r != VIBEOS_PARTTAB_OK) {
+                verdict = vibeos_parttab_result_name(r);
+            } else {
+                vibeos_parttable_t back;
+                int protective = 0;
+                uint8_t sec[512];
+
+                verdict = "FAILED: sector 0 unreadable";
+                if (vibeos_blockcache_read(&g_scratch_bc, 0, sec) == 0 &&
+                    vibeos_partition_parse_mbr(sec, &back, &protective) == 0) {
+                    int entries_ok = (back.count == 2u) &&
+                                     (back.entry[0].first_lba == 64ull) &&
+                                     (back.entry[0].sector_count == 6000ull) &&
+                                     (back.entry[1].first_lba == 6144ull) &&
+                                     (back.entry[1].sector_count == 1024ull);
+                    /* And the bytes the table does not own are untouched: a
+                     * writer that rebuilds sector 0 makes a disk unbootable
+                     * while doing exactly what it was asked. */
+                    int rest_ok = 1;
+                    for (i = 0; i < 446u; i++) {
+                        if (sec[i] != (uint8_t)(i ^ 0x3Cu)) {
+                            rest_ok = 0;
+                            break;
+                        }
+                    }
+                    /* Three outcomes, decided by two flags rather than by
+                     * inspecting the string that was set last - which is what
+                     * the first version did, and which would have reported the
+                     * wrong one the moment a message was reworded. */
+                    if (!entries_ok) {
+                        verdict = "FAILED: the table read back differs";
+                    } else if (!rest_ok) {
+                        verdict = "FAILED: the rest of sector 0 was destroyed";
+                    } else {
+                        verdict = "OK";
+                        table_ok = 1;
+                    }
+                }
+            }
+        }
+
+        /* Format the first partition, and check the result the way anything
+         * else would: by probing it.
+         *
+         * Not by mounting it. This driver's state is a single global, so
+         * mounting the scratch volume would unmount the one the machine is
+         * running from - which is the structural limit already recorded in
+         * io_mounts.md, and a much larger change than a formatter. Probing
+         * proves the bytes on the medium are a FAT16 volume that a reader will
+         * recognise, which is what the format op is responsible for; mounting
+         * and writing a file waits for the driver to stop being a singleton.
+         *
+         * The probe is the same one the volume scan uses, with no shared state
+         * with the formatter. A formatter checked by its own idea of what it
+         * wrote proves nothing. */
+        /* A flag, not the first letter of a message. The previous line of
+         * this function already had to stop deciding an outcome by inspecting
+         * the string it had set, because a reworded message would have changed
+         * the decision. */
+        if (table_ok) {
+            const char *fverdict = "not attempted";
+            /* The driver the scan would pick, asked for by name: the exercise
+             * formats FAT, so it is not scanning for a filesystem (C7). */
+            const vibeos_fs_driver_t *fat = vibeos_storage_driver("fat");
+            if (!fat || !fat->format) {
+                fverdict = "FAILED: no format op";
+            } else if (fat->format(&g_scratch_bc, 64ull, 6000ull) != 0) {
+                fverdict = "FAILED: format refused";
+            } else if (fat->probe(&g_scratch_bc, 64ull) != 0) {
+                fverdict = "FAILED: the probe did not recognise it";
+            } else {
+                /* Mount it, write a file, read it back. This is the phase's
+                 * own "done when", and until the driver stopped being a
+                 * singleton it could not be attempted: mounting this volume
+                 * would have unmounted the one the machine is running from.
+                 *
+                 * The read back goes through the mount table's resolver, not
+                 * through the mount handle directly, so what is proved is that
+                 * a path under /vol1 reaches this volume and not the root -
+                 * which is the property the table exists for and the one a
+                 * first-match resolver would get wrong. */
+                static vibeos_fsmount_t s_scratch_mnt;
+
+                fverdict = "FAILED: mount";
+                if (fat->mount(&s_scratch_mnt, &g_scratch_bc, 64ull, 0ull, 0) == 0 &&
+                    vibeos_fs_attach("/vol1", &s_scratch_mnt) == 0) {
+                    static uint8_t s_wr[600];
+                    static uint8_t s_rd[600];
+                    vibeos_fsmount_t *m = 0;
+                    const char *tail = 0;
+                    uint32_t k;
+
+                    for (k = 0; k < sizeof(s_wr); k++) {
+                        s_wr[k] = (uint8_t)((k * 5u) ^ 0xA7u);
+                    }
+                    fverdict = "FAILED: write";
+                    if (vibeos_fs_write_file(&s_scratch_mnt, "HELLO.BIN",
+                                             s_wr, sizeof(s_wr)) ==
+                        (long)sizeof(s_wr)) {
+                        fverdict = "FAILED: resolve";
+                        if (vibeos_fs_resolve("/vol1/HELLO.BIN", &m, &tail) == 0 &&
+                            m == &s_scratch_mnt) {
+                            long got;
+                            for (k = 0; k < sizeof(s_rd); k++) {
+                                s_rd[k] = 0;
+                            }
+                            got = vibeos_fs_read_file(m, tail, s_rd,
+                                                      sizeof(s_rd));
+                            fverdict = "FAILED: read back";
+                            if (got == (long)sizeof(s_rd)) {
+                                int same = 1;
+                                for (k = 0; k < sizeof(s_rd); k++) {
+                                    if (s_rd[k] != s_wr[k]) {
+                                        same = 0;
+                                        break;
+                                    }
+                                }
+                                fverdict = same ? "OK"
+                                                : "FAILED: contents differ";
+                                /* And not on the root. Everything above proves
+                                 * /vol1 reaches this *mount*, and that the mount
+                                 * round-trips - which a mount of the boot volume
+                                 * does too. A FAT driver whose mount ignored the
+                                 * volume it was given passed this exercise while
+                                 * writing HELLO.BIN onto the disk the machine
+                                 * runs from (C7, io-device-fs.txt case 2). */
+                                if (same) {
+                                    vibeos_fsmount_t *rm = 0;
+                                    const char *rt = 0;
+                                    if (vibeos_fs_resolve("/HELLO.BIN", &rm, &rt) == 0 &&
+                                        rm != &s_scratch_mnt &&
+                                        vibeos_fs_read_file(rm, rt, s_rd,
+                                                            sizeof(s_rd)) >= 0) {
+                                        fverdict = "FAILED: also on the root";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            vibeos_x86_64_serial_lock();
+            vibeos_x86_64_serial_puts("[IO] FORMAT fs=fat first_lba=0x40 result=");
+            vibeos_x86_64_serial_puts(fverdict);
+            vibeos_x86_64_serial_puts("\n");
+            vibeos_x86_64_serial_unlock();
+        }
+
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[IO] PARTTAB scratch_device=0x");
+        vibeos_x86_64_serial_print_hex((uint64_t)device);
+        vibeos_x86_64_serial_puts(" round_trip=");
+        vibeos_x86_64_serial_puts(verdict);
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+    }
+}
+
+/* ---- volumes (I4b step 1 and 2) -------------------------------------------
+ *
+ * What is actually on this disk, read at boot and said out loud.
+ *
+ * The partition reader, the GPT parser and the volume scan were all written,
+ * host-tested and sabotage-verified, and had never executed a line on a
+ * booting machine - the same state the swap stack and the block cache were in
+ * before this week. `vibeos_storage_scan` was defined and called by nobody.
+ *
+ * It reads through the block cache the filesystem already uses, and not one of
+ * its own. Two caches over one device is precisely the arrangement I2 spent a
+ * phase removing, and standing a second one up here to avoid a two-line
+ * accessor would have put it straight back.
+ *
+ * ## What this does not do yet
+ *
+ * Mount anything. The scan will claim volumes for drivers that have never run
+ * on this machine either, and mounting a second filesystem needs the mount
+ * table of step 4 - there is one global mount today, which is the structural
+ * reason only one filesystem can run. So this reports and stops, which is the
+ * "done when" of steps 1 and 2 and honestly not of 3 and 4.
+ */
+static vibeos_storage_t g_storage;
+
+/* ---- /tmp (docs/abi/ L1 step 2) ----------------------------------------------------
+ *
+ * tmpfs, the one filesystem here with owners, modes, links and writes at an
+ * offset. Its own lock: it has callers on every core, and it allocates, so no
+ * other layer's lock will do (CLAUDE.md). Its pages come through the admitted
+ * door for user memory - they are a program's data, and the reserve the
+ * kernel keeps for itself must not be spent on a file somebody wrote - and
+ * tmpfs takes them before its lock, because that door may reclaim. */
+#define HW_TMPFS_PAGES 8192u   /* 32 MiB: a ceiling, not a reservation */
+
+static vibeos_tmpfs_t g_tmpfs;
+static vibeos_fsmount_t g_tmpfs_mnt;
+static hw_lock_t g_tmpfs_lock;
+
+static void hw_tmpfs_lock(void) {
+    hw_spin_lock_named(&g_tmpfs_lock, "tmpfs");
+}
+
+static void hw_tmpfs_unlock(void) {
+    hw_spin_unlock(&g_tmpfs_lock);
+}
+
+static void *hw_tmpfs_page(void) {
+    return hw_alloc_user_page();
+}
+
+/* The filesystem's reference given back, which frees the page unless a mapping
+ * still has it (docs/abi/ L3). Not hw_free_page_why: that one reports a frame
+ * released while a process maps it, and here that is a file truncated under a
+ * mapping - allowed, and the mapping keeps the page. */
+static void hw_tmpfs_page_free(void *p) {
+    (void)hw_page_put((uint64_t)(uintptr_t)p);
+}
+
+static void hw_tmpfs_page_hold(void *p) {
+    vibeos_frame_get((uint64_t)(uintptr_t)p);
+}
+
+/* Uptime until there is a wall clock (L2). */
+static uint64_t hw_fs_clock_ns(void) {
+    return g_timer_ticks * (1000000000ull / VIBEOS_HW_TIMER_HZ);
+}
+
+static void hw_tmpfs_bringup(void) {
+    const char *verdict = "OK";
+
+    vibeos_fs_set_clock(hw_fs_clock_ns);
+    if (vibeos_tmpfs_init(&g_tmpfs, HW_TMPFS_PAGES, hw_tmpfs_page, hw_tmpfs_page_free,
+                          hw_tmpfs_lock, hw_tmpfs_unlock) != 0 ||
+        vibeos_fs_mount(&g_tmpfs_mnt, vibeos_tmpfs_ops(), &g_tmpfs, "tmpfs") != 0) {
+        verdict = "FAILED: mount";
+    } else if (vibeos_fs_attach("/tmp", &g_tmpfs_mnt) != 0) {
+        verdict = "FAILED: attach";
+    }
+    vibeos_tmpfs_set_page_hold(&g_tmpfs, hw_tmpfs_page_hold);
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[IO] TMPFS at=/tmp pages=0x");
+    vibeos_x86_64_serial_print_hex(HW_TMPFS_PAGES);
+    vibeos_x86_64_serial_puts(" result=");
+    vibeos_x86_64_serial_puts(verdict);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}
+
+/* /proc (docs/abi/ L3 step 3): what a program reads before it does anything
+ * else. The numbers are the frame layer's and the swap map's, in kibibytes;
+ * "available" is what is free, because what reclaim could add to it is not
+ * something this kernel can count without doing it. */
+static vibeos_fsmount_t g_procfs_mnt;
+static vibeos_procfs_t g_procfs;
+
+static void hw_procfs_mem(vibeos_procfs_mem_t *out) {
+    uint32_t slots = vibeos_swap_slots(), s, used = 0;
+
+    out->total_kb = vibeos_frame_total() * 4ull;
+    out->free_kb = vibeos_frame_free_count() * 4ull;
+    out->available_kb = out->free_kb;
+    out->cached_kb = 0;
+    for (s = 0; s < slots; s++) {
+        used += vibeos_swap_is_allocated(s) ? 1u : 0u;
+    }
+    out->swap_total_kb = (uint64_t)slots * 4ull;
+    out->swap_free_kb = (uint64_t)(slots - used) * 4ull;
+}
+
+/* cpuinfo (L2 step 6): what CPUID says, under Linux's names for the bits, and a
+ * clock measured from the TSC against the timer rather than claimed. LTP
+ * decides it runs virtualised from the model name ("QEMU Virtual CPU") and
+ * the hypervisor bit, and loosens its timing checks for it. */
+static char g_cpu_flags[640];
+static uint64_t g_cpu_tsc0, g_cpu_tick0;
+
+static void hw_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
+    __asm__ __volatile__("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
+}
+
+static uint64_t hw_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+typedef struct {
+    uint8_t reg;     /* 0 leaf 1 edx, 1 leaf 1 ecx, 2 ext edx, 3 ext ecx, 4 leaf 7 ebx */
+    uint8_t bit;
+    const char *name;
+} hw_cpu_flag_t;
+
+static const hw_cpu_flag_t g_cpu_flag_names[] = {
+    {0, 0, "fpu"}, {0, 1, "vme"}, {0, 2, "de"}, {0, 3, "pse"}, {0, 4, "tsc"}, {0, 5, "msr"},
+    {0, 6, "pae"}, {0, 7, "mce"}, {0, 8, "cx8"}, {0, 9, "apic"}, {0, 11, "sep"}, {0, 12, "mtrr"},
+    {0, 13, "pge"}, {0, 14, "mca"}, {0, 15, "cmov"}, {0, 16, "pat"}, {0, 17, "pse36"},
+    {0, 19, "clflush"}, {0, 23, "mmx"}, {0, 24, "fxsr"}, {0, 25, "sse"}, {0, 26, "sse2"},
+    {0, 28, "ht"}, {2, 11, "syscall"}, {2, 20, "nx"}, {2, 26, "pdpe1gb"}, {2, 27, "rdtscp"},
+    {2, 29, "lm"}, {1, 0, "pni"}, {1, 1, "pclmulqdq"}, {1, 9, "ssse3"}, {1, 12, "fma"},
+    {1, 13, "cx16"}, {1, 19, "sse4_1"}, {1, 20, "sse4_2"}, {1, 21, "x2apic"}, {1, 22, "movbe"},
+    {1, 23, "popcnt"}, {1, 25, "aes"}, {1, 26, "xsave"}, {1, 28, "avx"}, {1, 29, "f16c"},
+    {1, 30, "rdrand"}, {1, 31, "hypervisor"}, {3, 0, "lahf_lm"}, {3, 5, "abm"},
+    {4, 0, "fsgsbase"}, {4, 3, "bmi1"}, {4, 5, "avx2"}, {4, 8, "bmi2"}, {4, 9, "erms"},
+    {4, 18, "rdseed"}, {4, 19, "adx"}, {4, 29, "sha_ni"},
+};
+
+static uint32_t hw_procfs_cpus(void) {
+    return g_cpu_online_count ? g_cpu_online_count : 1u;
+}
+
+static uint32_t hw_procfs_cpu_khz(void) {
+    uint64_t ticks = g_timer_ticks - g_cpu_tick0;
+
+    if (ticks < 10u) {
+        return 0;   /* not long enough yet to say */
+    }
+    return (uint32_t)((hw_rdtsc() - g_cpu_tsc0) * VIBEOS_HW_TIMER_HZ / ticks / 1000u);
+}
+
+static void hw_procfs_cpu(vibeos_procfs_cpu_t *c) {
+    uint32_t r[4], regs[5] = {0, 0, 0, 0, 0}, max, ext, i, n = 0, k;
+
+    hw_cpuid(0, 0, r);
+    max = r[0];
+    c->cpuid_level = max;
+    ((uint32_t *)c->vendor)[0] = r[1];
+    ((uint32_t *)c->vendor)[1] = r[3];
+    ((uint32_t *)c->vendor)[2] = r[2];
+    c->vendor[12] = 0;
+    hw_cpuid(1, 0, r);
+    c->stepping = r[0] & 0xfu;
+    c->model = (r[0] >> 4) & 0xfu;
+    c->family = (r[0] >> 8) & 0xfu;
+    if (c->family == 6u || c->family == 15u) {
+        c->model += ((r[0] >> 16) & 0xfu) << 4;
+    }
+    if (c->family == 15u) {
+        c->family += (r[0] >> 20) & 0xffu;
+    }
+    regs[0] = r[3];
+    regs[1] = r[2];
+    if (max >= 7u) {
+        hw_cpuid(7, 0, r);
+        regs[4] = r[1];
+    }
+    hw_cpuid(0x80000000u, 0, r);
+    ext = r[0];
+    if (ext >= 0x80000001u) {
+        hw_cpuid(0x80000001u, 0, r);
+        regs[2] = r[3];
+        regs[3] = r[2];
+    }
+    c->model_name[0] = 0;
+    if (ext >= 0x80000004u) {
+        char brand[49];
+        uint32_t j, at = 0;
+
+        for (i = 0; i < 3u; i++) {
+            hw_cpuid(0x80000002u + i, 0, r);
+            for (j = 0; j < 4u; j++) {
+                ((uint32_t *)brand)[i * 4u + j] = r[j];
+            }
+        }
+        brand[48] = 0;
+        while (brand[at] == ' ') {
+            at++;   /* Intel pads the brand on the left */
+        }
+        for (i = 0; brand[at + i] && i + 1u < sizeof(c->model_name); i++) {
+            c->model_name[i] = brand[at + i];
+        }
+        c->model_name[i] = 0;
+    }
+    c->phys_bits = 36u;
+    c->virt_bits = 48u;
+    if (ext >= 0x80000008u) {
+        hw_cpuid(0x80000008u, 0, r);
+        c->phys_bits = r[0] & 0xffu;
+        c->virt_bits = (r[0] >> 8) & 0xffu;
+    }
+    for (i = 0; i < sizeof(g_cpu_flag_names) / sizeof(g_cpu_flag_names[0]); i++) {
+        const hw_cpu_flag_t *f = &g_cpu_flag_names[i];
+
+        if (!(regs[f->reg] & (1u << f->bit))) {
+            continue;
+        }
+        if (n > 0u && n + 1u < sizeof(g_cpu_flags)) {
+            g_cpu_flags[n++] = ' ';
+        }
+        for (k = 0; f->name[k] && n + 1u < sizeof(g_cpu_flags); k++) {
+            g_cpu_flags[n++] = f->name[k];
+        }
+    }
+    g_cpu_flags[n] = 0;
+    c->flags = g_cpu_flags;
+}
+
+/* /dev (L2 step 6): the names programs open without asking. Its own mount,
+ * with no state - the devices behind its names are the file types'. */
+static vibeos_fsmount_t g_devfs_mnt;
+
+static void hw_devfs_bringup(void) {
+    const char *verdict = "OK";
+
+    if (vibeos_fs_mount(&g_devfs_mnt, vibeos_devfs_ops(), 0, "devtmpfs") != 0) {
+        verdict = "FAILED: mount";
+    } else if (vibeos_fs_attach("/dev", &g_devfs_mnt) != 0) {
+        verdict = "FAILED: attach";
+    }
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[IO] DEVFS at=/dev result=");
+    vibeos_x86_64_serial_puts(verdict);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}
+
+static void hw_procfs_bringup(void) {
+    const char *verdict = "OK";
+
+    g_procfs.mem = hw_procfs_mem;
+    hw_procfs_cpu(&g_procfs.cpu);
+    g_cpu_tsc0 = hw_rdtsc();
+    g_cpu_tick0 = g_timer_ticks;
+    g_procfs.cpu_khz = hw_procfs_cpu_khz;
+    g_procfs.cpus = hw_procfs_cpus;
+    linux_procfs_bind(&g_procfs);
+    /* Linux's own limit on a 64-bit machine. Pids here come off a counter that
+     * does not wrap, so this is a number no boot has come near rather than one
+     * the allocator enforces. */
+    g_procfs.pid_max = 4194304u;
+    if (vibeos_fs_mount(&g_procfs_mnt, vibeos_procfs_ops(), &g_procfs, "proc") != 0) {
+        verdict = "FAILED: mount";
+    } else if (vibeos_fs_attach("/proc", &g_procfs_mnt) != 0) {
+        verdict = "FAILED: attach";
+    }
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[IO] PROCFS at=/proc result=");
+    vibeos_x86_64_serial_puts(verdict);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+}
+
+void hw_volumes_bringup(void) {
+    vibeos_blockcache_t *bc = vibeos_fat_cache();
+    uint64_t sectors = 0;
+    uint32_t i;
+
+    if (!bc) {
+        return;
+    }
+    {
+        vibeos_blk_driver_t info;
+        int dev = vibeos_x86_64_blk_device();
+        if (dev >= 0 && vibeos_blk_info((uint32_t)dev, &info) == 0) {
+            sectors = info.sectors;
+        }
+    }
+    /* Zero means the size is unknown, and the scan then declines to parse a
+     * GPT - correctly, because every one of its checks is against a size. The
+     * driver had to state its capacity to register at all since I1, so this
+     * should not happen; if it ever does, the line below says so by reporting
+     * an MBR-only result on a disk that has a GPT. */
+    if (vibeos_storage_scan(&g_storage, bc, sectors) != 0) {
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[IO] VOLUMES scan refused\n");
+        vibeos_x86_64_serial_unlock();
+        return;
+    }
+
+    vibeos_io_stats()->volumes_found += g_storage.volume_count;
+    vibeos_io_stats()->mounts += g_storage.mounted_count;
+    vibeos_io_stats()->probe_rejected +=
+        g_storage.volume_count - g_storage.mounted_count;
+
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[IO] VOLUMES table=");
+    vibeos_x86_64_serial_puts(g_storage.table.is_gpt ? "gpt" : "mbr");
+    vibeos_x86_64_serial_puts(" partitions=0x");
+    vibeos_x86_64_serial_print_hex((uint64_t)g_storage.table.count);
+    vibeos_x86_64_serial_puts(" volumes=0x");
+    vibeos_x86_64_serial_print_hex((uint64_t)g_storage.volume_count);
+    vibeos_x86_64_serial_puts(" mounted=0x");
+    vibeos_x86_64_serial_print_hex((uint64_t)g_storage.mounted_count);
+    vibeos_x86_64_serial_puts(" disk_sectors=0x");
+    vibeos_x86_64_serial_print_hex(sectors);
+    vibeos_x86_64_serial_puts("\n");
+    vibeos_x86_64_serial_unlock();
+
+    /* Every mounted volume goes in the table, and the first one is the root.
+     *
+     * The syscalls still take g_rootfs directly - moving them onto the
+     * resolver is the change that makes a second mount reachable, and doing it
+     * in the same step as building the table would mean neither is verified.
+     * What the table gives today is the ability to *say* what is mounted,
+     * which is what the phase's "done when" asks for and what a machine with
+     * one global mount could not do at all. */
+    for (i = 0; i < g_storage.volume_count && i < VIBEOS_STORAGE_MAX_VOLUMES; i++) {
+        char at[VIBEOS_FS_MOUNT_PATH_MAX];
+        uint32_t w = 0;
+
+        if (!vibeos_fs_is_mounted(&g_storage.volume[i].mount)) {
+            continue;
+        }
+        if (vibeos_fs_mount_count() == 0u) {
+            at[w++] = '/';
+        } else {
+            /* /vol1, /vol2, ... A name a person can type, and one this build
+             * can generate without a formatter. */
+            at[w++] = '/'; at[w++] = 'v'; at[w++] = 'o'; at[w++] = 'l';
+            at[w++] = (char)('0' + (i % 10u));
+        }
+        at[w] = 0;
+        if (vibeos_fs_attach(at, &g_storage.volume[i].mount) != 0) {
+            vibeos_x86_64_serial_lock();
+            vibeos_x86_64_serial_puts("[IO] MOUNT refused at ");
+            vibeos_x86_64_serial_puts(at);
+            vibeos_x86_64_serial_puts("\n");
+            vibeos_x86_64_serial_unlock();
+        }
+    }
+
+    /* After the volumes, so the first of them is still the root. */
+    hw_tmpfs_bringup();
+    hw_procfs_bringup();
+    hw_devfs_bringup();
+
+    {
+        uint32_t k;
+        for (k = 0; k < vibeos_fs_mount_count(); k++) {
+            vibeos_x86_64_serial_lock();
+            vibeos_x86_64_serial_puts("[IO] MOUNT at=");
+            vibeos_x86_64_serial_puts(vibeos_fs_mount_path(k));
+            vibeos_x86_64_serial_puts(" type=");
+            vibeos_x86_64_serial_puts(
+                vibeos_fs_type(vibeos_fs_mount_at(k)));
+            vibeos_x86_64_serial_puts("\n");
+            vibeos_x86_64_serial_unlock();
+        }
+    }
+
+    /* One line per volume, each bracketed on its own: a run of them assembled
+     * as one critical section would hold the console across several device
+     * reads, and this project has a rule about how long a lock that masks
+     * interrupts may be held. */
+    for (i = 0; i < g_storage.volume_count && i < VIBEOS_PART_MAX; i++) {
+        const vibeos_partition_t *p = &g_storage.table.entry[i];
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[IO] VOLUME idx=0x");
+        vibeos_x86_64_serial_print_hex((uint64_t)i);
+        vibeos_x86_64_serial_puts(" first_lba=0x");
+        vibeos_x86_64_serial_print_hex(g_storage.volume[i].first_lba);
+        vibeos_x86_64_serial_puts(" sectors=0x");
+        vibeos_x86_64_serial_print_hex(
+            (i < g_storage.table.count) ? p->sector_count : sectors);
+        vibeos_x86_64_serial_puts(" kind=");
+        vibeos_x86_64_serial_puts(
+            (i < g_storage.table.count)
+                ? vibeos_partition_kind_name(p->kind) : "whole-disk");
+        vibeos_x86_64_serial_puts(" fs=");
+        vibeos_x86_64_serial_puts(g_storage.volume[i].fs_name
+                                  ? g_storage.volume[i].fs_name : "none");
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+    }
+}
+
+/* Give swap somewhere to write, if this medium has anywhere.
+ *
+ * Called after the volume is mounted, because until then there is no device
+ * and no way to resolve a path. The whole of P5 - the swap map, page-out,
+ * page-in, reclaim's anonymous tier - was built, host-tested and
+ * sabotage-verified above this, and had never once run on a booting machine.
+ *
+ * Every step here can decline, and each declines differently on purpose:
+ * "there is no swap file" and "there is a swap file and it is unusable" are
+ * different states, and only one of them is somebody's mistake.
+ *
+ * The refusal that matters is fragmentation. The swap file lives on the same
+ * volume as everything else, so an area that spanned a gap in the chain would
+ * not fail - it would write a page of some process's memory over another
+ * file's data, and the damage would surface at the next boot as a program that
+ * is quietly wrong. vibeos_fat_file_extent reports whether the chain is
+ * one run and this refuses it if it is not, rather than hoping. */
+void hw_swap_bringup(void) {
+    vibeos_swap_area_t area;
+    uint64_t first = 0, sectors = 0;
+    int contiguous = 0;
+    uint32_t slots = 0;
+    const char *why = "no swap file on this medium";
+    int dev = vibeos_x86_64_blk_device();
+
+    {
+        uint8_t *z = (uint8_t *)&area;
+        unsigned k;
+        for (k = 0; k < sizeof(area); k++) {
+            z[k] = 0;
+        }
+    }
+    area.kind = VIBEOS_SWAP_NONE;
+    area.origin = "EFI/BOOT/SWAPFILE.BIN";
+
+    if (dev >= 0 &&
+        vibeos_fat_file_extent("EFI/BOOT/SWAPFILE.BIN",
+                                      &first, &sectors, &contiguous) == 0) {
+        if (!contiguous) {
+            /* Declined, not worked around. Following an extent list belongs in
+             * the swap area layer and is a later change; guessing here would
+             * put the guess in the one place that must not have one. */
+            why = "swap file is fragmented; refused";
+        } else {
+            area.kind = VIBEOS_SWAP_FILE;
+            area.device = (uint32_t)dev;
+            area.first_sector = first;
+            area.sectors = sectors;
+            area.contiguous = 1;
+            why = "swap file accepted";
+        }
+    }
+
+    slots = vibeos_swaparea_configure(&area, hw_swap_block, 0, g_swap_bitmap,
+                                      (uint32_t)sizeof(g_swap_bitmap));
+    if (slots == 0u && area.kind != VIBEOS_SWAP_NONE) {
+        why = "swap area refused by the swap layer";
+    }
+    if (slots > 0u) {
+        /* Does a page actually survive the trip?
+         *
+         * Everything below here was host-tested against a memory-backed
+         * device, which proves the arithmetic and proves nothing about this
+         * machine's disk. The interesting failures are the ones a model cannot
+         * have: a driver that reports a write it did not do, a medium that
+         * reads back zeroes, an area pointed somewhere it does not own.
+         *
+         * Two checks, and the second is the one that matters.
+         *
+         * One slot is taken, filled with a pattern that includes its own
+         * offset - a constant would survive a read that returned the wrong
+         * sector, as long as that sector had been written too - sent out, read
+         * back into a different page, and compared.
+         *
+         * That alone would be a weak check, and saying so is the point: a
+         * write and a read that use the same wrong address agree perfectly.
+         * An area whose first sector is off by a cluster passes it, while
+         * quietly writing pages of memory over another file.
+         *
+         * So the bytes are then looked for through the *filesystem* - the file
+         * is read by name, which resolves its own chain and never consults
+         * area.first_sector. If the pattern is not at the front of
+         * SWAPFILE.BIN, the area is not pointing at the swap file, whatever
+         * the round trip said. That is the check that would have caught the
+         * defect this layer's header says it exists to prevent.
+         *
+         * A boot check rather than a host test because the point is the parts a
+         * host test cannot reach, and it is cheap: two 4 KiB transfers, once.
+         *
+         * "Gate the mechanism when you cannot gate the bug": reclaim's
+         * anonymous tier only runs under memory pressure, which an ordinary
+         * boot never reaches, so without this the entire swap path could stop
+         * working and every boot would stay green. */
+        void *out = hw_alloc_page();
+        void *back = hw_alloc_page();
+        uint32_t slot = 0;
+        const char *verdict = "swap round trip not attempted";
+
+        if (out && back && vibeos_swap_alloc(&slot) == 0) {
+            uint64_t *w = (uint64_t *)out;
+            const uint64_t *r = (const uint64_t *)back;
+            uint32_t i;
+            int bad = -1;
+
+            for (i = 0; i < 4096u / 8u; i++) {
+                w[i] = 0x5761705465737430ull ^ ((uint64_t)i << 8);
+            }
+            for (i = 0; i < 4096u / 8u; i++) {
+                ((uint64_t *)back)[i] = 0ull;
+            }
+            if (vibeos_swap_write(slot, out) != 0) {
+                verdict = "swap round trip FAILED: write";
+            } else if (vibeos_swap_read(slot, back) != 0) {
+                verdict = "swap round trip FAILED: read";
+            } else {
+                for (i = 0; i < 4096u / 8u; i++) {
+                    if (r[i] != (0x5761705465737430ull ^ ((uint64_t)i << 8))) {
+                        bad = (int)i;
+                        break;
+                    }
+                }
+                verdict = (bad < 0) ? "swap round trip OK"
+                                    : "swap round trip FAILED: contents";
+            }
+            /* The independent half. Read through the filesystem, which
+             * walks the chain from the directory entry and knows nothing about
+             * where the swap area thinks it is.
+             *
+             * Only meaningful on a first read of this file: a cached copy from
+             * earlier in the boot would be stale, because the swap write went
+             * straight to the block layer. Nothing reads SWAPFILE.BIN before
+             * this, and if anything ever does, this check has to move ahead of
+             * it rather than be believed. */
+            if (bad < 0) {
+                /* A positional read, because vibeos_fs_read_file reads a whole
+                 * file and this one is eight megabytes. The first version
+                 * asked for the whole thing into a 4 KiB page and reported
+                 * "file unreadable", which was true and was about the buffer
+                 * rather than about swap. */
+                uint32_t fc = 0, fsz = 0;
+                long n = -1;
+
+                if (vibeos_fat_open("EFI/BOOT/SWAPFILE.BIN", &fc, &fsz) == 0) {
+                    n = vibeos_fat_read_at(fc, fsz, 0u, back, 4096u);
+                }
+                if (n < 4096) {
+                    verdict = "swap round trip FAILED: file unreadable";
+                } else {
+                    for (i = 0; i < 4096u / 8u; i++) {
+                        if (r[i] != (0x5761705465737430ull ^ ((uint64_t)i << 8))) {
+                            bad = (int)i;
+                            break;
+                        }
+                    }
+                    if (bad >= 0) {
+                        verdict = "swap round trip FAILED: area is not the file";
+                    }
+                }
+            }
+            (void)vibeos_swap_free(slot);
+            /* And eight slots at once, each with its own pattern, all written
+             * before any is read back.
+             *
+             * One slot proved nothing about the others, and on QEMU's vvfat -
+             * the gate's boot disk until then - it passed every boot while
+             * every slot past the second read back as slot 0 or slot 1. The
+             * first load to force reclaim paid for that with processes killed
+             * by each other's data. A medium that cannot hold eight distinct
+             * pages in eight places is refused rather than written to. */
+            if (bad < 0) {
+                uint32_t s8[8], k, j;
+                uint32_t got = 0;
+
+                for (k = 0; k < 8u; k++) {
+                    if (vibeos_swap_alloc(&s8[k]) != 0) {
+                        break;
+                    }
+                    got++;
+                }
+                for (k = 0; k < got; k++) {
+                    for (j = 0; j < 512u; j++) {
+                        w[j] = 0xC0DE000000000000ull | ((uint64_t)s8[k] << 16) | j;
+                    }
+                    if (vibeos_swap_write(s8[k], out) != 0) {
+                        bad = 0;
+                    }
+                }
+                for (k = 0; k < got && bad < 0; k++) {
+                    for (j = 0; j < 512u; j++) {
+                        ((uint64_t *)back)[j] = 0;
+                    }
+                    if (vibeos_swap_read(s8[k], back) != 0 ||
+                        r[0] != (0xC0DE000000000000ull | ((uint64_t)s8[k] << 16)) ||
+                        r[511] != (0xC0DE000000000000ull | ((uint64_t)s8[k] << 16) | 511u)) {
+                        bad = (int)k;
+                    }
+                }
+                for (k = 0; k < got; k++) {
+                    (void)vibeos_swap_free(s8[k]);
+                }
+                if (got < 8u || bad >= 0) {
+                    verdict = "swap round trip FAILED: slots do not hold what was written";
+                }
+            }
+        }
+        if (out) {
+            hw_free_page_why(out, "swap_selftest");
+        }
+        if (back) {
+            hw_free_page_why(back, "swap_selftest");
+        }
+        vibeos_x86_64_serial_lock();
+        vibeos_x86_64_serial_puts("[MM] SWAP_ROUNDTRIP ");
+        vibeos_x86_64_serial_puts(verdict);
+        vibeos_x86_64_serial_puts("\n");
+        vibeos_x86_64_serial_unlock();
+
+        /* Only now, and this is the whole point of the phase.
+         *
+         * Registering the anonymous tier without an area would give reclaim a
+         * source that can never succeed, and `skipped_no_swap` would stop
+         * counting what having no swap costs - a number going quiet because
+         * the thing it measures became invisible, not because it stopped
+         * happening. With no area, no source: reclaim keeps saying so. */
+        if (verdict[0] == 's' && verdict[16] == 'O') {   /* "swap round trip OK" */
+            vibeos_anon_set_map(hw_frame_identity_map);
+            vibeos_reclaim_set_anon_source(vibeos_anon_reclaim);
+        }
+    }
+
+    /* One call under the console lock: a line built from several is several
+     * critical sections, and this project has had a gate report failures that
+     * were a marker cut in half. */
+    vibeos_x86_64_serial_lock();
+    vibeos_x86_64_serial_puts("[MM] SWAP_AREA slots=0x");
+    vibeos_x86_64_serial_print_hex((uint64_t)slots);
+    vibeos_x86_64_serial_puts(" first_lba=0x");
+    vibeos_x86_64_serial_print_hex(area.first_sector);
+    vibeos_x86_64_serial_puts(" sectors=0x");
+    vibeos_x86_64_serial_print_hex(area.sectors);
+    vibeos_x86_64_serial_puts(" contiguous=0x");
+    vibeos_x86_64_serial_print_hex((uint64_t)area.contiguous);
+    vibeos_x86_64_serial_puts(" (");
+    vibeos_x86_64_serial_puts(why);
+    vibeos_x86_64_serial_puts(")\n");
+    vibeos_x86_64_serial_unlock();
+}
+

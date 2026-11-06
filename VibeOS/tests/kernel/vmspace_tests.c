@@ -1,0 +1,773 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Host tests for the address-space layer (plan phase P2).
+ *
+ * The page-table format here is real x86-64; only the memory is malloc'd. That
+ * is the whole reason this layer sits in kernel/mm/ rather than in the arch
+ * file: the logic that decides what an address space owns can be exercised in
+ * milliseconds instead of by booting a virtual machine and hoping the timing
+ * comes out wrong.
+ *
+ * The cases that matter are the refusals. Every defect this layer replaces was
+ * a teardown that freed something it did not own, so most of what follows
+ * checks that something is *not* released.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "vibeos/vmspace.h"
+#include "vibeos/frame.h"
+#include "vibeos/mm_stats.h"
+
+int test_vmspace(void);
+
+#define VS_FRAMES 512u
+#define VS_BASE   0x200000ull
+
+static unsigned char *g_ram;
+
+static void *vs_map(uint64_t phys) {
+    if (phys < VS_BASE || phys >= VS_BASE + (uint64_t)VS_FRAMES * 4096ull) {
+        return 0;
+    }
+    return g_ram + (phys - VS_BASE);
+}
+
+static vibeos_frame_t g_ftable[VS_FRAMES];
+
+static uint64_t vs_alloc_table(void) {
+    return vibeos_frame_alloc(VIBEOS_FRAME_PAGE_TABLE);
+}
+
+static void vs_free_table(uint64_t phys) {
+    (void)vibeos_frame_put(phys);
+}
+
+/* A stand-in for the kernel's shared low-window tables: one PDPT whose first
+ * entry points at one page directory of 2 MiB identity leaves.
+ *
+ * They live at fixed physical addresses inside the fake RAM, not in static
+ * arrays, because the backend translates *physical* addresses - the first
+ * version of this test put them in C globals and the low-window map failed on
+ * the spot, which was the test being wrong rather than the layer.
+ *
+ * Their frames are reserved, so the allocator never hands them out and any
+ * attempt to release one is counted as a release of something with no owners.
+ * That is deliberate: the case being tested is that teardown leaves them
+ * alone, and a silent success would prove nothing. */
+#define SHARED_PDPT_PHYS (VS_BASE)
+#define SHARED_PD0_PHYS  (VS_BASE + 4096ull)
+
+static uint64_t *shared_pdpt(void) { return (uint64_t *)vs_map(SHARED_PDPT_PHYS); }
+static uint64_t *shared_pd0(void)  { return (uint64_t *)vs_map(SHARED_PD0_PHYS); }
+
+static const uint64_t *vs_shared_pd(uint32_t gib) {
+    return (gib == 0u) ? shared_pd0() : 0;
+}
+
+/* Records every shootdown the layer asks for. fork must ask for one for the
+ * *source* address space: the parent's entries have just lost write permission,
+ * and a thread of it on another core can still hold a writable translation. The
+ * boot gate used to be the only thing that noticed this went missing, through a
+ * counter that munmap and mprotect now also move - so removing fork's call left
+ * the boot green (the sabotage case for it stopped being red). */
+static uint64_t g_vs_shootdowns;
+static uint64_t g_vs_shootdown_last;
+
+static void vs_shootdown(uint64_t root_phys) {
+    g_vs_shootdowns++;
+    g_vs_shootdown_last = root_phys;
+}
+
+static int setup(int with_low_window) {
+    unsigned i;
+
+    memset(g_ftable, 0, sizeof(g_ftable));
+    memset(g_ram, 0, (size_t)VS_FRAMES * 4096u);
+    vibeos_mm_stats_reset();
+    if (vibeos_frame_init(VS_BASE, (uint64_t)VS_FRAMES * 4096ull,
+                          g_ftable, VS_FRAMES, vs_map) != 0) {
+        return -1;
+    }
+    if (vibeos_frame_reserve(SHARED_PDPT_PHYS, 2ull * 4096ull) != 0) {
+        return -1;
+    }
+    for (i = 0; i < 512u; i++) {
+        /* 2 MiB identity leaves, present and writable and supervisor-only -
+         * the shape that a teardown deciding ownership by inspection used to
+         * mistake for user pages. */
+        shared_pd0()[i] = ((uint64_t)i << 21) | 1ull | 2ull | (1ull << 7);
+    }
+    shared_pdpt()[0] = SHARED_PD0_PHYS | 1ull | 2ull;
+
+    {
+        vibeos_vmspace_backend_t be;
+        memset(&be, 0, sizeof(be));
+        be.map_phys = vs_map;
+        be.alloc_table = vs_alloc_table;
+        be.free_table = vs_free_table;
+        be.shootdown = vs_shootdown;
+        if (with_low_window) {
+            /* Slot 0 of every address space starts as the kernel's shared
+             * PDPT, which is what create() installs and what destroy()
+             * recognises and leaves alone. */
+            be.kernel_pml4e = SHARED_PDPT_PHYS | 1ull | 2ull;
+            be.identity_limit = 0x40000000ull;
+            be.shared_pdpt = shared_pdpt();
+            be.shared_pd = vs_shared_pd;
+        }
+        return vibeos_vmspace_init(&be);
+    }
+}
+
+/* Stands in for a fork on another core landing inside the copy-on-write
+ * fault's exclusivity window. It takes exactly the reference clone_one's
+ * already-COW branch takes, and - like that branch - leaves the source
+ * page-table entry untouched, which is what makes the compare-exchange in the
+ * fault handler blind to it. */
+static uint64_t g_race_frame;
+
+static void race_take_a_reference(uint64_t phys) {
+    if (phys == g_race_frame) {
+        vibeos_frame_get(phys);
+    }
+}
+
+/* Stands in for a copy-on-write fault resolving on another core while fork is
+ * partway through cloning the same entry.
+ *
+ * It stores what the fault's sole-owner fast path stores: present, writable,
+ * user, and *no* copy-on-write mark. That is the value clone_one used to adopt
+ * when its exchange lost - which mapped the child read-only and unmarked on a
+ * frame the parent then wrote freely.
+ *
+ * Fires once. The kernel retries and re-reads, so a hook that kept re-arming
+ * the writable entry would spin forever - a property of the test, not of the
+ * fix. */
+static int g_fork_race_armed;
+static uint64_t g_fork_race_frame;
+
+static void fork_race_make_writable_private(uint64_t *pte) {
+    if (!g_fork_race_armed) {
+        return;
+    }
+    g_fork_race_armed = 0;
+    /* A *different* frame, which is what the fault's copy path installs.
+     *
+     * The first two versions stored the same frame back with the same
+     * permissions, so clone_one's exchange had nothing to lose against and the
+     * sabotaged kernel behaved exactly like the fixed one. A test that cannot
+     * tell the two apart is not a test, and only breaking the code on purpose
+     * showed which of the two this was. */
+    *pte = (g_fork_race_frame & 0x000FFFFFFFFFF000ull)
+         | 1ull | (1ull << 1) | (1ull << 2) | VIBEOS_PTE_OWNED;
+}
+
+int test_vmspace(void) {
+    vibeos_vmspace_t as;
+    vibeos_vmspace_t only;
+    uint64_t f1, f2;
+    uint64_t free_before;
+
+    g_ram = (unsigned char *)malloc((size_t)VS_FRAMES * 4096u);
+    if (!g_ram) {
+        return -1;
+    }
+
+    /* ---- map takes a reference, unmap releases exactly one --------------- */
+    if (setup(0) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (f1 == 0ull) { goto fail; }
+    if (vibeos_vmspace_map(&as, 0x8000000000ull, f1,
+                           VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                           VIBEOS_PROT_USER) != 0) { goto fail; }
+    if (vibeos_frame_owners(f1) != 2u) { goto fail; }   /* allocation + mapping */
+    if (vibeos_vmspace_owned_count(&as) != 1ull) { goto fail; }
+    if (vibeos_mm_stats()->maps != 1ull) { goto fail; }
+
+    /* The entry says it is ours, and that is a recorded fact rather than
+     * something inferred from the permission bits. */
+    {
+        uint64_t *e = vibeos_vmspace_entry(&as, 0x8000000000ull);
+        if (!e || (*e & VIBEOS_PTE_OWNED) == 0ull) { goto fail; }
+    }
+
+    if (vibeos_vmspace_unmap(&as, 0x8000000000ull) != 1) { goto fail; }
+    if (vibeos_frame_owners(f1) != 1u) { goto fail; }   /* the allocation's */
+    if (vibeos_vmspace_unmap(&as, 0x8000000000ull) != 0) { goto fail; }
+    if (vibeos_frame_owners(f1) != 1u) { goto fail; }   /* and not twice */
+
+    /* ---- mapping over an owned entry releases the old frame -------------- */
+    if (setup(0) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    f2 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (!f1 || !f2) { goto fail; }
+    if (vibeos_vmspace_map(&as, 0x8000000000ull, f1, VIBEOS_PROT_READ) != 0) { goto fail; }
+    if (vibeos_vmspace_map(&as, 0x8000000000ull, f2, VIBEOS_PROT_READ) != 0) { goto fail; }
+    if (vibeos_frame_owners(f1) != 1u) { goto fail; }   /* the mapping let go */
+    if (vibeos_frame_owners(f2) != 2u) { goto fail; }
+
+    /* ---- destroy releases what is owned, and only that ------------------- */
+    if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+    if (vibeos_frame_owners(f2) != 1u) { goto fail; }
+    if (vibeos_mm_stats()->frames_double_put != 0ull) { goto fail; }
+    if (vibeos_mm_stats()->frames_leaked != 0ull) { goto fail; }
+
+    /* ---- destroy gives every table back ---------------------------------
+     *
+     * Not a tidiness check. Address spaces are created and destroyed on every
+     * exec, so a table leaked per process is a machine that runs out of memory
+     * after a few hundred commands - which reads as an unrelated failure much
+     * later in whatever program is unlucky. */
+    if (setup(0) != 0) { goto fail; }
+    free_before = vibeos_frame_free_count();
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (vibeos_vmspace_map(&as, 0x8000000000ull, f1, VIBEOS_PROT_READ) != 0) { goto fail; }
+    if (vibeos_vmspace_map(&as, 0x8000000001000ull, f1, VIBEOS_PROT_READ) != 0) { goto fail; }
+    if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+    (void)vibeos_frame_put(f1);
+    if (vibeos_frame_free_count() != free_before) {
+        printf("FAIL:vmspace leaked %llu frames across create/destroy\n",
+               (unsigned long long)(free_before - vibeos_frame_free_count()));
+        goto fail;
+    }
+
+    /* ---- the low window: the kernel's identity map survives teardown -----
+     *
+     * This is the case the whole layer is for. Splitting a 2 MiB identity leaf
+     * leaves 512 entries that are present, writable and the kernel's. A
+     * teardown that decided ownership by looking at them freed the kernel's own
+     * memory, and the machine stopped with no output at all. They carry no
+     * ownership bit, so they are simply not considered. */
+    if (setup(1) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (!f1) { goto fail; }
+    if (vibeos_vmspace_map(&as, 0x400000ull, f1,
+                           VIBEOS_PROT_READ | VIBEOS_PROT_USER) != 0) { goto fail; }
+    if (vibeos_frame_owners(f1) != 2u) { goto fail; }
+    if (vibeos_vmspace_owned_count(&as) != 1ull) { goto fail; }
+
+    /* The shared tables were copied, not modified: the kernel's originals are
+     * untouched, and the copy still identity-maps everything except the one
+     * page the process asked for. */
+    if (shared_pd0()[2] != ((2ull << 21) | 1ull | 2ull | (1ull << 7))) {
+        printf("FAIL:the shared page directory was modified in place\n");
+        goto fail;
+    }
+    if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+    if (vibeos_frame_owners(f1) != 1u) { goto fail; }
+    /* Nothing outside the frame table was handed to the allocator. If a split
+     * identity entry or a shared table had been released, this is where it
+     * would show, because those addresses are not describable. */
+    if (vibeos_mm_stats()->frames_leaked != 0ull) {
+        printf("FAIL:teardown released %llu frames it did not own\n",
+               (unsigned long long)vibeos_mm_stats()->frames_leaked);
+        goto fail;
+    }
+    if (vibeos_mm_stats()->frames_double_put != 0ull) { goto fail; }
+
+    /* ---- a PROT_NONE guard page is owned like any other ------------------
+     *
+     * It has no PTE_USER, which is exactly why "reachable from ring 3" was
+     * never a safe test for ownership: a C library maps a thread stack and its
+     * guard as one PROT_NONE region, and losing those frames on exit is a leak
+     * per thread. */
+    if (setup(0) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (vibeos_vmspace_map(&as, 0x8000000000ull, f1, VIBEOS_PROT_NONE) != 0) { goto fail; }
+    {
+        uint64_t *e = vibeos_vmspace_entry(&as, 0x8000000000ull);
+        if (!e) { goto fail; }
+        if ((*e & VIBEOS_PTE_OWNED) == 0ull) { goto fail; }
+        if ((*e & 4ull) != 0ull) {            /* PTE_USER must be clear */
+            printf("FAIL:PROT_NONE page is reachable from ring 3\n");
+            goto fail;
+        }
+        if ((*e & 1ull) == 0ull) {            /* ...and it must still be present */
+            printf("FAIL:PROT_NONE was refused instead of mapped\n");
+            goto fail;
+        }
+    }
+    if (vibeos_vmspace_owned_count(&as) != 1ull) { goto fail; }
+    if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+    if (vibeos_frame_owners(f1) != 1u) { goto fail; }
+
+
+    /* ---- M-036: execute permission is a grant ----------------------------- *
+     * Every user page used to be executable whatever was asked for: the entry
+     * was built without NX. The bit must be set unless PROT_EXEC was requested,
+     * must follow protect in both directions, and must survive everything that
+     * rebuilds an entry - a fork's copy-on-write, and a swap round trip. */
+    if (setup(0) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (vibeos_vmspace_map(&as, 0x8000000000ull, f1,
+                           VIBEOS_PROT_READ | VIBEOS_PROT_WRITE | VIBEOS_PROT_USER) != 0) { goto fail; }
+    {
+        uint64_t *e = vibeos_vmspace_entry(&as, 0x8000000000ull);
+        const uint64_t nx = 1ull << 63;
+        if (!e || (*e & nx) == 0ull) {
+            printf("FAIL:a user page without PROT_EXEC was executable\n");
+            goto fail;
+        }
+        if (vibeos_vmspace_protect(&as, 0x8000000000ull,
+                                   VIBEOS_PROT_READ | VIBEOS_PROT_EXEC | VIBEOS_PROT_USER) != 0) { goto fail; }
+        if ((*e & nx) != 0ull) {
+            printf("FAIL:protect(+EXEC) left NX set\n");
+            goto fail;
+        }
+        if (vibeos_vmspace_protect(&as, 0x8000000000ull,
+                                   VIBEOS_PROT_READ | VIBEOS_PROT_USER) != 0) { goto fail; }
+        if ((*e & nx) == 0ull) {
+            printf("FAIL:protect(-EXEC) left the page executable\n");
+            goto fail;
+        }
+        if ((*e & 0x000FFFFFFFFFF000ull) != f1) { goto fail; }
+    }
+    if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+
+    /* ---- a write fault on a page that is already writable is a stale TLB ---- *
+     * Threads make it real: one core resolves a copy-on-write fault and another,
+     * holding the old translation, faults on a page that is now plainly
+     * writable. The handler has to recognise that and just invalidate - killing
+     * the task for a violation it did not commit cost a session once - and a
+     * page that really is read-only must still be refused. No test covered the
+     * first half until sabotage found the guard removable (case "the fault
+     * treats a stale-TLB write as a protection violation"). */
+    if (setup(0) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (vibeos_vmspace_map(&as, 0x8000000000ull, f1,
+                           VIBEOS_PROT_READ | VIBEOS_PROT_WRITE | VIBEOS_PROT_USER) != 0) { goto fail; }
+    if (vibeos_vmspace_fault(&as, 0x8000000000ull, 1) != 1) {
+        printf("FAIL:a write fault on an already-writable page was not treated as a stale TLB\n");
+        goto fail;
+    }
+    if (vibeos_vmspace_protect(&as, 0x8000000000ull,
+                               VIBEOS_PROT_READ | VIBEOS_PROT_USER) != 0) { goto fail; }
+    if (vibeos_vmspace_fault(&as, 0x8000000000ull, 1) != 0) {
+        printf("FAIL:a write to a genuinely read-only page was resolved as a stale TLB\n");
+        goto fail;
+    }
+    if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+    /* ---- protect changes access and nothing else ------------------------ */
+    if (setup(0) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (vibeos_vmspace_map(&as, 0x8000000000ull, f1,
+                           VIBEOS_PROT_READ | VIBEOS_PROT_USER) != 0) { goto fail; }
+
+    /* Widen to writable, then take it away again. The frame and the ownership
+     * mark must survive both, because neither is a permission. */
+    if (vibeos_vmspace_protect(&as, 0x8000000000ull,
+                               VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                               VIBEOS_PROT_USER) != 0) { goto fail; }
+    {
+        uint64_t *e = vibeos_vmspace_entry(&as, 0x8000000000ull);
+        if (!e) { goto fail; }
+        if ((*e & 2ull) == 0ull) { goto fail; }                  /* writable */
+        if ((*e & VIBEOS_PTE_OWNED) == 0ull) {
+            printf("FAIL:protect dropped the ownership mark\n");
+            goto fail;
+        }
+        if ((*e & 0x000FFFFFFFFFF000ull) != f1) {
+            printf("FAIL:protect moved the page to a different frame\n");
+            goto fail;
+        }
+    }
+    if (vibeos_vmspace_protect(&as, 0x8000000000ull, VIBEOS_PROT_NONE) != 0) { goto fail; }
+    {
+        uint64_t *e = vibeos_vmspace_entry(&as, 0x8000000000ull);
+        if (!e || (*e & 1ull) == 0ull) { goto fail; }             /* still present */
+        if ((*e & (2ull | 4ull)) != 0ull) { goto fail; }          /* no access */
+        if ((*e & VIBEOS_PTE_OWNED) == 0ull) { goto fail; }
+    }
+    /* ...and the frame is still released at teardown, which is what makes the
+     * ownership mark surviving a permission change matter at all. */
+    if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+    if (vibeos_frame_owners(f1) != 1u) { goto fail; }
+
+    /* ---- protect never grants write over a copy-on-write page ------------
+     *
+     * Such a page is read-only because it is *shared*, not because the program
+     * may not write it. Granting the write bit here let a forked process write
+     * straight into a page its parent was still reading - the corruption
+     * fork's sharing exists to prevent, reachable by a program calling
+     * mprotect on its own memory. It stays read-only; the write faults, the
+     * fault makes the copy, and the program gets what it asked for one fault
+     * later. */
+    if (setup(0) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+    f1 = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+    if (vibeos_vmspace_map_raw(&as, 0x8000000000ull, f1,
+                               1ull | 4ull | (1ull << 9)) != 0) { goto fail; }
+    if (vibeos_vmspace_protect(&as, 0x8000000000ull,
+                               VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                               VIBEOS_PROT_USER) != 0) { goto fail; }
+    {
+        uint64_t *e = vibeos_vmspace_entry(&as, 0x8000000000ull);
+        if (!e) { goto fail; }
+        if (*e & 2ull) {
+            printf("FAIL:protect made a copy-on-write page writable\n");
+            goto fail;
+        }
+        if ((*e & (1ull << 9)) == 0ull) {
+            printf("FAIL:protect cleared the copy-on-write mark\n");
+            goto fail;
+        }
+        if ((*e & 4ull) == 0ull) { goto fail; }   /* readable, as asked */
+    }
+    if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+
+    /* ---- clone_cow: fork ------------------------------------------------ */
+    if (setup(1) != 0) { goto fail; }
+    {
+        vibeos_vmspace_t child;
+        uint64_t guard, rw, ro;
+        uint64_t *e;
+
+        if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+
+        /* Three kinds of page, because the sharing rule differs for each and
+         * conflating the last two is the defect that made a shell die on its
+         * third command. */
+        rw = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        ro = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        guard = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        if (!rw || !ro || !guard) { goto fail; }
+        if (vibeos_vmspace_map(&as, 0x8000000000ull, rw,
+                               VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                               VIBEOS_PROT_USER) != 0) { goto fail; }
+        if (vibeos_vmspace_map(&as, 0x8000001000ull, ro,
+                               VIBEOS_PROT_READ | VIBEOS_PROT_USER) != 0) { goto fail; }
+        /* A thread guard: present, owned, and deliberately not reachable from
+         * ring 3. The old low-window walk selected pages by PTE_USER and so
+         * skipped exactly this, handing a forked child an address space with a
+         * hole where its guard belonged. It lives in the low window here
+         * because that is where the walk that skipped it ran. */
+        if (vibeos_vmspace_map(&as, 0x400000ull, guard, VIBEOS_PROT_NONE) != 0) { goto fail; }
+
+        if (vibeos_vmspace_create(&child) != 0) { goto fail; }
+        g_vs_shootdowns = 0;
+        if (vibeos_vmspace_clone_cow(&child, &as) != 0) { goto fail; }
+        /* fork asks for a shootdown of the SOURCE address space, once. */
+        if (g_vs_shootdowns < 1u || g_vs_shootdown_last != as.root_phys) {
+            printf("FAIL:fork did not shoot down the parent's TLBs (%llu requests)\n",
+                   (unsigned long long)g_vs_shootdowns);
+            goto fail;
+        }
+
+        /* All three pages, in both address spaces, with two owners each. */
+        if (vibeos_vmspace_owned_count(&child) != 3ull) {
+            printf("FAIL:fork cloned %llu pages, not 3\n",
+                   (unsigned long long)vibeos_vmspace_owned_count(&child));
+            goto fail;
+        }
+        if (vibeos_frame_owners(guard) != 3u) {   /* allocation + both spaces */
+            printf("FAIL:fork skipped the PROT_NONE guard page\n");
+            goto fail;
+        }
+
+        /* The writable page became copy-on-write on both sides, and the
+         * parent's write permission is gone - leaving it would let the parent
+         * modify a page the child can still see. */
+        e = vibeos_vmspace_entry(&as, 0x8000000000ull);
+        if (!e || (*e & 2ull) || (*e & (1ull << 9)) == 0ull) {
+            printf("FAIL:fork left the parent able to write a shared page\n");
+            goto fail;
+        }
+        e = vibeos_vmspace_entry(&child, 0x8000000000ull);
+        if (!e || (*e & 2ull) || (*e & (1ull << 9)) == 0ull) { goto fail; }
+
+        /* The read-only page is shared as it was. Marking it copy-on-write
+         * would turn a genuine protection fault into a silent success. */
+        e = vibeos_vmspace_entry(&child, 0x8000001000ull);
+        if (!e || (*e & (1ull << 9))) {
+            printf("FAIL:a read-only page was marked copy-on-write\n");
+            goto fail;
+        }
+
+        /* A second fork. The first fork's pages are read-only *because they
+         * are shared*, and treating them as plain read-only drops the mark -
+         * after which the page is permanently unwritable for everyone. */
+        {
+            vibeos_vmspace_t grand;
+            if (vibeos_vmspace_create(&grand) != 0) { goto fail; }
+            if (vibeos_vmspace_clone_cow(&grand, &child) != 0) { goto fail; }
+            e = vibeos_vmspace_entry(&grand, 0x8000000000ull);
+            if (!e || (*e & (1ull << 9)) == 0ull) {
+                printf("FAIL:a second fork dropped the copy-on-write mark\n");
+                goto fail;
+            }
+            if (vibeos_frame_owners(rw) != 4u) { goto fail; }
+            if (vibeos_vmspace_destroy(&grand) != 0) { goto fail; }
+        }
+
+        if (vibeos_vmspace_destroy(&child) != 0) { goto fail; }
+        if (vibeos_frame_owners(rw) != 2u) { goto fail; }
+        if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+        if (vibeos_frame_owners(rw) != 1u) { goto fail; }
+        if (vibeos_frame_owners(guard) != 1u) { goto fail; }
+        if (vibeos_mm_stats()->frames_leaked != 0ull ||
+            vibeos_mm_stats()->frames_double_put != 0ull) { goto fail; }
+    }
+
+    /* ---- the copy-on-write fault ---------------------------------------- */
+    if (setup(0) != 0) { goto fail; }
+    {
+        vibeos_vmspace_t child;
+        uint64_t shared;
+        uint64_t *pe, *ce;
+        unsigned char *bytes;
+
+        if (vibeos_vmspace_create(&as) != 0) { goto fail; }
+        if (vibeos_vmspace_create(&child) != 0) { goto fail; }
+        shared = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        if (!shared) { goto fail; }
+        /* Something recognisable in the page, so the copy can be shown to be a
+         * copy rather than a fresh zeroed frame handed over silently. */
+        bytes = (unsigned char *)vs_map(shared);
+        bytes[0] = 0xAB;
+        bytes[4095] = 0xCD;
+
+        if (vibeos_vmspace_map(&as, 0x8000000000ull, shared,
+                               VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                               VIBEOS_PROT_USER) != 0) { goto fail; }
+        if (vibeos_vmspace_clone_cow(&child, &as) != 0) { goto fail; }
+        if (vibeos_frame_owners(shared) != 3u) { goto fail; }
+
+        /* A read fault is not this layer's business, whatever else is true. */
+        if (vibeos_vmspace_fault(&as, 0x8000000000ull, 0) != 0) { goto fail; }
+
+        /* Two owners: the write has to copy. */
+        if (vibeos_vmspace_fault(&as, 0x8000000000ull, 1) != 1) { goto fail; }
+        pe = vibeos_vmspace_entry(&as, 0x8000000000ull);
+        ce = vibeos_vmspace_entry(&child, 0x8000000000ull);
+        if (!pe || !ce) { goto fail; }
+        if ((*pe & 0x000FFFFFFFFFF000ull) == shared) {
+            printf("FAIL:the copy-on-write fault did not copy\n");
+            goto fail;
+        }
+        if ((*pe & 2ull) == 0ull) { goto fail; }              /* now writable */
+        if ((*pe & (1ull << 63)) == 0ull || (*ce & (1ull << 63)) == 0ull) {
+            printf("FAIL:a copy-on-write copy or clone lost NX and became executable\n");
+            goto fail;
+        }
+        if ((*pe & VIBEOS_PTE_OWNED) == 0ull) { goto fail; }
+        if ((*ce & 0x000FFFFFFFFFF000ull) != shared) { goto fail; }       /* child unmoved */
+        if (vibeos_frame_owners(shared) != 2u) { goto fail; } /* one let go */
+
+        /* The copy carries the data, not zeroes. A fault handler that hands
+         * back a blank page passes every reference-count check ever written
+         * and destroys the program's memory. */
+        bytes = (unsigned char *)vs_map(*pe & 0x000FFFFFFFFFF000ull);
+        if (bytes[0] != 0xABu || bytes[4095] != 0xCDu) {
+            printf("FAIL:the copy-on-write copy lost the page contents\n");
+            goto fail;
+        }
+
+        /* The child is now the only mapper besides the standalone reference.
+         * Drop that one, and its write must take the permission back rather
+         * than copying a page nobody else has. */
+        (void)vibeos_frame_put(shared);
+        if (vibeos_frame_owners(shared) != 1u) { goto fail; }
+        if (vibeos_vmspace_fault(&child, 0x8000000000ull, 1) != 1) { goto fail; }
+        ce = vibeos_vmspace_entry(&child, 0x8000000000ull);
+        if (!ce || (*ce & 0x000FFFFFFFFFF000ull) != shared) {
+            printf("FAIL:the sole owner copied instead of taking write back\n");
+            goto fail;
+        }
+        if ((*ce & 2ull) == 0ull) { goto fail; }
+        if ((*ce & (1ull << 63)) == 0ull) {
+            printf("FAIL:the sole-owner write path dropped NX\n");
+            goto fail;
+        }
+
+        /* ---- a fork that lands in the exclusivity window ------------------
+         *
+         * The defect this proves, and the reason it needs a seam rather than a
+         * boot: the sole-owner path above decides to widen the entry to
+         * writable because the frame has one owner, and then stores. The store
+         * is a compare-exchange, but it guards the *entry*, and the fact it
+         * depends on lives in the *reference count*. clone_one's already-COW
+         * branch takes a reference and never touches the source entry, so a
+         * fork on another core can make the decision false while leaving the
+         * exchange nothing to notice.
+         *
+         * The result was a process holding a writable mapping of a frame
+         * another address space held copy-on-write - one side's writes landing
+         * in the other's private page. On a running machine that is
+         * "STRESS_FAIL: the child could not keep its own copy", once in
+         * however many boots. Here it is every time.
+         *
+         * The hook stands in for the concurrent fork: it runs inside the
+         * window and takes exactly the reference clone_one would. */
+        {
+            uint64_t page = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+            const uint64_t va = 0x8000002000ull;
+            uint64_t *e;
+            uint64_t before_lost;
+
+            if (!page) { goto fail; }
+            if (vibeos_vmspace_map(&as, va, page,
+                                   VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                                   VIBEOS_PROT_USER) != 0) { goto fail; }
+            /* Fork, then take the child's mapping and the standalone reference
+             * away again. What is left is the state the fast path exists for:
+             * an entry still marked copy-on-write, on a frame this address
+             * space is now the only owner of - a parent whose child has since
+             * exited. */
+            if (vibeos_vmspace_clone_cow(&child, &as) != 0) { goto fail; }
+            if (vibeos_vmspace_unmap(&child, va) != 1) { goto fail; }
+            (void)vibeos_frame_put(page);
+            if (vibeos_frame_owners(page) != 1u) {
+                printf("FAIL:the exclusivity case was not set up\n");
+                goto fail;
+            }
+
+            before_lost = vibeos_mm_stats()->cow_exclusive_lost;
+            g_race_frame = page;
+            vibeos_vmspace_set_race_hook(race_take_a_reference);
+            if (vibeos_vmspace_fault(&as, va, 1) != 1) { goto fail; }
+            vibeos_vmspace_set_race_hook(0);
+
+            e = vibeos_vmspace_entry(&as, va);
+            if (!e) { goto fail; }
+            if ((*e & 2ull) == 0ull) {
+                printf("FAIL:the fault left the page unwritable\n");
+                goto fail;
+            }
+            /* The whole point. The frame the hook took a reference to must not
+             * be the frame this address space can now write. */
+            if ((*e & 0x000FFFFFFFFFF000ull) == page) {
+                printf("FAIL:a frame shared during the fault was made writable in place\n");
+                goto fail;
+            }
+            if (vibeos_mm_stats()->cow_exclusive_lost != before_lost + 1ull) {
+                printf("FAIL:losing exclusivity mid-fault was not counted\n");
+                goto fail;
+            }
+            /* And the reference the hook took is still there: the fault copied
+             * instead, so it never released a frame somebody else had taken. */
+            if (vibeos_frame_owners(page) != 1u) {
+                printf("FAIL:the fault released a frame taken during its own window\n");
+                goto fail;
+            }
+            (void)vibeos_frame_put(page);
+        }
+
+        /* A write fault on a page that is already writable is the stale-TLB
+         * case: another core resolved it first. It must be reported handled,
+         * not passed up as a violation the task never committed. */
+        if (vibeos_vmspace_fault(&child, 0x8000000000ull, 1) != 1) {
+            printf("FAIL:a stale-TLB write fault was called a violation\n");
+            goto fail;
+        }
+
+        /* A genuine violation stays a violation: read-only, not shared. */
+        {
+            uint64_t plain = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+            if (!plain) { goto fail; }
+            if (vibeos_vmspace_map(&as, 0x8000002000ull, plain,
+                                   VIBEOS_PROT_READ | VIBEOS_PROT_USER) != 0) { goto fail; }
+            if (vibeos_vmspace_fault(&as, 0x8000002000ull, 1) != 0) {
+                printf("FAIL:a write to a read-only page was silently allowed\n");
+                goto fail;
+            }
+        }
+
+        if (vibeos_vmspace_destroy(&child) != 0) { goto fail; }
+        if (vibeos_vmspace_destroy(&as) != 0) { goto fail; }
+        if (vibeos_mm_stats()->frames_leaked != 0ull ||
+            vibeos_mm_stats()->frames_double_put != 0ull) { goto fail; }
+    }
+
+    /* Its own address space and its own pool: the block below creates a third
+     * set of page tables, and the harness has 512 frames in total. The first
+     * version shared the running one and clone_cow failed for want of a table,
+     * which is the harness running out rather than the layer refusing. */
+    if (setup(0) != 0) { goto fail; }
+    if (vibeos_vmspace_create(&only) != 0) { goto fail; }
+    /* Fork losing its exchange to a fault resolving on another core.
+     *
+     * The old code adopted whatever the losing exchange found. When that is
+     * the fault's writable-private entry, the result breaks the one
+     * guarantee fork makes, in two directions at once: the parent keeps a
+     * writable mapping of a frame the child shares, so its stores land in
+     * the child's memory; and the child's entry carries no copy-on-write
+     * mark, so the child's first store is read - correctly - as a
+     * protection violation and kills it for touching memory it owns.
+     *
+     * Both are asserted, because a fix producing only one of them would be
+     * half a fix and would look like a whole one. */
+    {
+        vibeos_vmspace_t forked;
+        uint64_t page = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        const uint64_t va = 0x8000004000ull;
+        uint64_t *pe, *ce;
+
+        if (!page) { goto fail; }
+        if (vibeos_vmspace_map(&only, va, page,
+                               VIBEOS_PROT_READ | VIBEOS_PROT_WRITE |
+                               VIBEOS_PROT_USER) != 0) { goto fail; }
+
+        /* clone_cow requires a created destination - it refuses a null root
+         * rather than creating one - and passing an uninitialised vmspace is
+         * what made the first version of this test fail in the fix's name. */
+        if (vibeos_vmspace_create(&forked) != 0) { goto fail; }
+        g_fork_race_frame = vibeos_frame_alloc(VIBEOS_FRAME_ALLOCATED);
+        if (!g_fork_race_frame) { goto fail; }
+        g_fork_race_armed = 1;
+        vibeos_vmspace_set_fork_race_hook(fork_race_make_writable_private);
+        if (vibeos_vmspace_clone_cow(&forked, &only) != 0) { goto fail; }
+        vibeos_vmspace_set_fork_race_hook(0);
+
+        pe = vibeos_vmspace_entry(&only, va);
+        ce = vibeos_vmspace_entry(&forked, va);
+        if (!pe || !ce) { goto fail; }
+
+        if (*pe & (1ull << 1)) {
+            printf("FAIL:fork left the parent writable on a shared frame\n");
+            goto fail;
+        }
+        if ((*pe & (1ull << 9)) == 0ull) {
+            printf("FAIL:fork left the parent unmarked on a shared frame\n");
+            goto fail;
+        }
+        if ((*ce & (1ull << 9)) == 0ull) {
+            printf("FAIL:the child got a share with no copy-on-write mark\n");
+            goto fail;
+        }
+        if ((*pe & 0x000FFFFFFFFFF000ull) != (*ce & 0x000FFFFFFFFFF000ull)) {
+            printf("FAIL:parent and child ended up on different frames\n");
+            goto fail;
+        }
+        /* And the child can still write it: a mark the fault handler
+         * resolves, not one that kills the task. */
+        if (vibeos_vmspace_fault(&forked, va, 1) != 1) {
+            printf("FAIL:the child could not resolve its own fault\n");
+            goto fail;
+        }
+        if (vibeos_vmspace_destroy(&forked) != 0) { goto fail; }
+        if (vibeos_vmspace_unmap(&only, va) != 1) { goto fail; }
+        (void)vibeos_frame_put(page);
+    }
+
+
+    if (vibeos_vmspace_destroy(&only) != 0) { goto fail; }
+
+    free(g_ram);
+    g_ram = 0;
+    return 0;
+
+fail:
+    free(g_ram);
+    g_ram = 0;
+    return -1;
+}

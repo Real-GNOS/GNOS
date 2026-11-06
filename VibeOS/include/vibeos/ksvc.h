@@ -1,0 +1,345 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef VIBEOS_KSVC_H
+#define VIBEOS_KSVC_H
+
+/* Kernel services: what a syscall personality may ask of the kernel under it.
+ *
+ * Written for the Linux handlers (docs/abi/phases.md, A2), and deliberately not
+ * named after them: a second personality - Windows is planned - is another
+ * directory beside kernel/abi/linux that includes this header, and the kernel
+ * underneath does not change. Nothing here is a Linux type or a Linux number
+ * except the errno a handler returns, which is the personality's business.
+ *
+ * The Linux handlers used to include the architecture's private header and reach
+ * into its task table, its locks and its trap frame directly - about seven
+ * hundred references, and the reason none of them could be tested anywhere but
+ * in a booted guest. This is the whole of what they need, declared once:
+ *
+ *   - the current task, and any task by slot: who it is (vibeos_task_t), its
+ *     process (vibeos_procstate_t), its image, its ABI;
+ *   - the scheduler's lock, task states, lookups by id, allocation and release;
+ *   - waiting: parking until the next tick, whether a signal must end a wait;
+ *   - user memory: the range checks, strings, the fault-safe copy;
+ *   - the address space: the per-process mutation lock, mapping a page, the
+ *     unmap quarantine, describing a page;
+ *   - the network stack, the console, the log (the filesystems are reached
+ *     through the mount table, vibeos/path.h, which is portable);
+ *   - and the few operations whose substance is the machine's registers - a
+ *     new task's saved state, a program's entry, a handler frame, the thread
+ *     pointer. Linux keeps the same things in arch/: copy_thread,
+ *     start_thread, setup_rt_frame, arch_prctl - and Windows needs the same
+ *     four for a thread, an image, an APC and the TEB.
+ *
+ * The architecture implements it (kernel/arch/x86_64/ksvc.c); the host tests
+ * implement it again (tests/kernel/ksvc_fake.c), which is how the handlers run
+ * in a test binary. A handler that needs something not listed here
+ * adds it here - which is the point: the list is the cost of the seam, and it
+ * is written down.
+ *
+ * Every `slot` is an index in the task table, as `ks_current()` returns it. */
+
+#include <stdint.h>
+#include "vibeos/procstate.h"
+#include "vibeos/task_ident.h"
+#include "vibeos/task.h"
+#include "vibeos/abi.h"
+#include "vibeos/log.h"
+#include "vibeos/vfs.h"
+#include "vibeos/inet.h"
+#include "vibeos/vmspace.h"
+#include "vibeos/pageinfo.h"
+#include "vibeos/exec_stats.h"
+#include "vibeos/siginfo.h"
+#include "vibeos/sched_policy.h"
+
+/* A saved user register state: the trap frame a syscall arrived with. Opaque
+ * here; only the functions below that name it read or write it. */
+typedef struct ks_regs ks_regs_t;
+
+/* ---- tasks ------------------------------------------------------------------ */
+
+int ks_current(void);                          /* slot, or negative for none   */
+uint32_t ks_slots(void);                       /* how many slots there are     */
+vibeos_task_t *ks_id(int slot);
+vibeos_procstate_t *ks_ps(int slot);           /* 0 once a task has let go     */
+void ks_set_ps(int slot, vibeos_procstate_t *ps);
+vibeos_image_t *ks_image(int slot);
+uint32_t ks_seq(int slot);                     /* which tenancy of the slot    */
+const vibeos_abi_t *ks_abi(int slot);
+uint64_t ks_cr3(int slot);                     /* diagnostics only             */
+/* Where a task was last made runnable, or where its address space was kept
+ * rather than destroyed: static strings, read by the context-switch guard. */
+void ks_mark_ready(int slot, const char *where);
+void ks_mark_aspace(int slot, const char *where);
+
+vibeos_lock_t *ks_sched_lock(void);
+int ks_set_state(int slot, vibeos_task_state_t to, const char *why);
+int ks_task_by_pid(uint32_t pid);              /* under ks_sched_lock          */
+int ks_task_by_tid(uint32_t tid);
+/* A task's nice, -20..19: the scheduler's weight (L2 step 4). */
+int ks_task_nice(int slot);
+int ks_task_set_nice(int slot, int nice);
+/* Its class and, in REALTIME, its priority (docs/abi/ L6 step 2), as the
+ * scheduler's policy keeps them: set_class refuses what the policy refuses.
+ * Under ks_sched_lock, as the picker reads them. */
+int ks_task_set_class(int slot, vibeos_sched_class_t cls, uint32_t rt_prio);
+vibeos_sched_class_t ks_task_class(int slot);
+uint32_t ks_task_rt_prio(int slot);
+uint32_t ks_class_quantum(vibeos_sched_class_t cls);   /* in ticks */
+/* The cores a task may run on, a bit per core; 0 is anywhere. */
+uint32_t ks_task_affinity(int slot);
+int ks_task_set_affinity(int slot, uint32_t mask);
+uint32_t ks_cpus_online_mask(void);
+/* The slot core `cpu` is running now - its idle task when it has nothing - or -1:
+ * for a diagnostic that has to say what kept a task off a core. */
+int ks_cpu_running(uint32_t cpu);
+/* A memory barrier on other cores (membarrier): every core running the
+ * caller's address space, or with `global` every core running any user
+ * space, has taken an interrupt - which serialises it - when this returns. */
+void ks_membarrier(int global);
+int ks_task_alloc_for_user(const char *what);  /* a RESERVED slot, or negative */
+void ks_task_release(int slot);
+uint32_t ks_next_pid(void);
+void ks_task_exit(uint64_t code);              /* does not return              */
+void ks_task_exit_group(uint64_t code);        /* does not return              */
+/* The whole process killed by `sig`: every thread ends, and each leaves the
+ * signal as its wait status. Does not return. */
+void ks_task_kill_group(uint32_t sig);
+
+/* ---- locks and waiting --------------------------------------------------------
+ *
+ * ks_lock masks interrupts until the matching unlock; the preemptible form
+ * leaves them as they were, for a critical section that can be long. `fn` names
+ * the holder in a deadlock report. */
+void ks_lock(vibeos_lock_t *l, const char *fn);
+void ks_unlock(vibeos_lock_t *l);
+void ks_lock_preemptible(vibeos_lock_t *l);
+void ks_unlock_preemptible(vibeos_lock_t *l);
+void ks_irq_off(void);
+void ks_irq_on(void);
+void ks_idle(void);                    /* interrupts on, sleep until the next one  */
+void ks_block_point(void);
+/* Give the core away until the clock has moved: what a wait with a deadline
+ * does between looks at the time. Always returns, a tick later at most. */
+void ks_wait_tick(void);             /* a task giving up the core to wait: idle  */
+void ks_wake_waiters(void);            /* data, room or an end of file appeared    */
+int ks_signal_interrupts(int slot);    /* must a wait end, for a signal?           */
+int ks_signal_raise(int slot, uint32_t sig);   /* from the kernel           */
+/* Raise with a reason. A signal already pending keeps the reason it came with
+ * (Linux's rule for the standard signals; queued real-time ones are not kept
+ * apart yet). 0, or -1 if the task cannot take one. */
+int ks_signal_send(int slot, uint32_t sig, const vibeos_siginfo_t *info);
+/* Take `sig` off the pending set with its reason: 1 if it was pending. Raise and
+ * take are one critical section each, so a reason is never read half-written. */
+int ks_signal_take(int slot, uint32_t sig, vibeos_siginfo_t *out);
+int ks_signal_default_kills(uint32_t sig);
+
+/* ---- time ------------------------------------------------------------------- */
+
+uint64_t ks_ticks(void);
+uint32_t ks_hz(void);
+
+/* ---- user memory ---------------------------------------------------------------
+ *
+ * ks_user_ok is the one place a user range is judged; see linux_user_ok. The
+ * copy is fault-safe in both directions: 0, or -1 if the user side faulted - which
+ * a sibling thread's munmap can cause at any moment after the range was checked. */
+int ks_user_ok(uint64_t base, uint64_t len, int write);
+int ks_user_addr_ok(uint64_t va);
+int ks_user_range_why(uint64_t va, uint64_t len, int write, uint32_t *why);
+const char *ks_user_range_why_name(uint32_t why);
+int ks_copy_user_string(uint64_t uptr, char *dst, int max);
+int vibeos_uaccess_copy(void *dst, const void *src, uint64_t len);
+
+/* ---- the address space ----------------------------------------------------------
+ *
+ * ks_mm_lock is the process's one-mutation-at-a-time lock (see its definition).
+ * ks_map_anon maps one fresh zeroed page at `va` with `prot`; VIBEOS_PROT_NONE is
+ * a guard - allocated, owned, and reachable from ring 3 by nobody. */
+void ks_mm_lock(vibeos_procstate_t *ps);
+void ks_mm_unlock(vibeos_procstate_t *ps);
+vibeos_vmspace_t ks_vm(int slot);
+int ks_map_anon(int slot, uint64_t va, vibeos_prot_t prot);
+/* Map a page that already exists - one a filesystem handed out with
+ * share_page - at `va`. The mapping takes its own reference; the caller still
+ * has the one the page came with, and gives it back with ks_page_unhold. */
+int ks_map_page(int slot, uint64_t va, void *page, vibeos_prot_t prot);
+void ks_page_unhold(void *page);
+int ks_map_user_pages(int slot, uint64_t va, uint64_t pages);
+/* May a program place a mapping of `len` bytes at `base`, an address it chose?
+ * The architecture's policy on where user memory may be: a personality asks,
+ * for a mapping at a fixed address, and never decides. */
+int ks_user_fixed_ok(uint64_t base, uint64_t len);
+void ks_tlb_drain(void);
+void ks_tlb_flush_page(uint64_t va);
+void ks_pageinfo(int slot, uint64_t va, vibeos_pageinfo_t *out);
+void *ks_page_alloc(void);
+void ks_page_free(void *page, const char *why);
+/* The layout's fixed points, which brk and prlimit report. */
+uint64_t ks_heap_base(void);
+uint64_t ks_mmap_base(void);
+uint64_t ks_stack_bytes(void);
+/* The end of the user window a personality allocates in - the first address
+ * past it - for an answer about "the rest of the address space" (W3's
+ * NtQueryVirtualMemory of free memory). */
+uint64_t ks_user_top(void);
+
+/* ---- processes ------------------------------------------------------------------
+ *
+ * A fork builds the child in four steps the handler orders: a copy of the address
+ * space (under the parent's mm lock), a kernel stack, a process state, and the
+ * registers. A thread shares the address space and takes only the last two. */
+vibeos_procstate_t *ks_procstate_new(void);
+void ks_procstate_put(vibeos_procstate_t *ps);
+/* Give `child` the address space `parent` has - its regions, its lock, its
+ * break - in place of its own (M-100): clone(CLONE_VM) without CLONE_THREAD. */
+void ks_mm_share(vibeos_procstate_t *child, vibeos_procstate_t *parent);
+int ks_fork_aspace(int child, int parent);
+/* CLONE_VM without CLONE_THREAD (docs/abi/ L6 step 3): the child runs on the
+ * parent's page tables rather than a copy of them, and lets go of them
+ * without freeing anything if it is unwound before it ran. */
+void ks_share_aspace(int child, int parent);
+void ks_unshare_aspace(int slot);
+/* Where a new task's user stack starts, when its creator said (clone's
+ * stack argument). */
+void ks_set_user_sp(int slot, uint64_t sp);
+/* Store a 32-bit word into another task's memory, breaking copy-on-write in
+ * its view if it must - CLONE_CHILD_SETTID for a forked child, written before
+ * the child first runs. 0, or -1 if the word is not there. */
+int ks_poke_u32(int slot, uint64_t va, uint32_t val);        /* 0, or -1 with nothing kept */
+/* Hold the address space a slot's tenancy `seq` runs on, for a caller that
+ * does not run in it (NtReadVirtualMemory, W7 step 1): exit and exec leave it
+ * to the last holder rather than freeing it under the walk. A pin, or -1 when
+ * the tenancy has ended or no pin is free; one system call at most. */
+int ks_aspace_pin(int slot, uint32_t seq, vibeos_vmspace_t *out);
+/* ks_thread_regs, joining the process a task of tenancy `seq` runs in - the
+ * caller's or another's (W7 step 2) - asked under the scheduler's lock, where
+ * an exit decides: 0, or -1 when that tenancy has ended. */
+int ks_thread_regs_of(int child, int slot, uint32_t seq, const ks_regs_t *frame, uint64_t stack);
+void ks_aspace_unpin(int pin);
+/* Within one page of a held address space: copy to (write) or from it. 0, or
+ * -1 when the page is not there for the user, or not writable. */
+int ks_vm_copy(vibeos_vmspace_t *v, uint64_t va, void *buf, uint32_t len, int write);
+/* ks_map_anon into a held address space. */
+int ks_vm_map_anon(vibeos_vmspace_t *v, uint64_t va, vibeos_prot_t prot);
+void ks_drop_aspace(int slot);
+int ks_alloc_kstack(int slot);                    /* 0, or -1                   */
+/* Give back a stack ks_alloc_kstack gave a slot that never ran: a fork that
+ * fails after the stack is made (#141). Not for a task that has run - exit's
+ * deferred release is for that, since it stands on its stack. */
+void ks_free_kstack(int slot);
+void ks_fork_regs(int child, int parent, const ks_regs_t *frame);
+void ks_thread_regs(int child, int parent, const ks_regs_t *frame,
+                    uint64_t stack, uint64_t tls);
+/* Where a task made by ks_thread_regs begins instead of its creator's return:
+ * at `ip`, on `sp`, with three arguments in the registers the Windows x64
+ * convention passes the first three in (rcx, rdx, r8) - an NT thread starts in
+ * ntdll that way (docs/abi/windows.md W5). 0, or -1 for an `ip` that is not a
+ * user address, with nothing changed. */
+int ks_task_start_win64(int slot, uint64_t ip, uint64_t sp, uint64_t a0, uint64_t a1, uint64_t a2);
+
+/* execve's halves: the staging buffer and its reader, the loader, and the
+ * switch to the new image once it is committed. */
+uint8_t *ks_exec_buffer(uint32_t *cap);
+long ks_read_file_cached(const char *path, void *buf, uint32_t cap, uint32_t *out_id);
+int ks_exec_refuse(vibeos_exec_fail_t why, const char *path, const char *detail);
+int ks_image_create(vibeos_image_t *img, vibeos_procstate_t *ps,
+                    const unsigned char *elf, uint64_t len, uint64_t staged,
+                    const char *const *argv, const char *const *envp,
+                    const char *path, uint32_t file_id);
+void ks_image_drop(vibeos_image_t *img, const char *why);
+/* Make `img` the task's image and load it; the old address space is destroyed
+ * unless another task still runs in it. */
+void ks_exec_switch(int slot, const vibeos_image_t *img);
+void ks_exec_regs(int slot, ks_regs_t *frame, uint64_t entry, uint64_t sp);
+
+/* ---- registers ------------------------------------------------------------------ */
+
+uint64_t ks_regs_sp(const ks_regs_t *frame);
+uint64_t ks_regs_ret(const ks_regs_t *frame);
+/* Make the frame one that issues syscall `nr` again when it is resumed: the
+ * number back where the instruction reads it, and the instruction pointer back
+ * on the instruction. The arguments are still in their registers - a handler
+ * does not write them. */
+void ks_regs_restart(ks_regs_t *frame, uint64_t nr);
+/* The registers a program can see, for a personality that saves them where
+ * the program can read and change them - Linux's signal frame (docs/abi/ L2).
+ * The frame's layout is the personality's; what the registers are is the
+ * machine's, so they cross here by name.
+ *
+ * ks_regs_set puts back what a program may have changed and decides what of it
+ * may be trusted: the selectors and the privileged flags are forced, and a
+ * resume address that is not a user address is refused (-1, nothing changed) -
+ * iretq to a non-canonical rip faults in ring 0 (H-018). */
+typedef struct {
+    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, rflags;
+    uint16_t cs, ss;
+} vibeos_uregs_t;
+
+void ks_regs_get(const ks_regs_t *frame, vibeos_uregs_t *out);
+int ks_regs_set(ks_regs_t *frame, const vibeos_uregs_t *in);
+/* The calling task's vector and floating-point state, 512 bytes in the FXSAVE
+ * format, to and from user memory at `uaddr` (16-byte aligned). Both 0, or -1:
+ * the memory was not there, or the state read back would fault the CPU. A
+ * handler that uses SSE - memcpy does - would otherwise hand the interrupted
+ * code back registers it never wrote. */
+/* One atomic compare-exchange on a 4-byte user word: 0 with *expected set to
+ * what the word held (the exchange happened if that equals what was passed),
+ * or -1 when the word could not be reached. Fault-tolerant, like the copy:
+ * user memory can go between any check and the access (docs/abi/ L6). And,
+ * like the copy, it does not judge the address: the caller asks ks_user_ok
+ * (through its personality's helper) first. */
+int ks_user_cmpxchg32(uint64_t uaddr, uint32_t *expected, uint32_t desired);
+uint64_t ks_fpu_size(void);
+int ks_fpu_save(uint64_t uaddr);
+int ks_fpu_restore(uint64_t uaddr);
+/* Resume in a handler: at `handler`, on `sp`, with its three arguments - the
+ * signal, and two pointers the personality chose. */
+void ks_regs_enter_handler(ks_regs_t *frame, uint64_t handler, uint64_t sp,
+                           uint64_t a0, uint64_t a1, uint64_t a2);
+uint64_t ks_tls_get(int slot);
+void ks_tls_set(int slot, uint64_t base);
+/* The task's %gs base: Linux's ARCH_SET_GS, and the TEB an NT thread finds
+ * through %gs (docs/abi/windows.md W1). */
+/* PE images (docs/abi/windows.md W2): is the file at `path` one, and how much
+ * address space it spans - 0, -ENOENT or -ENOEXEC; and map it into `slot`'s
+ * address space where it asks if it can, somewhere else otherwise, relocated -
+ * 0 at its own base, 1 moved, or a negated errno. */
+/* The image a section's file is - read through the description, by its node,
+ * and never by its path again (M-106): a rename after the section was made
+ * cannot change what is mapped. */
+struct vibeos_file;
+int ks_pe_probe(const struct vibeos_file *f, uint64_t *image_size);
+int ks_map_pe_image(int slot, const struct vibeos_file *f, uint64_t *base, uint64_t *size);
+uint64_t ks_gs_get(int slot);
+/* 0, or -1 for a base that is neither 0 nor a user address: the kernel's entry
+ * decides whose %gs is loaded by whether it points into the kernel. */
+int ks_gs_set(int slot, uint64_t base);
+
+/* ---- devices ----------------------------------------------------------------------- */
+
+vibeos_inet_t *ks_net(void);          /* 0 while the network is down              */
+vibeos_lock_t *ks_net_lock(void);
+int ks_console_getc(void);            /* next console byte, or -1                 */
+void ks_console_echo(char c);         /* one byte to the screen                   */
+uint32_t ks_foreground_pgid(void);
+void ks_set_foreground_pgid(uint32_t pgid);
+
+/* The serial console. A multi-part line is bracketed by ks_con_lock/unlock, or
+ * another core writes into the middle of it. */
+void ks_con_lock(void);
+void ks_con_unlock(void);
+void ks_con_puts(const char *s);
+void ks_con_putc(char c);
+void ks_con_hex(uint64_t v);
+void ks_log(vibeos_log_level_t level, uint32_t code, uint64_t a0, uint64_t a1,
+            const char *msg);
+void ks_panic(const char *why);
+uint32_t ks_cpu_id(void);
+uint64_t ks_cr3_now(void);
+/* Every recorded copy-on-write fault on `page`, appended to the line the caller
+ * is writing under ks_con_lock. */
+void ks_con_cow_faults(uint64_t page);
+
+#endif

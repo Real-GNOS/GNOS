@@ -1,0 +1,225 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "uefi_file_io.h"
+
+#include "uefi_serial.h"
+
+#define UEFI_PAGE_SIZE 4096ull
+#define EFI_OPEN_MODE_READ 0x0000000000000001ull
+
+
+
+static const EFI_GUID VIBEOS_EFI_SIMPLE_FILE_SYSTEM_GUID = {
+    0x964e5b22u, 0x6459u, 0x11d2u, {0x8eu, 0x39u, 0x00u, 0xa0u, 0xc9u, 0x69u, 0x72u, 0x3bu}
+};
+
+static const EFI_GUID VIBEOS_EFI_FILE_INFO_GUID = {
+    0x09576e92u, 0x6d3fu, 0x11d2u, {0x8eu, 0x39u, 0x00u, 0xa0u, 0xc9u, 0x69u, 0x72u, 0x3bu}
+};
+static const EFI_GUID VIBEOS_EFI_LOADED_IMAGE_PROTOCOL_GUID = {
+    0x5b1b31a1u, 0x9562u, 0x11d2u, {0x8eu, 0x3fu, 0x00u, 0xa0u, 0xc9u, 0x69u, 0x72u, 0x3bu}
+};
+
+typedef EFI_STATUS(EFIAPI *EFI_HANDLE_PROTOCOL)(
+    EFI_HANDLE Handle,
+    EFI_GUID *Protocol,
+    void **Interface
+);
+
+typedef struct efi_loaded_image_protocol {
+    uint32_t Revision;
+    EFI_HANDLE ParentHandle;
+    EFI_SYSTEM_TABLE *SystemTable;
+    EFI_HANDLE DeviceHandle;
+    void *FilePath;
+    void *Reserved;
+    uint32_t LoadOptionsSize;
+    void *LoadOptions;
+    void *ImageBase;
+    uint64_t ImageSize;
+    EFI_MEMORY_TYPE ImageCodeType;
+    EFI_MEMORY_TYPE ImageDataType;
+    EFI_STATUS(EFIAPI *Unload)(EFI_HANDLE ImageHandle);
+} EFI_LOADED_IMAGE_PROTOCOL;
+
+static uint64_t round_up_pages(uint64_t size) {
+    if (size == 0) {
+        return 0;
+    }
+    return (size + (UEFI_PAGE_SIZE - 1ull)) / UEFI_PAGE_SIZE;
+}
+
+static int uefi_allocate_bytes(EFI_SYSTEM_TABLE *st, uint64_t size, void **out_buffer) {
+    uint64_t pages;
+    uint64_t address = 0;
+    EFI_STATUS status;
+
+    if (!st || !st->BootServices || !st->BootServices->AllocatePages || !out_buffer) {
+        return -1;
+    }
+    if (size == 0) {
+        return -1;
+    }
+
+    pages = round_up_pages(size);
+    if (pages == 0) {
+        return -1;
+    }
+
+    status = st->BootServices->AllocatePages(AllocateAnyPages, EfiLoaderData, (size_t)pages, &address);
+    if (status != EFI_SUCCESS) {
+        return -1;
+    }
+
+    *out_buffer = (void *)(uintptr_t)address;
+    return 0;
+}
+
+static void uefi_close_file_if_open(EFI_FILE_PROTOCOL *file) {
+    if (file && file->Close) {
+        (void)file->Close(file);
+    }
+}
+
+static int uefi_open_root_volume(EFI_HANDLE image_handle,
+                                 EFI_SYSTEM_TABLE *st,
+                                 EFI_FILE_PROTOCOL **out_root) {
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = 0;
+    EFI_HANDLE_PROTOCOL handle_protocol = 0;
+    if (!st || !st->BootServices || !out_root) {
+        return -1;
+    }
+    *out_root = 0;
+
+    /* Preferred path: locate filesystem bound to the current loaded image device. */
+    handle_protocol = st->BootServices->HandleProtocol;
+    if (image_handle && handle_protocol) {
+        EFI_LOADED_IMAGE_PROTOCOL *loaded_image = 0;
+        EFI_STATUS status = handle_protocol(image_handle, (EFI_GUID *)&VIBEOS_EFI_LOADED_IMAGE_PROTOCOL_GUID, (void **)&loaded_image);
+        if (status == EFI_SUCCESS && loaded_image && loaded_image->DeviceHandle) {
+            status = handle_protocol(loaded_image->DeviceHandle, (EFI_GUID *)&VIBEOS_EFI_SIMPLE_FILE_SYSTEM_GUID, (void **)&fs);
+            if (status == EFI_SUCCESS && fs && fs->OpenVolume) {
+                status = fs->OpenVolume(fs, out_root);
+                if (status == EFI_SUCCESS && *out_root && (*out_root)->Open) {
+                    return 0;
+                }
+            }
+        }
+    }
+
+    /* Fallback for limited firmware: first available filesystem protocol. */
+    if (!st->BootServices->LocateProtocol) {
+        return -1;
+    }
+    if (st->BootServices->LocateProtocol((EFI_GUID *)&VIBEOS_EFI_SIMPLE_FILE_SYSTEM_GUID, 0, (void **)&fs) != EFI_SUCCESS || !fs || !fs->OpenVolume) {
+        return -1;
+    }
+    if (fs->OpenVolume(fs, out_root) != EFI_SUCCESS || !*out_root || !(*out_root)->Open) {
+        *out_root = 0;
+        return -1;
+    }
+    return 0;
+}
+
+void uefi_file_free_buffer(EFI_SYSTEM_TABLE *st, void *buffer, uint64_t size) {
+    uint64_t pages;
+    if (!st || !st->BootServices || !st->BootServices->FreePages || !buffer || size == 0) {
+        return;
+    }
+    pages = round_up_pages(size);
+    if (pages == 0) {
+        return;
+    }
+    (void)st->BootServices->FreePages((uint64_t)(uintptr_t)buffer, (size_t)pages);
+}
+
+int uefi_file_read_all(EFI_HANDLE image_handle,
+                       EFI_SYSTEM_TABLE *st,
+                       const uint16_t *path,
+                       void **out_buf,
+                       uint64_t *out_size) {
+    EFI_FILE_PROTOCOL *root = 0;
+    EFI_FILE_PROTOCOL *file = 0;
+    EFI_FILE_INFO *info = 0;
+    void *file_buffer = 0;
+    void *info_buffer = 0;
+    uint64_t file_size = 0;
+    size_t info_size = 1024;
+    size_t read_size = 0;
+    EFI_STATUS status;
+
+    if (!st || !st->BootServices || !path || !out_buf || !out_size) {
+        return -1;
+    }
+
+    *out_buf = 0;
+    *out_size = 0;
+
+    if (uefi_open_root_volume(image_handle, st, &root) != 0 || !root || !root->Open) {
+        uefi_serial_puts("[ERROR] UEFI file I/O: failed to resolve root volume\n");
+        return -1;
+    }
+
+    status = root->Open(root, &file, path, EFI_OPEN_MODE_READ, 0);
+    if (status != EFI_SUCCESS || !file || !file->GetInfo || !file->Read) {
+        uefi_serial_puts("[ERROR] UEFI file I/O: kernel file open failed\n");
+        uefi_close_file_if_open(root);
+        return -1;
+    }
+
+    if (uefi_allocate_bytes(st, (uint64_t)info_size, &info_buffer) != 0) {
+        uefi_serial_puts("[ERROR] UEFI file I/O: metadata allocation failed\n");
+        uefi_close_file_if_open(file);
+        uefi_close_file_if_open(root);
+        return -1;
+    }
+    info = (EFI_FILE_INFO *)info_buffer;
+
+    status = file->GetInfo(file, (EFI_GUID *)&VIBEOS_EFI_FILE_INFO_GUID, &info_size, info);
+    if (status == EFI_BUFFER_TOO_SMALL && info_size > 1024u) {
+        uefi_file_free_buffer(st, info_buffer, 1024u);
+        info_buffer = 0;
+        if (uefi_allocate_bytes(st, (uint64_t)info_size, &info_buffer) != 0) {
+            uefi_serial_puts("[ERROR] UEFI file I/O: metadata resize allocation failed\n");
+            uefi_close_file_if_open(file);
+            uefi_close_file_if_open(root);
+            return -1;
+        }
+        info = (EFI_FILE_INFO *)info_buffer;
+        status = file->GetInfo(file, (EFI_GUID *)&VIBEOS_EFI_FILE_INFO_GUID, &info_size, info);
+    }
+    if (status != EFI_SUCCESS || info->FileSize == 0) {
+        uefi_serial_puts("[ERROR] UEFI file I/O: invalid file metadata\n");
+        uefi_file_free_buffer(st, info_buffer, (uint64_t)info_size);
+        uefi_close_file_if_open(file);
+        uefi_close_file_if_open(root);
+        return -1;
+    }
+
+    file_size = info->FileSize;
+    if (uefi_allocate_bytes(st, file_size, &file_buffer) != 0) {
+        uefi_serial_puts("[ERROR] UEFI file I/O: file buffer allocation failed\n");
+        uefi_file_free_buffer(st, info_buffer, (uint64_t)info_size);
+        uefi_close_file_if_open(file);
+        uefi_close_file_if_open(root);
+        return -1;
+    }
+
+    read_size = (size_t)file_size;
+    status = file->Read(file, &read_size, file_buffer);
+    if (status != EFI_SUCCESS || (uint64_t)read_size != file_size) {
+        uefi_serial_puts("[ERROR] UEFI file I/O: short/failed read\n");
+        uefi_file_free_buffer(st, file_buffer, file_size);
+        uefi_file_free_buffer(st, info_buffer, (uint64_t)info_size);
+        uefi_close_file_if_open(file);
+        uefi_close_file_if_open(root);
+        return -1;
+    }
+
+    uefi_file_free_buffer(st, info_buffer, (uint64_t)info_size);
+    uefi_close_file_if_open(file);
+    uefi_close_file_if_open(root);
+
+    *out_buf = file_buffer;
+    *out_size = file_size;
+    return 0;
+}

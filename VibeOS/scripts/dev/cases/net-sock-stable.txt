@@ -1,0 +1,38 @@
+# M-020: a socket syscall that waits re-verifies its socket after every wake
+# (kernel/abi/linux/net.c), proved by check-net-stable.py.
+#
+#  1. recvfrom (recvmsg since L5) stops re-verifying - the state an external review found it in on
+#     2026-09-24, a phase after the tracker called M-020 fixed: expect
+#     "vibeos_sockfile_recvfrom waits holding a description and never calls
+#     vibeos_sockfile_stable" (the waits moved to kernel/abi/files/socket.c in A3);
+#  2. the same for accept, one of the three the original fix did reach.
+#
+# The race itself is not reproduced - it needs a sibling thread closing and
+# reusing the descriptor while the call waits. What is checked is the rule that
+# makes it impossible, at every site, which is what was missing: three sites had
+# it and the fourth was left to memory.
+#
+# Target source: kernel/abi/files/socket.c
+# Run: SABOTAGE_VERIFY="python3 scripts/dev/check-net-stable.py" python3 scripts/dev/sabotage.py kernel/abi/files/socket.c scripts/dev/cases/net-sock-stable.txt
+
+### recvfrom stops re-verifying its socket
+--- old
+        if ((sock = vibeos_sockfile_stable(f)) < 0) {
+            return got ? (long)got : -VIBEOS_EBADF;
+        }
++++ new
+        sock = f->sock;
+
+### accept stops re-verifying its socket
+--- old
+    for (;;) {
+        if ((sock = vibeos_sockfile_stable(f)) < 0) {
+            return -VIBEOS_EBADF;
+        }
+        ks_lock(ks_net_lock(), __func__);
+        child = vibeos_inet_accept(ks_net(), sock);
++++ new
+    for (;;) {
+        sock = f->sock;
+        ks_lock(ks_net_lock(), __func__);
+        child = vibeos_inet_accept(ks_net(), sock);

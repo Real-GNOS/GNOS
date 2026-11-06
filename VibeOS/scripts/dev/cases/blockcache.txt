@@ -1,0 +1,8 @@
+# Target source: kernel/fs/blockcache.c
+
+### device cache never emptied
+--- old
+    if (bc->dev->flush != 0 && bc->dev->flush(bc->dev->ctx) != 0) {
+        rc = -1;
+    }
++++ new

@@ -1,0 +1,307 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Open file descriptions. See include/vibeos/file.h. */
+
+#include "vibeos/file.h"
+#include "vibeos/mbz.h"
+#include "vibeos/filelock.h"
+#include "vibeos/abi_linux.h"   /* the kernel's errno values */
+
+/* quota: RLIMIT_NOFILE descriptions a process, through its descriptor table
+ * (vibeos_fdtable_t.limit): a description exists only while a descriptor or a
+ * call holds it. */
+static vibeos_file_t g_files[VIBEOS_FILE_MAX];
+/* Where the next search starts: past the last slot handed out. From zero
+ * every time, the long-lived descriptions at the front of the table - a
+ * shell's terminal, a daemon's sockets - were stepped over on every open,
+ * under the table's lock (#95). Under that lock too. */
+static uint32_t g_next;
+static void (*g_lock)(void);
+static void (*g_unlock)(void);
+
+static void lock(void) {
+    if (g_lock) {
+        g_lock();
+    }
+}
+
+static void unlock(void) {
+    if (g_unlock) {
+        g_unlock();
+    }
+}
+
+void vibeos_file_set_lock(void (*l)(void), void (*u)(void)) {
+    g_lock = l;
+    g_unlock = u;
+}
+
+static void file_clear(vibeos_file_t *f) {
+    unsigned char *raw = (unsigned char *)f;
+    uint32_t gen = f->gen, i;
+
+    for (i = 0; i < (uint32_t)sizeof(*f); i++) {
+        raw[i] = 0;
+    }
+    f->gen = gen;
+    f->pipe = -1;
+    f->sock = -1;
+    f->ux = -1;
+    f->nt_ob = -1;   /* 0 is a slot of the NT object table, not "none" */
+}
+
+void vibeos_file_reset(void) {
+    uint32_t i;
+
+    lock();
+    for (i = 0; i < VIBEOS_FILE_MAX; i++) {
+        file_clear(&g_files[i]);
+        g_files[i].gen = 0;
+    }
+    g_next = 0;
+    unlock();
+}
+
+vibeos_file_t *vibeos_file_alloc(const vibeos_file_ops_t *ops, uint32_t flags) {
+    uint32_t i, n;
+    vibeos_file_t *f = 0;
+
+    if (!ops) {
+        return 0;
+    }
+    lock();
+    for (n = 0; n < VIBEOS_FILE_MAX; n++) {
+        i = (g_next + n) % VIBEOS_FILE_MAX;
+        /* Free is both: no reference, and no release still running. The last
+         * put takes refs to zero before it runs the type's release, so refs
+         * alone would hand out a slot whose pipe end is still being given back. */
+        if (g_files[i].refs == 0u && g_files[i].ops == 0) {
+            g_next = (i + 1u) % VIBEOS_FILE_MAX;
+            f = &g_files[i];
+            file_clear(f);
+            f->gen++;
+            f->ops = ops;
+            f->flags = flags & ~VIBEOS_O_CLOEXEC;
+            __atomic_store_n(&f->refs, 1u, __ATOMIC_RELEASE);
+            break;
+        }
+    }
+    unlock();
+    return f;
+}
+
+int vibeos_file_share_claim(vibeos_file_t *f, uint32_t access, uint32_t share) {
+    uint32_t i;
+
+    if (!f || access == 0u) {
+        return 0;
+    }
+    lock();
+    for (i = 0; i < VIBEOS_FILE_MAX; i++) {
+        const vibeos_file_t *o = &g_files[i];
+
+        if (o == f || !o->nt_shared || o->ops == 0 || __atomic_load_n(&o->refs, __ATOMIC_ACQUIRE) == 0u ||
+            o->mnt != f->mnt || o->node != f->node) {
+            continue;
+        }
+        if ((o->nt_access & ~share) != 0u || (access & ~(uint32_t)o->nt_share) != 0u) {
+            unlock();
+            return -1;
+        }
+    }
+    f->nt_access = (uint8_t)access;
+    f->nt_share = (uint8_t)share;
+    f->nt_shared = 1;
+    unlock();
+    return 0;
+}
+
+void vibeos_file_get(vibeos_file_t *f) {
+    if (f) {
+        (void)__atomic_add_fetch(&f->refs, 1u, __ATOMIC_ACQ_REL);
+    }
+}
+
+int vibeos_file_still_at_path(const vibeos_file_t *f) {
+    vibeos_fsmount_t *m = 0;
+    const char *tail = 0;
+    vibeos_fs_node_t node;
+
+    if (!f || !f->mnt || f->path[0] != '/' || vibeos_fs_resolve(f->path, &m, &tail) != 0 ||
+        m != f->mnt) {
+        return 0;
+    }
+    while (*tail == '/') {
+        tail++;
+    }
+    return vibeos_fs_lookup(m, tail, &node) == 0 && node.id == f->node;
+}
+
+int vibeos_file_node(const vibeos_file_t *f, vibeos_fs_node_t *out) {
+    vibeos_fs_node_t held;
+    int r;
+
+    if (!f || !f->mnt || f->isdir || f->node == 0u) {
+        return -VIBEOS_EINVAL;
+    }
+    held.id = f->node;
+    held.size = f->size;
+    held.is_dir = 0;
+    r = vibeos_fs_getattr(f->mnt, &held, out);
+    if (r == -VIBEOS_ENOSYS) {
+        *out = held;   /* the description's own idea; never the name's */
+        r = 0;
+    }
+    return r;
+}
+
+uint32_t vibeos_file_change_flags(vibeos_file_t *f, uint32_t clear, uint32_t set) {
+    uint32_t old, want;
+
+    if (!f) {
+        return 0;
+    }
+    old = __atomic_load_n(&f->flags, __ATOMIC_ACQUIRE);
+    do {
+        want = (old & ~clear) | set;
+    } while (!__atomic_compare_exchange_n(&f->flags, &old, want, 0, __ATOMIC_ACQ_REL,
+                                          __ATOMIC_ACQUIRE));
+    return old;
+}
+
+void vibeos_file_paths_moved(const char *from, const char *to) {
+    uint32_t i;
+
+    lock();
+    for (i = 0; i < VIBEOS_FILE_MAX; i++) {
+        vibeos_file_t *f = &g_files[i];
+        char out[VIBEOS_FILE_PATH];
+        uint32_t n = 0, k = 0;
+
+        if (f->ops == 0 || f->path[0] == 0) {
+            continue;
+        }
+        while (from[n] && from[n] == f->path[n]) {
+            n++;
+        }
+        if (from[n] != 0 || (f->path[n] != 0 && f->path[n] != '/')) {
+            continue;
+        }
+        while (to[k] && k + 1u < sizeof(out)) {
+            out[k] = to[k];
+            k++;
+        }
+        while (f->path[n] && k + 1u < sizeof(out)) {
+            out[k++] = f->path[n++];
+        }
+        if (f->path[n] != 0) {
+            continue;   /* would not fit: left as it was */
+        }
+        out[k] = 0;
+        for (n = 0; n <= k; n++) {
+            f->path[n] = out[n];
+        }
+    }
+    unlock();
+}
+
+int vibeos_file_try_get(vibeos_file_t *f) {
+    uint32_t n;
+
+    if (!f) {
+        return 0;
+    }
+    n = __atomic_load_n(&f->refs, __ATOMIC_ACQUIRE);
+    while (n != 0u) {
+        if (__atomic_compare_exchange_n(&f->refs, &n, n + 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void (*g_on_release)(vibeos_file_t *f);
+
+void vibeos_file_on_release(void (*fn)(vibeos_file_t *f)) {
+    g_on_release = fn;
+}
+
+void vibeos_file_put(vibeos_file_t *f) {
+    uint32_t n;
+
+    if (!f) {
+        return;
+    }
+    /* Never below zero: a second release of the same reference would otherwise
+     * run the type's release twice - a pipe end given back twice, a socket closed
+     * under whoever was handed its slot - and then wrap, so nothing released
+     * the description again. The same rule as a thread leaving a table. */
+    for (;;) {
+        n = __atomic_load_n(&f->refs, __ATOMIC_ACQUIRE);
+        if (n == 0u) {
+            vibeos_mbz_hit(VIBEOS_MBZ_FILE_PUT_UNDERFLOW, (uint64_t)(uintptr_t)f);
+            return;
+        }
+        if (__atomic_compare_exchange_n(&f->refs, &n, n - 1u, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            break;
+        }
+    }
+    if (n != 1u) {
+        return;
+    }
+    /* Nobody else can reach it now: the count was the last thing that said
+     * somebody might. The release runs without this layer's lock, because it
+     * wakes pipe readers and writes files back. The slot stays taken while it
+     * runs - alloc wants no references *and* no ops - and is handed back here,
+     * under the lock alloc takes. */
+    /* What the description itself held of locks - a flock, an OFD lock - goes
+     * with it: that is the whole of their lifetime rule. */
+    if (vibeos_flk_count() != 0u) {
+        vibeos_flk_drop_owner(VIBEOS_FLK_OWNER_FILE(f));
+        vibeos_flk_drop_owner(VIBEOS_FLK_OWNER_NT(f));
+    }
+    if (g_on_release) {
+        g_on_release(f);
+    }
+    if (f->ops && f->ops->release) {
+        f->ops->release(f);
+    }
+    lock();
+    f->ops = 0;
+    unlock();
+}
+
+void vibeos_file_stat_clear(vibeos_file_stat_t *st) {
+    uint8_t *p = (uint8_t *)st;
+    uint32_t i;
+    for (i = 0; i < sizeof(*st); i++) {
+        p[i] = 0;
+    }
+}
+
+void vibeos_file_stat_from_node(vibeos_file_stat_t *st, const vibeos_fs_node_t *node) {
+    vibeos_file_stat_clear(st);
+    st->mode = node->mode;
+    st->size = node->is_dir ? 0u : node->size;   /* 64-bit: do not narrow (M-018) */
+    st->ino = node->id ? node->id : 2u;
+    st->nlink = node->nlink;
+    st->uid = node->uid;
+    st->gid = node->gid;
+    st->rdev = node->rdev;
+    st->atime_ns = node->atime_ns;
+    st->mtime_ns = node->mtime_ns;
+    st->ctime_ns = node->ctime_ns;
+}
+
+uint32_t vibeos_file_in_use(void) {
+    uint32_t i, n = 0;
+
+    lock();
+    for (i = 0; i < VIBEOS_FILE_MAX; i++) {
+        if (g_files[i].refs != 0u) {
+            n++;
+        }
+    }
+    unlock();
+    return n;
+}

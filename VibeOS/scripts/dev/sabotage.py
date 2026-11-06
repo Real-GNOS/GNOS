@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Break a thing on purpose and confirm a named test goes red.
+
+    scripts/dev/sabotage.py <source-file> <cases-file> [build-dir]
+
+A test that has never failed has not been shown to work. This project has now
+produced several tests that passed while proving nothing about the check they
+named - a hole test that read a block which happened to be zeroed, a checksum
+test whose corruption was rejected for a different reason, a bounds test whose
+input failed an earlier check. Every one was found by sabotaging the code and
+noticing the suite stayed green.
+
+Cases file format - block-structured, because the interesting anchors span
+several lines and a line-oriented format silently mangles them:
+
+    ### short label
+    --- old
+    the exact text to remove
+    +++ new
+    the text to put in its place, may be empty
+
+The backup is written next to the source, not to /tmp. Two sabotage runs were
+killed by a timeout while a guard was removed, and both times /tmp had been
+cleared by a WSL restart, leaving the source half-restored with nothing to
+restore from. Removing some guards hangs the test suite rather than failing it,
+so being killed by a timeout is not a hypothetical.
+"""
+
+import os
+import shlex
+import signal
+import subprocess
+import sys
+
+
+def run_bounded(argv, timeout):
+    """subprocess.run(argv, capture_output=True, text=True, timeout=timeout), but
+    a timeout ends everything the command started, not only the command.
+
+    subprocess.run kills the process it ran and nothing below it. The verifier
+    is a shell script that runs the test binary, so a sabotage that hung the
+    suite left the binary spinning after the case was scored HUNG - two of them
+    held two of eight cores for an afternoon on 2026-10-13, and every boot
+    measured meanwhile (a parent commit's baseline among them) wedged or ran out
+    of time, and was read for an hour as a defect in the kernel. The command
+    gets a session of its own and the whole group is killed."""
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        p.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
+def parse_cases(text):
+    cases, label, old, new, mode = [], None, [], [], None
+    for line in text.splitlines():
+        if line.startswith('#') and not line.startswith('### '):
+            # A comment, anywhere, including after the last case.
+            #
+            # Every case file here ends with a paragraph explaining what each
+            # case actually caught, and those lines were being appended to the
+            # final case's replacement text - so the last case of every file
+            # was substituting prose into C. It came back as a compile failure,
+            # which with a custom verifier scored as *red*: the case looked
+            # like it was working, and was testing nothing at all. That is the
+            # exact failure this whole tool exists to catch, in the tool.
+            #
+            # An anchor that is a preprocessor directive cannot be indented -
+            # it has to match the source - so a line written `\#define ...` is
+            # content, with the backslash removed. Without that escape a
+            # `#define` anchor was dropped as a comment, the case ran with an
+            # empty anchor, and it scored NOT RED having changed nothing
+            # (docs/abi/ A5's errno cases, which were right all along).
+            continue
+        if line.startswith('\\#'):
+            line = line[1:]
+        if line.startswith('### '):
+            if label is not None:
+                cases.append((label, '\n'.join(old), '\n'.join(new)))
+            label, old, new, mode = line[4:].strip(), [], [], None
+        elif line.strip() == '--- old':
+            mode = 'old'
+        elif line.strip() == '+++ new':
+            mode = 'new'
+        elif mode == 'old':
+            old.append(line)
+        elif mode == 'new':
+            new.append(line)
+    if label is not None:
+        cases.append((label, '\n'.join(old), '\n'.join(new)))
+    return cases
+
+
+def build_and_test(build_dir, verify=None):
+    """Returns 'pass', 'red', 'hung' or 'nobuild'.
+
+    `verify` runs a shell command instead of the kernel test binary, for guards
+    that live outside the C code - a generated VM appliance, say, whose checks
+    are a script over build artifacts. The verdicts mean the same thing either
+    way: non-zero is red.
+    """
+    if verify is None and subprocess.run(["cmake", "--build", build_dir, "-j4"],
+                                         capture_output=True).returncode != 0:
+        return 'nobuild', ''
+    try:
+        if verify is not None:
+            # Split as a shell would split it, and run without one: the
+            # command is "bash scripts/dev/verify-host.sh <dir>" or the like,
+            # and nothing in it needs a shell to interpret.
+            r = run_bounded(shlex.split(verify), 300)
+            if r.returncode == 0:
+                return 'pass', r.stdout
+            # A verifier that could not build has not scored the case. Without
+            # this, a sabotage that does not compile is indistinguishable from
+            # one the tests caught - and "every case red" is indistinguishable
+            # from "every case working", which is how eight cases once passed
+            # having proved nothing.
+            if 'BUILD_FAILED' in r.stdout or 'BUILD_FAILED' in r.stderr:
+                return 'nobuild', ''
+            return 'red', r.stdout.strip()
+        r = run_bounded(["./%s/vibeos_kernel_tests" % build_dir], 120)
+    except subprocess.TimeoutExpired:
+        return 'hung', ''
+    if r.returncode == 0:
+        return 'pass', r.stdout
+    # The group verdict ("FAIL:test_compact") and the check inside it that
+    # failed ("  compact: FAIL the page is where it was..."). Only the first
+    # used to be kept, so eleven cases could each go red by group name and not
+    # one of them said whether it failed on its own check or on a neighbour's.
+    fails = [l.strip() for l in r.stdout.splitlines()
+             if l.startswith('FAIL') or ': FAIL ' in l]
+    return 'red', '\n'.join(fails[:3])
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return 2
+    src, cases_path = sys.argv[1], sys.argv[2]
+    build_dir = sys.argv[3] if len(sys.argv) > 3 else "build-gcc-Release"
+    verify = os.environ.get("SABOTAGE_VERIFY")
+
+    with open(cases_path, encoding='utf-8') as fh:
+        cases = parse_cases(fh.read())
+    if not cases:
+        print("no cases parsed - check the ### / --- old / +++ new markers")
+        return 2
+
+    backup = src + '.sabotage-backup'
+    # A backup that already exists means a run was interrupted with a case
+    # applied: the source holds the sabotage and the backup holds the original.
+    # Carrying on would read the sabotaged file as "original" and overwrite the
+    # only good copy with it - the sabotage would become the tree, silently.
+    # That was one keystroke away when a verification run was stopped mid-case
+    # (C7, 2026-09-23); refuse, and say how to put it right.
+    if os.path.exists(backup):
+        print("REFUSED: %s exists - an earlier run stopped with a case applied." % backup)
+        print("  Compare:  diff %s %s" % (backup, src))
+        print("  Restore:  cp %s %s && rm %s" % (backup, src, backup))
+        return 2
+    with open(src, encoding='utf-8') as fh:
+        original = fh.read()
+    with open(backup, 'w', encoding='utf-8', newline='') as fh:
+        fh.write(original)
+
+    weak = []
+    try:
+        for label, old, new in cases:
+            print("--- %s" % label)
+            if not old.strip():
+                # "" is in every file, so it used to pass the anchor check and
+                # run a case that changed nothing.
+                print("    empty anchor; this case tests nothing")
+                weak.append(label)
+                continue
+            if old not in original:
+                print("    anchor not found; this case tests nothing")
+                weak.append(label)
+                continue
+            with open(src, 'w', encoding='utf-8', newline='') as fh:
+                fh.write(original.replace(old, new, 1))
+            verdict, detail = build_and_test(build_dir, verify)
+            if verdict == 'red':
+                for line in detail.splitlines():
+                    print("    " + line)
+            elif verdict == 'hung':
+                print("    HUNG - removing this guard hangs the suite rather "
+                      "than failing it, which is itself the reason it exists")
+            elif verdict == 'nobuild':
+                print("    did not compile; this case proves nothing")
+                weak.append(label)
+            else:
+                print("    NOT RED - no test covers this")
+                weak.append(label)
+            with open(src, 'w', encoding='utf-8', newline='') as fh:
+                fh.write(original)
+    finally:
+        with open(src, 'w', encoding='utf-8', newline='') as fh:
+            fh.write(original)
+        os.remove(backup)
+
+    verdict, _ = build_and_test(build_dir)
+    print("--- restored: %s" % verdict)
+    if weak:
+        print("cases that proved nothing: " + ", ".join(weak))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

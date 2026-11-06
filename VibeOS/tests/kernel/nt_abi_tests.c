@@ -1,0 +1,3437 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Host tests for the NT personality (docs/abi/windows.md W1).
+ *
+ * The registry against nt_services.def, the dispatcher's three kinds of no,
+ * Windows' calling convention for the arguments past the fourth, the W1
+ * services as a program sees them, and the blocks a process starts with - all
+ * on tests/kernel/ksvc_fake.c, as the Linux handlers are tested. */
+
+#include <stdio.h>
+#include <string.h>
+
+#include "ksvc_fake.h"
+#include "vibeos/abi_nt.h"
+#include "vibeos/abi_linux.h"
+#include "vibeos/linux_exports.h"
+#include "vibeos/nt_layout.h"
+#include "vibeos/ksvc.h"
+#include "vibeos/filelock.h"
+#include "vibeos/ntreg.h"
+#include "vibeos/vfs.h"
+
+int test_nt_abi(void);
+
+static int g_fail;
+
+static void expect(int cond, const char *what) {
+    if (!cond) {
+        printf("FAIL:nt_abi %s\n", what);
+        g_fail = 1;
+    }
+}
+
+#define ST(s) ((long)(uint32_t)(s))
+
+extern int g_kf_aspace_pins;   /* ksvc_fake.c: address spaces held for a call */
+extern int g_kf_lock_reentry;  /* ksvc_fake.c: a preemptible lock taken again by its holder */
+void kf_retire(int slot);       /* ksvc_fake.c: a slot's tenancy moves on */
+
+static long nt(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+               kf_outcome_t *out) {
+    return kf_call(nt_syscall, nr, a0, a1, a2, a3, 0, 0, out);
+}
+
+static int fresh(uint32_t pid) {
+    int slot;
+
+    kf_reset();
+    vibeos_linux_abi_init();
+    vibeos_nt_abi_init();
+    slot = kf_spawn(pid, pid);
+    kf_set_current(slot);
+    return slot;
+}
+
+/* The arguments past the fourth, where Windows' convention leaves them: a
+ * stack whose pointer the call arrives with, the fifth at sp + 0x28. */
+static uint64_t stack_args_(const uint64_t *rest, uint32_t n) {
+    uint64_t sp = kf_ualloc(0x28u + 8u * 16u);
+    uint32_t i;
+
+    for (i = 0; i < n; i++) {
+        *(uint64_t *)kf_uptr(sp + 0x28u + 8u * i) = rest[i];
+    }
+    return sp;
+}
+
+/* `rest` is always an array, and asking for more of it than it holds is a
+ * compile error: two helpers declared six and passed seven, and only the CI's
+ * sanitizer build saw the read past the end, for a week. */
+#define stack_args(rest, n)                                                              \
+    (stack_args_((rest), (n)) +                                                          \
+     0u * sizeof(char[(n) <= sizeof(rest) / sizeof((rest)[0]) ? 1 : -1]))
+
+static void t_registry(void) {
+    static const vibeos_row_t past[] = {
+        { VIBEOS_NT_SERVICES, "past", VIBEOS_OP_WRITE, (vibeos_handler_t)0 },
+    };
+    const vibeos_nt_service_t *w;
+
+    fresh(30);
+    expect(vibeos_abi_nt_disagreement() == (uint32_t)VIBEOS_NT_SERVICES,
+           "every DONE and PARTIAL service has a row, and no other does");
+    w = vibeos_nt_service(VIBEOS_NT_NR_NtWriteFile);
+    expect(w && w->nr == (uint32_t)VIBEOS_NT_NR_NtWriteFile && w->args == 9u &&
+           strcmp(w->name, "NtWriteFile") == 0, "NtWriteFile is its line: nine arguments");
+    expect(VIBEOS_NT_SERVICES == 237, "237 services, as Wine 9.0 has them");
+    expect(vibeos_nt_service(VIBEOS_NT_SERVICES) == 0, "past the table is no service");
+    expect(vibeos_abi_nt_register(past, 1u) != 0, "a row past the table is refused");
+    expect(vibeos_abi_nt()->lookup(VIBEOS_NT_NR_NtAddAtom) == 0, "a MISSING service has no row");
+}
+
+static void t_dispatch_refusals(void) {
+    uint64_t un, ref;
+
+    fresh(31);
+    un = g_nt_unimplemented;
+    ref = g_nt_refused;
+    expect(nt(VIBEOS_NT_SERVICES + 5u, 0, 0, 0, 0, 0) == ST(VIBEOS_STATUS_INVALID_SYSTEM_SERVICE),
+           "a number past the table names no service");
+    expect(nt(VIBEOS_NT_NR_NtAddAtom, 4, 0, 0, 0, 0) == ST(VIBEOS_STATUS_NOT_IMPLEMENTED) &&
+           g_nt_unimplemented == un + 1u && g_nt_last_nr == (uint64_t)VIBEOS_NT_NR_NtAddAtom &&
+           strstr(kf_console(), "unimplemented NT service") &&
+           strstr(kf_console(), "NtAddAtom"),
+           "a service not written yet is NOT_IMPLEMENTED, counted and named");
+    expect(nt(VIBEOS_NT_NR_NtLoadDriver, 0, 0, 0, 0, 0) == ST(VIBEOS_STATUS_NOT_IMPLEMENTED) &&
+           g_nt_refused == ref + 1u && g_nt_unimplemented == un + 1u,
+           "a refused service is counted apart, and not as news");
+}
+
+/* How many times `what` is on the console: the console's own framing (the
+ * ring-3 write prefix) sits between writes, so a count is what can be compared. */
+static int con_count(const char *what) {
+    const char *p = kf_console();
+    int n = 0;
+
+    while ((p = strstr(p, what)) != 0) {
+        n++;
+        p++;
+    }
+    return n;
+}
+
+static void t_write_file(void) {
+    uint64_t iosb = kf_ualloc(16), buf = kf_ualloc(16), off = kf_ualloc(8);
+    uint64_t rest[5];
+    const vibeos_nt_iosb_t *io = (const vibeos_nt_iosb_t *)kf_uptr(iosb);
+
+    fresh(32);
+    memcpy(kf_uptr(buf), "nt-hello", 8);
+    /* The length's upper half is what a caller left in the register: a ULONG
+     * is 32 bits, and reading 64 would be four billion bytes. */
+    rest[0] = iosb;
+    rest[1] = buf;
+    rest[2] = 0xDEADBEEF00000005ull;
+    rest[3] = 0;
+    rest[4] = 0;
+    kf_next_sp(stack_args(rest, 5));
+    expect(nt(VIBEOS_NT_NR_NtWriteFile, 8, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "NtWriteFile to standard output succeeds");
+    expect(con_count("nt-he") == 1 && con_count("nt-hel") == 0,
+           "five bytes reach the console: the length is read as 32 bits");
+    expect(io->status == 0u && io->information == 5u, "the status block says success, five bytes");
+
+    kf_next_sp(stack_args(rest, 5));
+    expect(nt(VIBEOS_NT_NR_NtWriteFile, 6, 0, 0, 0, 0) == ST(VIBEOS_STATUS_INVALID_HANDLE),
+           "a handle that is not a multiple of four is no handle");
+    kf_next_sp(stack_args(rest, 5));
+    expect(nt(VIBEOS_NT_NR_NtWriteFile, 4u * 300u, 0, 0, 0, 0) == ST(VIBEOS_STATUS_INVALID_HANDLE),
+           "a handle naming no descriptor is INVALID_HANDLE");
+    kf_next_sp(stack_args(rest, 5));
+    expect(nt(VIBEOS_NT_NR_NtWriteFile, 8, 0x40, 0, 0, 0) == ST(VIBEOS_STATUS_INVALID_HANDLE),
+           "an event that is no event's handle is refused before anything is written (W4)");
+    rest[3] = off;
+    kf_next_sp(stack_args(rest, 5));
+    expect(nt(VIBEOS_NT_NR_NtWriteFile, 8, 0, 0, 0, 0) == ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+           con_count("nt-he") == 1, "an offset on the console, which has none: refused, nothing written (W4)");
+    rest[3] = 0;
+    rest[0] = 0x10u;   /* the status block is nobody's memory */
+    kf_next_sp(stack_args(rest, 5));
+    expect(nt(VIBEOS_NT_NR_NtWriteFile, 8, 0, 0, 0, 0) == ST(VIBEOS_STATUS_ACCESS_VIOLATION) &&
+           con_count("nt-he") == 1,
+           "a bad status block is an access violation before anything is written");
+    /* A stack pointer at the kernel's own memory, holding arguments that would
+     * work: the copy here reads any address that does not fault, as the
+     * machine's does, so only the judgement stops the kernel taking a
+     * program's arguments out of itself (CLAUDE.md, M-082). */
+    {
+        static uint64_t kstack[16];
+
+        rest[0] = iosb;
+        memcpy(&kstack[5], rest, sizeof(rest));
+        kf_next_sp((uint64_t)(uintptr_t)kstack);
+        expect(nt(VIBEOS_NT_NR_NtWriteFile, 8, 0, 0, 0, 0) == ST(VIBEOS_STATUS_ACCESS_VIOLATION) &&
+                   con_count("nt-he") == 1,
+               "a stack pointer into the kernel is judged before anything is read through it");
+    }
+    {
+        uint64_t sp = stack_args(rest, 5);
+        kf_fault(sp + 0x28u, 40u);
+        kf_next_sp(sp);
+        expect(nt(VIBEOS_NT_NR_NtWriteFile, 8, 0, 0, 0, 0) == ST(VIBEOS_STATUS_ACCESS_VIOLATION),
+               "arguments on a stack that faults are the caller's access violation");
+    }
+}
+
+static void t_process(void) {
+    uint64_t buf = kf_ualloc(64), got = kf_ualloc(4);
+    const vibeos_nt_process_basic_t *pbi = (const vibeos_nt_process_basic_t *)kf_uptr(buf);
+    int me = fresh(33);
+    kf_outcome_t how;
+    const uint64_t zero = 0;
+
+    ks_image(me)->start_arg = 0x8003FF0000ull;
+    kf_next_sp(stack_args_(&zero, 1));
+    expect(nt(VIBEOS_NT_NR_NtQueryInformationProcess, VIBEOS_NT_CURRENT_PROCESS,
+              0xFFFFFFFF00000000ull | VIBEOS_NT_PROCESS_BASIC_INFORMATION, buf,
+              0xABCD000000000030ull, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "ProcessBasicInformation for oneself, with garbage in the 32-bit arguments' upper halves");
+    expect(pbi->peb == 0x8003FF0000ull && pbi->unique_process_id == 33u,
+           "the PEB the image was started with, and the process id");
+    kf_next_sp(stack_args_(&got, 1));
+    expect(nt(VIBEOS_NT_NR_NtQueryInformationProcess, VIBEOS_NT_CURRENT_PROCESS, 0, buf, 48, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) && *(uint32_t *)kf_uptr(got) == 48u,
+           "the fifth argument, from the stack: the length written");
+    kf_next_sp(stack_args_(&zero, 1));
+    expect(nt(VIBEOS_NT_NR_NtQueryInformationProcess, VIBEOS_NT_CURRENT_PROCESS, 0, buf, 8, 0) ==
+               ST(VIBEOS_STATUS_INFO_LENGTH_MISMATCH), "a short buffer is a length mismatch");
+    kf_next_sp(stack_args_(&zero, 1));
+    expect(nt(VIBEOS_NT_NR_NtQueryInformationProcess, VIBEOS_NT_CURRENT_PROCESS, 7, buf, 48, 0) ==
+               ST(VIBEOS_STATUS_INVALID_INFO_CLASS), "a class W1 does not answer");
+    kf_next_sp(stack_args_(&zero, 1));
+    expect(nt(VIBEOS_NT_NR_NtQueryInformationProcess, 0x7FFC, 0, buf, 48, 0) ==
+               ST(VIBEOS_STATUS_INVALID_HANDLE), "a process handle that names nothing");
+    kf_next_sp(stack_args_(&zero, 1));
+    expect(nt(VIBEOS_NT_NR_NtQueryInformationProcess, VIBEOS_NT_CURRENT_PROCESS, 0, 0x10, 48, 0) ==
+               ST(VIBEOS_STATUS_ACCESS_VIOLATION), "a buffer that is nobody's memory");
+    expect(nt(VIBEOS_NT_NR_NtTerminateProcess, 0x7FFC, 0, 0, 0, 0) == ST(VIBEOS_STATUS_INVALID_HANDLE),
+           "terminating through a handle that names nothing");
+    (void)nt(VIBEOS_NT_NR_NtTerminateProcess, VIBEOS_NT_CURRENT_PROCESS,
+             0xFFFFFFFF00000103ull, 0, 0, &how);
+    expect(how == KF_EXITED && kf_exit_code() == 0x103u,
+           "NtTerminateProcess of oneself ends the process with its status");
+}
+
+static void t_system(void) {
+    uint64_t t = kf_ualloc(8), c = kf_ualloc(8), f = kf_ualloc(8), buf = kf_ualloc(64);
+    const vibeos_nt_system_basic_t *sbi = (const vibeos_nt_system_basic_t *)kf_uptr(buf);
+    uint64_t first;
+
+    fresh(34);
+    expect(nt(VIBEOS_NT_NR_NtQuerySystemTime, t, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           *(uint64_t *)kf_uptr(t) >= VIBEOS_NT_EPOCH_DELTA,
+           "the system time is the kernel's clock moved to 1601");
+    expect(nt(VIBEOS_NT_NR_NtQueryPerformanceCounter, c, f, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           *(uint64_t *)kf_uptr(f) == VIBEOS_NT_PERF_FREQUENCY, "the counter runs at 10 MHz");
+    first = *(uint64_t *)kf_uptr(c);
+    kf_cpu(3, 1);
+    expect(nt(VIBEOS_NT_NR_NtQueryPerformanceCounter, c, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           *(uint64_t *)kf_uptr(c) > first, "and moves with the clock; the frequency may be null");
+    expect(nt(VIBEOS_NT_NR_NtQuerySystemTime, 0x10, 0, 0, 0, 0) == ST(VIBEOS_STATUS_ACCESS_VIOLATION),
+           "a time to nobody's memory");
+    expect(nt(VIBEOS_NT_NR_NtQuerySystemInformation, VIBEOS_NT_SYSTEM_BASIC_INFORMATION, buf, 64, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) && sbi->page_size == 4096u && sbi->processors == 4u &&
+           sbi->active_processors_mask == 0xFu, "SystemBasicInformation: the page, the processors");
+    expect(nt(VIBEOS_NT_NR_NtQuerySystemInformation, VIBEOS_NT_SYSTEM_BASIC_INFORMATION, buf, 60, 0, 0) ==
+               ST(VIBEOS_STATUS_INFO_LENGTH_MISMATCH), "and a mismatched length");
+    expect(nt(VIBEOS_NT_NR_NtQuerySystemInformation, 5, buf, 64, 0, 0) ==
+               ST(VIBEOS_STATUS_INVALID_INFO_CLASS), "a class W1 does not answer");
+}
+
+/* ---- the object manager (W2) ---------------------------------------------------------- */
+
+/* OBJECT_ATTRIBUTES in user memory naming `ascii`, or with no name for null. */
+/* Set, oattr spells three characters beyond ASCII (W4 step 6): '#' is U+00E9,
+ * '%' is U+1F600 as its surrogate pair, '!' is half a pair alone. */
+static int g_oattr_wide;
+
+static uint64_t oattr(const char *ascii, uint32_t attributes) {
+    uint64_t oa = kf_ualloc(VIBEOS_OA_SIZE);
+    uint8_t *p = (uint8_t *)kf_uptr(oa);
+
+    *(uint32_t *)(p + VIBEOS_OA_LENGTH) = VIBEOS_OA_SIZE;
+    *(uint32_t *)(p + VIBEOS_OA_ATTRIBUTES) = attributes;
+    if (ascii) {
+        uint32_t n = (uint32_t)strlen(ascii), i;
+        uint64_t us = kf_ualloc(VIBEOS_USTR_SIZE), buf = kf_ualloc(2u * n + 2u);
+        uint8_t *u = (uint8_t *)kf_uptr(us);
+        uint16_t *w = (uint16_t *)kf_uptr(buf);
+
+        for (i = 0; i < n; i++) {
+            w[i] = (uint8_t)ascii[i];
+        }
+        if (g_oattr_wide) {
+            uint32_t o = 0;
+
+            buf = kf_ualloc(4u * n + 2u);
+            w = (uint16_t *)kf_uptr(buf);
+            for (i = 0; i < n; i++) {
+                if (ascii[i] == '#') {
+                    w[o++] = 0x00E9u;
+                } else if (ascii[i] == '%') {
+                    w[o++] = 0xD83Du;
+                    w[o++] = 0xDE00u;
+                } else if (ascii[i] == '!') {
+                    w[o++] = 0xD800u;
+                } else {
+                    w[o++] = (uint8_t)ascii[i];
+                }
+            }
+            n = o;
+        }
+        *(uint16_t *)(u + VIBEOS_USTR_LENGTH) = (uint16_t)(2u * n);
+        *(uint16_t *)(u + VIBEOS_USTR_MAXIMUM) = (uint16_t)(2u * n + 2u);
+        *(uint64_t *)(u + VIBEOS_USTR_BUFFER) = buf;
+        *(uint64_t *)(p + VIBEOS_OA_OBJECT_NAME) = us;
+    }
+    return oa;
+}
+
+static const uint64_t g_zero5 = 0;
+
+/* NtCreateEvent's fifth argument (InitialState) is on the stack. */
+static long create_event(uint64_t *h, uint32_t access, uint64_t oa, uint32_t type, int initial) {
+    uint64_t out = kf_ualloc(8), arg = (uint64_t)(initial ? 1u : 0u) | 0xAB00u;
+    long r;
+
+    kf_next_sp(stack_args_(&arg, 1));
+    r = nt(VIBEOS_NT_NR_NtCreateEvent, out, 0xFFFFFFFF00000000ull | access, oa,
+           0xFFFFFFFF00000000ull | type, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+static int32_t event_state(uint64_t h) {
+    uint64_t buf = kf_ualloc(8);
+    kf_next_sp(stack_args_(&g_zero5, 1));
+    if (nt(VIBEOS_NT_NR_NtQueryEvent, h, 0, buf, 8, 0) != ST(VIBEOS_STATUS_SUCCESS)) {
+        return -99;
+    }
+    return ((const vibeos_nt_event_basic_t *)kf_uptr(buf))->event_state;
+}
+
+static long wait1(uint64_t h, int64_t timeout) {
+    uint64_t t = kf_ualloc(8);
+    *(int64_t *)kf_uptr(t) = timeout;
+    return nt(VIBEOS_NT_NR_NtWaitForSingleObject, h, 0, t, 0, 0);
+}
+
+static long waitn(const uint64_t *hs, uint32_t n, int all, int64_t timeout) {
+    uint64_t arr = kf_ualloc(8u * n), t = kf_ualloc(8);
+    uint64_t tptr = t;
+
+    memcpy(kf_uptr(arr), hs, 8u * n);
+    *(int64_t *)kf_uptr(t) = timeout;
+    kf_next_sp(stack_args_(&tptr, 1));
+    return nt(VIBEOS_NT_NR_NtWaitForMultipleObjects, n, arr, all ? 0 : 1, 0, 0);
+}
+
+static void t_events(void) {
+    uint64_t a, b, h[2];
+    kf_outcome_t how;
+
+    fresh(40);
+    expect(create_event(&a, VIBEOS_EVENT_ALL_ACCESS, oattr(0, 0), VIBEOS_NT_SYNCHRONIZATION_EVENT,
+                        0) == ST(VIBEOS_STATUS_SUCCESS) && a >= 16u && (a & 3u) == 0u,
+           "an unnamed event: a handle past the standard ones, a multiple of four");
+    expect(event_state(a) == 0, "it starts as asked: not signalled");
+    expect(wait1(a, 0) == ST(VIBEOS_STATUS_TIMEOUT), "a zero timeout on an unsignalled event");
+    expect(nt(VIBEOS_NT_NR_NtSetEvent, a, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           event_state(a) == 1, "set");
+    expect(wait1(a, 0) == ST(VIBEOS_STATUS_WAIT_0) && event_state(a) == 0,
+           "a synchronization event is taken by the wait it satisfies");
+    expect(wait1(a, -10000000) == ST(VIBEOS_STATUS_TIMEOUT),
+           "a relative timeout ends the wait when it runs out");
+
+    expect(create_event(&b, VIBEOS_EVENT_ALL_ACCESS, 0, VIBEOS_NT_NOTIFICATION_EVENT, 1) ==
+               ST(VIBEOS_STATUS_SUCCESS), "a notification event, signalled, without attributes");
+    expect(wait1(b, 0) == ST(VIBEOS_STATUS_WAIT_0) && wait1(b, 0) == ST(VIBEOS_STATUS_WAIT_0),
+           "a notification event satisfies every wait until reset");
+    h[0] = a;
+    h[1] = b;
+    expect(waitn(h, 2, 0, 0) == ST(VIBEOS_STATUS_WAIT_0 + 1u), "any: the index of the one signalled");
+    expect(waitn(h, 2, 1, 0) == ST(VIBEOS_STATUS_TIMEOUT), "all: one unsignalled is a timeout");
+    h[0] = b;
+    h[1] = a;
+    expect(waitn(h, 2, 1, 0) == ST(VIBEOS_STATUS_TIMEOUT) && event_state(b) == 1,
+           "all: the first signalled is not enough, and nothing is acquired");
+    h[0] = a;
+    h[1] = b;
+    (void)nt(VIBEOS_NT_NR_NtSetEvent, a, 0, 0, 0, 0);
+    expect(waitn(h, 2, 1, 0) == ST(VIBEOS_STATUS_WAIT_0) && event_state(a) == 0 &&
+               event_state(b) == 1, "all: both acquired at once, each as its type says");
+    h[1] = a;
+    expect(waitn(h, 2, 1, 0) == ST(0xC0000030u), "all, naming one object twice, is refused");
+    expect(nt(VIBEOS_NT_NR_NtResetEvent, b, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           nt(VIBEOS_NT_NR_NtPulseEvent, b, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           event_state(b) == 0, "a pulse with nobody waiting leaves the event reset");
+    (void)wait1(a, -1);   /* reset again; nothing */
+    (void)nt(VIBEOS_NT_NR_NtWaitForSingleObject, a, 0, 0, 0, &how);
+    expect(how == KF_BLOCKED, "no timeout on an event nobody will set waits for ever");
+}
+
+static long create_mutant(uint64_t *h, uint64_t oa, int owned) {
+    uint64_t out = kf_ualloc(8);
+    long r = nt(VIBEOS_NT_NR_NtCreateMutant, out, 0xFFFFFFFF00000000ull | VIBEOS_MUTANT_ALL_ACCESS,
+                oa, (owned ? 1u : 0u) | 0xAB00u, 0);   /* a BOOLEAN: the low byte */
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+/* MutantBasicInformation, or -99 if the query failed; *owned set from it. */
+static int32_t mutant_count(uint64_t h, int *owned) {
+    uint64_t buf = kf_ualloc(8);
+    const vibeos_nt_mutant_basic_t *m = (const vibeos_nt_mutant_basic_t *)kf_uptr(buf);
+
+    kf_next_sp(stack_args_(&g_zero5, 1));
+    if (nt(VIBEOS_NT_NR_NtQueryMutant, h, 0, buf, 8, 0) != ST(VIBEOS_STATUS_SUCCESS)) {
+        return -99;
+    }
+    *owned = m->owned_by_caller;
+    return m->current_count;
+}
+
+static long release_mutant(uint64_t h, int32_t *prev) {
+    uint64_t p = kf_ualloc(4);
+    long r = nt(VIBEOS_NT_NR_NtReleaseMutant, h, p, 0, 0, 0);
+    *prev = *(int32_t *)kf_uptr(p);
+    return r;
+}
+
+static void t_mutants(void) {
+    uint64_t m, other;
+    int32_t prev = 7;
+    int owned = 0;
+    int a;
+
+    a = fresh(50);
+    expect(create_mutant(&m, oattr("\\BaseNamedObjects\\mu", 0), 1) == ST(VIBEOS_STATUS_SUCCESS),
+           "a named mutant, owned by its creator");
+    expect(mutant_count(m, &owned) == 0 && owned == 1, "held once: count 0, owned by the caller");
+    expect(wait1(m, 0) == ST(VIBEOS_STATUS_WAIT_0) && mutant_count(m, &owned) == -1,
+           "the owner takes it again without waiting: count -1");
+    expect(release_mutant(m, &prev) == ST(VIBEOS_STATUS_SUCCESS) && prev == -1,
+           "a release reports the count before it");
+    expect(release_mutant(m, &prev) == ST(VIBEOS_STATUS_SUCCESS) && prev == 0 &&
+               mutant_count(m, &owned) == 1 && owned == 0, "released as often as taken: free");
+    expect(release_mutant(m, &prev) == ST(VIBEOS_STATUS_MUTANT_NOT_OWNED),
+           "a free mutant cannot be released");
+    expect(wait1(m, 0) == ST(VIBEOS_STATUS_WAIT_0) && mutant_count(m, &owned) == 0 && owned == 1,
+           "a wait on a free mutant takes it");
+
+    /* Another process, the same name: a different owner. */
+    kf_set_current(kf_spawn(51, 51));
+    expect(nt(VIBEOS_NT_NR_NtOpenMutant, kf_ualloc(8), VIBEOS_MUTANT_ALL_ACCESS,
+              oattr("\\BaseNamedObjects\\mu", 0), 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "opened by name from another process");
+    expect(create_mutant(&other, oattr("\\BaseNamedObjects\\mu", 0), 1) ==
+               ST(VIBEOS_STATUS_OBJECT_NAME_EXISTS) && mutant_count(other, &owned) == 0 &&
+               owned == 0, "created again by name: the existing one, its owner unchanged");
+    expect(wait1(other, 0) == ST(VIBEOS_STATUS_TIMEOUT), "held by somebody else: the wait times out");
+    expect(release_mutant(other, &prev) == ST(VIBEOS_STATUS_MUTANT_NOT_OWNED),
+           "only the owner releases");
+    kf_set_current(a);
+    expect(release_mutant(m, &prev) == ST(VIBEOS_STATUS_SUCCESS), "the owner releases it");
+}
+
+static long create_semaphore(uint64_t *h, int32_t initial, int32_t maximum) {
+    uint64_t out = kf_ualloc(8), arg = 0xFFFFFFFF00000000ull | (uint32_t)maximum;
+    long r;
+
+    kf_next_sp(stack_args_(&arg, 1));
+    r = nt(VIBEOS_NT_NR_NtCreateSemaphore, out, VIBEOS_SEMAPHORE_ALL_ACCESS, 0,
+           0xFFFFFFFF00000000ull | (uint32_t)initial, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+static int32_t semaphore_count(uint64_t h) {
+    uint64_t buf = kf_ualloc(8);
+
+    kf_next_sp(stack_args_(&g_zero5, 1));
+    if (nt(VIBEOS_NT_NR_NtQuerySemaphore, h, 0, buf, 8, 0) != ST(VIBEOS_STATUS_SUCCESS)) {
+        return -99;
+    }
+    return ((const vibeos_nt_semaphore_basic_t *)kf_uptr(buf))->current_count;
+}
+
+static void t_semaphores(void) {
+    uint64_t s, prev = kf_ualloc(4);
+
+    fresh(52);
+    expect(create_semaphore(&s, 3, 2) == ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "an initial count above the maximum is refused");
+    expect(create_semaphore(&s, 0, 0) == ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "a maximum of zero is refused");
+    expect(create_semaphore(&s, 1, 2) == ST(VIBEOS_STATUS_SUCCESS) && semaphore_count(s) == 1,
+           "one of two");
+    expect(wait1(s, 0) == ST(VIBEOS_STATUS_WAIT_0) && semaphore_count(s) == 0,
+           "a wait takes one");
+    expect(wait1(s, 0) == ST(VIBEOS_STATUS_TIMEOUT), "none left: the wait times out");
+    expect(nt(VIBEOS_NT_NR_NtReleaseSemaphore, s, 0xFFFFFFFF00000003ull, prev, 0, 0) ==
+               ST(VIBEOS_STATUS_SEMAPHORE_LIMIT_EXCEEDED) && semaphore_count(s) == 0,
+           "a release past the maximum is refused and changes nothing");
+    expect(nt(VIBEOS_NT_NR_NtReleaseSemaphore, s, 2, prev, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(int32_t *)kf_uptr(prev) == 0 && semaphore_count(s) == 2,
+           "a release up to the maximum, reporting the count before it");
+    expect(nt(VIBEOS_NT_NR_NtReleaseSemaphore, s, 0, prev, 0, 0) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER), "a release of none is refused");
+}
+
+/* Sleep: a relative interval passes on the clock before the call returns. */
+static void t_delay(void) {
+    uint64_t t = kf_ualloc(8), before;
+
+    fresh(53);
+    *(int64_t *)kf_uptr(t) = -1500000;   /* 150 ms, 15 ticks at 100 Hz */
+    before = ks_ticks();
+    expect(nt(VIBEOS_NT_NR_NtDelayExecution, 0, t, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               ks_ticks() - before >= 15u, "a delay of 150 ms lets 15 ticks pass");
+    *(int64_t *)kf_uptr(t) = 0;
+    before = ks_ticks();
+    expect(nt(VIBEOS_NT_NR_NtDelayExecution, 0, t, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               ks_ticks() - before <= 1u, "a delay of zero gives up a tick and no more");
+    expect(nt(VIBEOS_NT_NR_NtDelayExecution, 0, 0, 0, 0, 0) == ST(VIBEOS_STATUS_ACCESS_VIOLATION),
+           "no interval is a bad pointer");
+}
+
+static void t_handles_and_names(void) {
+    uint64_t a, b, c, out = kf_ualloc(8), oa;
+    long r;
+
+    fresh(41);
+    expect(create_event(&a, VIBEOS_EVENT_QUERY_STATE, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           nt(VIBEOS_NT_NR_NtSetEvent, a, 0, 0, 0, 0) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "a handle without EVENT_MODIFY_STATE cannot set");
+    expect(wait1(a, 0) == ST(VIBEOS_STATUS_ACCESS_DENIED), "nor wait, without SYNCHRONIZE");
+    expect(event_state(a) == 0, "but can query: it was granted that");
+    expect(nt(VIBEOS_NT_NR_NtSetEvent, 8, 0, 0, 0, 0) == ST(VIBEOS_STATUS_OBJECT_TYPE_MISMATCH),
+           "the console's handle is not an event");
+
+    /* Duplicating: the same object, the rights asked for or the same ones. */
+    kf_next_sp(stack_args_((const uint64_t[3]){ VIBEOS_EVENT_ALL_ACCESS, 0, VIBEOS_DUPLICATE_SAME_ACCESS }, 3));
+    expect(nt(VIBEOS_NT_NR_NtDuplicateObject, VIBEOS_NT_CURRENT_PROCESS, a,
+              VIBEOS_NT_CURRENT_PROCESS, out, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           *(uint64_t *)kf_uptr(out) != a &&
+           nt(VIBEOS_NT_NR_NtSetEvent, *(uint64_t *)kf_uptr(out), 0, 0, 0, 0) ==
+               ST(VIBEOS_STATUS_ACCESS_DENIED), "SAME_ACCESS copies the rights, not more");
+    kf_next_sp(stack_args_((const uint64_t[3]){ VIBEOS_GENERIC_ALL, 0, VIBEOS_DUPLICATE_CLOSE_SOURCE }, 3));
+    expect(nt(VIBEOS_NT_NR_NtDuplicateObject, VIBEOS_NT_CURRENT_PROCESS, a,
+              VIBEOS_NT_CURRENT_PROCESS, out, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           nt(VIBEOS_NT_NR_NtSetEvent, *(uint64_t *)kf_uptr(out), 0, 0, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) &&
+           nt(VIBEOS_NT_NR_NtClose, a, 0, 0, 0, 0) == ST(VIBEOS_STATUS_INVALID_HANDLE),
+           "GENERIC_ALL maps to all of an event's rights, and CLOSE_SOURCE closed the source");
+    expect(nt(VIBEOS_NT_NR_NtClose, VIBEOS_NT_CURRENT_PROCESS, 0, 0, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS), "closing the process's pseudo-handle closes nothing");
+    expect(nt(VIBEOS_NT_NR_NtClose, 6, 0, 0, 0, 0) == ST(VIBEOS_STATUS_INVALID_HANDLE),
+           "a handle that is not a multiple of four");
+
+    /* Names. */
+    oa = oattr("\\BaseNamedObjects\\vibe", VIBEOS_OBJ_CASE_INSENSITIVE);
+    expect(create_event(&b, VIBEOS_EVENT_ALL_ACCESS, oa, VIBEOS_NT_NOTIFICATION_EVENT, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS), "a named event");
+    r = create_event(&c, VIBEOS_EVENT_ALL_ACCESS, oattr("\\BaseNamedObjects\\VIBE",
+                                                        VIBEOS_OBJ_CASE_INSENSITIVE),
+                     VIBEOS_NT_SYNCHRONIZATION_EVENT, 1);
+    expect(r == ST(VIBEOS_STATUS_OBJECT_NAME_EXISTS) && c != b,
+           "creating it again opens it, says it existed, and is another handle");
+    (void)nt(VIBEOS_NT_NR_NtSetEvent, c, 0, 0, 0, 0);
+    expect(event_state(b) == 1 && wait1(c, 0) == ST(VIBEOS_STATUS_WAIT_0) && event_state(b) == 1,
+           "one object: set through one handle, seen through the other - still a notification event");
+    expect(nt(VIBEOS_NT_NR_NtOpenEvent, out, VIBEOS_EVENT_ALL_ACCESS,
+              oattr("\\BaseNamedObjects\\vibe", 0), 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "opened by its name");
+    expect(nt(VIBEOS_NT_NR_NtOpenEvent, out, VIBEOS_EVENT_ALL_ACCESS,
+              oattr("\\BaseNamedObjects\\nobody", 0), 0, 0) ==
+               ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND), "a name nothing has");
+    expect(nt(VIBEOS_NT_NR_NtOpenEvent, out, VIBEOS_EVENT_ALL_ACCESS, oattr("relative", 0), 0, 0) ==
+               ST(VIBEOS_STATUS_OBJECT_PATH_SYNTAX_BAD), "a name that is not a path");
+    (void)nt(VIBEOS_NT_NR_NtClose, *(uint64_t *)kf_uptr(out), 0, 0, 0, 0);
+    (void)nt(VIBEOS_NT_NR_NtClose, b, 0, 0, 0, 0);
+    expect(nt(VIBEOS_NT_NR_NtOpenEvent, out, VIBEOS_EVENT_ALL_ACCESS,
+              oattr("\\BaseNamedObjects\\vibe", 0), 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a name lives while any handle does");
+    (void)nt(VIBEOS_NT_NR_NtClose, *(uint64_t *)kf_uptr(out), 0, 0, 0, 0);
+    (void)nt(VIBEOS_NT_NR_NtClose, c, 0, 0, 0, 0);
+    expect(nt(VIBEOS_NT_NR_NtOpenEvent, out, VIBEOS_EVENT_ALL_ACCESS,
+              oattr("\\BaseNamedObjects\\vibe", 0), 0, 0) ==
+               ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND), "and goes with the last");
+
+    /* Case: a name made without OBJ_CASE_INSENSITIVE, asked for in another
+     * case by a caller that did not ask for it either, is another name. */
+    expect(create_event(&b, VIBEOS_EVENT_ALL_ACCESS, oattr("\\BaseNamedObjects\\Exact", 0),
+                        0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           nt(VIBEOS_NT_NR_NtOpenEvent, out, VIBEOS_EVENT_ALL_ACCESS,
+              oattr("\\BaseNamedObjects\\EXACT", 0), 0, 0) ==
+               ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND) &&
+           nt(VIBEOS_NT_NR_NtOpenEvent, out, VIBEOS_EVENT_ALL_ACCESS,
+              oattr("\\BaseNamedObjects\\EXACT", VIBEOS_OBJ_CASE_INSENSITIVE), 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS),
+           "case matters unless somebody asked for it not to");
+}
+
+/* ---- files and image sections (W2) ----------------------------------------------- */
+
+static long open_file(uint64_t *h, uint32_t access, const char *nt_path) {
+    uint64_t out = kf_ualloc(8), iosb = kf_ualloc(16);
+    uint64_t rest[2] = { 7u, 0x20u };   /* share access, open options */
+    long r;
+
+    kf_next_sp(stack_args(rest, 2));
+    r = nt(VIBEOS_NT_NR_NtOpenFile, out, access, oattr(nt_path, VIBEOS_OBJ_CASE_INSENSITIVE),
+           iosb, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+/* NtCreateFile: the handle, and what the status block's Information said. */
+/* The ShareAccess create_file passes: everything, unless a test says. */
+static uint32_t g_share = 7u;
+
+static long create_file(uint64_t *h, uint64_t *info, uint32_t access, const char *nt_path,
+                        uint32_t disposition, uint32_t options) {
+    uint64_t out = kf_ualloc(8), iosb = kf_ualloc(16);
+    uint64_t rest[7] = { 0, 0, g_share, disposition, options, 0, 0 };
+    long r;
+
+    kf_next_sp(stack_args(rest, 7));
+    r = nt(VIBEOS_NT_NR_NtCreateFile, out, access, oattr(nt_path, VIBEOS_OBJ_CASE_INSENSITIVE), iosb, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    *info = ((uint64_t *)kf_uptr(iosb))[1];
+    return r;
+}
+
+/* W4 step 1: the dispositions, the options, and what each says it did. */
+static void t_create_file(void) {
+    const uint32_t rw = VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE;
+    uint64_t h = 0, info = 9;
+
+    fresh(43);
+    kf_fs_add("/w4", 0, 0, 1);
+    expect(create_file(&h, &info, rw, "\\??\\C:\\w4\\a.txt", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               info == 2u && nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "FILE_CREATE makes a file, and says FILE_CREATED");
+    expect(create_file(&h, &info, rw, "\\??\\C:\\w4\\a.txt", 2, 0) == ST(VIBEOS_STATUS_OBJECT_NAME_COLLISION),
+           "FILE_CREATE of a name that exists is a collision");
+    expect(create_file(&h, &info, rw, "\\??\\C:\\w4\\none.txt", 1, 0) ==
+               ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND) &&
+           create_file(&h, &info, rw, "\\??\\C:\\w4\\none.txt", 4, 0) ==
+               ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND),
+           "FILE_OPEN and FILE_OVERWRITE want the file to exist");
+    expect(create_file(&h, &info, rw, "\\??\\C:\\w4\\a.txt", 3, 0) == ST(VIBEOS_STATUS_SUCCESS) && info == 1u &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           create_file(&h, &info, rw, "\\??\\C:\\w4\\a.txt", 5, 0) == ST(VIBEOS_STATUS_SUCCESS) && info == 3u &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+           create_file(&h, &info, rw, "\\??\\C:\\w4\\a.txt", 0, 0) == ST(VIBEOS_STATUS_SUCCESS) && info == 0u &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "FILE_OPEN_IF opens, FILE_OVERWRITE_IF overwrites, FILE_SUPERSEDE supersedes");
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\w4\\d", 2, 0x1) == ST(VIBEOS_STATUS_SUCCESS) &&
+               info == 2u && nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "FILE_DIRECTORY_FILE with FILE_CREATE makes a directory");
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\w4\\d", 1, 0x40) ==
+               ST(VIBEOS_STATUS_FILE_IS_A_DIRECTORY) &&
+           create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\w4\\a.txt", 1, 0x1) ==
+               ST(VIBEOS_STATUS_NOT_A_DIRECTORY),
+           "a directory is not a non-directory file, and a file is not a directory");
+    expect(create_file(&h, &info, rw, "\\??\\C:\\w4\\b.txt", 6, 0) == ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+           create_file(&h, &info, rw, "\\??\\C:\\w4\\b.txt", 2, 0x41) == ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+           create_file(&h, &info, rw, "\\??\\C:\\w4\\b.txt", 2, 0x1000) == ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "an unknown disposition, both kinds asked, DELETE_ON_CLOSE without DELETE");
+}
+
+/* NtReadFile or NtWriteFile of `len` bytes at `buf`, at *offset when `offset`
+ * is not null, with `event` for completion. The status, and the count. */
+static long rw_file(int write, uint64_t h, uint64_t event, uint64_t buf, uint32_t len,
+                    const uint64_t *offset, uint64_t *count) {
+    uint64_t iosb = kf_ualloc(16), off = 0;
+    uint64_t rest[5];
+    long r;
+
+    if (offset) {
+        off = kf_ualloc(8);
+        *(uint64_t *)kf_uptr(off) = *offset;
+    }
+    rest[0] = iosb;
+    rest[1] = buf;
+    rest[2] = len;
+    rest[3] = off;
+    rest[4] = 0;
+    kf_next_sp(stack_args(rest, 5));
+    r = nt(write ? VIBEOS_NT_NR_NtWriteFile : VIBEOS_NT_NR_NtReadFile, h, event, 0, 0, 0);
+    *count = ((uint64_t *)kf_uptr(iosb))[1];
+    return r;
+}
+
+/* W4 step 2: offsets, the two that are not, the end of the file, events. */
+static void t_read_write_file(void) {
+    const uint32_t rw = VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE;
+    uint64_t h = 0, info = 0, n = 0, ev = 0, buf = kf_ualloc(32);
+    const uint64_t at4 = 4, end = 0xFFFFFFFFFFFFFFFFull, cur = 0xFFFFFFFFFFFFFFFEull, past = 100;
+    char *b = (char *)kf_uptr(buf);
+
+    fresh(44);
+    kf_fs_add("/w4", 0, 0, 1);
+    expect(create_file(&h, &info, rw, "\\??\\C:\\w4\\rw.txt", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS),
+           "a file to read and write");
+    memcpy(b, "abcdefgh", 8);
+    expect(rw_file(1, h, 0, buf, 8, 0, &n) == ST(VIBEOS_STATUS_SUCCESS) && n == 8u, "eight bytes at the position");
+    memcpy(b, "XY", 2);
+    expect(rw_file(1, h, 0, buf, 2, &at4, &n) == ST(VIBEOS_STATUS_SUCCESS) && n == 2u &&
+               rw_file(1, h, 0, buf, 2, &end, &n) == ST(VIBEOS_STATUS_SUCCESS),
+           "two at offset four, two at the end");
+    memset(b, 0, 32);
+    expect(rw_file(0, h, 0, buf, 32, &(uint64_t){0}, &n) == ST(VIBEOS_STATUS_SUCCESS) && n == 10u &&
+               memcmp(b, "abcdXYghXY", 10) == 0,
+           "read back from offset zero: the file is what the writes made it");
+    expect(rw_file(0, h, 0, buf, 4, &cur, &n) == ST(VIBEOS_STATUS_END_OF_FILE) && n == 0u &&
+               rw_file(0, h, 0, buf, 4, &past, &n) == ST(VIBEOS_STATUS_END_OF_FILE),
+           "at the position, now the end, and past the end: STATUS_END_OF_FILE");
+    expect(create_event(&ev, 0x1F0003u, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               rw_file(0, h, ev, buf, 2, &at4, &n) == ST(VIBEOS_STATUS_SUCCESS) && event_state(ev) == 1 &&
+               memcmp(b, "XY", 2) == 0,
+           "the event is set when the read completes");
+}
+
+/* NtQueryInformationFile or NtSetInformationFile with class `cls` on `len`
+ * bytes at `buf`. The status, and the status block's count. */
+static long file_info(int set, uint64_t h, uint64_t buf, uint32_t len, uint32_t cls, uint64_t *count) {
+    uint64_t iosb = kf_ualloc(16), rest[1] = { cls };
+    long r;
+
+    kf_next_sp(stack_args(rest, 1));
+    r = nt(set ? VIBEOS_NT_NR_NtSetInformationFile : VIBEOS_NT_NR_NtQueryInformationFile, h, iosb, buf, len, 0);
+    *count = ((uint64_t *)kf_uptr(iosb))[1];
+    return r;
+}
+
+/* W4 step 3: what a handle says of its file, and what may be set through it. */
+static void t_file_information(void) {
+    const uint32_t rw = VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE | VIBEOS_DELETE;
+    uint64_t h = 0, h2 = 0, info = 0, n = 0, buf = kf_ualloc(256);
+    uint8_t *b = (uint8_t *)kf_uptr(buf);
+    static const char to[] = "\\??\\C:\\tmp\\moved.txt";
+    uint32_t i;
+
+    fresh(45);
+    expect(create_file(&h, &info, rw, "\\??\\C:\\tmp\\info.txt", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS),
+           "a file to ask about");
+    memcpy(b, "0123456789", 10);
+    (void)rw_file(1, h, 0, buf, 10, 0, &n);
+    memset(b, 0xEE, 256);
+    expect(file_info(0, h, buf, 24, 5, &n) == ST(VIBEOS_STATUS_SUCCESS) && n == 24u &&
+               *(uint64_t *)(b + 8) == 10u && b[21] == 0u,
+           "FileStandardInformation: ten bytes at the end of the file, not a directory");
+    expect(file_info(0, h, buf, 8, 14, &n) == ST(VIBEOS_STATUS_SUCCESS) && *(uint64_t *)b == 10u,
+           "FilePositionInformation: after the ten written");
+    expect(file_info(0, h, buf, 23, 5, &n) == ST(VIBEOS_STATUS_INFO_LENGTH_MISMATCH) &&
+               file_info(0, h, buf, 64, 99, &n) == ST(VIBEOS_STATUS_INVALID_INFO_CLASS),
+           "a buffer short of the class is a length mismatch, an unknown class invalid");
+    /* The fake's clock may stand at zero, which is no time: 0, as Windows has
+     * it, or a time since 1601 - never a raw count of nanoseconds. */
+    expect(file_info(0, h, buf, 40, 4, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (*(uint32_t *)(b + 32) & ~1u) == 0x20u &&
+               (*(uint64_t *)(b + 16) == 0u || *(uint64_t *)(b + 16) >= 116444736000000000ull),
+           "FileBasicInformation: an archive file, its write time since 1601");
+    expect(file_info(0, h, buf, 8, 9, &n) == ST(VIBEOS_STATUS_BUFFER_OVERFLOW) && n == 8u &&
+               *(uint32_t *)b == 2u * 13u,
+           "FileNameInformation too small: the length, the start, and BUFFER_OVERFLOW");
+    expect(file_info(0, h, buf, 64, 9, &n) == ST(VIBEOS_STATUS_SUCCESS) && n == 4u + 26u &&
+               b[4] == '\\' && b[6] == 't' && b[12] == '\\',
+           "and whole: \\tmp\\info.txt from the volume's root");
+    *(uint64_t *)b = 4;
+    expect(file_info(1, h, buf, 8, 20, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               file_info(0, h, buf, 24, 5, &n) == ST(VIBEOS_STATUS_SUCCESS) && *(uint64_t *)(b + 8) == 4u,
+           "FileEndOfFileInformation cuts the file to four bytes");
+    *(uint64_t *)b = 1;
+    expect(file_info(1, h, buf, 8, 14, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               rw_file(0, h, 0, buf, 3, 0, &n) == ST(VIBEOS_STATUS_SUCCESS) && n == 3u && memcmp(b, "123", 3) == 0,
+           "FilePositionInformation moves where the next read starts");
+    memset(b, 0, 256);
+    b[0] = 0;   /* ReplaceIfExists: no */
+    *(uint32_t *)(b + 16) = (uint32_t)(2u * strlen(to));
+    for (i = 0; to[i]; i++) {
+        b[20u + 2u * i] = (uint8_t)to[i];
+    }
+    expect(file_info(1, h, buf, 20u + 2u * (uint32_t)strlen(to), 10, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               create_file(&h2, &info, rw, "\\??\\C:\\tmp\\moved.txt", 1, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, h2, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               create_file(&h2, &info, rw, "\\??\\C:\\tmp\\info.txt", 1, 0) ==
+                   ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND),
+           "FileRenameInformation moves the file to its new name");
+    b[0] = 1;
+    expect(file_info(1, h, buf, 1, 13, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               create_file(&h2, &info, rw, "\\??\\C:\\tmp\\moved.txt", 1, 0) ==
+                   ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND),
+           "FileDispositionInformation: the file goes with its last handle");
+}
+
+/* W4 step 4: attributes by name, deletion by name, the volume, the cancels. */
+static void t_small_file_services(void) {
+    const uint32_t rw = VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE;
+    uint64_t h = 0, info = 0, n = 0, buf = kf_ualloc(64), iosb = kf_ualloc(16), rest[1];
+    uint8_t *b = (uint8_t *)kf_uptr(buf);
+
+    fresh(46);
+    expect(create_file(&h, &info, rw, "\\??\\C:\\tmp\\sv.txt", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               rw_file(1, h, 0, buf, 5, 0, &n) == ST(VIBEOS_STATUS_SUCCESS),
+           "a five-byte file");
+    expect(nt(VIBEOS_NT_NR_NtQueryFullAttributesFile, oattr("\\??\\C:\\tmp\\sv.txt", VIBEOS_OBJ_CASE_INSENSITIVE),
+              buf, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint64_t *)(b + 40) == 5u && (*(uint32_t *)(b + 48) & 0x10u) == 0u,
+           "NtQueryFullAttributesFile: its size, and not a directory");
+    expect(nt(VIBEOS_NT_NR_NtQueryAttributesFile, oattr("\\??\\C:\\tmp", VIBEOS_OBJ_CASE_INSENSITIVE),
+              buf, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) && (*(uint32_t *)(b + 32) & 0x10u) != 0u,
+           "NtQueryAttributesFile: a directory says so");
+    expect(nt(VIBEOS_NT_NR_NtFlushBuffersFile, h, iosb, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtCancelIoFile, h, iosb, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtCancelIoFileEx, h, 0, iosb, 0, 0) == ST(VIBEOS_STATUS_NOT_FOUND),
+           "a flush; a cancel finds nothing pending, one asked by request finds nothing");
+    rest[0] = 4;   /* FileFsDeviceInformation */
+    kf_next_sp(stack_args(rest, 1));
+    expect(nt(VIBEOS_NT_NR_NtQueryVolumeInformationFile, h, iosb, buf, 8, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint32_t *)b == 7u,
+           "the volume is a disk");
+    expect(nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtDeleteFile, oattr("\\??\\C:\\tmp\\sv.txt", VIBEOS_OBJ_CASE_INSENSITIVE),
+                  0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtQueryAttributesFile, oattr("\\??\\C:\\tmp\\sv.txt", VIBEOS_OBJ_CASE_INSENSITIVE),
+                  buf, 0, 0, 0) == ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND),
+           "NtDeleteFile takes the name at once");
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\tmp\\dd", 2, 0x1) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               create_file(&h, &info, rw, "\\??\\C:\\tmp\\dd\\in", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtDeleteFile, oattr("\\??\\C:\\tmp\\dd", VIBEOS_OBJ_CASE_INSENSITIVE),
+                  0, 0, 0, 0) == ST(VIBEOS_STATUS_DIRECTORY_NOT_EMPTY),
+           "a directory with something in it is not deleted");
+}
+
+/* NtQueryDirectoryFile on `h` into `len` bytes at `buf`, class `cls`, with
+ * `mask` (0: none). The status, and the status block's count. */
+static long query_dir(uint64_t h, uint64_t buf, uint32_t len, uint32_t cls, int single, const char *mask,
+                      int restart, uint64_t *count) {
+    uint64_t iosb = kf_ualloc(16), us = 0, rest[7];
+    long r;
+
+    if (mask) {
+        uint64_t chars = kf_ualloc(128);
+        uint32_t i;
+
+        us = kf_ualloc(16);
+        for (i = 0; mask[i]; i++) {
+            ((uint16_t *)kf_uptr(chars))[i] = (uint8_t)mask[i];
+        }
+        ((uint16_t *)kf_uptr(us))[0] = (uint16_t)(2u * i);
+        ((uint16_t *)kf_uptr(us))[1] = (uint16_t)(2u * i);
+        ((uint64_t *)kf_uptr(us))[1] = chars;
+    }
+    rest[0] = iosb;
+    rest[1] = buf;
+    rest[2] = len;
+    rest[3] = cls;
+    rest[4] = (uint64_t)single;
+    rest[5] = us;
+    rest[6] = (uint64_t)restart;
+    kf_next_sp(stack_args(rest, 7));
+    r = nt(VIBEOS_NT_NR_NtQueryDirectoryFile, h, 0, 0, 0, 0);
+    *count = ((uint64_t *)kf_uptr(iosb))[1];
+    return r;
+}
+
+/* The names in a buffer of FILE_NAMES_INFORMATION, joined by ','. */
+static void dir_names(const uint8_t *b, char *out) {
+    uint32_t at = 0, n = 0, k;
+
+    for (;;) {
+        uint32_t len = *(const uint32_t *)(b + at + 8);
+
+        for (k = 0; k < len / 2u; k++) {
+            out[n++] = (char)b[at + 12u + 2u * k];
+        }
+        out[n++] = ',';
+        if (*(const uint32_t *)(b + at) == 0u) {
+            break;
+        }
+        at += *(const uint32_t *)(b + at);
+    }
+    out[n] = 0;
+}
+
+/* v7 review: a file service does what its handle was granted, not what the
+ * description underneath could. A handle opened for attributes reads nothing,
+ * one opened to read writes nothing and sets no times, one that may only
+ * traverse a directory lists nothing. */
+static void t_handle_rights(void) {
+    uint64_t h = 0, d = 0, info = 0, n = 0, buf = kf_ualloc(512);
+    uint8_t *b = (uint8_t *)kf_uptr(buf);
+
+    fresh(50);
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE, "\\??\\C:\\tmp\\r.txt", 2, 0x40) ==
+                   ST(VIBEOS_STATUS_SUCCESS) &&
+               rw_file(1, h, 0, buf, 8, 0, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a file with eight bytes");
+    expect(create_file(&h, &info, 0x80u /* FILE_READ_ATTRIBUTES */, "\\??\\C:\\tmp\\r.txt", 1, 0x40) ==
+                   ST(VIBEOS_STATUS_SUCCESS) &&
+               rw_file(0, h, 0, buf, 8, 0, &n) == ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               file_info(0, h, buf, 40, 4, &n) == ST(VIBEOS_STATUS_SUCCESS),
+           "a handle for the attributes reads them, and not the data");
+    (void)nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0);
+    expect(create_file(&h, &info, 0x1u /* FILE_READ_DATA */, "\\??\\C:\\tmp\\r.txt", 1, 0x40) ==
+                   ST(VIBEOS_STATUS_SUCCESS) &&
+               rw_file(1, h, 0, buf, 8, 0, &n) == ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               (memset(b, 0, 40), file_info(1, h, buf, 40, 4, &n)) == ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               (*(uint64_t *)b = 1, file_info(1, h, buf, 8, 20, &n)) == ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               (b[0] = 1, file_info(1, h, buf, 1, 13, &n)) == ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               file_info(0, h, buf, 40, 4, &n) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "one opened to read writes nothing, cuts nothing, deletes nothing, and asks no attributes");
+    (void)nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0);
+    expect(create_file(&d, &info, 0x20u /* FILE_TRAVERSE */, "\\??\\C:\\tmp", 1, 0x1) == ST(VIBEOS_STATUS_SUCCESS) &&
+               query_dir(d, buf, 512, 12, 0, 0, 1, &n) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "a directory handle that may only traverse lists nothing");
+    (void)nt(VIBEOS_NT_NR_NtClose, d, 0, 0, 0, 0);
+}
+
+/* W4 step 5: listing a directory - masks, classes, restart, one at a time. */
+static void t_query_directory(void) {
+    const uint32_t rw = VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE;
+    uint64_t h = 0, f = 0, info = 0, n = 0, buf = kf_ualloc(512);
+    uint8_t *b = (uint8_t *)kf_uptr(buf);
+    char names[256];
+
+    fresh(47);
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\tmp\\ls", 2, 0x1) == ST(VIBEOS_STATUS_SUCCESS),
+           "a directory to list");
+    (void)create_file(&f, &info, rw, "\\??\\C:\\tmp\\ls\\a.txt", 2, 0x40);
+    (void)rw_file(1, f, 0, buf, 7, 0, &n);
+    (void)nt(VIBEOS_NT_NR_NtClose, f, 0, 0, 0, 0);
+    (void)create_file(&f, &info, rw, "\\??\\C:\\tmp\\ls\\b.log", 2, 0x40);
+    (void)nt(VIBEOS_NT_NR_NtClose, f, 0, 0, 0, 0);
+    (void)create_file(&f, &info, rw, "\\??\\C:\\tmp\\ls\\c.TXT", 2, 0x40);
+    (void)nt(VIBEOS_NT_NR_NtClose, f, 0, 0, 0, 0);
+    memset(b, 0xEE, 512);
+    expect(query_dir(h, buf, 512, 12, 0, "*.txt", 0, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (dir_names(b, names), strstr(names, "a.txt,") && strstr(names, "c.TXT,") && !strstr(names, "b.log")),
+           "a mask matches without case, and only what it matches");
+    expect(query_dir(h, buf, 512, 12, 0, "*.log", 0, &n) == ST(VIBEOS_STATUS_NO_MORE_FILES),
+           "the mask is the first call's; after it, nothing more");
+    expect(query_dir(h, buf, 512, 12, 1, "?.log", 1, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint32_t *)b == 0u && *(uint32_t *)(b + 8) == 10u && b[12] == 'b',
+           "a restart takes the new mask; a single entry ends the chain");
+    expect(query_dir(h, buf, 512, 1, 0, "a.txt", 1, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint64_t *)(b + 40) == 7u && *(uint32_t *)(b + 60) == 10u && b[64] == 'a' &&
+               (*(uint32_t *)(b + 56) & 0x10u) == 0u,
+           "FileDirectoryInformation: its size, its name at 64, a file");
+    expect(query_dir(h, buf, 512, 12, 0, "zz*", 1, &n) == ST(VIBEOS_STATUS_NO_SUCH_FILE),
+           "a mask nothing matches, at the start: no such file");
+    {
+        /* v7 review: a mask whose buffer is not the program's is not read -
+         * the same "zz*" from the host's own memory, which matched nothing
+         * above, must not filter the listing now. */
+        static const uint16_t kmask[3] = { 'z', 'z', '*' };
+        uint64_t iosb = kf_ualloc(16), us = kf_ualloc(16), rest[7];
+
+        ((uint16_t *)kf_uptr(us))[0] = 6;
+        ((uint16_t *)kf_uptr(us))[1] = 6;
+        ((uint64_t *)kf_uptr(us))[1] = (uint64_t)(uintptr_t)kmask;
+        rest[0] = iosb;
+        rest[1] = buf;
+        rest[2] = 512;
+        rest[3] = 12;
+        rest[4] = 0;
+        rest[5] = us;
+        rest[6] = 1;
+        kf_next_sp(stack_args(rest, 7));
+        expect(nt(VIBEOS_NT_NR_NtQueryDirectoryFile, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+               "a mask in memory that is not the program's is not read");
+    }
+    expect(query_dir(h, buf, 512, 12, 1, "*.TXT", 1, &n) == ST(VIBEOS_STATUS_SUCCESS) && *(uint32_t *)b == 0u &&
+               (names[0] = (char)b[12], query_dir(h, buf, 512, 12, 0, 0, 0, &n) == ST(VIBEOS_STATUS_SUCCESS)) &&
+               *(uint32_t *)b == 0u && (b[12] == 'a' || b[12] == 'c') && b[12] != names[0],
+           "one at a time: each call one entry, and the mask holds across them");
+    expect(query_dir(h, buf, 512, 99, 0, 0, 1, &n) == ST(VIBEOS_STATUS_INVALID_INFO_CLASS) &&
+               query_dir(h, buf, 20, 1, 0, 0, 1, &n) == ST(VIBEOS_STATUS_INFO_LENGTH_MISMATCH),
+           "an unknown class, a buffer short of the header");
+    expect(query_dir(h, buf, 70, 1, 0, "a.txt", 1, &n) == ST(VIBEOS_STATUS_BUFFER_OVERFLOW) &&
+               query_dir(h, buf, 512, 1, 0, 0, 0, &n) == ST(VIBEOS_STATUS_SUCCESS) && b[64] == 'a',
+           "an entry that does not fit: the overflow, and the next call has it whole");
+    /* v7 review: the gaps that align entries are zero, not the kernel's stack. */
+    memset(b, 0xEE, 512);
+    expect(query_dir(h, buf, 512, 12, 0, "*.txt", 1, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint32_t *)b == 24u && b[22] == 0u && b[23] == 0u,
+           "the bytes that align an entry are zero");
+    {
+        /* v7 review: a mask of stars against a long name is linear, not
+         * exponential - this one, recursive, would not have finished. */
+        char mask[64], name[220];
+        uint32_t i;
+        uint64_t f2 = 0;
+
+        for (i = 0; i < 31u; i++) {
+            mask[2u * i] = '*';
+            mask[2u * i + 1u] = 'a';
+        }
+        mask[62] = 'b';
+        mask[63] = 0;
+        memcpy(name, "\\??\\C:\\tmp\\ls\\", 14);
+        for (i = 14; i < 114u; i++) {   /* an NT path is at most 128 characters here */
+            name[i] = 'a';
+        }
+        name[114] = 0;
+        expect(create_file(&f2, &info, VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE, name, 2, 0x40) ==
+                       ST(VIBEOS_STATUS_SUCCESS) &&
+                   nt(VIBEOS_NT_NR_NtClose, f2, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+                   query_dir(h, buf, 512, 12, 0, mask, 1, &n) == ST(VIBEOS_STATUS_NO_SUCH_FILE) &&
+                   query_dir(h, buf, 512, 12, 1, "*a*a*a*a*", 1, &n) == ST(VIBEOS_STATUS_SUCCESS),
+               "thirty-one stars against a hundred letters end at once, and still match what they should");
+    }
+}
+
+/* W4 step 6: a name found without case on a filesystem that keeps it, and
+ * names beyond ASCII there and back. */
+static void t_names(void) {
+    const uint32_t rw = VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE;
+    uint64_t h = 0, h2 = 0, info = 0, n = 0, buf = kf_ualloc(512);
+    uint8_t *b = (uint8_t *)kf_uptr(buf);
+    const uint16_t *w = (const uint16_t *)(b + 4);
+
+    fresh(48);
+    expect(create_file(&h, &info, rw, "\\??\\C:\\tmp\\Mixed.TXT", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a file named with both cases, on tmpfs");
+    expect(create_file(&h, &info, rw, "\\??\\C:\\TMP\\mixed.txt", 1, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               file_info(0, h, buf, 64, 9, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               w[1] == 't' && w[5] == 'M' && w[11] == 'T',
+           "opened by another case, every component: it is the same file, named as it was made");
+    expect(create_file(&h2, &info, rw, "\\??\\C:\\tmp\\MIXED.txt", 2, 0x40) ==
+               ST(VIBEOS_STATUS_OBJECT_NAME_COLLISION),
+           "and FILE_CREATE under a third case collides with it");
+    (void)nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0);
+    g_oattr_wide = 1;
+    expect(create_file(&h, &info, rw, "\\??\\C:\\tmp\\#%.txt", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               file_info(0, h, buf, 64, 9, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint32_t *)b == 2u * 12u && w[5] == 0x00E9u && w[6] == 0xD83Du && w[7] == 0xDE00u && w[8] == '.',
+           "a name beyond ASCII comes back as it was given, a surrogate pair included");
+    expect(create_file(&h2, &info, rw, "\\??\\C:\\tmp\\!.txt", 2, 0x40) == ST(VIBEOS_STATUS_OBJECT_NAME_INVALID),
+           "half a surrogate pair is not a name");
+    g_oattr_wide = 0;
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\tmp", 1, 0x1) == ST(VIBEOS_STATUS_SUCCESS) &&
+               query_dir(h, buf, 512, 12, 1, "*.txt", 1, &n) == ST(VIBEOS_STATUS_SUCCESS),
+           "the directory lists");
+    {
+        int seen = 0;
+
+        (void)query_dir(h, buf, 512, 12, 0, "*", 1, &n);
+        for (;;) {
+            uint32_t at = 0;
+
+            for (;;) {
+                const uint16_t *nm = (const uint16_t *)(b + at + 12);
+                if (*(uint32_t *)(b + at + 8) == 14u && nm[0] == 0x00E9u && nm[1] == 0xD83Du && nm[2] == 0xDE00u) {
+                    seen = 1;
+                }
+                if (*(uint32_t *)(b + at) == 0u) {
+                    break;
+                }
+                at += *(uint32_t *)(b + at);
+            }
+            if (query_dir(h, buf, 512, 12, 0, 0, 0, &n) != ST(VIBEOS_STATUS_SUCCESS)) {
+                break;
+            }
+        }
+        expect(seen, "and its listing spells the name in UTF-16 too");
+    }
+}
+
+/* NtLockFile (lock) or NtUnlockFile on [off, off + len) through `h`. */
+static long lock_file(int lock, uint64_t h, uint64_t off, uint64_t len, int exclusive) {
+    uint64_t iosb = kf_ualloc(16), o = kf_ualloc(8), l = kf_ualloc(8);
+
+    *(uint64_t *)kf_uptr(o) = off;
+    *(uint64_t *)kf_uptr(l) = len;
+    if (lock) {
+        uint64_t rest[6] = { iosb, o, l, 0, 1, (uint64_t)exclusive };
+
+        kf_next_sp(stack_args(rest, 6));
+        return nt(VIBEOS_NT_NR_NtLockFile, h, 0, 0, 0, 0);
+    } else {
+        uint64_t rest[1] = { 0 };
+
+        kf_next_sp(stack_args(rest, 1));
+        return nt(VIBEOS_NT_NR_NtUnlockFile, h, iosb, o, l, 0);
+    }
+}
+
+/* W4 step 7: share modes at open, and locks that refuse. */
+static void t_share_and_locks(void) {
+    const uint32_t r = VIBEOS_GENERIC_READ, rw = VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE;
+    uint64_t a = 0, b = 0, c = 0, info = 0, n = 0, off = 0, buf = kf_ualloc(64);
+
+    fresh(49);
+    g_share = 1u;   /* FILE_SHARE_READ */
+    expect(create_file(&a, &info, rw, "\\??\\C:\\tmp\\sh.txt", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               rw_file(1, a, 0, buf, 16, 0, &n) == ST(VIBEOS_STATUS_SUCCESS),
+           "a writer that shares reading only");
+    expect(create_file(&b, &info, r, "\\??\\C:\\tmp\\sh.txt", 1, 0x40) == ST(VIBEOS_STATUS_SHARING_VIOLATION),
+           "a reader that does not share writing is refused: the writer writes");
+    g_share = 3u;
+    expect(create_file(&b, &info, r, "\\??\\C:\\tmp\\sh.txt", 1, 0x40) == ST(VIBEOS_STATUS_SUCCESS),
+           "a reader that shares writing is let in");
+    expect(create_file(&c, &info, rw, "\\??\\C:\\tmp\\sh.txt", 1, 0x40) == ST(VIBEOS_STATUS_SHARING_VIOLATION),
+           "a second writer is refused: the first shares reading only");
+    g_share = 7u;
+    expect(create_file(&c, &info, rw, "\\??\\C:\\tmp\\sh.txt", 5, 0x40) == ST(VIBEOS_STATUS_SHARING_VIOLATION) &&
+               (nt(VIBEOS_NT_NR_NtClose, b, 0, 0, 0, 0), g_share = 0u, create_file(&b, &info, 0x80u /* FILE_READ_ATTRIBUTES */,
+                                                               "\\??\\C:\\tmp\\sh.txt", 1, 0x40)) ==
+                   ST(VIBEOS_STATUS_SUCCESS) &&
+               file_info(0, a, buf, 24, 5, &n) == ST(VIBEOS_STATUS_SUCCESS) && *(uint64_t *)((uint8_t *)kf_uptr(buf) + 8) == 16u,
+           "a refused overwrite leaves the file as it was; an open for attributes takes no part");
+    g_share = 7u;
+    (void)nt(VIBEOS_NT_NR_NtClose, b, 0, 0, 0, 0);
+    expect(nt(VIBEOS_NT_NR_NtClose, a, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               create_file(&a, &info, rw, "\\??\\C:\\tmp\\sh.txt", 1, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               create_file(&b, &info, rw, "\\??\\C:\\tmp\\sh.txt", 1, 0x40) == ST(VIBEOS_STATUS_SUCCESS),
+           "the claim goes with the handle");
+    expect(lock_file(1, a, 4, 4, 1) == ST(VIBEOS_STATUS_SUCCESS) &&
+               lock_file(1, b, 6, 4, 0) == ST(VIBEOS_STATUS_LOCK_NOT_GRANTED),
+           "an exclusive lock refuses another handle's overlapping lock");
+    {
+        uint64_t ra = 0;
+
+        expect(create_file(&ra, &info, 0x80u /* FILE_READ_ATTRIBUTES */, "\\??\\C:\\tmp\\sh.txt", 1, 0x40) ==
+                       ST(VIBEOS_STATUS_SUCCESS) &&
+                   lock_file(1, ra, 32, 4, 1) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+               "a handle that may neither read nor write locks nothing (v7 review)");
+        /* v7 review: locks are counted by process, so one NT process at its
+         * share leaves the table to another - with pid 0 for all, they had
+         * one share between them. */
+        {
+            uint32_t k;
+            long last = 0;
+            int me = ks_current(), other = kf_spawn(52, 52);
+            uint64_t ob = 0;
+
+            for (k = 0; k < VIBEOS_FLK_PER_PROCESS && last != ST(VIBEOS_STATUS_LOCK_NOT_GRANTED); k++) {
+                last = lock_file(1, a, 1000u + 2u * k, 1, 1);
+            }
+            expect(last == ST(VIBEOS_STATUS_LOCK_NOT_GRANTED), "one process reaches its share of the lock table");
+            kf_set_current(other);
+            expect(create_file(&ob, &info, VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE, "\\??\\C:\\tmp\\sh.txt", 1,
+                               0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+                       lock_file(1, ob, 5000, 1, 1) == ST(VIBEOS_STATUS_SUCCESS),
+                   "and another process still locks");
+            (void)nt(VIBEOS_NT_NR_NtClose, ob, 0, 0, 0, 0);
+            kf_set_current(me);
+            for (k = 0; k < VIBEOS_FLK_PER_PROCESS; k++) {
+                (void)lock_file(0, a, 1000u + 2u * k, 1, 0);
+            }
+        }
+        (void)nt(VIBEOS_NT_NR_NtClose, ra, 0, 0, 0, 0);
+    }
+    off = 5;
+    expect(rw_file(0, b, 0, buf, 2, &off, &n) == ST(VIBEOS_STATUS_FILE_LOCK_CONFLICT) &&
+               (off = 0, rw_file(0, b, 0, buf, 4, &off, &n)) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (off = 4, rw_file(0, a, 0, buf, 4, &off, &n)) == ST(VIBEOS_STATUS_SUCCESS),
+           "and is mandatory: another handle cannot read it, its own can, and around it is free");
+    expect(lock_file(0, b, 4, 4, 0) == ST(VIBEOS_STATUS_RANGE_NOT_LOCKED) &&
+               lock_file(0, a, 4, 2, 0) == ST(VIBEOS_STATUS_RANGE_NOT_LOCKED) &&
+               lock_file(0, a, 4, 4, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (off = 5, rw_file(1, b, 0, buf, 2, &off, &n)) == ST(VIBEOS_STATUS_SUCCESS),
+           "only the holder unlocks, and only the range it locked; then the bytes are free");
+    /* v7 review: two touching locks of one handle stay two, so each is given
+     * back by its own range - the table had joined them into one. */
+    expect(lock_file(1, a, 100, 4, 1) == ST(VIBEOS_STATUS_SUCCESS) &&
+               lock_file(1, a, 104, 4, 1) == ST(VIBEOS_STATUS_SUCCESS) &&
+               lock_file(0, a, 100, 4, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (off = 105, rw_file(1, b, 0, buf, 1, &off, &n)) == ST(VIBEOS_STATUS_FILE_LOCK_CONFLICT) &&
+               lock_file(0, a, 104, 4, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "two touching locks are given back one at a time, each by its own range");
+    expect(lock_file(1, a, 0, 8, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (off = 0, rw_file(0, b, 0, buf, 4, &off, &n)) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (off = 0, rw_file(1, b, 0, buf, 4, &off, &n)) == ST(VIBEOS_STATUS_FILE_LOCK_CONFLICT),
+           "a shared lock lets others read and not write");
+    expect(nt(VIBEOS_NT_NR_NtClose, a, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (off = 0, rw_file(1, b, 0, buf, 4, &off, &n)) == ST(VIBEOS_STATUS_SUCCESS),
+           "and goes with its handle");
+    (void)nt(VIBEOS_NT_NR_NtClose, b, 0, 0, 0, 0);
+}
+
+/* A Linux call, from the NT tests: to make files with owners and modes, which
+ * NtCreateFile (W4) cannot yet. */
+static long lsys(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
+    return kf_call(linux_syscall, nr, a0, a1, a2, 0, 0, 0, 0);
+}
+
+static uint64_t lstr(const char *s) {
+    uint64_t u = kf_ualloc((uint32_t)strlen(s) + 1u);
+    memcpy(kf_uptr(u), s, strlen(s) + 1u);
+    return u;
+}
+
+/* No process makes more than a quarter of the object table (M-110). */
+static void t_object_share(void) {
+    uint64_t h = 0;
+    uint32_t i;
+    long r = ST(VIBEOS_STATUS_SUCCESS);
+    int me = fresh(45), other;
+
+    for (i = 0; i < 64u && r == ST(VIBEOS_STATUS_SUCCESS); i++) {
+        r = create_event(&h, VIBEOS_EVENT_ALL_ACCESS, 0, VIBEOS_NT_NOTIFICATION_EVENT, 0);
+    }
+    expect(r == ST(VIBEOS_STATUS_SUCCESS), "a process makes 64 events");
+    expect(create_event(&h, VIBEOS_EVENT_ALL_ACCESS, 0, VIBEOS_NT_NOTIFICATION_EVENT, 0) ==
+               ST(VIBEOS_STATUS_QUOTA_EXCEEDED),
+           "a 65th is past its share: STATUS_QUOTA_EXCEEDED");
+    other = kf_spawn(46, 46);
+    kf_set_current(other);
+    expect(create_event(&h, VIBEOS_EVENT_ALL_ACCESS, 0, VIBEOS_NT_NOTIFICATION_EVENT, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS), "and another process is not refused for it");
+    kf_set_current(me);
+}
+
+/* NtOpenFile asks who is asking, as openat does (M-105). */
+static void t_open_file_permissions(void) {
+    uint64_t fh = 0;
+    int me = fresh(44);
+
+    expect(lsys(83 /* mkdir */, lstr("/tmp/sealed"), 0700, 0) == 0 &&
+               lsys(85 /* creat */, lstr("/tmp/mine"), 0600, 0) >= 0 &&
+               lsys(85, lstr("/tmp/open"), 0644, 0) >= 0,
+           "root makes a closed directory, a private file and a readable one");
+    ks_ps(me)->cred.euid = ks_ps(me)->cred.fsuid = 1000u;
+    ks_ps(me)->cred.egid = ks_ps(me)->cred.fsgid = 1000u;
+    expect(open_file(&fh, 0x00120089u, "\\??\\C:\\tmp\\open") == ST(VIBEOS_STATUS_SUCCESS),
+           "another user opens what everybody may read");
+    expect(open_file(&fh, 0x00120089u, "\\??\\C:\\tmp\\mine") == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "but not root's 0600 file");
+    expect(open_file(&fh, 0x00120089u, "\\??\\C:\\tmp\\sealed\\anything") ==
+               ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "nor a path through a directory it may not search: not even whether it exists");
+    expect(open_file(&fh, 0x001200A9u /* + FILE_EXECUTE */, "\\??\\C:\\tmp\\open") ==
+               ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "and FILE_EXECUTE asks for execute permission, which 0644 does not give");
+}
+
+/* The paths that change the filesystem ask who is asking (v7 review): DELETE,
+ * DELETE_ON_CLOSE, NtDeleteFile and a rename by the rule for taking a name
+ * from a directory, sticky bit included; FILE_WRITE_ATTRIBUTES by ownership or
+ * write permission; and a file made is its maker's. */
+static void t_write_permissions(void) {
+    const uint32_t del = VIBEOS_DELETE | 0x80u /* FILE_READ_ATTRIBUTES */;
+    uint64_t h = 0, info = 0, n = 0, buf = kf_ualloc(256), st = kf_ualloc(144);
+    uint8_t *b = (uint8_t *)kf_uptr(buf);
+    static const char to[] = "\\??\\C:\\tmp\\st\\roots";
+    uint32_t i;
+    int me = fresh(51);
+
+    expect(lsys(83 /* mkdir */, lstr("/tmp/st"), 0777, 0) == 0 &&
+               lsys(90 /* chmod */, lstr("/tmp/st"), 01777, 0) == 0 &&
+               lsys(85 /* creat */, lstr("/tmp/st/roots"), 0666, 0) >= 0 &&
+               lsys(85, lstr("/tmp/st/ro"), 0644, 0) >= 0,
+           "root makes a sticky directory and two of its own files in it");
+    ks_ps(me)->cred.euid = ks_ps(me)->cred.fsuid = 1000u;
+    ks_ps(me)->cred.egid = ks_ps(me)->cred.fsgid = 1000u;
+    expect(create_file(&h, &info, del, "\\??\\C:\\tmp\\st\\roots", 1, 0x40) == ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               create_file(&h, &info, del, "\\??\\C:\\tmp\\st\\roots", 1, 0x1040) ==
+                   ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               nt(VIBEOS_NT_NR_NtDeleteFile, oattr("\\??\\C:\\tmp\\st\\roots", VIBEOS_OBJ_CASE_INSENSITIVE),
+                  0, 0, 0, 0) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "in a sticky directory, another user's file is not deleted: not by DELETE, on close, or by name");
+    expect(lsys(88 /* symlink */, lstr("/tmp/st/nowhere"), lstr("/tmp/st/dangling"), 0) == 0 &&
+               create_file(&h, &info, VIBEOS_GENERIC_WRITE, "\\??\\C:\\tmp\\st\\dangling", 2, 0x40) ==
+                   ST(VIBEOS_STATUS_OBJECT_NAME_COLLISION) &&
+               lsys(4, lstr("/tmp/st/nowhere"), st, 0) < 0,
+           "FILE_CREATE on a dangling link takes the name as taken, and makes nothing where it points");
+    expect(create_file(&h, &info, 0x100u /* FILE_WRITE_ATTRIBUTES */, "\\??\\C:\\tmp\\st\\ro", 1, 0x40) ==
+               ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "nor are the times of a file that is neither its own nor writable");
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ | VIBEOS_GENERIC_WRITE | VIBEOS_DELETE,
+                       "\\??\\C:\\tmp\\st\\mine", 2, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               lsys(4 /* stat */, lstr("/tmp/st/mine"), st, 0) == 0 &&
+               *(uint32_t *)((uint8_t *)kf_uptr(st) + 28) == 1000u,
+           "a file it makes is its own");
+    memset(b, 0, 256);
+    b[0] = 1;   /* ReplaceIfExists */
+    *(uint32_t *)(b + 16) = (uint32_t)(2u * strlen(to));
+    for (i = 0; to[i]; i++) {
+        b[20u + 2u * i] = (uint8_t)to[i];
+    }
+    expect(file_info(1, h, buf, 20u + 2u * (uint32_t)strlen(to), 10, &n) == ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               lsys(4, lstr("/tmp/st/roots"), st, 0) == 0 && *(uint32_t *)((uint8_t *)kf_uptr(st) + 28) == 0u,
+           "and a rename onto another user's file there replaces nothing");
+    b[0] = 1;
+    expect(file_info(1, h, buf, 1, 13, &n) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               lsys(4, lstr("/tmp/st/mine"), st, 0) < 0,
+           "its own file it deletes");
+}
+
+/* v7 review: a delete-on-close follows its file. Renamed away by a Linux
+ * call, with another file made at the old name, the close takes the file it
+ * was opened on and leaves the newcomer; and a directory marked for deletion
+ * goes, which unlink alone could not do. */
+static void t_delete_follows_file(void) {
+    uint64_t h = 0, d = 0, info = 0, n = 0, buf = kf_ualloc(16), st = kf_ualloc(144);
+
+    fresh(53);
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ | VIBEOS_DELETE, "\\??\\C:\\tmp\\doc", 2, 0x1040) ==
+               ST(VIBEOS_STATUS_SUCCESS),
+           "a file that goes with its handle");
+    expect(lsys(82 /* rename */, lstr("/tmp/doc"), lstr("/tmp/moved"), 0) == 0 &&
+               lsys(85 /* creat */, lstr("/tmp/doc"), 0644, 0) >= 0 &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "renamed by Linux, a newcomer made at its old name, and closed");
+    expect(lsys(4 /* stat */, lstr("/tmp/doc"), st, 0) == 0 && lsys(4, lstr("/tmp/moved"), st, 0) < 0,
+           "the close took the file it was opened on, not the newcomer");
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ | VIBEOS_DELETE, "\\??\\C:\\tmp\\doc2", 2, 0x1040) ==
+                   ST(VIBEOS_STATUS_SUCCESS) &&
+               lsys(87 /* unlink */, lstr("/tmp/doc2"), 0, 0) == 0 &&
+               lsys(85 /* creat */, lstr("/tmp/doc2"), 0644, 0) >= 0 &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               lsys(4, lstr("/tmp/doc2"), st, 0) == 0,
+           "unlinked under it and replaced, the close removes nothing: the name is somebody else's now");
+    expect(create_file(&d, &info, VIBEOS_GENERIC_READ | VIBEOS_DELETE, "\\??\\C:\\tmp\\gone", 2, 0x1) ==
+                   ST(VIBEOS_STATUS_SUCCESS) &&
+               (((uint8_t *)kf_uptr(buf))[0] = 1, file_info(1, d, buf, 1, 13, &n)) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, d, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               lsys(4, lstr("/tmp/gone"), st, 0) < 0,
+           "and a directory marked for deletion is removed at its last close");
+}
+
+/* v7 review: C: is the process's root. Rooted elsewhere, an NT program finds
+ * what is inside and nothing outside - by name, by "..", or by a case it
+ * guessed. Latent until chroot exists (L8): every root is "/" today. */
+static void t_nt_chroot(void) {
+    uint64_t h = 0, info = 0;
+    int me = fresh(54);
+
+    expect(lsys(83 /* mkdir */, lstr("/tmp/jail"), 0755, 0) == 0 &&
+               lsys(85 /* creat */, lstr("/tmp/jail/In.txt"), 0644, 0) >= 0 &&
+               lsys(85, lstr("/tmp/out.txt"), 0644, 0) >= 0 &&
+               (strcpy(ks_ps(me)->root, "/tmp/jail"), 1),
+           "a process rooted in a directory with one file - chroot is L8's, so the root is set as it will -"
+           " and another file outside");
+    expect(create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\in.TXT", 1, 0x40) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "C:\\ is its root: the file inside opens, in another case");
+    {
+        long up = create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\..\\out.txt", 1, 0x40);
+        long abs = create_file(&h, &info, VIBEOS_GENERIC_READ, "\\??\\C:\\tmp\\out.txt", 1, 0x40);
+
+        if (up != ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND) || (abs != ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND) &&
+                                                               abs != ST(VIBEOS_STATUS_OBJECT_PATH_NOT_FOUND))) {
+            printf("  chroot: .. %lx, machine path %lx\n", up, abs);
+        }
+        expect(up == ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND) &&
+                   (abs == ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND) || abs == ST(VIBEOS_STATUS_OBJECT_PATH_NOT_FOUND)),
+               "and nothing outside: not by .., not by the machine's path");
+    }
+}
+
+/* NtCreateThreadEx(handle, access, attributes, process, start, param, flags,
+ * zero bits, stack size, maximum stack, attribute list). */
+static long create_thread(uint64_t *h, uint64_t start, uint64_t param, uint64_t max_stack) {
+    uint64_t out = kf_ualloc(8);
+    uint64_t rest[7] = { start, param, 0, 0, 0, max_stack, 0 };
+    long r;
+
+    kf_next_sp(stack_args(rest, 7));
+    r = nt(VIBEOS_NT_NR_NtCreateThreadEx, out, 0x001FFFFFu, 0, VIBEOS_NT_CURRENT_PROCESS, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+/* RLIMIT_NPROC holds for an NT thread as for a Linux clone (v8 review, M-134):
+ * an unprivileged user at the limit gets no thread, the superuser does. */
+static void t_thread_nproc(void) {
+    uint64_t h = 0;
+    int me = fresh(56);
+
+    ks_image(me)->entry = kf_ualloc(16);
+    ks_image(me)->start_arg = kf_ualloc(64);
+    ks_ps(me)->cred.uid = ks_ps(me)->cred.euid = 1000u;
+    ks_ps(me)->rlim_cur[VIBEOS_RLIM_NPROC] = 1u;   /* the caller itself is the one */
+    expect(create_thread(&h, kf_ualloc(16), 0, 0) == ST(VIBEOS_STATUS_INSUFFICIENT_RESOURCES),
+           "a user at RLIMIT_NPROC makes no NT thread");
+    ks_ps(me)->cred.uid = ks_ps(me)->cred.euid = 0u;
+    expect(create_thread(&h, kf_ualloc(16), 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "and the superuser is not counted against it");
+}
+
+/* W5 step 1: a thread is a task of the process, started at ntdll's entry with
+ * (0, routine, parameter), on a stack and with a TEB of its own; its handle is
+ * signalled when it ends; the last thread's end is the process's. */
+static void t_create_thread(void) {
+    uint64_t h = 0, routine = kf_ualloc(16), peb = kf_ualloc(64), ntdll_entry = kf_ualloc(16);
+    uint64_t teb, sp, v = 0;
+    const uint64_t *st = 0;
+    int me = fresh(55), child = -1;
+    uint32_t i;
+    kf_outcome_t how = KF_RETURNED;
+
+    ks_image(me)->entry = ntdll_entry;
+    ks_image(me)->start_arg = peb;
+    expect(create_thread(&h, routine, 0x1234u, 0) == ST(VIBEOS_STATUS_SUCCESS) && h != 0u,
+           "NtCreateThreadEx makes a thread and a handle to it");
+    for (i = 0; i < KF_SLOTS; i++) {
+        if ((int)i != me && kf_task_start((int)i)[0] == ntdll_entry) {
+            child = (int)i;
+        }
+    }
+    expect(child >= 0 && vibeos_task_state((uint32_t)child) == VIBEOS_TASK_READY &&
+               ks_id(child)->tgid == ks_id(me)->tgid && ks_id(child)->pid != ks_id(me)->pid &&
+               ks_id(child)->is_thread && ks_ps(child) == ks_ps(me),
+           "a ready task of the same process, with an id of its own");
+    if (child < 0) {
+        return;
+    }
+    st = kf_task_start(child);
+    sp = st[1];
+    expect(st[2] == 0u && st[3] == routine && st[4] == 0x1234u && (sp & 0xFu) == 8u,
+           "started at ntdll's entry with rcx zero, the routine and its parameter, as after a call");
+    teb = ks_gs_get(child);
+    expect(teb != 0u && teb != ks_gs_get(me), "with a TEB of its own as %gs");
+    expect(kf_peek(teb + VIBEOS_TEB_SELF, &v, 8) == 0 && v == teb &&
+               kf_peek(teb + VIBEOS_TEB_PEB, &v, 8) == 0 && v == peb &&
+               kf_peek(teb + VIBEOS_TEB_CLIENT_THREAD, &v, 8) == 0 && v == ks_id(child)->pid &&
+               kf_peek(teb + VIBEOS_TEB_STACK_BASE, &v, 8) == 0 && v > sp &&
+               kf_peek(teb + VIBEOS_TEB_STACK_LIMIT, &v, 8) == 0 && v < sp,
+           "the TEB names itself, the PEB, the thread, and the stack around its sp");
+    expect(wait1(h, 0) == ST(VIBEOS_STATUS_TIMEOUT), "a running thread's handle is not signalled");
+    kf_set_current(child);
+    (void)nt(VIBEOS_NT_NR_NtTerminateThread, VIBEOS_NT_CURRENT_THREAD, 77, 0, 0, &how);
+    expect(how == KF_EXITED && kf_exit_code() == 77u && !kf_exit_was_group(),
+           "NtTerminateThread ends the thread, not the process, with its status");
+    kf_set_current(me);
+    (void)vibeos_task_transition((uint32_t)child, VIBEOS_TASK_ZOMBIE, "test");
+    (void)vibeos_task_transition((uint32_t)child, VIBEOS_TASK_FREE, "test");
+    expect(wait1(h, 0) == ST(VIBEOS_STATUS_SUCCESS), "and its handle is signalled, after its slot has gone");
+    expect(create_thread(&h, 0x10u, 0, 0) == ST(VIBEOS_STATUS_ACCESS_VIOLATION),
+           "a routine that is nobody's memory is refused");
+    how = KF_RETURNED;
+    (void)nt(VIBEOS_NT_NR_NtTerminateThread, 0, 5, 0, 0, &how);
+    expect(how == KF_EXITED && kf_exit_code() == 5u && kf_exit_was_group(),
+           "the last thread's end is the process's, with its status");
+}
+
+static long qthread(uint64_t h, uint32_t cls, uint64_t buf, uint32_t len);   /* below */
+
+/* W7 step 2: a thread made in another process runs there - its address
+ * space, its ntdll entry, its PEB - with a TEB and a stack made in that
+ * process's memory, and only with PROCESS_CREATE_THREAD. */
+static void t_remote_thread(void) {
+    uint64_t cid = kf_ualloc(16), out = kf_ualloc(8);
+    uint64_t rest[7] = { 0x12340000ull, 0x77u, 0, 0, 0, 0, 0 };
+    uint64_t h, ro, teb, v = 0;
+    int me = fresh(62), other = kf_spawn(63, 63), child = -1;
+    uint32_t i;
+
+    ks_image(me)->entry = kf_ualloc(16);
+    ks_image(other)->entry = 0x10400000ull;   /* the other's ntdll, not ours */
+    ks_image(other)->start_arg = 0x13FF0000ull;
+    ((uint64_t *)kf_uptr(cid))[0] = 63u;
+    ((uint64_t *)kf_uptr(cid))[1] = 0u;
+    (void)nt(VIBEOS_NT_NR_NtOpenProcess, out, 0x0002u /* CREATE_THREAD */, 0, cid, 0);
+    h = *(uint64_t *)kf_uptr(out);
+    (void)nt(VIBEOS_NT_NR_NtOpenProcess, out, 0x0010u /* VM_READ */, 0, cid, 0);
+    ro = *(uint64_t *)kf_uptr(out);
+
+    kf_next_sp(stack_args(rest, 7));
+    expect(nt(VIBEOS_NT_NR_NtCreateThreadEx, out, 0x001FFFFFu, 0, ro, 0) ==
+               ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "a handle without PROCESS_CREATE_THREAD makes no thread there");
+    kf_next_sp(stack_args(rest, 7));
+    expect(nt(VIBEOS_NT_NR_NtCreateThreadEx, out, 0x001FFFFFu, 0, h, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "NtCreateThreadEx with another process's handle");
+    for (i = 0; i < KF_SLOTS; i++) {
+        if ((int)i != other && kf_task_start((int)i)[0] == 0x10400000ull) {
+            child = (int)i;
+        }
+    }
+    expect(child >= 0 && ks_id(child)->tgid == 63u && ks_ps(child) == ks_ps(other) &&
+               ks_vm(child).root == ks_vm(other).root && ks_vm(child).root != ks_vm(me).root,
+           "the thread is the other's: its process, its address space, its ntdll's entry");
+    if (child < 0) {
+        return;
+    }
+    teb = ks_gs_get(child);
+    expect(vibeos_vma_find(&ks_ps(other)->mm->vmas, teb) != 0 &&
+               vibeos_vma_find(&ks_ps(me)->mm->vmas, teb) == 0,
+           "its TEB is in the other's memory, not the caller's");
+    kf_set_current(other);
+    expect(kf_peek(teb + VIBEOS_TEB_SELF, &v, 8) == 0 && v == teb &&
+               kf_peek(teb + VIBEOS_TEB_PEB, &v, 8) == 0 && v == 0x13FF0000ull &&
+               kf_peek(teb + VIBEOS_TEB_CLIENT_PROCESS, &v, 8) == 0 && v == 63u,
+           "and names itself, the other's PEB and the other's process id");
+    kf_set_current(me);
+    {
+        uint64_t q = kf_ualloc(48), rest1[1] = { 0 };
+        const uint64_t *tbi = (const uint64_t *)kf_uptr(q);
+
+        kf_next_sp(stack_args(rest1, 1));
+        expect(nt(VIBEOS_NT_NR_NtQueryInformationThread, *(uint64_t *)kf_uptr(out), 0, q, 48, 0) ==
+                   ST(VIBEOS_STATUS_SUCCESS) && tbi[1] == teb && tbi[2] == 63u,
+               "its handle reports the other's process id and the TEB made there");
+    }
+    {
+        /* A routine that is not mapped anywhere is the thread's to fault on, as
+         * Windows makes it (kernel32:process's test_TerminateProcess). */
+        uint64_t bad[7] = { 0xDEADBEEFull, 0, 1u /* suspended */, 0, 0, 0, 0 };
+
+        kf_next_sp(stack_args(bad, 7));
+        expect(nt(VIBEOS_NT_NR_NtCreateThreadEx, out, 0x001FFFFFu, 0, h, 0) == ST(VIBEOS_STATUS_SUCCESS),
+               "a thread at an address the other process has not mapped is still made there");
+    }
+    {
+        /* ProcessBasicInformation answers PROCESS_QUERY_LIMITED_INFORMATION
+         * (kernel32:process's test_process_info). */
+        uint64_t q = kf_ualloc(48), z = 0, lim;
+
+        (void)nt(VIBEOS_NT_NR_NtOpenProcess, out, 0x1000u, 0, cid, 0);
+        lim = *(uint64_t *)kf_uptr(out);
+        kf_next_sp(stack_args_(&z, 1));
+        expect(nt(VIBEOS_NT_NR_NtQueryInformationProcess, lim, VIBEOS_NT_PROCESS_BASIC_INFORMATION, q, 48, 0) ==
+                   ST(VIBEOS_STATUS_SUCCESS),
+               "ProcessBasicInformation through a PROCESS_QUERY_LIMITED_INFORMATION handle");
+    }
+    expect(g_kf_aspace_pins == 0, "and the other's address space was let go");
+    {
+        /* THREAD_QUERY_LIMITED_INFORMATION answers the basic classes and not
+         * the start address (kernel32:thread's test_thread_info). */
+        uint64_t q = kf_ualloc(48), lim;
+
+        ((uint64_t *)kf_uptr(cid))[0] = 0;
+        ((uint64_t *)kf_uptr(cid))[1] = ks_id(me)->pid;
+        expect(nt(VIBEOS_NT_NR_NtOpenThread, out, 0x0800u, 0, cid, 0) == ST(VIBEOS_STATUS_SUCCESS),
+               "the caller's thread opened with THREAD_QUERY_LIMITED_INFORMATION");
+        lim = *(uint64_t *)kf_uptr(out);
+        expect(qthread(lim, 0, q, 48) == ST(VIBEOS_STATUS_SUCCESS) &&
+                   qthread(lim, 1, q, 32) == ST(VIBEOS_STATUS_SUCCESS) &&
+                   qthread(lim, 12, q, 4) == ST(VIBEOS_STATUS_SUCCESS),
+               "answers ThreadBasicInformation, ThreadTimes, ThreadAmILastThread");
+        expect(qthread(lim, 9, q, 8) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+               "but not the start address, which needs THREAD_QUERY_INFORMATION");
+    }
+}
+
+static long create_thread_flags(uint64_t *h, uint64_t start, uint64_t flags) {
+    uint64_t out = kf_ualloc(8);
+    uint64_t rest[7] = { start, 0, flags, 0, 0, 0, 0 };
+    long r;
+
+    kf_next_sp(stack_args(rest, 7));
+    r = nt(VIBEOS_NT_NR_NtCreateThreadEx, out, 0x001FFFFFu, 0, VIBEOS_NT_CURRENT_PROCESS, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+/* NtQueryInformationThread(h, class, buf, len, no return length): the fifth
+ * argument is the stack's. */
+static long qthread(uint64_t h, uint32_t cls, uint64_t buf, uint32_t len) {
+    uint64_t rest[1] = { 0 };
+
+    kf_next_sp(stack_args(rest, 1));
+    return nt(VIBEOS_NT_NR_NtQueryInformationThread, h, cls, buf, len, 0);
+}
+
+/* The slot of the thread `h` names, through its basic information. */
+static int thread_slot(uint64_t h) {
+    uint64_t buf = kf_ualloc(48);
+    uint32_t i;
+
+    if (qthread(h, 0, buf, 48) != ST(VIBEOS_STATUS_SUCCESS)) {
+        return -1;
+    }
+    for (i = 0; i < KF_SLOTS; i++) {
+        if (vibeos_task_state(i) != VIBEOS_TASK_FREE && ks_id((int)i)->pid == ((uint64_t *)kf_uptr(buf))[3]) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* W5 steps 2 and 3: what a thread says of itself, the ways to name one, and
+ * suspend, resume and alert. */
+static void t_thread_info(void) {
+    uint64_t h = 0, h2 = 0, buf = kf_ualloc(64), prev = kf_ualloc(4), cid = kf_ualloc(16);
+    uint64_t routine = kf_ualloc(16), out = kf_ualloc(8);
+    const uint8_t *b = (const uint8_t *)kf_uptr(buf);
+    int me = fresh(56), child;
+    kf_outcome_t how = KF_RETURNED;
+
+    ks_image(me)->entry = kf_ualloc(16);
+    ks_image(me)->start_arg = kf_ualloc(64);
+    expect(create_thread_flags(&h, routine, 0x1u | 0x4u /* suspended, hidden */) == ST(VIBEOS_STATUS_SUCCESS),
+           "a thread made suspended and hidden from a debugger");
+    child = thread_slot(h);
+    expect(child >= 0 && vibeos_task_state((uint32_t)child) == VIBEOS_TASK_SETUP,
+           "a suspended thread is made and not started");
+    expect(qthread(h, 0, buf, 48) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(const uint32_t *)b == 0x103u && *(const uint64_t *)(b + 8) == ks_gs_get(child) &&
+               *(const uint64_t *)(b + 16) == ks_id(me)->tgid,
+           "ThreadBasicInformation: still active, its TEB, its process");
+    memset((void *)b, 0xCC, 8);
+    expect(qthread(h, 17, buf, 1) == ST(VIBEOS_STATUS_SUCCESS) &&
+               b[0] == 1u,
+           "ThreadHideFromDebugger says it was hidden");
+    expect(qthread(h, 0, buf, 40) == ST(VIBEOS_STATUS_INFO_LENGTH_MISMATCH) &&
+               qthread(h, 99, buf, 8) == ST(VIBEOS_STATUS_INVALID_INFO_CLASS),
+           "a length short of the class, a class not answered");
+    expect(nt(VIBEOS_NT_NR_NtSuspendThread, h, prev, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint32_t *)kf_uptr(prev) == 1u,
+           "a second suspension: the count was one");
+    expect(nt(VIBEOS_NT_NR_NtResumeThread, h, prev, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint32_t *)kf_uptr(prev) == 2u && vibeos_task_state((uint32_t)child) == VIBEOS_TASK_SETUP,
+           "one resume takes it back to one, and it is not started");
+    expect(nt(VIBEOS_NT_NR_NtResumeThread, h, prev, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint32_t *)kf_uptr(prev) == 1u && vibeos_task_state((uint32_t)child) == VIBEOS_TASK_READY,
+           "the last resume starts it");
+    expect(nt(VIBEOS_NT_NR_NtResumeThread, h, prev, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(uint32_t *)kf_uptr(prev) == 0u,
+           "a resume of a running thread changes nothing and says zero");
+    expect(nt(VIBEOS_NT_NR_NtAlertThread, h, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) && ks_id(child)->nt_alerted,
+           "NtAlertThread alerts it");
+    ((uint64_t *)kf_uptr(cid))[0] = 0;
+    ((uint64_t *)kf_uptr(cid))[1] = ks_id(child)->pid;
+    expect(nt(VIBEOS_NT_NR_NtOpenThread, out, 0x001FFFFFu, 0, cid, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               thread_slot(*(uint64_t *)kf_uptr(out)) == child,
+           "NtOpenThread finds it by its id");
+    ((uint64_t *)kf_uptr(cid))[1] = 99999u;
+    expect(nt(VIBEOS_NT_NR_NtOpenThread, out, 0x001FFFFFu, 0, cid, 0) == ST(VIBEOS_STATUS_INVALID_CID),
+           "and an id nobody has is no thread");
+    {
+        int other = kf_spawn(58, 58);
+
+        ((uint64_t *)kf_uptr(cid))[1] = ks_id(other)->pid;
+        expect(nt(VIBEOS_NT_NR_NtOpenThread, out, 0x001FFFFFu, 0, cid, 0) == ST(VIBEOS_STATUS_INVALID_CID),
+               "nor is another process's thread, by its id alone (W6 opens those)");
+    }
+    {
+        /* A suspension sends the stop SIGSTOP is; a thread waiting when it
+         * comes keeps waiting, rather than ending its wait STATUS_USER_APC. */
+        uint64_t ev = 0;
+
+        (void)create_event(&ev, VIBEOS_EVENT_ALL_ACCESS, 0, VIBEOS_NT_NOTIFICATION_EVENT, 0);
+        ks_id(me)->sig_pending |= 1ull << VIBEOS_SIGSTOP;
+        expect(wait1(ev, -200000) == ST(VIBEOS_STATUS_TIMEOUT),
+               "a pending stop does not end a wait: it waits out its time");
+        ks_id(me)->sig_pending = 0;
+    }
+    {
+        uint64_t rest[2] = { 0, out };
+
+        kf_next_sp(stack_args(rest, 2));
+        expect(nt(VIBEOS_NT_NR_NtGetNextThread, VIBEOS_NT_CURRENT_PROCESS, 0, 0x001FFFFFu, 0, 0) ==
+                   ST(VIBEOS_STATUS_SUCCESS) && thread_slot(*(uint64_t *)kf_uptr(out)) >= 0,
+               "NtGetNextThread walks the process's threads");
+        h2 = *(uint64_t *)kf_uptr(out);
+        kf_next_sp(stack_args(rest, 2));
+        (void)nt(VIBEOS_NT_NR_NtGetNextThread, VIBEOS_NT_CURRENT_PROCESS, h2, 0x001FFFFFu, 0, 0);
+        h2 = *(uint64_t *)kf_uptr(out);
+        kf_next_sp(stack_args(rest, 2));
+        expect(nt(VIBEOS_NT_NR_NtGetNextThread, VIBEOS_NT_CURRENT_PROCESS, h2, 0x001FFFFFu, 0, 0) ==
+                   ST(VIBEOS_STATUS_NO_MORE_ENTRIES),
+               "two threads, and then no more");
+    }
+    expect(nt(VIBEOS_NT_NR_NtTerminateThread, h, 9, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               ks_id(child)->exec_killed && (ks_id(child)->sig_pending & (1ull << VIBEOS_SIGKILL)) != 0u,
+           "NtTerminateThread of another thread kills that thread alone");
+    expect(qthread(h, 0, buf, 48) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(const uint32_t *)b == 9u,
+           "and its handle reports the status it was given");
+    (void)how;
+}
+
+/* W5 step 7: waitable timers and keyed events. */
+static void t_timers(void) {
+    uint64_t h = 0, out = kf_ualloc(8), due = kf_ualloc(8), cur = kf_ualloc(4), buf = kf_ualloc(16);
+
+    fresh(57);
+    expect(nt(VIBEOS_NT_NR_NtCreateTimer, out, 0x001F0003u, 0, 1 /* synchronization */, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS),
+           "a synchronization timer");
+    h = *(uint64_t *)kf_uptr(out);
+    expect(wait1(h, 0) == ST(VIBEOS_STATUS_TIMEOUT), "not signalled before it is set");
+    *(int64_t *)kf_uptr(due) = -500000;   /* 50 ms from now */
+    {
+        uint64_t rest[3] = { 0, 0, cur };
+
+        kf_next_sp(stack_args(rest, 3));
+        expect(nt(VIBEOS_NT_NR_NtSetTimer, h, due, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+               "set fifty milliseconds out");
+    }
+    expect(wait1(h, 0) == ST(VIBEOS_STATUS_TIMEOUT), "not yet due");
+    expect(wait1(h, -10000000) == ST(VIBEOS_STATUS_SUCCESS), "a wait sees it fire");
+    expect(wait1(h, 0) == ST(VIBEOS_STATUS_TIMEOUT), "and the waiter took it: a synchronization timer");
+    {
+        uint64_t rest[1] = { 0 };
+
+        kf_next_sp(stack_args(rest, 1));
+        expect(nt(VIBEOS_NT_NR_NtQueryTimer, h, 0, buf, 12, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+                   ((uint8_t *)kf_uptr(buf))[8] == 0u,
+               "NtQueryTimer: not signalled now");
+    }
+    expect(nt(VIBEOS_NT_NR_NtCreateTimer, out, 0x001F0003u, 0, 0 /* notification */, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS),
+           "a notification timer");
+    h = *(uint64_t *)kf_uptr(out);
+    *(int64_t *)kf_uptr(due) = -1;
+    {
+        uint64_t rest[3] = { 0, 0, 0 };
+
+        kf_next_sp(stack_args(rest, 3));
+        (void)nt(VIBEOS_NT_NR_NtSetTimer, h, due, 0, 0, 0);
+    }
+    expect(wait1(h, -10000000) == ST(VIBEOS_STATUS_SUCCESS) && wait1(h, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a notification timer stays signalled for every waiter");
+    expect(nt(VIBEOS_NT_NR_NtCancelTimer, h, cur, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               ((uint8_t *)kf_uptr(cur))[0] == 1u,
+           "a cancel says it was signalled");
+    {
+        uint64_t t = kf_ualloc(8);
+
+        *(int64_t *)kf_uptr(t) = -100000;
+        expect(nt(VIBEOS_NT_NR_NtCreateKeyedEvent, out, 0x000F0003u, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+               "a keyed event");
+        h = *(uint64_t *)kf_uptr(out);
+        expect(nt(VIBEOS_NT_NR_NtWaitForKeyedEvent, h, 0x1000, 0, t, 0) == ST(VIBEOS_STATUS_TIMEOUT) &&
+                   nt(VIBEOS_NT_NR_NtReleaseKeyedEvent, h, 0x1000, 0, t, 0) == ST(VIBEOS_STATUS_TIMEOUT),
+               "a wait with no release, and a release with no waiter, each time out");
+        expect(nt(VIBEOS_NT_NR_NtWaitForKeyedEvent, h, 0x1001, 0, t, 0) == ST(VIBEOS_STATUS_INVALID_PARAMETER_1),
+               "an odd key is refused");
+        expect(nt(VIBEOS_NT_NR_NtReleaseKeyedEvent, 0, 0x2000, 0, t, 0) == ST(VIBEOS_STATUS_TIMEOUT),
+               "handle 0 is the process's keyed event");
+    }
+}
+
+/* CONTEXT_FULL names FLOATING_POINT, so the x87/SSE state goes into an APC's
+ * context and NtContinue puts it back (v8 review, M-139): an APC routine that
+ * used an XMM register handed the interrupted code back one it never wrote.
+ * The fake's CPU state is g_kf_fpu. */
+extern unsigned char g_kf_fpu[512];
+
+static void t_apc_fpu(void) {
+    uint64_t routine = kf_ualloc(16), interval = kf_ualloc(8), stack = kf_ualloc(16384);
+    uint64_t top = (stack + 16384u) & ~0xFull, ctx, entry = kf_ualloc(16);
+    uint8_t area[512];
+    uint32_t mx = 0, i;
+    int me = fresh(57);
+
+    ks_image(me)->entry = entry;
+    *(int64_t *)kf_uptr(interval) = -100000;
+    for (i = 0; i < 512u; i++) {
+        g_kf_fpu[i] = (unsigned char)(i * 13u + 1u);
+    }
+    g_kf_fpu[24] = 0x80;   /* MXCSR 0x1F80, the default */
+    g_kf_fpu[25] = 0x1F;
+    g_kf_fpu[26] = g_kf_fpu[27] = 0;
+    {
+        uint64_t rest[1] = { 0 };
+
+        kf_next_sp(stack_args(rest, 1));
+        (void)nt(VIBEOS_NT_NR_NtQueueApcThread, VIBEOS_NT_CURRENT_THREAD, routine, 1, 2, 0);
+    }
+    kf_next_sp(top);
+    (void)nt(VIBEOS_NT_NR_NtDelayExecution, 1, interval, 0, 0, 0);
+    ctx = kf_last_frame()->arg2;
+    expect(kf_peek(ctx + 0x100, area, sizeof(area)) == 0 && memcmp(area, g_kf_fpu, sizeof(area)) == 0 &&
+               kf_peek(ctx + 0x34, &mx, 4) == 0 && mx == 0x1F80u,
+           "an APC's context holds the x87/SSE state in FltSave, and MxCsr beside it");
+    area[160] ^= 0xFFu;   /* xmm0's first byte, changed by the handler */
+    expect(kf_poke(ctx + 0x100, area, sizeof(area)) == 0, "the context's FltSave changed");
+    kf_next_sp(kf_last_frame()->sp);
+    (void)nt(VIBEOS_NT_NR_NtContinue, ctx, 0, 0, 0, 0);
+    expect(g_kf_fpu[160] == area[160], "and NtContinue puts it back into the CPU");
+}
+
+/* W5 step 4: an APC queued for a thread runs when it next waits alertably:
+ * the wait ends STATUS_USER_APC and the thread enters ntdll with rcx 1, the
+ * context to go back to in rdx and the APC in r8; NtContinue goes back. */
+static void t_apcs(void) {
+    uint64_t routine = kf_ualloc(16), interval = kf_ualloc(8), stack = kf_ualloc(16384);
+    uint64_t top = (stack + 16384u) & ~0xFull, ctx, rec, v = 0, entry = kf_ualloc(16);
+    const struct ks_regs *f;
+    int me = fresh(59);
+    long r;
+
+    ks_image(me)->entry = entry;
+    *(int64_t *)kf_uptr(interval) = -100000;
+    {
+        uint64_t rest[1] = { 33 };
+
+        kf_next_sp(stack_args(rest, 1));
+        expect(nt(VIBEOS_NT_NR_NtQueueApcThread, VIBEOS_NT_CURRENT_THREAD, routine, 11, 22, 0) ==
+                   ST(VIBEOS_STATUS_SUCCESS),
+               "NtQueueApcThread queues a call for the calling thread");
+    }
+    kf_next_sp(top);
+    expect(nt(VIBEOS_NT_NR_NtDelayExecution, 0, interval, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a wait that is not alertable runs no APC");
+    kf_next_sp(top);
+    r = nt(VIBEOS_NT_NR_NtDelayExecution, 1, interval, 0, 0, 0);
+    f = kf_last_frame();
+    ctx = f->arg2;          /* rdx */
+    rec = f->other[0];      /* r8  */
+    expect(r == ST(VIBEOS_STATUS_USER_APC) && f->ip == entry && f->rcx == 1u && ctx < top && rec < ctx &&
+               (f->sp & 0xFu) == 8u,
+           "an alertable wait ends USER_APC, into ntdll's entry with the APC's mark");
+    expect(kf_peek(rec, &v, 8) == 0 && v == routine && kf_peek(rec + 8, &v, 8) == 0 && v == 11u &&
+               kf_peek(rec + 24, &v, 8) == 0 && v == 33u,
+           "the APC's record: the routine and its three arguments");
+    expect(kf_peek(ctx + 0x78, &v, 8) == 0 && v == 0xC0u && kf_peek(ctx + 0x98, &v, 8) == 0 && v == top,
+           "and the context to go back to: rax USER_APC, the stack it waited on");
+    kf_next_sp(f->sp);
+    expect(nt(VIBEOS_NT_NR_NtContinue, ctx, 0, 0, 0, 0) == ST(VIBEOS_STATUS_USER_APC) &&
+               kf_last_frame()->sp == top && kf_last_frame()->rcx != 1u,
+           "NtContinue goes back to the context, rax and stack and all");
+    expect(nt(VIBEOS_NT_NR_NtTestAlert, 0, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "NtTestAlert with nothing queued");
+    ks_id(me)->nt_alerted = 1;
+    kf_next_sp(top);
+    expect(nt(VIBEOS_NT_NR_NtDelayExecution, 1, interval, 0, 0, 0) == ST(VIBEOS_STATUS_ALERTED) &&
+               ks_id(me)->nt_alerted == 0u,
+           "an alerted thread's alertable wait ends ALERTED, and takes the alert");
+    {
+        uint64_t rest[1] = { 0 };
+        uint32_t i;
+
+        for (i = 0; i < 16u; i++) {
+            kf_next_sp(stack_args(rest, 1));
+            (void)nt(VIBEOS_NT_NR_NtQueueApcThread, VIBEOS_NT_CURRENT_THREAD, routine, i, 0, 0);
+        }
+        kf_next_sp(stack_args(rest, 1));
+        expect(nt(VIBEOS_NT_NR_NtQueueApcThread, VIBEOS_NT_CURRENT_THREAD, routine, 99, 0, 0) ==
+                   ST(VIBEOS_STATUS_NO_MEMORY),
+               "a thread holds sixteen APCs and no more");
+        kf_next_sp(top);
+        expect(nt(VIBEOS_NT_NR_NtTestAlert, 0, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+                   kf_last_frame()->rcx == 1u && kf_peek(kf_last_frame()->other[0] + 8, &v, 8) == 0 && v == 0u,
+               "NtTestAlert delivers the oldest");
+    }
+    {
+        /* APCs left for a thread that ended (v8 review, M-134): they held
+         * their entries for good, and a process's share filled up with
+         * them. Three rounds of sixteen, the thread's tenancy moved on after
+         * each, and every one is queued. */
+        uint64_t rest[1] = { 0 };
+        uint32_t i, ok = 0, round;
+
+        for (round = 0; round < 3u; round++) {
+            kf_retire(me);
+            for (i = 0; i < 16u; i++) {
+                kf_next_sp(stack_args(rest, 1));
+                ok += nt(VIBEOS_NT_NR_NtQueueApcThread, VIBEOS_NT_CURRENT_THREAD, routine, i, 0, 0) ==
+                      ST(VIBEOS_STATUS_SUCCESS);
+            }
+        }
+        expect(ok == 48u, "an ended thread's APCs give their entries back");
+        kf_retire(me);
+    }
+    {
+        uint64_t rest[1] = { 0 };
+
+        kf_next_sp(stack_args(rest, 1));
+        expect(nt(VIBEOS_NT_NR_NtQueueApcThread, VIBEOS_NT_CURRENT_THREAD, 0x10, 0, 0, 0) ==
+                   ST(VIBEOS_STATUS_INVALID_PARAMETER),
+               "a routine that is nobody's memory is refused");
+    }
+}
+
+/* W5 step 5: NtRaiseException, first chance - the record and context on the
+ * stack and the thread into ntdll's entry with rcx 2 - and second chance, the
+ * process's end with the exception's code. */
+static void t_raise_exception(void) {
+    uint64_t rec = kf_ualloc(0x98), ctx = kf_ualloc(0x4D0), stack = kf_ualloc(16384);
+    uint64_t top = (stack + 16384u) & ~0xFull, entry = kf_ualloc(16), v = 0;
+    const struct ks_regs *f;
+    int me = fresh(60);
+    kf_outcome_t how = KF_RETURNED;
+
+    ks_image(me)->entry = entry;
+    memset(kf_uptr(rec), 0, 0x98);
+    memset(kf_uptr(ctx), 0, 0x4D0);
+    *(uint32_t *)kf_uptr(rec) = 0xE0000042u;
+    *(uint64_t *)((uint8_t *)kf_uptr(ctx) + 0x98) = top;   /* the context's Rsp */
+    kf_next_sp(top);
+    expect(nt(VIBEOS_NT_NR_NtRaiseException, rec, ctx, 1, 0, 0) == ST(VIBEOS_STATUS_SUCCESS), "a first chance");
+    f = kf_last_frame();
+    expect(f->ip == entry && f->rcx == 2u && f->arg2 < top && f->other[0] < f->arg2 && (f->sp & 0xFu) == 8u,
+           "into ntdll's entry with rcx 2, the context in rdx and the record below it in r8");
+    expect(kf_peek(f->other[0], &v, 4) == 0 && (uint32_t)v == 0xE0000042u &&
+               kf_peek(f->arg2 + 0x98, &v, 8) == 0 && v == top,
+           "the record and context are the ones raised");
+    *(uint32_t *)((uint8_t *)kf_uptr(rec) + 0x18) = 16;
+    kf_next_sp(top);
+    expect(nt(VIBEOS_NT_NR_NtRaiseException, rec, ctx, 1, 0, 0) == ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "more than fifteen parameters is no record");
+    *(uint32_t *)((uint8_t *)kf_uptr(rec) + 0x18) = 0;
+    kf_next_sp(top);
+    (void)nt(VIBEOS_NT_NR_NtRaiseException, rec, ctx, 0, 0, &how);
+    expect(how == KF_EXITED && kf_exit_was_group() && kf_exit_code() == 0xE0000042u,
+           "a second chance ends the process with the exception's code");
+}
+
+static long create_section(uint64_t *h, uint32_t attributes, uint64_t file) {
+    uint64_t out = kf_ualloc(8);
+    uint64_t rest[3] = { 0x02u /* PAGE_READONLY */, attributes, file };
+    long r;
+
+    kf_next_sp(stack_args(rest, 3));
+    r = nt(VIBEOS_NT_NR_NtCreateSection, out, 0x000F001Fu, 0, 0, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+#ifdef VIBEOS_PE_FIXTURE_DIR
+/* Only the fixture's part of t_sections maps a view: without mingw-w64 there is
+ * no image to map, and the helper would be defined for nothing. */
+static long map_view(uint64_t sec, uint64_t process, uint64_t *base, uint64_t *size) {
+    uint64_t b = kf_ualloc(8), s = kf_ualloc(8);
+    uint64_t rest[6] = { 0, 0, s, 1, 0, 0x02u };
+
+    *(uint64_t *)kf_uptr(b) = 0;
+    kf_next_sp(stack_args(rest, 6));
+    {
+        long r = nt(VIBEOS_NT_NR_NtMapViewOfSection, sec, process, b, 0, 0);
+        *base = *(uint64_t *)kf_uptr(b);
+        *size = *(uint64_t *)kf_uptr(s);
+        return r;
+    }
+}
+#endif
+
+static void t_sections(void) {
+    uint64_t fh, sh;
+
+    fresh(42);
+    kf_fs_add("/win", 0, 0, 1);
+    kf_fs_add("/win/text.txt", "not an image", 12, 0);
+    expect(open_file(&fh, 0x00120089u, "\\??\\C:\\win\\nothing.dll") ==
+               ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND), "a file that is not there");
+    expect(open_file(&fh, 0x00120089u, "\\??\\D:\\win\\text.txt") ==
+               ST(VIBEOS_STATUS_OBJECT_PATH_NOT_FOUND), "a drive that is not there");
+    expect(open_file(&fh, 0x00120089u, "C:\\win\\text.txt") ==
+               ST(VIBEOS_STATUS_OBJECT_PATH_SYNTAX_BAD), "a DOS path is not an NT path");
+    expect(open_file(&fh, 0x00120089u, "\\BaseNamedObjects\\text.txt") ==
+               ST(VIBEOS_STATUS_OBJECT_PATH_SYNTAX_BAD),
+           "an NT path outside \\??\\ names no file W2 can open");
+    expect(open_file(&fh, VIBEOS_GENERIC_WRITE, "\\??\\C:\\win\\text.txt") == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, fh, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a file opened to write (W4)");
+    expect(open_file(&fh, 0x00120089u, "\\??\\C:\\win\\text.txt") == ST(VIBEOS_STATUS_SUCCESS) &&
+           fh >= 16u, "a file opened to read, by its NT path");
+    expect(create_section(&sh, 0x08000000u /* SEC_COMMIT */, fh) == ST(VIBEOS_STATUS_SUCCESS) &&
+               nt(VIBEOS_NT_NR_NtClose, sh, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a data section of a file, read-only (W3; t_data_sections has the rest)");
+    expect(create_section(&sh, 0x01000000u, fh) == ST(VIBEOS_STATUS_INVALID_IMAGE_FORMAT),
+           "an image section of a file that is no image is refused at creation");
+    expect(create_section(&sh, 0x01000000u, 8) == ST(VIBEOS_STATUS_OBJECT_TYPE_MISMATCH),
+           "the console is not a file to map");
+#ifdef VIBEOS_PE_FIXTURE_DIR
+    {
+        uint64_t base = 0, size = 0;
+        char path[512];
+        FILE *f;
+        static uint8_t img[1u << 17];
+        size_t n;
+
+        snprintf(path, sizeof(path), "%s/pe_fixture.exe", VIBEOS_PE_FIXTURE_DIR);
+        f = fopen(path, "rb");
+        n = f ? fread(img, 1, sizeof(img), f) : 0;
+        if (f) {
+            fclose(f);
+        }
+        expect(n > 0u, "the mingw fixture is there to map");
+        kf_fs_add("/win/fx.dll", img, (uint32_t)n, 0);
+        {
+            long ro = open_file(&fh, 0x00120089u, "\\??\\C:\\win\\fx.dll");
+            long rc = create_section(&sh, 0x01000000u, fh);
+            if (ro != ST(VIBEOS_STATUS_SUCCESS) || rc != ST(VIBEOS_STATUS_SUCCESS)) {
+                printf("nt_abi: open %lx section %lx (fixture %zu bytes)\n", ro, rc, n);
+            }
+            expect(ro == ST(VIBEOS_STATUS_SUCCESS) && rc == ST(VIBEOS_STATUS_SUCCESS),
+                   "an image section over mingw's image");
+        }
+        expect(nt(VIBEOS_NT_NR_NtClose, fh, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+               "the file's handle can go: the section holds the file");
+        expect(map_view(sh, VIBEOS_NT_CURRENT_PROCESS, &base, &size) == ST(0x40000003u) &&
+                   base >= 0x8003000000ull && size >= 0x6000u && (base & 0xFFFFu) == 0u,
+               "mapped where it can be, said moved, at a 64 KiB boundary");
+        expect(map_view(sh, 4, &base, &size) == ST(VIBEOS_STATUS_INVALID_HANDLE),
+               "into another process: W6's");
+        expect(nt(VIBEOS_NT_NR_NtClose, sh, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+               "and the section closes");
+
+        /* Another file at the name between the section and the map (M-106):
+         * the kernel reads images by path, and must not read that one. The old
+         * file goes, something else takes its slot, and a new file is put at
+         * the name - a different node behind the same path. */
+        {
+            uint64_t fh2 = 0, sh2 = 0, fh3 = 0, sh3 = 0;
+
+            expect(open_file(&fh2, 0x00120089u, "\\??\\C:\\win\\fx.dll") == ST(VIBEOS_STATUS_SUCCESS) &&
+                       create_section(&sh2, 0x01000000u, fh2) == ST(VIBEOS_STATUS_SUCCESS) &&
+                       open_file(&fh3, 0x00120089u, "\\??\\C:\\win\\fx.dll") == ST(VIBEOS_STATUS_SUCCESS),
+                   "a section of the image, and a second handle to it");
+            expect(lsys(87 /* unlink */, lstr("/win/fx.dll"), 0, 0) == 0, "the image is unlinked");
+            kf_fs_add("/win/filler", "x", 1, 0);
+            kf_fs_add("/win/fx.dll", img, (uint32_t)n, 0);
+            expect(map_view(sh2, VIBEOS_NT_CURRENT_PROCESS, &base, &size) ==
+                       ST(VIBEOS_STATUS_FILE_RENAMED),
+                   "a section whose name now names another file is not mapped from it");
+            expect(create_section(&sh3, 0x01000000u, fh3) == ST(VIBEOS_STATUS_FILE_RENAMED),
+                   "nor is a section made of it through a handle to the old one");
+        }
+    }
+#endif
+}
+
+static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint64_t rd64(const uint8_t *p) {
+    uint64_t v = 0;
+    int i;
+    for (i = 7; i >= 0; i--) {
+        v = (v << 8) | p[i];
+    }
+    return v;
+}
+
+/* The UNICODE_STRING at block offset `field`, compared with `ascii`. */
+static int ustr_is(uint8_t *const *pages, uint64_t base, uint32_t field, const char *ascii) {
+    uint8_t *blk = pages[field / 4096u] + field % 4096u;
+    uint16_t len = rd16(blk + VIBEOS_USTR_LENGTH);
+    uint64_t at = rd64(blk + VIBEOS_USTR_BUFFER) - base;
+    uint32_t i;
+
+    if (len != 2u * strlen(ascii) || rd16(blk + VIBEOS_USTR_MAXIMUM) != len + 2u) {
+        return 0;
+    }
+    for (i = 0; i < len / 2u; i++) {
+        uint32_t o = (uint32_t)at + 2u * i;
+        if (rd16(pages[o / 4096u] + o % 4096u) != (uint8_t)ascii[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void t_blocks(void) {
+    static uint8_t mem[VIBEOS_NT_BLOCK_PAGES][4096];
+    uint8_t *pages[VIBEOS_NT_BLOCK_PAGES];
+    const char *argv[] = { "C:\\a b.exe", "x", 0 };
+    /* Larger than the room the parameters' two pages leave, by less than a
+     * page: a bound that is off by a page must not accept it. */
+    static char longarg[4001];
+    const char *big[] = { longarg, 0 };
+    const uint64_t base = 0x8003FF0000ull;
+    vibeos_nt_start_t s;
+    uint8_t *teb, *peb, *rupp;
+    uint32_t i;
+
+    for (i = 0; i < VIBEOS_NT_BLOCK_PAGES; i++) {
+        pages[i] = mem[i];
+    }
+    memset(mem, 0, sizeof(mem));
+    memset(&s, 0, sizeof(s));
+    s.image_base = 0x8000000000ull;
+    s.stack_base = 0x8000400000ull;
+    s.stack_limit = 0x8000201000ull;
+    s.pid = 7;
+    s.tid = 8;
+    s.processors = 4;
+    s.std_handle[0] = 4;
+    s.std_handle[1] = 8;
+    s.std_handle[2] = 12;
+    s.image_path = "/win/hello.exe";
+    s.argv = argv;
+    expect(vibeos_nt_build_blocks(pages, base, &s) == 0, "the blocks are built");
+    teb = mem[VIBEOS_NT_BLOCK_TEB / 4096u];
+    peb = mem[VIBEOS_NT_BLOCK_PEB / 4096u];
+    rupp = mem[VIBEOS_NT_BLOCK_PARAMS / 4096u];
+    expect(rd64(teb + VIBEOS_TEB_SELF) == base + VIBEOS_NT_BLOCK_TEB &&
+           rd64(teb + VIBEOS_TEB_PEB) == base + VIBEOS_NT_BLOCK_PEB &&
+           rd64(teb + VIBEOS_TEB_STACK_BASE) == s.stack_base &&
+           rd64(teb + VIBEOS_TEB_CLIENT_PROCESS) == 7u && rd64(teb + VIBEOS_TEB_CLIENT_THREAD) == 8u,
+           "the TEB: itself, the PEB, the stack, who it is");
+    expect(rd64(peb + VIBEOS_PEB_IMAGE_BASE) == s.image_base &&
+           rd64(peb + VIBEOS_PEB_PROCESS_PARAMS) == base + VIBEOS_NT_BLOCK_PARAMS &&
+           rd16(peb + VIBEOS_PEB_OS_BUILD) == 19045u &&
+           rd16(peb + VIBEOS_PEB_SESSION_ID) == 1u && rd16(peb + VIBEOS_PEB_SESSION_ID + 2u) == 0u,
+           "the PEB: the program, the parameters, Windows 10, session 1");
+    expect(rd64(rupp + VIBEOS_RUPP_STD_INPUT) == 4u && rd64(rupp + VIBEOS_RUPP_STD_OUTPUT) == 8u &&
+           rd64(rupp + VIBEOS_RUPP_STD_ERROR) == 12u, "the standard handles");
+    expect(ustr_is(pages, base, VIBEOS_NT_BLOCK_PARAMS + VIBEOS_RUPP_IMAGE_PATH, "/win/hello.exe"),
+           "the image path, in UTF-16");
+    expect(ustr_is(pages, base, VIBEOS_NT_BLOCK_PARAMS + VIBEOS_RUPP_COMMAND_LINE,
+                   "\"C:\\a b.exe\" x"),
+           "the command line: arguments joined, the one with a space quoted");
+    memset(longarg, 'a', sizeof(longarg) - 1u);
+    s.argv = big;
+    expect(vibeos_nt_build_blocks(pages, base, &s) != 0,
+           "arguments larger than the parameters' pages are refused");
+}
+
+/* ---- virtual memory (W3 step 2) ------------------------------------------------ */
+
+static long valloc(uint64_t *base, uint64_t *size, uint64_t zero_bits, uint32_t type,
+                   uint32_t prot) {
+    uint64_t b = kf_ualloc(8), s = kf_ualloc(8);
+    uint64_t rest[2] = { type, prot };
+    long r;
+
+    *(uint64_t *)kf_uptr(b) = *base;
+    *(uint64_t *)kf_uptr(s) = *size;
+    kf_next_sp(stack_args(rest, 2));
+    r = nt(VIBEOS_NT_NR_NtAllocateVirtualMemory, VIBEOS_NT_CURRENT_PROCESS, b, zero_bits, s, 0);
+    *base = *(uint64_t *)kf_uptr(b);
+    *size = *(uint64_t *)kf_uptr(s);
+    return r;
+}
+
+static long vfree(uint64_t *base, uint64_t *size, uint32_t type) {
+    uint64_t b = kf_ualloc(8), s = kf_ualloc(8);
+    long r;
+
+    *(uint64_t *)kf_uptr(b) = *base;
+    *(uint64_t *)kf_uptr(s) = *size;
+    r = nt(VIBEOS_NT_NR_NtFreeVirtualMemory, VIBEOS_NT_CURRENT_PROCESS, b, s, type, 0);
+    *base = *(uint64_t *)kf_uptr(b);
+    *size = *(uint64_t *)kf_uptr(s);
+    return r;
+}
+
+static long vprotect(uint64_t base, uint64_t size, uint32_t prot, uint32_t *old) {
+    uint64_t b = kf_ualloc(8), s = kf_ualloc(8), o = kf_ualloc(8);
+    uint64_t rest[1] = { o };
+    long r;
+
+    *(uint64_t *)kf_uptr(b) = base;
+    *(uint64_t *)kf_uptr(s) = size;
+    *(uint32_t *)kf_uptr(o) = 0xEEEEu;
+    kf_next_sp(stack_args(rest, 1));
+    r = nt(VIBEOS_NT_NR_NtProtectVirtualMemory, VIBEOS_NT_CURRENT_PROCESS, b, s, prot, 0);
+    *old = *(uint32_t *)kf_uptr(o);
+    return r;
+}
+
+static long vquery(uint64_t va, uint32_t cls, uint64_t len, vibeos_nt_memory_basic_t *mbi) {
+    uint64_t buf = kf_ualloc(64), got = kf_ualloc(8);
+    uint64_t rest[2] = { len, got };
+    long r;
+
+    memset(kf_uptr(buf), 0xA5, 64);
+    kf_next_sp(stack_args(rest, 2));
+    r = nt(VIBEOS_NT_NR_NtQueryVirtualMemory, VIBEOS_NT_CURRENT_PROCESS, va, cls, buf, 0);
+    memcpy(mbi, kf_uptr(buf), sizeof(*mbi));
+    if (r == ST(VIBEOS_STATUS_SUCCESS) && *(uint64_t *)kf_uptr(got) != sizeof(*mbi)) {
+        return -1;   /* the length written is the structure's */
+    }
+    return r;
+}
+
+
+/* NtRead/WriteVirtualMemory and NtWriteVirtualMemory(ProcessHandle, BaseAddress, Buffer, Size,
+ * NumberOfBytes): `buf` is the caller's, `n` how many it says were moved. */
+static long vm_rw(uint32_t nr, uint64_t h, uint64_t va, uint64_t buf, uint64_t size, uint64_t *n) {
+    uint64_t got = kf_ualloc(8);
+    uint64_t rest[1] = { got };
+    long r;
+
+    *(uint64_t *)kf_uptr(got) = 0xA5A5u;
+    kf_next_sp(stack_args(rest, 1));
+    r = nt(nr, h, va, buf, size, 0);
+    *n = *(uint64_t *)kf_uptr(got);
+    return r;
+}
+
+/* Another process's memory (docs/abi/windows.md W7 step 1): allocated,
+ * written, read, protected and asked about through a process handle, each
+ * with the right Windows asks for, and the other process sees what was
+ * written in its own address space. */
+static void t_remote_memory(void) {
+    const uint32_t ops = 0x0008u | 0x0010u | 0x0020u | 0x0400u;   /* VM_OPERATION, _READ, _WRITE, QUERY */
+    uint64_t cid = kf_ualloc(16), out = kf_ualloc(8), b = kf_ualloc(8), s = kf_ualloc(8);
+    uint64_t buf = kf_ualloc(0x1800), h, ro, base, n = 0, rest[3];
+    uint8_t *p = (uint8_t *)kf_uptr(buf), y = 0;
+    vibeos_nt_memory_basic_t mbi;
+    uint32_t i;
+    int me = fresh(60), other = kf_spawn(61, 61);
+
+    ((uint64_t *)kf_uptr(cid))[0] = 61u;
+    ((uint64_t *)kf_uptr(cid))[1] = 0u;
+    expect(nt(VIBEOS_NT_NR_NtOpenProcess, out, ops, 0, cid, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a handle to another process with the memory rights");
+    h = *(uint64_t *)kf_uptr(out);
+    expect(nt(VIBEOS_NT_NR_NtOpenProcess, out, 0x0010u, 0, cid, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "and one that may only read");
+    ro = *(uint64_t *)kf_uptr(out);
+
+    *(uint64_t *)kf_uptr(b) = 0;
+    *(uint64_t *)kf_uptr(s) = 0x3000;
+    rest[0] = VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT;
+    rest[1] = VIBEOS_NT_PAGE_READWRITE;
+    kf_next_sp(stack_args(rest, 2));
+    expect(nt(VIBEOS_NT_NR_NtAllocateVirtualMemory, h, b, 0, s, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "NtAllocateVirtualMemory in the other process");
+    base = *(uint64_t *)kf_uptr(b);
+    expect(vibeos_vma_find(&ks_ps(other)->mm->vmas, base) != 0 &&
+               vibeos_vma_find(&ks_ps(me)->mm->vmas, base) == 0,
+           "the allocation is the other's, not the caller's");
+
+    for (i = 0; i < 0x1800u; i++) {
+        p[i] = (uint8_t)(i * 7u + 1u);
+    }
+    expect(vm_rw(VIBEOS_NT_NR_NtWriteVirtualMemory, h, base + 0x800u, buf, 0x1800u, &n) ==
+               ST(VIBEOS_STATUS_SUCCESS) && n == 0x1800u,
+           "NtWriteVirtualMemory across a page boundary, into pages nobody had touched");
+    kf_set_current(other);
+    expect(kf_peek(base + 0x800u + 0x1234u, &y, 1) == 0 && y == (uint8_t)(0x1234u * 7u + 1u),
+           "the other process reads what was written, in its own address space");
+    y = 0xEE;
+    expect(kf_poke(base + 0x10u, &y, 1) == 0, "and stores a byte of its own");
+    kf_set_current(me);
+    /* A region its inserter mapped - exec's first stack pages - is PRESENT, not
+     * DEMAND, and is committed all the same: refusing it refused a process's
+     * own main stack (WO-099). The page is touched already, so making it
+     * PRESENT is what exec leaves. */
+    expect(vibeos_vma_change(&ks_ps(other)->mm->vmas, base, 0x1000u, VIBEOS_VMA_CHANGE_STATE, 0, 0,
+                             VIBEOS_VMA_PRESENT) == 0 &&
+               vm_rw(VIBEOS_NT_NR_NtWriteVirtualMemory, h, base + 0x40u, buf, 16u, &n) ==
+                   ST(VIBEOS_STATUS_SUCCESS) && n == 16u,
+           "NtWriteVirtualMemory into a PRESENT region, as a main stack is");
+    memset(p, 0, 0x1800u);
+    expect(vm_rw(VIBEOS_NT_NR_NtReadVirtualMemory, ro, base, buf, 0x1800u, &n) ==
+               ST(VIBEOS_STATUS_SUCCESS) && n == 0x1800u && p[0x10] == 0xEE &&
+               p[0x800 + 3] == (uint8_t)(3u * 7u + 1u),
+           "NtReadVirtualMemory with a handle that may only read");
+    expect(vm_rw(VIBEOS_NT_NR_NtWriteVirtualMemory, ro, base, buf, 16u, &n) ==
+               ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "and NtWriteVirtualMemory through it is ACCESS_DENIED");
+
+    {
+        uint64_t old = kf_ualloc(4), q = kf_ualloc(8), qs = kf_ualloc(8);
+
+        *(uint64_t *)kf_uptr(q) = base + 0x2000u;
+        *(uint64_t *)kf_uptr(qs) = 0x1000u;
+        rest[0] = old;
+        kf_next_sp(stack_args(rest, 1));
+        expect(nt(VIBEOS_NT_NR_NtProtectVirtualMemory, h, q, qs, VIBEOS_NT_PAGE_READONLY, 0) ==
+                   ST(VIBEOS_STATUS_SUCCESS) && *(uint32_t *)kf_uptr(old) == VIBEOS_NT_PAGE_READWRITE,
+               "NtProtectVirtualMemory in the other process");
+    }
+    expect(vm_rw(VIBEOS_NT_NR_NtWriteVirtualMemory, h, base + 0x1F00u, buf, 0x200u, &n) ==
+               ST(VIBEOS_STATUS_PARTIAL_COPY) && n == 0x100u,
+           "a write into its read-only page is a partial copy, the bytes before it counted");
+    expect(vm_rw(VIBEOS_NT_NR_NtReadVirtualMemory, h, base + 0x2F00u, buf, 0x200u, &n) ==
+               ST(VIBEOS_STATUS_PARTIAL_COPY) && n == 0x100u,
+           "a read past the allocation is a partial copy too");
+    {
+        uint64_t mb = kf_ualloc(64), got = kf_ualloc(8);
+        uint64_t qr[2] = { sizeof(mbi), got };
+
+        kf_next_sp(stack_args(qr, 2));
+        expect(nt(VIBEOS_NT_NR_NtQueryVirtualMemory, h, base + 0x2000u, 0, mb, 0) ==
+                   ST(VIBEOS_STATUS_SUCCESS),
+               "NtQueryVirtualMemory in the other process");
+        memcpy(&mbi, kf_uptr(mb), sizeof(mbi));
+        expect(mbi.allocation_base == base && mbi.protect == VIBEOS_NT_PAGE_READONLY &&
+                   mbi.state == VIBEOS_NT_MEM_COMMIT,
+               "and it describes the other's allocation, as it was changed");
+        kf_next_sp(stack_args(qr, 2));
+        expect(nt(VIBEOS_NT_NR_NtQueryVirtualMemory, ro, base, 0, mb, 0) ==
+                   ST(VIBEOS_STATUS_ACCESS_DENIED),
+               "but not through a handle without PROCESS_QUERY_INFORMATION");
+    }
+    *(uint64_t *)kf_uptr(b) = base;
+    *(uint64_t *)kf_uptr(s) = 0;
+    expect(nt(VIBEOS_NT_NR_NtFreeVirtualMemory, h, b, s, VIBEOS_NT_MEM_RELEASE, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) && vibeos_vma_find(&ks_ps(other)->mm->vmas, base) == 0,
+           "NtFreeVirtualMemory releases it there");
+    expect(g_kf_aspace_pins == 0, "and every address space held for a call was let go");
+}
+
+/* ---- the registry (W8 step 3) ------------------------------------------------------- */
+
+void nt_reg_restart(void);   /* key.c: the registry as a reboot leaves it */
+
+/* A UNICODE_STRING of `ascii` in the program's memory. */
+static uint64_t ustr(const char *ascii) {
+    uint32_t n = (uint32_t)strlen(ascii), i;
+    uint64_t us = kf_ualloc(VIBEOS_USTR_SIZE), buf = kf_ualloc(2u * n + 2u);
+    uint8_t *u = (uint8_t *)kf_uptr(us);
+    uint16_t *w = (uint16_t *)kf_uptr(buf);
+
+    for (i = 0; i < n; i++) {
+        w[i] = (uint8_t)ascii[i];
+    }
+    *(uint16_t *)(u + VIBEOS_USTR_LENGTH) = (uint16_t)(2u * n);
+    *(uint16_t *)(u + VIBEOS_USTR_MAXIMUM) = (uint16_t)(2u * n + 2u);
+    *(uint64_t *)(u + VIBEOS_USTR_BUFFER) = buf;
+    return us;
+}
+
+/* NtCreateKey: the handle, and the disposition. */
+static long create_key(uint64_t *h, uint32_t access, uint64_t root, const char *path, uint32_t options,
+                       uint32_t *disp) {
+    uint64_t out = kf_ualloc(8), d = kf_ualloc(4), oa = oattr(path, VIBEOS_OBJ_CASE_INSENSITIVE);
+    uint64_t rest[3] = { 0, options, d };
+    long r;
+
+    *(uint64_t *)kf_uptr(oa + VIBEOS_OA_ROOT_DIRECTORY) = root;
+    *(uint32_t *)kf_uptr(d) = 0xEEEEu;
+    kf_next_sp(stack_args(rest, 3));
+    r = nt(VIBEOS_NT_NR_NtCreateKey, out, access, oa, 0, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    if (disp) {
+        *disp = *(uint32_t *)kf_uptr(d);
+    }
+    return r;
+}
+
+static long open_key(uint64_t *h, uint32_t access, uint64_t root, const char *path) {
+    uint64_t out = kf_ualloc(8), oa = oattr(path, VIBEOS_OBJ_CASE_INSENSITIVE);
+    long r;
+
+    *(uint64_t *)kf_uptr(oa + VIBEOS_OA_ROOT_DIRECTORY) = root;
+    r = nt(VIBEOS_NT_NR_NtOpenKey, out, access, oa, 0, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+static long set_value(uint64_t h, const char *name, uint32_t type, const void *data, uint32_t len) {
+    uint64_t d = kf_ualloc(len ? len : 1u);
+    uint64_t rest[2] = { d, len };
+
+    memcpy(kf_uptr(d), data, len);
+    kf_next_sp(stack_args(rest, 2));
+    return nt(VIBEOS_NT_NR_NtSetValueKey, h, ustr(name), 0, type, 0);
+}
+
+/* NtQueryValueKey of class `cls` into `buf` (`len` bytes): the status, with
+ * ResultLength in *got. */
+static long query_value(uint64_t h, const char *name, uint32_t cls, uint64_t buf, uint32_t len,
+                        uint32_t *got) {
+    uint64_t rl = kf_ualloc(4);
+    uint64_t rest[2] = { len, rl };
+    long r;
+
+    *(uint32_t *)kf_uptr(rl) = 0xEEEEu;
+    kf_next_sp(stack_args(rest, 2));
+    r = nt(VIBEOS_NT_NR_NtQueryValueKey, h, ustr(name), cls, buf, 0);
+    *got = *(uint32_t *)kf_uptr(rl);
+    return r;
+}
+
+static long query_key(uint64_t h, uint32_t cls, uint64_t buf, uint32_t len, uint32_t *got) {
+    uint64_t rl = kf_ualloc(4);
+    uint64_t rest[1] = { rl };
+    long r;
+
+    kf_next_sp(stack_args(rest, 1));
+    r = nt(VIBEOS_NT_NR_NtQueryKey, h, cls, buf, len, 0);
+    *got = *(uint32_t *)kf_uptr(rl);
+    return r;
+}
+
+static int wide_is(const uint8_t *b, uint32_t bytes, const char *s) {
+    uint32_t i;
+
+    if (bytes != 2u * strlen(s)) {
+        return 0;
+    }
+    for (i = 0; s[i]; i++) {
+        if (b[2u * i] != (uint8_t)s[i] || b[2u * i + 1u] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Who may open a process (v8 review, H-040): any mask was granted to any
+ * caller, and a handle writes the process's memory and runs a thread in it.
+ * Now Linux's ptrace rule: an unprivileged caller opens only a process all of
+ * whose ids are its own; the superuser opens any. */
+static long open_pid(uint32_t pid, uint64_t *h) {
+    uint64_t cid = kf_ualloc(16), out = kf_ualloc(8);
+    long r;
+
+    ((uint64_t *)kf_uptr(cid))[0] = pid;
+    ((uint64_t *)kf_uptr(cid))[1] = 0u;
+    r = nt(VIBEOS_NT_NR_NtOpenProcess, out, 0x001FFFFFu /* PROCESS_ALL_ACCESS */, 0, cid, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+static void t_open_process_cred(void) {
+    uint64_t h = 0;
+    int me = fresh(70), root = kf_spawn(71, 71), mine = kf_spawn(72, 72), setuid = kf_spawn(73, 73);
+    vibeos_cred_t user;
+
+    vibeos_cred_root(&user);
+    user.uid = user.euid = user.suid = user.fsuid = 1000u;
+    user.gid = user.egid = user.sgid = user.fsgid = 1000u;
+    ks_ps(me)->cred = user;
+    ks_ps(mine)->cred = user;
+    ks_ps(setuid)->cred = user;
+    ks_ps(setuid)->cred.suid = 0u;   /* a setuid program that kept root in its saved id */
+    (void)root;   /* root's credentials: the fake's default */
+    expect(open_pid(71, &h) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "an unprivileged process cannot open a root process");
+    expect(open_pid(73, &h) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "nor one of its own uid that keeps root as its saved id");
+    expect(open_pid(72, &h) == ST(VIBEOS_STATUS_SUCCESS),
+           "it opens a process whose ids are all its own");
+    kf_set_current(root);
+    expect(open_pid(72, &h) == ST(VIBEOS_STATUS_SUCCESS), "and the superuser opens anybody's");
+}
+
+/* Who may change a key (v8 review, M-137): a handle that names a parent must
+ * hold KEY_CREATE_SUB_KEY for a key to be made under it, and machine keys are
+ * the superuser's to change - anybody else reads them. */
+static void t_reg_rights(void) {
+    uint64_t ro, k, max;
+    uint32_t disp = 0, one = 1u;
+    int me = fresh(66);
+
+    nt_reg_restart();
+    expect(open_key(&ro, 0x00020019u /* KEY_READ */, 0, "\\Registry\\Machine\\SOFTWARE") ==
+               ST(VIBEOS_STATUS_SUCCESS),
+           "a key opened to read");
+    expect(create_key(&k, 0x000F003Fu, ro, "MadeThroughRead", 0, &disp) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "makes no subkey through a handle without KEY_CREATE_SUB_KEY");
+    ks_ps(me)->cred.uid = ks_ps(me)->cred.euid = 1000u;
+    expect(open_key(&k, 0x000F003Fu, 0, "\\Registry\\Machine\\SOFTWARE") == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "an unprivileged caller cannot open a machine key to change it");
+    expect(open_key(&max, VIBEOS_MAXIMUM_ALLOWED, 0, "\\Registry\\Machine\\SOFTWARE") ==
+               ST(VIBEOS_STATUS_SUCCESS) &&
+               set_value(max, "x", 4u, &one, 4u) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "MAXIMUM_ALLOWED gives it a handle that reads and does not write");
+    /* Asked to read, so the handle's own refusal cannot stand in for the
+     * creation's: the key must not exist afterwards. */
+    expect(create_key(&k, 0x00020019u, 0, "\\Registry\\Machine\\SOFTWARE\\UserMade", 0, &disp) ==
+               ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+               open_key(&k, 0x00020019u, 0, "\\Registry\\Machine\\SOFTWARE\\UserMade") ==
+                   ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND),
+           "nor make a machine key");
+    expect(create_key(&k, 0x000F003Fu, 0, "\\Registry\\User\\.Default\\UserMade", 0, &disp) ==
+               ST(VIBEOS_STATUS_SUCCESS) && disp == 1u,
+           "and makes its own under the user's hive");
+}
+
+/* NtTerminateProcess of a process whose leader has ended while a thread runs
+ * (v8 review, M-136): the kill went to the leader's slot, a zombie took it,
+ * and the process went on reported terminated. It reaches the live thread. */
+static void t_terminate_zombie_leader(void) {
+    uint64_t h = 0;
+    int me = fresh(80), leader = kf_spawn(81, 81), thread = kf_spawn(82, 81);
+
+    (void)me;
+    ks_id(thread)->tgid = 81u;
+    ks_id(thread)->is_thread = 1;
+    ks_set_ps(thread, ks_ps(leader));
+    expect(open_pid(81, &h) == ST(VIBEOS_STATUS_SUCCESS), "a handle to the process");
+    expect(ks_set_state(leader, VIBEOS_TASK_ZOMBIE, "test") == 0, "whose leader has ended");
+    expect(nt(VIBEOS_NT_NR_NtTerminateProcess, h, 5, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               (ks_id(thread)->sig_pending & (1ull << VIBEOS_SIGKILL)) != 0u,
+           "NtTerminateProcess kills its live thread, not the leader's zombie slot");
+}
+
+/* A key opened with the handle table full (v8 review, H-041): the install
+ * fails, the description goes with the key's reference, and its release ran
+ * under the registry lock key_open already held - a self-deadlock on the
+ * machine, a re-entry counted here. Then the registry still answers. */
+static void t_reg_full_table(void) {
+    uint64_t h = 0, last = 0;
+    long r = ST(VIBEOS_STATUS_SUCCESS);
+    int me = fresh(65), before;
+    uint32_t i;
+
+    nt_reg_restart();
+    ks_ps(me)->files.limit = 16u;   /* RLIMIT_NOFILE: the table is full sooner */
+    before = g_kf_lock_reentry;
+    for (i = 0; i < 64u && r == ST(VIBEOS_STATUS_SUCCESS); i++) {
+        r = open_key(&h, 0x000F003Fu, 0, "\\Registry\\Machine\\SOFTWARE");
+        if (r == ST(VIBEOS_STATUS_SUCCESS)) {
+            last = h;
+        }
+    }
+    expect(r != ST(VIBEOS_STATUS_SUCCESS) && i < 64u, "a key opened with the handle table full is refused");
+    expect(g_kf_lock_reentry == before, "without its release taking the registry's lock a second time");
+    (void)nt(VIBEOS_NT_NR_NtClose, last, 0, 0, 0, 0);
+    expect(open_key(&h, 0x000F003Fu, 0, "\\Registry\\Machine\\SOFTWARE") == ST(VIBEOS_STATUS_SUCCESS),
+           "and with a handle closed, the registry opens a key again");
+}
+
+static void t_reg_keys(void) {
+    uint64_t sw, k, k2, ro, buf = kf_ualloc(256);
+    const uint8_t *b = (const uint8_t *)kf_uptr(buf);
+    uint32_t disp = 0, got = 0, forty_two = 42u;
+    static uint8_t hive[8192];   /* the whole file: read_file refuses a buffer shorter than it */
+
+    fresh(64);
+    nt_reg_restart();
+    expect(open_key(&sw, 0x000F003Fu, 0, "\\Registry\\Machine\\SOFTWARE") == ST(VIBEOS_STATUS_SUCCESS),
+           "the registry starts with HKLM\\SOFTWARE");
+    expect(create_key(&k, 0x000F003Fu, 0, "\\REGISTRY\\machine\\Software\\VibeTest", 0, &disp) ==
+               ST(VIBEOS_STATUS_SUCCESS) && disp == 1u,
+           "NtCreateKey makes a key by its whole path, REG_CREATED_NEW_KEY");
+    expect(create_key(&k2, 0x000F003Fu, sw, "vibetest", 0, &disp) == ST(VIBEOS_STATUS_SUCCESS) &&
+               disp == 2u,
+           "and made again under a root handle, in another case, REG_OPENED_EXISTING_KEY");
+    (void)nt(VIBEOS_NT_NR_NtClose, k2, 0, 0, 0, 0);
+    expect(open_key(&k2, 0x20019u, sw, "\\VibeTest") == ST(VIBEOS_STATUS_OBJECT_PATH_SYNTAX_BAD) &&
+               open_key(&k2, 0x20019u, 0, "Machine") == ST(VIBEOS_STATUS_OBJECT_PATH_SYNTAX_BAD) &&
+               open_key(&k2, 0x20019u, 0, "\\BaseNamedObjects\\x") == ST(VIBEOS_STATUS_OBJECT_TYPE_MISMATCH),
+           "a rooted path under a root, a relative one without, another namespace: refused");
+    expect(open_key(&k2, 0x20019u, 0, "\\Reg\\Machine") == ST(VIBEOS_STATUS_OBJECT_TYPE_MISMATCH),
+           "and a path that only begins like \\Registry is not the registry");
+    expect(set_value(k, "Answer", VIBEOS_REG_DWORD, &forty_two, 4) == ST(VIBEOS_STATUS_SUCCESS),
+           "NtSetValueKey");
+    expect(query_value(k, "ANSWER", 2, buf, 256, &got) == ST(VIBEOS_STATUS_SUCCESS) && got == 16u &&
+               *(const uint32_t *)(b + 4) == VIBEOS_REG_DWORD && *(const uint32_t *)(b + 8) == 4u &&
+               *(const uint32_t *)(b + 12) == 42u,
+           "KeyValuePartialInformation: type, length, data, found without case");
+    expect(query_value(k, "Answer", 1, buf, 256, &got) == ST(VIBEOS_STATUS_SUCCESS) && got == 36u &&
+               *(const uint32_t *)(b + 8) == 32u && *(const uint32_t *)(b + 16) == 12u &&
+               wide_is(b + 20, 12u, "Answer") && *(const uint32_t *)(b + 32) == 42u,
+           "KeyValueFullInformation: the data right after the name, as Wine places it");
+    expect(query_value(k, "Answer", 2, buf, 8, &got) == ST(VIBEOS_STATUS_BUFFER_TOO_SMALL) && got == 16u,
+           "shorter than the fixed part: BUFFER_TOO_SMALL, with the length needed");
+    expect(query_value(k, "Answer", 2, buf, 14, &got) == ST(VIBEOS_STATUS_BUFFER_OVERFLOW) && got == 16u,
+           "the fixed part and not all the data: BUFFER_OVERFLOW");
+    expect(query_value(k, "Nothing", 2, buf, 256, &got) == ST(VIBEOS_STATUS_OBJECT_NAME_NOT_FOUND),
+           "a value nobody set");
+    expect(query_key(k, 3, buf, 256, &got) == ST(VIBEOS_STATUS_SUCCESS) &&
+               wide_is(b + 4, *(const uint32_t *)b, "\\REGISTRY\\MACHINE\\SOFTWARE\\VibeTest"),
+           "KeyNameInformation is the whole path");
+    expect(query_key(k, 2, buf, 256, &got) == ST(VIBEOS_STATUS_SUCCESS) && got == 44u &&
+               *(const uint32_t *)(b + 32) == 1u && *(const uint32_t *)(b + 36) == 12u,
+           "KeyFullInformation counts the value and its longest name");
+    {
+        uint64_t rl = kf_ualloc(4);
+        uint64_t rest[2] = { 256, rl };
+        int found = 0;
+        uint32_t i;
+
+        for (i = 0; i < 16u; i++) {
+            kf_next_sp(stack_args(rest, 2));
+            if (nt(VIBEOS_NT_NR_NtEnumerateKey, sw, i, 0, buf, 0) != ST(VIBEOS_STATUS_SUCCESS)) {
+                break;
+            }
+            found |= wide_is(b + 16, *(const uint32_t *)(b + 12), "VibeTest");
+        }
+        expect(found, "NtEnumerateKey lists it under SOFTWARE");
+    }
+    expect(open_key(&ro, 0x20019u, 0, "\\Registry\\Machine\\Software\\VibeTest") == ST(VIBEOS_STATUS_SUCCESS) &&
+               set_value(ro, "X", VIBEOS_REG_DWORD, &forty_two, 4) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "a handle opened for reading may not set a value");
+    expect(nt(VIBEOS_NT_NR_NtDeleteKey, ro, 0, 0, 0, 0) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+           "nor delete the key");
+
+    /* What survives a reboot: the hive written by NtFlushKey, then the
+     * registry started again from it. */
+    /* A value set inside the second after a save is only pending: what writes
+     * it is NtFlushKey. The fake's clock does not move, so it stays pending. */
+    (void)set_value(k, "Fresh", VIBEOS_REG_DWORD, &forty_two, 4);
+    expect(nt(VIBEOS_NT_NR_NtFlushKey, k, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS), "NtFlushKey");
+    {
+        vibeos_fsmount_t *m;
+        const char *tail;
+        long n = -1;
+        int fresh_there = 0;
+
+        if (vibeos_fs_resolve("/windows/system32/config/MACHINE.HIV", &m, &tail) == 0) {
+            n = vibeos_fs_read_file(m, tail, hive, sizeof(hive));
+        }
+        for (long i = 0; n > 10 && i + 10 <= n; i++) {
+            fresh_there |= memcmp(hive + i, "F\0r\0e\0s\0h\0", 10) == 0;
+        }
+        expect(n > 0 && memcmp(hive, "VREG", 4) == 0, "and the machine's hive is on the volume");
+        expect(fresh_there, "with the value set just before the flush in it");
+    }
+    (void)nt(VIBEOS_NT_NR_NtClose, ro, 0, 0, 0, 0);
+    (void)nt(VIBEOS_NT_NR_NtClose, k, 0, 0, 0, 0);
+    (void)nt(VIBEOS_NT_NR_NtClose, sw, 0, 0, 0, 0);
+    nt_reg_restart();
+    expect(open_key(&k, 0x20019u, 0, "\\Registry\\Machine\\Software\\VibeTest") == ST(VIBEOS_STATUS_SUCCESS) &&
+               query_value(k, "Answer", 2, buf, 256, &got) == ST(VIBEOS_STATUS_SUCCESS) &&
+               *(const uint32_t *)(b + 12) == 42u,
+           "after a restart the key and its value are read back from the hive");
+    (void)nt(VIBEOS_NT_NR_NtClose, k, 0, 0, 0, 0);
+    {
+        /* The hive damaged: the backup is read instead. */
+        vibeos_fsmount_t *m;
+        const char *tail;
+        static const uint8_t junk[40] = { 'V', 'R', 'E', 'G', 1 };
+
+        (void)open_key(&k, 0x000F003Fu, 0, "\\Registry\\Machine\\Software\\VibeTest");
+        (void)set_value(k, "Second", VIBEOS_REG_DWORD, &forty_two, 4);
+        (void)nt(VIBEOS_NT_NR_NtFlushKey, k, 0, 0, 0, 0);   /* the first save is the backup now */
+        (void)nt(VIBEOS_NT_NR_NtClose, k, 0, 0, 0, 0);
+        if (vibeos_fs_resolve("/windows/system32/config/MACHINE.HIV", &m, &tail) == 0) {
+            (void)vibeos_fs_write_file(m, tail, junk, sizeof(junk));
+        }
+        nt_reg_restart();
+        expect(open_key(&k, 0x20019u, 0, "\\Registry\\Machine\\Software\\VibeTest") == ST(VIBEOS_STATUS_SUCCESS) &&
+                   query_value(k, "Answer", 2, buf, 256, &got) == ST(VIBEOS_STATUS_SUCCESS),
+               "a damaged hive is replaced by its backup");
+        (void)nt(VIBEOS_NT_NR_NtClose, k, 0, 0, 0, 0);
+    }
+    (void)open_key(&k, 0x000F003Fu, 0, "\\Registry\\Machine\\Software\\VibeTest");
+    expect(nt(VIBEOS_NT_NR_NtDeleteKey, k, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               query_value(k, "Answer", 2, buf, 256, &got) == ST(VIBEOS_STATUS_KEY_DELETED),
+           "NtDeleteKey, and its handle answers STATUS_KEY_DELETED");
+    (void)nt(VIBEOS_NT_NR_NtClose, k, 0, 0, 0, 0);
+    nt_reg_restart();
+}
+
+static void t_virtual_memory(void) {
+    vibeos_nt_memory_basic_t m;
+    uint64_t a, as, b, bs, c, cs, x, xs;
+    uint32_t old;
+    uint8_t byte = 0x5A, y = 0;
+
+    fresh(43);
+    /* Reserved and committed at once, wherever there is room: at 64 KiB, the
+     * size by the page, and nothing made until it is touched. */
+    a = 0;
+    as = 0x2800;
+    expect(valloc(&a, &as, 0, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT,
+                  VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_SUCCESS) &&
+               a != 0u && (a & 0xFFFFu) == 0u && as == 0x3000u,
+           "reserve and commit: at 64 KiB, by the page");
+    expect(kf_peek(a + 0x1000u, &y, 1) == 0 && y == 0 && kf_poke(a + 0x2FFFu, &byte, 1) == 0 &&
+               kf_peek(a + 0x2FFFu, &y, 1) == 0 && y == byte,
+           "committed memory reads as zeros and keeps what is written, made on first touch");
+    expect(kf_poke(a + 0x3000u, &byte, 1) != 0, "and not a byte past it");
+    expect(vquery(a + 0x123u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.base_address == a && m.allocation_base == a &&
+               m.allocation_protect == VIBEOS_NT_PAGE_READWRITE && m.region_size == 0x3000u &&
+               m.state == VIBEOS_NT_MEM_COMMIT && m.protect == VIBEOS_NT_PAGE_READWRITE &&
+               m.type == VIBEOS_NT_MEM_PRIVATE,
+           "MEMORY_BASIC_INFORMATION of a committed allocation");
+    x = a + 0x2000u;
+    xs = 0x1000u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READONLY) ==
+               ST(VIBEOS_STATUS_SUCCESS) && kf_poke(a + 0x2FFFu, &byte, 1) != 0 &&
+               kf_peek(a + 0x2FFFu, &y, 1) == 0 && y == byte,
+           "a commit over a page already made gives it the new protection, contents kept");
+
+    /* The next one at the next 64 KiB, though the last ended three pages in. */
+    b = 0;
+    bs = 16u * 4096u;
+    expect(valloc(&b, &bs, 0, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_SUCCESS) && b == a + 0x10000u && bs == 0x10000u,
+           "a reservation starts at the next 64 KiB");
+    expect(kf_peek(b, &y, 1) != 0, "reserved memory has no access");
+    expect(vquery(b + 0x5000u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.base_address == b + 0x5000u && m.allocation_base == b &&
+               m.allocation_protect == VIBEOS_NT_PAGE_READWRITE && m.region_size == 0xB000u &&
+               m.state == VIBEOS_NT_MEM_RESERVE && m.protect == 0u,
+           "a reservation reports no protection, and its allocation's");
+
+    /* Committed a piece at a time, inside the reservation. */
+    c = b + 0x2100u;
+    cs = 0x1000u;
+    expect(valloc(&c, &cs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READONLY) ==
+               ST(VIBEOS_STATUS_SUCCESS) && c == b + 0x2000u && cs == 0x2000u,
+           "a commit inside a reservation, by the page: the range the bytes touch");
+    expect(kf_peek(b + 0x2000u, &y, 1) == 0 && y == 0 && kf_poke(b + 0x2000u, &byte, 1) != 0 &&
+               kf_peek(b + 0x1000u, &y, 1) != 0,
+           "a read-only commit reads zeros and refuses a store; the rest stays reserved");
+    expect(vquery(b, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.state == VIBEOS_NT_MEM_RESERVE && m.region_size == 0x2000u &&
+               vquery(b + 0x3000u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.base_address == b + 0x3000u && m.state == VIBEOS_NT_MEM_COMMIT &&
+               m.protect == VIBEOS_NT_PAGE_READONLY && m.region_size == 0x1000u &&
+               m.allocation_base == b,
+           "a query stops where the state stops, and starts at the page asked about");
+    x = b + 0x20000u;
+    xs = 0x1000u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a commit where nothing is reserved is refused");
+    x = b + 0xF000u;
+    xs = 0x2000u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a commit running past its reservation is refused");
+    x = b + 0x4321u;
+    xs = 0x100u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a reservation over another is refused");
+    x = b + 0x34567u;
+    xs = 0x100u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_SUCCESS) && x == b + 0x30000u && xs == 0x5000u,
+           "a reservation at an address: down to 64 KiB, and up to the page past the end");
+
+    /* The requests Windows refuses before anything is looked at. */
+    x = 0;
+    xs = 0x1000u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_WRITECOPY) ==
+               ST(VIBEOS_STATUS_INVALID_PAGE_PROTECTION) &&
+               valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, 0x3u) ==
+               ST(VIBEOS_STATUS_INVALID_PAGE_PROTECTION) &&
+               valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT,
+                      VIBEOS_NT_PAGE_NOACCESS | VIBEOS_NT_PAGE_GUARD) ==
+               ST(VIBEOS_STATUS_INVALID_PAGE_PROTECTION),
+           "copy-on-write private memory, two protections at once, a guarded no-access page");
+    /* ZeroBits with an address the caller names: the address decides, and a
+     * conflict there is a conflict (Wine's ntdll:virtual). */
+    x = a;
+    xs = 0x1000u;
+    expect(valloc(&x, &xs, 12, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT,
+                  VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "ZeroBits does not hide a conflict at a named address");
+    x = 0;
+    expect(valloc(&x, &xs, 0, 0u, VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+               valloc(&x, &xs, 0, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_RESET,
+                      VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+               valloc(&x, &xs, 25, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER_3) &&
+               valloc(&x, &xs, 0, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_WRITE_WATCH,
+                      VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_NOT_SUPPORTED),
+           "no type, a reset in an allocation, ZeroBits past 21, a write watch");
+    xs = 0;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER), "a size of zero");
+    x = 0;
+    xs = 0x1000u;
+    expect(nt(VIBEOS_NT_NR_NtFreeVirtualMemory, 4, kf_ualloc(8), kf_ualloc(8),
+              VIBEOS_NT_MEM_RELEASE, 0) == ST(VIBEOS_STATUS_OBJECT_TYPE_MISMATCH),
+           "a handle that is not a process's (the console's) is refused for its type");
+
+    /* Protection: of committed pages, the old one the first page's. */
+    expect(vprotect(b + 0x2800u, 0x100u, VIBEOS_NT_PAGE_READWRITE, &old) ==
+               ST(VIBEOS_STATUS_SUCCESS) && old == VIBEOS_NT_PAGE_READONLY &&
+               kf_poke(b + 0x2000u, &byte, 1) == 0,
+           "a protection change: the old one back, and a page touched before takes the new");
+    expect(vprotect(b + 0x3000u, 0x1000u, VIBEOS_NT_PAGE_READWRITE | VIBEOS_NT_PAGE_GUARD, &old) ==
+               ST(VIBEOS_STATUS_SUCCESS) && old == VIBEOS_NT_PAGE_READONLY &&
+               vquery(b + 0x3000u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.protect == (VIBEOS_NT_PAGE_READWRITE | VIBEOS_NT_PAGE_GUARD) &&
+               m.region_size == 0x1000u,
+           "PAGE_GUARD is recorded and reported as it was given");
+    expect(vprotect(b + 0x1000u, 0x2000u, VIBEOS_NT_PAGE_READWRITE, &old) ==
+               ST(VIBEOS_STATUS_NOT_COMMITTED) && old == 0xEEEEu,
+           "a range with a reserved page in it is not protected, and nothing is written");
+    expect(vprotect(a + 0x20000000u, 0x1000u, VIBEOS_NT_PAGE_READWRITE, &old) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES) &&
+               vprotect(a, 0x1000u, 0x6u, &old) == ST(VIBEOS_STATUS_INVALID_PAGE_PROTECTION),
+           "free memory, and a protection that is two");
+    expect(vprotect(a + 0x2000u, 0x10000u, VIBEOS_NT_PAGE_READONLY, &old) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a range running out of its allocation is refused");
+
+    /* A decommit to the end, said from inside the allocation, is refused;
+     * one of two bytes takes the pages they fall in (Wine's ntdll:virtual). */
+    x = b + 0x1001u;
+    xs = 0;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_DECOMMIT) == ST(VIBEOS_STATUS_FREE_VM_NOT_AT_BASE) &&
+               x == b + 0x1001u && xs == 0u,
+           "a decommit of size zero not at the base's page, and nothing written back");
+    x = b + 0xffeu;
+    xs = 0;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_DECOMMIT) == ST(VIBEOS_STATUS_SUCCESS) && x == b &&
+               xs == 0u && kf_peek(b + 0x3000u, &y, 1) != 0 &&
+               vquery(b, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.state == VIBEOS_NT_MEM_RESERVE && m.region_size == 0x10000u,
+           "one from the base's page decommits the whole allocation and says size zero");
+    /* Decommit: the pages go, the range stays reserved, and a commit again is
+     * fresh zeros. */
+    x = b + 0x2000u;
+    xs = 0x1000u;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_DECOMMIT) == ST(VIBEOS_STATUS_SUCCESS) &&
+               x == b + 0x2000u && xs == 0x1000u && kf_peek(b + 0x2000u, &y, 1) != 0 &&
+               vquery(b + 0x2000u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.state == VIBEOS_NT_MEM_RESERVE,
+           "a decommit leaves the range reserved, with no access");
+    x = b + 0x2000u;
+    xs = 0x1000u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_SUCCESS) && kf_peek(b + 0x2000u, &y, 1) == 0 && y == 0,
+           "committed again, the page is zeros - not what was written before");
+
+    /* Release: the whole allocation, by its base. */
+    x = b + 0x1000u;
+    xs = 0;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_FREE_VM_NOT_AT_BASE),
+           "a release not at the allocation's base");
+    x = b + 0xF000u;
+    xs = 0x2000u;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_UNABLE_TO_FREE_VM) &&
+               x == b + 0xF000u && xs == 0x2000u,
+           "a release running past the allocation, and nothing written back");
+    x = b;
+    xs = 0;
+    expect(vfree(&x, &xs, 0u) == ST(VIBEOS_STATUS_INVALID_PARAMETER_4) &&
+               vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE | VIBEOS_NT_MEM_DECOMMIT) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER_4),
+           "a free type that is neither, or both");
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS) && x == b &&
+               xs == 0x10000u && kf_peek(b + 0x2000u, &y, 1) != 0,
+           "released whole, by its base: the size is the allocation's");
+    expect(vquery(b + 0x4000u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.state == VIBEOS_NT_MEM_FREE && m.protect == VIBEOS_NT_PAGE_NOACCESS &&
+               m.allocation_base == 0u && m.base_address == b + 0x4000u &&
+               m.region_size == 0x2C000u,
+           "free memory runs to the next region");
+    x = b;
+    xs = 0;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_MEMORY_NOT_ALLOCATED),
+           "released twice: nothing is allocated there");
+
+    expect(vquery(a, 1u, sizeof(m), &m) == ST(VIBEOS_STATUS_INVALID_INFO_CLASS) &&
+               vquery(a, 0, sizeof(m) - 1u, &m) == ST(VIBEOS_STATUS_INFO_LENGTH_MISMATCH) &&
+               vquery(ks_user_top(), 0, sizeof(m), &m) == ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "a class not written, a short buffer, an address past user memory");
+    expect(kf_uaccess_under_mm() == 0u,
+           "no store into the program's memory under its own mm lock");
+}
+
+/* ---- NtAllocateVirtualMemoryEx and placeholders (W3 step 10) ------------------- */
+
+/* The upper halves of the ULONGs on the stack are garbage, as a caller may
+ * leave them: the service reads 32 bits of each. */
+static long valloc_ex(uint64_t *base, uint64_t *size, uint32_t type, uint32_t prot,
+                      uint64_t params, uint32_t count) {
+    uint64_t b = kf_ualloc(8), s = kf_ualloc(8);
+    uint64_t rest[3] = { 0xDEAD000000000000ull | prot, params,
+                         0xBEEF000000000000ull | count };
+    long r;
+
+    *(uint64_t *)kf_uptr(b) = *base;
+    *(uint64_t *)kf_uptr(s) = *size;
+    kf_next_sp(stack_args(rest, 3));
+    r = nt(VIBEOS_NT_NR_NtAllocateVirtualMemoryEx, VIBEOS_NT_CURRENT_PROCESS, b, s,
+           0xFEED000000000000ull | type, 0);
+    *base = *(uint64_t *)kf_uptr(b);
+    *size = *(uint64_t *)kf_uptr(s);
+    return r;
+}
+
+/* The size of the run NtQueryVirtualMemory reports from `va`, or 0. */
+static uint64_t region_of(uint64_t va) {
+    vibeos_nt_memory_basic_t m;
+
+    return vquery(va, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) ? m.region_size : 0u;
+}
+
+/* One extended parameter of address requirements, in the program's memory. */
+static uint64_t requirements(uint64_t lo, uint64_t hi, uint64_t align) {
+    uint64_t p = kf_ualloc(sizeof(vibeos_nt_mem_ext_param_t));
+    uint64_t a = kf_ualloc(sizeof(vibeos_nt_mem_address_requirements_t));
+    vibeos_nt_mem_address_requirements_t *ar = kf_uptr(a);
+    vibeos_nt_mem_ext_param_t *ep = kf_uptr(p);
+
+    ar->lowest_starting_address = lo;
+    ar->highest_ending_address = hi;
+    ar->alignment = align;
+    ep->type = VIBEOS_NT_MEM_EXT_ADDRESS_REQUIREMENTS | 0xAB00ull;   /* reserved bits ignored */
+    ep->value = a;
+    return p;
+}
+
+/* Wine 9.0's test_NtAllocateVirtualMemoryEx, the placeholder half, in its
+ * order: what Windows 10 answers is what the test reads. */
+static void t_placeholders(void) {
+    const uint32_t rsv_ph = VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_RESERVE_PLACEHOLDER;
+    const uint32_t replace = VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_REPLACE_PLACEHOLDER;
+    const uint32_t preserve = VIBEOS_NT_MEM_RELEASE | VIBEOS_NT_MEM_PRESERVE_PLACEHOLDER;
+    const uint32_t coalesce = VIBEOS_NT_MEM_RELEASE | VIBEOS_NT_MEM_COALESCE_PLACEHOLDERS;
+    vibeos_nt_memory_basic_t m;
+    uint64_t a, as, p1, p2, p3, s, x, xs, ep;
+    uint8_t byte = 0xCC, y = 0;
+
+    fresh(44);
+    a = 0;
+    as = 0x1000u;
+    expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT,
+                     VIBEOS_NT_PAGE_EXECUTE_READWRITE, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               a != 0u && as == 0x1000u,
+           "Ex with no parameters is NtAllocateVirtualMemory");
+    xs = 0;
+    expect(vfree(&a, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS),
+           "and gives back what that gives back");
+    expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT,
+                     VIBEOS_NT_PAGE_READWRITE, 0, 1) == ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "a count with no parameters");
+    {
+        uint64_t bb = kf_ualloc(8), ss = kf_ualloc(8);
+        uint64_t rest[3] = { VIBEOS_NT_PAGE_READWRITE, 0, 0 };
+
+        *(uint64_t *)kf_uptr(ss) = 0x1000u;
+        kf_next_sp(stack_args(rest, 3));
+        expect(nt(VIBEOS_NT_NR_NtAllocateVirtualMemoryEx, 0, bb, ss,
+                  VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT, 0) ==
+                   ST(VIBEOS_STATUS_INVALID_HANDLE),
+               "a null process handle");
+    }
+
+    /* A placeholder: only from Ex, only with no access. */
+    a = 0;
+    as = 0x10000u;
+    expect(valloc(&a, &as, 0, rsv_ph, VIBEOS_NT_PAGE_NOACCESS) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "NtAllocateVirtualMemory knows no placeholders");
+    expect(valloc_ex(&a, &as, rsv_ph, VIBEOS_NT_PAGE_READWRITE, 0, 0) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "a placeholder anybody may touch");
+    expect(valloc_ex(&a, &as, rsv_ph, VIBEOS_NT_PAGE_NOACCESS, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) && a != 0u && (a & 0xFFFFu) == 0u && as == 0x10000u,
+           "a placeholder reserved");
+    expect(vquery(a, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.allocation_base == a && m.allocation_protect == VIBEOS_NT_PAGE_NOACCESS &&
+               m.state == VIBEOS_NT_MEM_RESERVE && m.type == VIBEOS_NT_MEM_PRIVATE &&
+               m.region_size == 0x10000u,
+           "a placeholder is reserved private memory with no access, marks unreported");
+    x = a;
+    xs = 0x1000u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a placeholder is not committed by asking");
+
+    /* Replaced, written, preserved, replaced again: zeros. */
+    s = 0x10000u;
+    expect(valloc_ex(&a, &s, replace | VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) && s == 0x10000u &&
+               kf_poke(a + 0x5000u, &byte, 1) == 0,
+           "a placeholder replaced by committed memory");
+    expect(vfree(&a, &s, preserve) == ST(VIBEOS_STATUS_SUCCESS) && s == 0x10000u &&
+               kf_peek(a + 0x5000u, &y, 1) != 0,
+           "released into a placeholder: no access");
+    s = 0x10000u;
+    expect(valloc_ex(&a, &s, replace | VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READONLY, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) && kf_peek(a + 0x5000u, &y, 1) == 0 && y == 0,
+           "replaced again, the pages are fresh zeros");
+    expect(vquery(a, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.allocation_protect == VIBEOS_NT_PAGE_READONLY &&
+               m.state == VIBEOS_NT_MEM_COMMIT && m.type == VIBEOS_NT_MEM_PRIVATE &&
+               m.region_size == 0x10000u,
+           "a replaced placeholder is the allocation it was replaced by");
+    expect(vfree(&a, &s, preserve) == ST(VIBEOS_STATUS_SUCCESS) &&
+               vquery(a, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.allocation_protect == VIBEOS_NT_PAGE_NOACCESS &&
+               m.state == VIBEOS_NT_MEM_RESERVE && m.region_size == 0x10000u,
+           "and a placeholder again");
+    expect(valloc_ex(&a, &s, rsv_ph, VIBEOS_NT_PAGE_NOACCESS, 0, 0) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES) &&
+               valloc_ex(&a, &s, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_NOACCESS, 0, 0) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a reservation over a placeholder");
+    xs = 0x1000u;
+    expect(valloc_ex(&a, &xs, replace, VIBEOS_NT_PAGE_NOACCESS, 0, 0) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a placeholder is replaced whole or not at all");
+    xs = 0x10000u;
+    expect(valloc_ex(&a, &xs, VIBEOS_NT_MEM_REPLACE_PLACEHOLDER, VIBEOS_NT_PAGE_READWRITE, 0, 0) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+               valloc_ex(&a, &xs, VIBEOS_NT_MEM_COMMIT | VIBEOS_NT_MEM_REPLACE_PLACEHOLDER,
+                         VIBEOS_NT_PAGE_READWRITE, 0, 0) == ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "a replacement that does not reserve");
+    x = 0;
+    xs = 0x10000u;
+    expect(valloc_ex(&x, &xs, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_NOACCESS, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) &&
+               valloc_ex(&x, &xs, replace, VIBEOS_NT_PAGE_NOACCESS, 0, 0) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "a reservation is not a placeholder to replace");
+    p1 = x;
+    expect(vfree(&p1, &xs, preserve) == ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES) &&
+               xs == 0x10000u && vfree(&p1, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS),
+           "nor released into one");
+
+    /* Split in three, from the middle. */
+    xs = 0x10000u;
+    expect(vfree(&a, &xs, preserve) == ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a placeholder whole is not preserved into itself");
+    p1 = a + 0x8000u;
+    p2 = a + 0xC000u;
+    s = 0x4000u;
+    expect(vfree(&p1, &s, preserve) == ST(VIBEOS_STATUS_SUCCESS) && p1 == a + 0x8000u &&
+               s == 0x4000u,
+           "a placeholder split from the middle");
+    expect(region_of(a) == 0x8000u && region_of(p1) == 0x4000u && region_of(p2) == 0x4000u &&
+               vquery(p2, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.allocation_base == p2,
+           "three placeholders, the one above based at itself");
+    x = a;
+    expect(vfree(&x, &s, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS) && x == a &&
+               s == 0x4000u && vquery(a + 0x4000u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.allocation_base == a + 0x4000u && m.state == VIBEOS_NT_MEM_RESERVE,
+           "a release of the front of an allocation: the rest is based where it starts");
+    expect(vfree(&p1, &s, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS) &&
+               vfree(&p2, &s, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS) &&
+               vquery(p2, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.state == VIBEOS_NT_MEM_FREE,
+           "each released by its own base");
+    x = a + 0x4000u;
+    s = 0;
+    expect(vfree(&x, &s, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS), "tidied");
+
+    /* Split from the bottom, joined again. */
+    a = 0;
+    as = 0x10000u;
+    expect(valloc_ex(&a, &as, rsv_ph, VIBEOS_NT_PAGE_NOACCESS, 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a second placeholder");
+    s = 0;
+    expect(vfree(&a, &s, preserve) == ST(VIBEOS_STATUS_INVALID_PARAMETER_3) && s == 0u,
+           "preserved with no size");
+    p1 = a;
+    p2 = a + 0x4000u;
+    p3 = a + 0x8000u;
+    s = 0x4000u;
+    expect(vfree(&p1, &s, preserve) == ST(VIBEOS_STATUS_SUCCESS) && p1 == a && s == 0x4000u &&
+               vfree(&p2, &s, preserve) == ST(VIBEOS_STATUS_SUCCESS) &&
+               region_of(p1) == 0x4000u && region_of(p2) == 0x4000u && region_of(p3) == 0x8000u,
+           "split from the bottom, twice");
+    expect(vfree(&p1, &s, coalesce) == ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "one placeholder is not joined");
+    xs = 0x10000u;
+    expect(vfree(&p1, &xs, VIBEOS_NT_MEM_COALESCE_PLACEHOLDERS) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER_4),
+           "joining without releasing");
+    xs = 0x11000u;
+    expect(vfree(&p1, &xs, coalesce) == ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES), "joined past them");
+    xs = 0xF000u;
+    expect(vfree(&p1, &xs, coalesce) == ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES), "joined short");
+    x = a + 0x1000u;
+    expect(vfree(&x, &xs, coalesce) == ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "joined from inside one");
+    xs = 0;
+    expect(vfree(&p1, &xs, coalesce) == ST(VIBEOS_STATUS_INVALID_PARAMETER_3), "joined with no size");
+    xs = 0x10000u;
+    expect(vfree(&p1, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_UNABLE_TO_FREE_VM),
+           "a release does not run on into the next placeholder");
+    expect(vfree(&p1, &xs, coalesce) == ST(VIBEOS_STATUS_SUCCESS) && p1 == a && xs == 0x10000u &&
+               region_of(a) == 0x10000u && vquery(p3, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.allocation_base == a,
+           "three placeholders joined into one");
+    s = 0x4000u;
+    xs = 0xC000u;
+    expect(vfree(&p1, &s, preserve) == ST(VIBEOS_STATUS_SUCCESS) &&
+               valloc_ex(&p2, &xs, replace, VIBEOS_NT_PAGE_READWRITE, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS),
+           "split, and the upper part replaced by a reservation");
+    xs = 0x10000u;
+    expect(vfree(&p1, &xs, coalesce) == ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES),
+           "a placeholder is not joined to an allocation");
+    x = p2 + 0x1000u;
+    xs = 0x2000u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_SUCCESS) && kf_poke(p2 + 0x2000u, &byte, 1) == 0,
+           "the replacement commits as any reservation does");
+    xs = 0xC000u;
+    expect(vfree(&p2, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS) && xs == 0xC000u &&
+               vfree(&p1, &s, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS),
+           "released, each");
+    s = 0;
+    expect(vfree(&p3, &s, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_MEMORY_NOT_ALLOCATED),
+           "and nothing left");
+
+    /* A release from the middle of an ordinary allocation, as Wine's
+     * test_NtFreeVirtualMemory asks: the part above is an allocation of its
+     * own, the part below keeps its base, both keep their pages. */
+    a = 0;
+    as = 0x10000u;
+    expect(valloc(&a, &as, 0, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT,
+                  VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_SUCCESS) &&
+               kf_poke(a + 0x2000u, &byte, 1) == 0,
+           "an allocation to release a piece of");
+    x = a + 0x1001u;
+    xs = 0xFFFu;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS) &&
+               x == a + 0x1000u && xs == 0x1000u && kf_peek(a + 0x1000u, &y, 1) != 0 &&
+               kf_poke(a, &byte, 1) == 0 && kf_peek(a + 0x2000u, &y, 1) == 0 && y == byte,
+           "a page released from the middle; the pages beside it stay");
+    expect(vquery(a + 0x2000u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) &&
+               m.allocation_base == a + 0x2000u && m.region_size == 0xE000u &&
+               region_of(a) == 0x1000u,
+           "the part above is based at itself");
+    x = a;
+    xs = 0x10000u;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_UNABLE_TO_FREE_VM),
+           "the part below ends where it does");
+    x = a + 0x2000u;
+    xs = 0;
+    s = 0;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS) && xs == 0xE000u &&
+               vfree(&a, &s, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS) && s == 0x1000u,
+           "each released whole by its base");
+
+    /* Extended parameters. */
+    ep = requirements(0, 0, 0);
+    a = 0;
+    as = 0x1000u;
+    expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT,
+                     VIBEOS_NT_PAGE_READWRITE, ep, 1) == ST(VIBEOS_STATUS_SUCCESS),
+           "address requirements of nothing");
+    xs = 0;
+    expect(vfree(&a, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS), "released");
+    {
+        uint64_t two = kf_ualloc(2u * sizeof(vibeos_nt_mem_ext_param_t));
+        vibeos_nt_mem_ext_param_t *e = kf_uptr(two);
+
+        memcpy(&e[0], kf_uptr(ep), sizeof(e[0]));
+        memcpy(&e[1], kf_uptr(ep), sizeof(e[1]));
+        a = 0;
+        expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE, two, 2) ==
+                   ST(VIBEOS_STATUS_INVALID_PARAMETER),
+               "a parameter given twice");
+        e[0].type = 0;
+        expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE, two, 1) ==
+                   ST(VIBEOS_STATUS_INVALID_PARAMETER),
+               "a parameter of no type");
+        e[0].type = VIBEOS_NT_MEM_EXT_MAX;
+        expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE, two, 1) ==
+                   ST(VIBEOS_STATUS_INVALID_PARAMETER),
+               "a parameter past the last type");
+        e[0].type = VIBEOS_NT_MEM_EXT_ATTRIBUTE_FLAGS;
+        e[0].value = 0;
+        expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE, two, 1) ==
+                   ST(VIBEOS_STATUS_SUCCESS),
+               "attribute flags of nothing");
+        xs = 0;
+        expect(vfree(&a, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_SUCCESS), "released");
+        e[0].value = VIBEOS_NT_MEM_EXT_EC_CODE;
+        a = 0;
+        expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE, two, 1) ==
+                   ST(VIBEOS_STATUS_INVALID_PARAMETER),
+               "ARM64EC code on a machine that is not ARM64");
+    }
+    a = 0;
+    as = 0x10000u;
+    expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                     requirements(0, 0x20001000u + 1u, 0), 1) == ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+               valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                         requirements(0, 0x20000800u - 1u, 0), 1) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+               valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                         requirements(0, VIBEOS_NT_MAX_USER_ADDRESS + 0x1000u, 0), 1) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "a ceiling not a page's end, or past the top");
+    expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                     requirements(0, 0, 0x8000u), 1) == ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+               valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                         requirements(0, 0, 0x30000u), 1) == ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+               valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                         requirements(0x20001000u, 0, 0), 1) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER) &&
+               valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                         requirements(0x30000000u, 0x20000000u - 1u, 0), 1) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "an alignment under 64 KiB or not a power of two, a floor not at 64 KiB, "
+           "a ceiling under the floor");
+    expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                     requirements(0, VIBEOS_NT_MAX_USER_ADDRESS, 0x40000u), 1) ==
+               ST(VIBEOS_STATUS_SUCCESS) && (a & 0x3FFFFu) == 0u,
+           "placed at the alignment asked for, the top of user memory a valid ceiling");
+    expect(valloc_ex(&a, &as, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE,
+                     requirements(0, 0, 0x40000u), 1) == ST(VIBEOS_STATUS_INVALID_PARAMETER),
+           "requirements with an address the caller names");
+    x = a + 0x400000u;
+    xs = 0x1000u;
+    expect(valloc_ex(&x, &xs, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS),
+           "something further up");
+    p1 = 0;
+    s = 0x10000u;
+    expect(valloc_ex(&p1, &s, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                     requirements(x, 0, 0), 1) == ST(VIBEOS_STATUS_SUCCESS) && p1 >= x + 0x10000u,
+           "a floor: placed above it, past what is there");
+    p2 = 0;
+    expect(valloc_ex(&p2, &s, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE, 0, 0) ==
+               ST(VIBEOS_STATUS_SUCCESS) && p2 < x,
+           "and the arena below it still placed from");
+    p3 = 0;
+    expect(valloc_ex(&p3, &s, VIBEOS_NT_MEM_RESERVE, VIBEOS_NT_PAGE_READWRITE,
+                     requirements(0, 0x20001000u - 1u, 0), 1) == ST(VIBEOS_STATUS_NO_MEMORY),
+           "a ceiling below the arena cannot be met (the ZeroBits gap)");
+    expect(kf_uaccess_under_mm() == 0u,
+           "no store into the program's memory under its own mm lock");
+}
+
+/* ---- data sections (W3 step 5) ------------------------------------------------- */
+
+static long sec_create(uint64_t *h, uint64_t oa, uint64_t size, uint32_t protect, uint32_t attributes,
+                       uint64_t file) {
+    uint64_t out = kf_ualloc(8), sz = 0;
+    uint64_t rest[3] = { protect, attributes, file };
+    long r;
+
+    if (size != 0u) {
+        sz = kf_ualloc(8);
+        *(uint64_t *)kf_uptr(sz) = size;
+    }
+    kf_next_sp(stack_args(rest, 3));
+    r = nt(VIBEOS_NT_NR_NtCreateSection, out, 0x000F001Fu, oa, sz, 0);
+    *h = *(uint64_t *)kf_uptr(out);
+    return r;
+}
+
+/* A view: at *base (0: anywhere), from `off` (all ones: no offset pointer),
+ * *size bytes (0: to the end); the base and size it got come back. */
+static long sec_map(uint64_t sec, uint64_t *base, uint64_t off, uint64_t *size, uint32_t protect) {
+    uint64_t b = kf_ualloc(8), s = kf_ualloc(8), o = 0;
+    uint64_t rest[6];
+    long r;
+
+    if (off != ~0ull) {
+        o = kf_ualloc(8);
+        *(uint64_t *)kf_uptr(o) = off;
+    }
+    rest[0] = 0;          /* CommitSize        */
+    rest[1] = o;          /* SectionOffset     */
+    rest[2] = s;          /* ViewSize          */
+    rest[3] = 1;          /* InheritDisposition */
+    rest[4] = 0;          /* AllocationType    */
+    rest[5] = protect;    /* Win32Protect      */
+    *(uint64_t *)kf_uptr(b) = *base;
+    *(uint64_t *)kf_uptr(s) = *size;
+    kf_next_sp(stack_args(rest, 6));
+    r = nt(VIBEOS_NT_NR_NtMapViewOfSection, sec, VIBEOS_NT_CURRENT_PROCESS, b, 0, 0);
+    *base = *(uint64_t *)kf_uptr(b);
+    *size = *(uint64_t *)kf_uptr(s);
+    return r;
+}
+
+static long sec_unmap(uint64_t base) {
+    return nt(VIBEOS_NT_NR_NtUnmapViewOfSection, VIBEOS_NT_CURRENT_PROCESS, base, 0, 0, 0);
+}
+
+static long sec_query(uint64_t sec, uint32_t cls, uint64_t len, vibeos_nt_section_basic_t *out) {
+    uint64_t buf = kf_ualloc(32), got = kf_ualloc(8);
+    uint64_t rest[1] = { got };
+    long r;
+
+    kf_next_sp(stack_args(rest, 1));
+    r = nt(VIBEOS_NT_NR_NtQuerySection, sec, cls, buf, len, 0);
+    memcpy(out, kf_uptr(buf), sizeof(*out));
+    return r;
+}
+
+static void t_data_sections(void) {
+    vibeos_nt_section_basic_t sb;
+    vibeos_nt_memory_basic_t m;
+    uint64_t s1, s2, s3, fh, b1 = 0, z1 = 0, b2 = 0, z2 = 0, b3 = 0, z3 = 0, bx, zx, x, xs;
+    uint8_t q = 'Q', w = 'W', y = 0;
+    char text[12];
+
+    fresh(44);
+    /* Memory alone, named: two views of it are one memory. */
+    expect(sec_create(&s1, oattr("\\BaseNamedObjects\\vibesec", 0), 0x5000u,
+                      VIBEOS_NT_PAGE_READWRITE, 0x08000000u, 0) == ST(VIBEOS_STATUS_SUCCESS),
+           "a section of memory alone, named, five pages");
+    expect(sec_map(s1, &b1, ~0ull, &z1, VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_SUCCESS) &&
+               sec_map(s1, &b2, 0, &z2, VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_SUCCESS) &&
+               b1 != b2 && (b1 & 0xFFFFu) == 0u && (b2 & 0xFFFFu) == 0u && z1 == 0x5000u && z2 == 0x5000u,
+           "two views, at 64 KiB, the whole section each");
+    expect(kf_peek(b1 + 0x4FFFu, &y, 1) == 0 && y == 0 && kf_poke(b1 + 0x1234u, &q, 1) == 0 &&
+               kf_peek(b2 + 0x1234u, &y, 1) == 0 && y == 'Q',
+           "zeros to begin with, and a store through one view is in the other");
+    expect(kf_poke(b1 + 0x5000u, &q, 1) != 0, "and nothing past the section's last page");
+    expect(vquery(b2 + 0x10u, 0, sizeof(m), &m) == ST(VIBEOS_STATUS_SUCCESS) && m.base_address == b2 &&
+               m.allocation_base == b2 && m.type == VIBEOS_NT_MEM_MAPPED &&
+               m.state == VIBEOS_NT_MEM_COMMIT && m.protect == VIBEOS_NT_PAGE_READWRITE &&
+               m.region_size == 0x5000u,
+           "a view is an allocation of its own, mapped memory");
+
+    /* Copy-on-write: the process's own copy, which nobody else sees. */
+    expect(sec_map(s1, &b3, ~0ull, &z3, VIBEOS_NT_PAGE_WRITECOPY) == ST(VIBEOS_STATUS_SUCCESS) &&
+               kf_peek(b3 + 0x1234u, &y, 1) == 0 && y == 'Q' && kf_poke(b3 + 0x1234u, &w, 1) == 0 &&
+               kf_peek(b1 + 0x1234u, &y, 1) == 0 && y == 'Q' &&
+               kf_peek(b3 + 0x1234u, &y, 1) == 0 && y == 'W',
+           "a copy-on-write view starts with the section's bytes and keeps its stores");
+
+    /* Opened by its name: the same memory. */
+    {
+        uint64_t out = kf_ualloc(8), bo = 0, zo = 0;
+
+        expect(nt(VIBEOS_NT_NR_NtOpenSection, out, 0x0004u /* SECTION_MAP_READ */,
+                  oattr("\\BaseNamedObjects\\vibesec", 0), 0, 0) == ST(VIBEOS_STATUS_SUCCESS),
+               "NtOpenSection finds it by its name");
+        s2 = *(uint64_t *)kf_uptr(out);
+        expect(sec_map(s2, &bo, ~0ull, &zo, VIBEOS_NT_PAGE_READONLY) == ST(VIBEOS_STATUS_SUCCESS) &&
+                   kf_peek(bo + 0x1234u, &y, 1) == 0 && y == 'Q' && kf_poke(bo, &q, 1) != 0,
+               "a read-only view through it: the same bytes, and no store");
+        bx = 0;
+        zx = 0;
+        expect(sec_map(s2, &bx, ~0ull, &zx, VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_ACCESS_DENIED),
+               "a handle with SECTION_MAP_READ alone maps no writable view");
+        {
+            uint32_t old = 0;
+
+            expect(vprotect(bo, 0x1000u, VIBEOS_NT_PAGE_READWRITE, &old) == ST(VIBEOS_STATUS_ACCESS_DENIED) &&
+                       kf_poke(bo, &q, 1) != 0 && kf_peek(b1, &y, 1) == 0 && y != q,
+                   "nor makes its read-only view writable afterwards (H-033's ceiling)");
+        }
+        expect(sec_unmap(bo) == ST(VIBEOS_STATUS_SUCCESS), "and the view goes");
+    }
+
+    /* What a view may not be. */
+    bx = 0;
+    zx = 0;
+    expect(sec_map(s1, &bx, 0x1000u, &zx, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_MAPPED_ALIGNMENT), "an offset off 64 KiB");
+    zx = 0x6000u;
+    expect(sec_map(s1, &bx, 0, &zx, VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_INVALID_VIEW_SIZE),
+           "a view longer than the section");
+    bx = b1;
+    zx = 0;
+    expect(sec_map(s1, &bx, ~0ull, &zx, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES), "at an address a view holds");
+    bx = 0;
+    expect(sec_map(s1, &bx, ~0ull, &zx, VIBEOS_NT_PAGE_EXECUTE_READ) ==
+               ST(VIBEOS_STATUS_SECTION_PROTECTION), "executable, of a section that is not");
+
+    expect(sec_query(s1, 0, sizeof(sb), &sb) == ST(VIBEOS_STATUS_SUCCESS) &&
+               sb.attributes == 0x08000000u && sb.size == 0x5000u,
+           "NtQuerySection: SEC_COMMIT, the size asked for");
+    expect(sec_query(s1, 1, 64, &sb) == ST(VIBEOS_STATUS_SECTION_NOT_IMAGE) &&
+               sec_query(s1, 0, sizeof(sb) - 1u, &sb) == ST(VIBEOS_STATUS_INFO_LENGTH_MISMATCH),
+           "an image's information of a data section, a short buffer");
+
+    /* A read-only section takes no writable view, whatever the handle may do. */
+    {
+        uint64_t sr = 0, br = 0, zr = 0;
+
+        expect(sec_create(&sr, 0, 0x1000u, VIBEOS_NT_PAGE_READONLY, 0x08000000u, 0) ==
+                   ST(VIBEOS_STATUS_SUCCESS) &&
+                   sec_map(sr, &br, ~0ull, &zr, VIBEOS_NT_PAGE_READWRITE) ==
+                   ST(VIBEOS_STATUS_SECTION_PROTECTION),
+               "a writable view of a read-only section, through a handle with every right");
+    }
+    /* A view in two regions - a protection changed on part of it - still goes
+     * whole; private memory is no view. */
+    {
+        uint32_t old = 0;
+        uint64_t pa = 0, pz = 0x1000u;
+
+        expect(vprotect(b2, 0x1000u, VIBEOS_NT_PAGE_READONLY, &old) == ST(VIBEOS_STATUS_SUCCESS) &&
+                   old == VIBEOS_NT_PAGE_READWRITE,
+               "a protection changed on the first page of a view");
+        expect(valloc(&pa, &pz, 0, VIBEOS_NT_MEM_RESERVE | VIBEOS_NT_MEM_COMMIT,
+                      VIBEOS_NT_PAGE_READWRITE) == ST(VIBEOS_STATUS_SUCCESS) &&
+                   sec_unmap(pa) == ST(VIBEOS_STATUS_NOT_MAPPED_VIEW),
+               "NtUnmapViewOfSection of private memory is no view's");
+    }
+
+    /* A view is not private memory, and goes whole by its base. */
+    x = b1;
+    xs = 0;
+    expect(vfree(&x, &xs, VIBEOS_NT_MEM_RELEASE) == ST(VIBEOS_STATUS_UNABLE_TO_DELETE_SECTION),
+           "NtFreeVirtualMemory does not release a view");
+    x = b1;
+    xs = 0x1000u;
+    expect(valloc(&x, &xs, 0, VIBEOS_NT_MEM_COMMIT, VIBEOS_NT_PAGE_READWRITE) ==
+               ST(VIBEOS_STATUS_CONFLICTING_ADDRESSES), "nor commits into one");
+    /* Wine's NtUnmapViewOfSection takes the view an address is in, wherever in
+     * it, and so does this. */
+    expect(sec_unmap(b1 + 0x1000u) == ST(VIBEOS_STATUS_SUCCESS) && kf_peek(b1, &y, 1) != 0 &&
+               kf_peek(b1 + 0x4000u, &y, 1) != 0 && sec_unmap(b1) == ST(VIBEOS_STATUS_NOT_MAPPED_VIEW),
+           "a view is unmapped whole, from any address in it, once");
+    expect(nt(VIBEOS_NT_NR_NtClose, s1, 0, 0, 0, 0) == ST(VIBEOS_STATUS_SUCCESS) &&
+               kf_peek(b2 + 0x1234u, &y, 1) == 0 && y == 'Q',
+           "the section closed, a view of it keeps its memory");
+    expect(sec_unmap(b2 + 0x3000u) == ST(VIBEOS_STATUS_SUCCESS) && kf_peek(b2, &y, 1) != 0 &&
+               kf_peek(b2 + 0x3000u, &y, 1) != 0,
+           "a view of two regions is unmapped whole, from its second");
+
+    /* A file's: read-only or copy-on-write, of the file's size. */
+    kf_fs_add("/win", 0, 0, 1);
+    kf_fs_add("/win/text.txt", "twelve bytes", 12, 0);
+    kf_fs_add("/win/empty.txt", "", 0, 0);
+    expect(open_file(&fh, 0x00120089u, "\\??\\C:\\win\\text.txt") == ST(VIBEOS_STATUS_SUCCESS),
+           "a text file opened to read");
+    expect(sec_create(&s3, 0, 0, VIBEOS_NT_PAGE_READWRITE, 0x08000000u, fh) ==
+               ST(VIBEOS_STATUS_ACCESS_DENIED), "a writable section of a file the handle may not write");
+    expect(sec_create(&s3, 0, 0x2000u, VIBEOS_NT_PAGE_READONLY, 0x08000000u, fh) ==
+               ST(VIBEOS_STATUS_SECTION_TOO_BIG), "a section longer than a file nobody can grow");
+    expect(sec_create(&s3, 0, 0, VIBEOS_NT_PAGE_WRITECOPY, 0x08000000u, fh) == ST(VIBEOS_STATUS_SUCCESS) &&
+               sec_query(s3, 0, sizeof(sb), &sb) == ST(VIBEOS_STATUS_SUCCESS) && sb.size == 12u &&
+               sb.attributes == (0x08000000u | 0x00800000u),
+           "a copy-on-write section of the file: its size, SEC_FILE");
+    bx = 0;
+    zx = 0;
+    expect(sec_map(s3, &bx, ~0ull, &zx, VIBEOS_NT_PAGE_WRITECOPY) == ST(VIBEOS_STATUS_SUCCESS) &&
+               zx == 0x1000u && kf_peek(bx, text, 12) == 0 && memcmp(text, "twelve bytes", 12) == 0 &&
+               kf_peek(bx + 12u, &y, 1) == 0 && y == 0 && kf_poke(bx, &w, 1) == 0,
+           "its view holds the file's bytes, zeros after them, and takes a store of its own");
+    {
+        uint64_t fe = 0, se = 0;
+
+        expect(open_file(&fe, 0x00120089u, "\\??\\C:\\win\\empty.txt") == ST(VIBEOS_STATUS_SUCCESS) &&
+                   sec_create(&se, 0, 0, VIBEOS_NT_PAGE_READONLY, 0x08000000u, fe) ==
+                       ST(VIBEOS_STATUS_MAPPED_FILE_SIZE_ZERO),
+               "an empty file and no size");
+    }
+    expect(sec_create(&s3, 0, 0, VIBEOS_NT_PAGE_READWRITE, 0x08000000u, 0) ==
+               ST(VIBEOS_STATUS_INVALID_PARAMETER_4) &&
+               sec_create(&s3, 0, 0x1000u, VIBEOS_NT_PAGE_NOACCESS, 0x08000000u, 0) ==
+               ST(VIBEOS_STATUS_INVALID_PAGE_PROTECTION) &&
+               sec_create(&s3, 0, 0, VIBEOS_NT_PAGE_READONLY, 0x01000000u, 0) ==
+               ST(VIBEOS_STATUS_INVALID_FILE_FOR_SECTION),
+           "memory alone with no size, a section nobody may read, an image of no file");
+    expect(kf_uaccess_under_mm() == 0u, "no store into the program's memory under its own mm lock");
+}
+
+int test_nt_abi(void) {
+    g_fail = 0;
+    t_registry();
+    t_dispatch_refusals();
+    t_write_file();
+    t_process();
+    t_system();
+    t_blocks();
+    t_events();
+    t_mutants();
+    t_semaphores();
+    t_delay();
+    t_handles_and_names();
+    t_read_write_file();
+    t_file_information();
+    t_small_file_services();
+    t_query_directory();
+    t_names();
+    t_share_and_locks();
+    t_handle_rights();
+    t_write_permissions();
+    t_delete_follows_file();
+    t_nt_chroot();
+    t_create_thread();
+    t_thread_nproc();
+    t_remote_thread();
+    t_thread_info();
+    t_timers();
+    t_apcs();
+    t_apc_fpu();
+    t_raise_exception();
+    t_create_file();
+    t_sections();
+    t_open_file_permissions();
+    t_object_share();
+    t_virtual_memory();
+    t_remote_memory();
+    t_reg_keys();
+    t_reg_full_table();
+    t_open_process_cred();
+    t_terminate_zombie_leader();
+    t_reg_rights();
+    t_placeholders();
+    t_data_sections();
+    return g_fail ? -1 : 0;
+}

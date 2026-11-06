@@ -1,0 +1,199 @@
+# madvise, mincore, mlock and mremap (docs/abi/ L3 step 4). Host test:
+# t_memory_calls in tests/kernel/linux_abi_tests.c.
+#
+#  1. MADV_DONTNEED leaves the page as it was
+#  2. a shared page is discarded like a private one
+#  3. a locked page is discarded
+#  4. advice that changes what fork does is taken
+#  5. madvise does not look for a hole
+#  6. mincore calls a page in swap resident
+#  7. mincore does not judge its vector (red because the host test then stores
+#     through a pointer that is nobody's and dies there - which is what the
+#     check is for, and is not the same as an expectation failing)
+#  8. mlock locks nothing
+#  9. mlock2 takes any flag
+# 10. mremap grows over what is after the mapping
+# 11. mremap moves without being allowed to
+# 12. mremap leaves the old range described
+# 13. mremap takes a range across two mappings
+# 14. a shared mapping grows with private pages
+# 15. MADV_POPULATE_WRITE populates a region it may not write (M-103).
+#     Expect "populating for an access the region refuses is EINVAL"
+#     (t_madvise_populate).
+# 16. mlockall forgets MCL_FUTURE (M-104). Expect "a mapping made afterwards
+#     is locked" (t_mlockall_future).
+# 17. brk grows unlocked under MCL_FUTURE. Expect "and so is the heap".
+# 18. mmap keeps a mapping MCL_FUTURE could not lock. Expect "a mapping
+#     RLIMIT_MEMLOCK cannot hold is EAGAIN, and not made".
+#     Not a case: a child inheriting MCL_FUTURE. The field is cleared in
+#     linux_procstate_defaults, which the machine's new process state calls;
+#     the fake kernel memsets its process states, so removing the clear would
+#     pass every host test - the fake's memset is CLAUDE.md's warning about
+#     this exact shape.
+#
+# Target source: kernel/abi/linux/mm.c
+# Run: SABOTAGE_VERIFY="bash scripts/dev/verify-host.sh build-gcc-Release" python3 scripts/dev/sabotage.py kernel/abi/linux/mm.c scripts/dev/cases/abi-mem4.txt
+
+### MADV_DONTNEED leaves the page as it was
+--- old
+        case LINUX_MADV_DONTNEED: case LINUX_MADV_FREE:
+            discard = 1;
+            break;
++++ new
+        case LINUX_MADV_DONTNEED: case LINUX_MADV_FREE:
+            break;
+
+### a shared page is discarded like a private one
+--- old
+        if (!reg || reg->backing != VIBEOS_BACKING_ANON || !vibeos_vmspace_mapped(&v, va)) {
+            continue;
+        }
++++ new
+        if (!reg || !vibeos_vmspace_mapped(&v, va)) {
+            continue;
+        }
+
+### a locked page is discarded
+--- old
+        } else if (e && (*e & VIBEOS_PTE_LOCKED)) {
+            r = -VIBEOS_EINVAL;   /* locked in memory: not to be thrown away */
+        }
++++ new
+        }
+
+### advice that changes what fork does is taken
+--- old
+        default:
+            return -VIBEOS_EINVAL;
+    }
+    end = (addr + len + 0xFFFull) & ~0xFFFull;
+    if (end == addr) {
+        return 0;
+    }
++++ new
+        default:
+            break;
+    }
+    end = (addr + len + 0xFFFull) & ~0xFFFull;
+    if (end == addr) {
+        return 0;
+    }
+
+### madvise does not look for a hole
+--- old
+    if (!vibeos_umem_covered(ps, addr, end)) {
+        r = -VIBEOS_ENOMEM;
+    }
+    /* MADV_POPULATE_READ and _WRITE: every page there now, as an access would
++++ new
+    /* MADV_POPULATE_READ and _WRITE: every page there now, as an access would
+
+### mincore calls a page in swap resident
+--- old
+            out[n] = vibeos_vmspace_resident(&v, va) == 1 ? 1u : 0u;
++++ new
+            out[n] = vibeos_vmspace_resident(&v, va) >= 0 ? 1u : 0u;
+
+### mincore does not judge its vector
+--- old
+    if (pages != 0u && !linux_user_ok(vec_uptr, pages, 1)) {
+        return -VIBEOS_EFAULT;
+    }
++++ new
+
+### mlock locks nothing
+--- old
+        if (vibeos_vmspace_set_locked(&v, va, on) < 0) {
+            return -VIBEOS_EAGAIN;   /* a page in swap that could not be brought back */
+        }
++++ new
+        (void)v;
+
+### mlock2 takes any flag
+--- old
+    if (flags & ~(uint64_t)LINUX_MLOCK_ONFAULT) {
+        return -VIBEOS_EINVAL;
+    }
++++ new
+
+### mremap grows over what is after the mapping
+--- old
+        if (ks_user_fixed_ok(old + old_len, new_len - old_len) &&
+            !vibeos_umem_region_in(ps, old + old_len, new_len - old_len)) {
++++ new
+        if (ks_user_fixed_ok(old + old_len, new_len - old_len)) {
+
+### mremap moves without being allowed to
+--- old
+        if (!(flags & LINUX_MREMAP_MAYMOVE)) {
+            return -VIBEOS_ENOMEM;
+        }
++++ new
+
+### mremap leaves the old range described
+--- old
+            if (vibeos_umem_unmap(me, ps, old, old + old_len) == 0) {
++++ new
+            if (1) {
+
+### mremap takes a range across two mappings
+--- old
+    if (!reg || old + old_len > reg->base + reg->len) {
+        return -VIBEOS_EFAULT;
+    }
++++ new
+    if (!reg) {
+        return -VIBEOS_EFAULT;
+    }
+
+### a shared mapping grows with private pages
+--- old
+        if (kind != VIBEOS_BACKING_ANON) {
+            return -VIBEOS_ENOMEM;
+        }
+        /* Room after it: grow where it stands. */
++++ new
+        /* Room after it: grow where it stands. */
+
+### MADV_POPULATE_WRITE populates a region it may not write (M-103)
+--- old
+            (advice == LINUX_MADV_POPULATE_WRITE &&
++++ new
+            (0 &&
+
+### mlockall forgets MCL_FUTURE (M-104)
+--- old
+    ps->mm->mlock_future = on;
++++ new
+    ps->mm->mlock_future = 0u * on;
+
+### brk grows unlocked under MCL_FUTURE (M-104)
+--- old
+        if (ps->mm->mlock_future &&
+            linux_lock_range(me, ps, ps->mm->brk_cur, new_brk, 1) != 0) {
++++ new
+        if (0 && ps->mm->mlock_future &&
+            linux_lock_range(me, ps, ps->mm->brk_cur, new_brk, 1) != 0) {
+
+### mmap keeps a mapping MCL_FUTURE could not lock (M-104)
+--- old
+        r = -VIBEOS_EAGAIN;
+    }
++++ new
+    }
+
+### mprotect takes a protection bit Linux does not know (#76)
+--- old
+    if (prot & ~(uint64_t)(LINUX_PROT_READ | LINUX_PROT_WRITE | LINUX_PROT_EXEC | LINUX_PROT_SEM |
++++ new
+    if (0 && prot & ~(uint64_t)(LINUX_PROT_READ | LINUX_PROT_WRITE | LINUX_PROT_EXEC | LINUX_PROT_SEM |
+
+### an mremap growth that cannot be locked keeps its region (#78)
+--- old
+                    (void)vibeos_umem_unmap(me, ps, old + old_len, old + new_len);
+                    return -VIBEOS_EAGAIN;
++++ new
+                    for (i = old_len; i < new_len; i += 4096ull) {
+                        (void)vibeos_vmspace_unmap(&v, old + i);
+                    }
+                    return -VIBEOS_EAGAIN;

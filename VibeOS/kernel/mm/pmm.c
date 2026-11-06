@@ -1,0 +1,210 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "vibeos/mm.h"
+
+static uintptr_t align_up(uintptr_t value, size_t align) {
+    uintptr_t mask;
+    if (align == 0) {
+        return value;
+    }
+    mask = (uintptr_t)(align - 1u);
+    /* Saturate rather than wrap.
+     *
+     * The values here come from a UEFI memory map, so they are somebody else's
+     * numbers and the top of the address space is a legal thing for one of them
+     * to name. `value + mask` wrapping turns a high address into a low one, and
+     * a low one is not refused anywhere below - it is a region base the
+     * allocator would hand out. The ELF parser already treats its input this
+     * way; the memory map is no less external.
+     *
+     * Returning UINTPTR_MAX makes every later size and bound computation
+     * refuse, which is the direction this subsystem chooses on purpose. */
+    if (value > (uintptr_t)(~(uintptr_t)0) - mask) {
+        return (uintptr_t)(~(uintptr_t)0);
+    }
+    return (value + mask) & ~mask;
+}
+
+static size_t align_down_size(size_t value, size_t align) {
+    if (align == 0) {
+        return value;
+    }
+    return value - (value % align);
+}
+
+int vibeos_pmm_init(vibeos_pmm_t *pmm, uintptr_t base, size_t size_bytes, size_t page_size) {
+    if (!pmm || size_bytes == 0 || page_size == 0) {
+        return -1;
+    }
+    pmm->base = base;
+    pmm->size_bytes = size_bytes;
+    pmm->offset_bytes = 0;
+    pmm->page_size = page_size;
+    return 0;
+}
+
+int vibeos_pmm_pick_usable_region(const vibeos_boot_info_t *boot_info, size_t page_size, uint64_t limit,
+                                  uintptr_t *out_base, size_t *out_size) {
+    uint64_t i;
+    uintptr_t best_base = 0;
+    size_t best_size = 0;
+    if (!boot_info || !out_base || !out_size || !boot_info->memory_map || boot_info->memory_map_entries == 0 || page_size == 0) {
+        return -1;
+    }
+    for (i = 0; i < boot_info->memory_map_entries; i++) {
+        const vibeos_memory_region_t *region = &boot_info->memory_map[i];
+        uintptr_t region_base;
+        size_t region_size;
+        uintptr_t aligned_base;
+        size_t adjusted_size;
+        if (region->type != VIBEOS_MEMORY_REGION_USABLE || region->length == 0) {
+            continue;
+        }
+        if (region->base > (uint64_t)UINTPTR_MAX || region->length > (uint64_t)SIZE_MAX) {
+            continue;
+        }
+        region_base = (uintptr_t)region->base;
+        region_size = (size_t)region->length;
+        /* Past what the kernel can reach: the largest region was picked
+         * wherever it lay, and frames above the identity map were handed out
+         * that no store could reach (#135). */
+        if (limit != 0u && region->base >= limit) {
+            continue;
+        }
+        if (limit != 0u && region->length > limit - region->base) {
+            region_size = (size_t)(limit - region->base);
+        }
+        if (boot_info->initrd_size > 0) {
+            /* The end after the limit's cut, not the region's own: taken
+             * from the length, a suffix past the initrd ran on above the
+             * identity map, and the cut was undone (v7 review). */
+            uint64_t region_end64 = region->base + region_size;
+            uint64_t initrd_end64 = boot_info->initrd_base + boot_info->initrd_size;
+            if (!(boot_info->initrd_base >= region_end64 || initrd_end64 <= region->base)) {
+                uint64_t prefix = (boot_info->initrd_base > region->base) ? (boot_info->initrd_base - region->base) : 0;
+                uint64_t suffix = (initrd_end64 < region_end64) ? (region_end64 - initrd_end64) : 0;
+                if (prefix >= suffix && prefix > 0 && prefix <= (uint64_t)SIZE_MAX) {
+                    region_size = (size_t)prefix;
+                } else if (suffix > 0 && suffix <= (uint64_t)SIZE_MAX && initrd_end64 <= (uint64_t)UINTPTR_MAX) {
+                    region_base = (uintptr_t)initrd_end64;
+                    region_size = (size_t)suffix;
+                } else {
+                    continue;
+                }
+            }
+        }
+        aligned_base = align_up(region_base, page_size);
+        if (aligned_base < region_base) {
+            continue;
+        }
+        if ((size_t)(aligned_base - region_base) >= region_size) {
+            continue;
+        }
+        adjusted_size = region_size - (size_t)(aligned_base - region_base);
+        adjusted_size = align_down_size(adjusted_size, page_size);
+        if (adjusted_size < page_size) {
+            continue;
+        }
+        if (adjusted_size > best_size) {
+            best_base = aligned_base;
+            best_size = adjusted_size;
+        }
+    }
+    if (best_size == 0) {
+        return -1;
+    }
+    *out_base = best_base;
+    *out_size = best_size;
+    return 0;
+}
+
+int vibeos_pmm_init_from_boot_info(vibeos_pmm_t *pmm, const vibeos_boot_info_t *boot_info, size_t page_size,
+                                   uint64_t limit) {
+    uintptr_t base;
+    size_t size_bytes;
+    if (vibeos_pmm_pick_usable_region(boot_info, page_size, limit, &base, &size_bytes) != 0) {
+        return -1;
+    }
+    return vibeos_pmm_init(pmm, base, size_bytes, page_size);
+}
+
+int vibeos_pmm_reserve(vibeos_pmm_t *pmm, uintptr_t base, size_t size) {
+    uintptr_t region_end, res_end;
+    size_t prefix, suffix;
+
+    if (!pmm || pmm->page_size == 0 || size == 0) {
+        return -1;
+    }
+    if (pmm->offset_bytes != 0) {
+        return -1;   /* something has already been handed out of this region */
+    }
+    if (base + size < base) {
+        return -1;   /* wrap */
+    }
+    region_end = pmm->base + pmm->size_bytes;
+    res_end = base + size;
+    if (res_end <= pmm->base || base >= region_end) {
+        return 0;    /* no overlap: nothing to do, and that is success */
+    }
+
+    prefix = (base > pmm->base) ? (size_t)(base - pmm->base) : 0u;
+    suffix = (res_end < region_end) ? (size_t)(region_end - res_end) : 0u;
+
+    if (prefix >= suffix) {
+        if (prefix < pmm->page_size) {
+            return -1;   /* nothing usable left below the reservation */
+        }
+        pmm->size_bytes = align_down_size(prefix, pmm->page_size);
+    } else {
+        uintptr_t new_base = align_up(res_end, pmm->page_size);
+        size_t shift;
+        if (new_base < res_end || new_base >= region_end) {
+            return -1;
+        }
+        shift = (size_t)(new_base - res_end);
+        if (suffix <= shift || (suffix - shift) < pmm->page_size) {
+            return -1;
+        }
+        pmm->base = new_base;
+        pmm->size_bytes = align_down_size(suffix - shift, pmm->page_size);
+    }
+    if (pmm->size_bytes < pmm->page_size) {
+        return -1;
+    }
+    return 0;
+}
+
+void *vibeos_pmm_alloc_page(vibeos_pmm_t *pmm) {
+    return vibeos_pmm_alloc_pages(pmm, 1u);
+}
+
+void *vibeos_pmm_alloc_pages(vibeos_pmm_t *pmm, size_t page_count) {
+    size_t required_bytes;
+    uintptr_t addr;
+    if (!pmm || page_count == 0 || pmm->page_size == 0) {
+        return 0;
+    }
+    if (page_count > (SIZE_MAX / pmm->page_size)) {
+        return 0;
+    }
+    required_bytes = page_count * pmm->page_size;
+    if (pmm->offset_bytes > pmm->size_bytes || required_bytes > (pmm->size_bytes - pmm->offset_bytes)) {
+        return 0;
+    }
+    addr = pmm->base + pmm->offset_bytes;
+    pmm->offset_bytes += required_bytes;
+    return (void *)addr;
+}
+
+size_t vibeos_pmm_remaining(const vibeos_pmm_t *pmm) {
+    if (!pmm || pmm->offset_bytes > pmm->size_bytes) {
+        return 0;
+    }
+    return pmm->size_bytes - pmm->offset_bytes;
+}
+
+size_t vibeos_pmm_allocated_pages(const vibeos_pmm_t *pmm) {
+    if (!pmm || pmm->page_size == 0) {
+        return 0;
+    }
+    return pmm->offset_bytes / pmm->page_size;
+}
