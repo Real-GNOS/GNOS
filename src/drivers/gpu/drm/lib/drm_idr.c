@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * drm_idr.c ¡ª id -> pointer table behind the DRM object handles. (GPLv2)
+ * drm_idr.c ï¿½ï¿½ id -> pointer table behind the DRM object handles. (GPLv2)
  *
  * The table is a plain open-addressed hash map over power-of-two buckets
  * with linear probing.  That choice is deliberate: the whole contents of a
@@ -34,12 +34,6 @@
 static inline uint32_t drm_idr_bucket(uint32_t id, uint32_t capacity)
 {
     return (id * 2654435761u) & (capacity - 1u);
-}
-
-/* True when a bucket holds nothing that could belong to a probe. */
-static inline bool drm_idr_slot_unused(const struct drm_idr_entry *e)
-{
-    return e->state == DRM_IDR_SLOT_EMPTY || e->state == DRM_IDR_SLOT_DEAD;
 }
 
 /*

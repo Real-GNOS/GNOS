@@ -172,6 +172,29 @@ typedef struct proc {
      */
     uint32_t uid, euid, suid;
     uint32_t gid, egid, sgid;
+    /*
+     * Filesystem ids (setfsuid/setfsgid) and the execution persona
+     * (personality(2)), plus the scheduling knobs the identity calls
+     * store: nice, an ioprio word, and the last sched_setscheduler
+     * policy/priority.  They are kept and reported; the permission
+     * checks read euid/egid and the runqueue stays EEVDF, so these are
+     * the observable state of calls whose deeper effects this kernel
+     * does not have.  fork copies the struct, so children inherit them
+     * the way Linux processes inherit theirs.
+     */
+    uint32_t fsuid, fsgid;
+    uint32_t persona;
+    int32_t  nice;
+    uint32_t ioprio;        /* Linux IOPRIO_PRIO_VALUE(class, data) */
+    uint32_t sched_policy;  /* last sched_setscheduler policy       */
+    uint32_t sched_priority;
+    /*
+     * set_robust_list: the user robust-list head and its length, as the
+     * futex layer hands them in.  Kept and reported; the exit-time robust
+     * futex sweep is not wired yet (documented plan gap).
+     */
+    uint64_t robust_head;
+    uint32_t robust_len;
     uint32_t ngroups;
     uint32_t groups[PROC_NGROUPS];
 

@@ -19,6 +19,7 @@
 #include "heap.h"
 #include "kstring.h"
 #include "smp.h"
+#include "debugcon.h" /* dbg_puts / dbg_puts_dec in the self-test */
 
 #define DC_BUCKETS 512
 #define DC_MAX     1024 /* total entries; keeps kmalloc pressure bounded */

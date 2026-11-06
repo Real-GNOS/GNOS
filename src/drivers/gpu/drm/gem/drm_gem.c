@@ -283,27 +283,40 @@ static void dumb_offset_free(uint64_t offset, size_t size)
 
     spin_lock(&dumb_alloc_lock);
 
+    /* Every slot in the range must still be marked as handed out.  A stray
+     * or repeated free would otherwise inject an overlapping range into the
+     * free list and two objects could end up sharing one mmap offset. */
+    for (i = 0; i < count && (start + i) < DUMB_OFFSET_MAX_SLOTS; i++) {
+        if (dumb_bitmap_get(start + i) != 1) {
+            spin_unlock(&dumb_alloc_lock);
+            return;
+        }
+    }
+
     for (i = 0; i < count && (start + i) < DUMB_OFFSET_MAX_SLOTS; i++) {
         dumb_bitmap_clear(start + i);
     }
 
     {
-        struct dumb_slot_range **prev = &dumb_free_list;
-        struct dumb_slot_range  *cur  = dumb_free_list;
+        struct dumb_slot_range *prev = NULL; /* last node whose start < start */
+        struct dumb_slot_range *cur  = dumb_free_list;
 
         while (cur != NULL && cur->start < start) {
-            prev = &cur->next;
+            prev = cur;
             cur  = cur->next;
         }
 
-        if (*prev != NULL && (*prev)->start + (*prev)->count == start) {
-            (*prev)->count += count;
-            if (cur != NULL && (*prev)->start + (*prev)->count == cur->start) {
-                (*prev)->count += cur->count;
-                (*prev)->next = cur->next;
+        if (prev != NULL && prev->start + prev->count == start) {
+            /* Merge into the left neighbour, then absorb the right one if
+             * the two now touch. */
+            prev->count += count;
+            if (cur != NULL && prev->start + prev->count == cur->start) {
+                prev->count += cur->count;
+                prev->next = cur->next;
                 dumb_range_free_node(cur);
             }
         } else if (cur != NULL && start + count == cur->start) {
+            /* No left neighbour: prepend to the right one. */
             cur->start = start;
             cur->count += count;
         } else {
@@ -313,7 +326,10 @@ static void dumb_offset_free(uint64_t offset, size_t size)
                 fresh->start = start;
                 fresh->count = count;
                 fresh->next  = cur;
-                *prev        = fresh;
+                if (prev != NULL)
+                    prev->next = fresh;
+                else
+                    dumb_free_list = fresh;
             }
         }
     }

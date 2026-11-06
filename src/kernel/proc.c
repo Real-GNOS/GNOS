@@ -20,6 +20,7 @@
 #include "namespace.h"
 #include "cgroup.h"
 #include "sysvipc.h"
+#include "syscall.h" /* posix_timers_sweep */
 #include "seccomp.h"
 #include "signal.h"
 #include "ptrace.h"
@@ -3123,6 +3124,11 @@ void sched_expire_timeouts(void)
         if (p->state == PROC_BLOCKED && p->wake_tick && now >= p->wake_tick)
             sched_wake(p);
     }
+
+    /* timer_create(2) family rides the same tick pass, once per tick (the
+     * sweep walks its own timer table): a periodic POSIX timer re-arms from
+     * `now`, a fire swallowed by a still-pending signal becomes an overrun. */
+    posix_timers_sweep(now);
 }
 
 /*

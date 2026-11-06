@@ -25,6 +25,7 @@ int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,
 {
     struct drm_gem_object *obj;
     uint32_t               handle;
+    uint64_t               pitch, bytes;
     size_t                 size;
     int                    ret;
 
@@ -38,9 +39,19 @@ int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,
         return -EINVAL;
     }
 
-    args->pitch = args->width * (args->bpp / 8);
-    size        = (size_t)args->pitch * args->height;
-    args->size  = (uint64_t)size;
+    /* Do the ABI arithmetic in 64 bits: width and bpp are u32, so
+     * width * (bpp / 8) used to wrap the u32 pitch field and leave the
+     * kernel and the client disagreeing about the buffer layout.  Keep the
+     * byte count inside the u32 GEM size field and the mmap-offset window. */
+    pitch = (uint64_t)args->width * (args->bpp / 8u);
+    bytes = pitch * (uint64_t)args->height;
+    if (pitch > UINT32_MAX || bytes > UINT32_MAX) {
+        return -EINVAL;
+    }
+
+    args->pitch = (uint32_t)pitch;
+    args->size  = bytes;
+    size        = (size_t)bytes;
 
     obj = malloc(sizeof(*obj));
     if (obj == NULL) {

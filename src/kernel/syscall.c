@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * syscall.c — the int 0x80 POSIX gate. (GPLv2)
+ * syscall.c — POSIX syscall implementations (everything except credentials
+ * and permission checks, which live in sysuser.c). (GPLv2)
  *
- * Everything a user process can ask the kernel to do arrives here with the
- * Linux/x86-64 register convention: number in RAX, arguments in RDI, RSI,
- * RDX, R10, R8, R9, result back in RAX, failures as a negative errno.
+ * The dispatch table and syscall_handler() live in dispatch.c; each
+ * __x64_sys_* entry point below takes the saved register frame and
+ * unpacks the Linux/x86-64 argument registers RDI, RSI, RDX, R10, R8, R9.
  *
  * File descriptors are per-process small integers that index the PCB's fd
  * table; the values stored there are handles into the VFS's global open-file
@@ -14,9 +15,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "syscall_impl.h"
 #include "syscall.h"
-#include "idt.h"
-#include "gdt.h"
+#include "mqueue.h" /* sys_mq_* (POSIX message queues) */
 #include "smp.h"
 #include "vfs.h"
 #include "tmpfs.h"
@@ -62,17 +63,6 @@
 #define LINUX_REBOOT_CMD_RESTART   0x01234567
 #define LINUX_REBOOT_CMD_POWER_OFF 0x4321fedc
 
-/* The `syscall` instruction lands here; defined in isr.asm.  It builds a
- * regs_t frame and calls syscall_handler(), exactly like the int 0x80 path. */
-extern uint8_t syscall_entry[];
-
-static void wrmsr(uint32_t msr, uint64_t val)
-{
-    uint32_t lo = (uint32_t)val;
-    uint32_t hi = (uint32_t)(val >> 32);
-    asm volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
-}
-
 /* Room for a shell's environment plus a long command line.  bash alone
  * exports about 30 variables before it runs anything. */
 #define MAX_ARGV 128
@@ -84,7 +74,7 @@ static void wrmsr(uint32_t msr, uint64_t val)
  * check alone cannot see a buffer (or a garbage length) that runs past the
  * end of the process image: copying that would trap on a page nobody owns,
  * and a ring-0 fault there is fatal.  See user_buf_ok() in vmm.c. */
-static int buf_ok(uint64_t p, uint64_t len, int writing)
+int buf_ok(uint64_t p, uint64_t len, int writing)
 {
     proc_t *pr = proc_current();
     return user_buf_ok(pr ? pr->as : NULL, p, len, writing);
@@ -177,7 +167,7 @@ __attribute__((noinline)) static int path_norm(const char *base, const char *pat
 }
 
 /* Resolve a user path against the calling process's current directory. */
-static int path_abs(uint64_t upath, char *out)
+int path_abs(uint64_t upath, char *out)
 {
     if (!user_ptr_ok(upath, 1))
         return -E_INVAL;
@@ -191,7 +181,7 @@ static int path_abs(uint64_t upath, char *out)
  * current directory; any other descriptor supplies its own path as the base,
  * which is why the open-file table remembers the name it was opened with.
  */
-static int path_at(int dfd, uint64_t upath, char *out)
+int path_at(int dfd, uint64_t upath, char *out)
 {
     if (!user_ptr_ok(upath, 1))
         return -E_INVAL;
@@ -1588,362 +1578,6 @@ static int64_t sys_alarm(uint64_t seconds)
     p->itimer_interval = 0;
     p->itimer_expire   = seconds ? now + seconds * 100 : 0;
     return (int64_t)left;
-}
-
-/* umask(95): remembered and inherited, but never enforced -- we have no
- * permission checks to enforce it against.  Programs still expect the
- * read-back-and-restore idiom to work. */
-static int64_t sys_umask(uint32_t mask)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_INVAL;
-
-    uint32_t old = p->umask;
-    p->umask     = mask & 0777;
-    return (int64_t)old;
-}
-
-/* Only the owner and root may change a file's permission bits. */
-static int chmod_allowed(const char *abs)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_INVAL;
-
-    uint32_t uid, gid, mode;
-    int      is_dir;
-    int      r = vfs_owner(abs, &uid, &gid, &mode, &is_dir, 1);
-    if (r < 0)
-        return r;
-    (void)gid;
-    (void)mode;
-    (void)is_dir;
-
-    if (p->euid == 0 || p->euid == uid)
-        return 0;
-    return -E_PERM;
-}
-
-static int64_t sys_chmod(uint64_t upath, uint32_t mode)
-{
-    char abs[GNUOS_PATH_MAX];
-    int  r = path_abs(upath, abs);
-    if (r < 0)
-        return r;
-    r = chmod_allowed(abs);
-    if (r < 0)
-        return r;
-    return vfs_chmod(abs, mode);
-}
-
-/*
- * chown(92) / lchown(94) / fchownat(260).  Handing a file to a different user
- * is root's privilege alone; a plain owner may only move a file it already
- * owns into a group it belongs to.  This is the rule that stops a user from
- * dumping a quota-eating file onto somebody else's account.
- */
-static int chown_allowed(uint32_t owner, uint32_t uid, uint32_t gid)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_INVAL;
-
-    if (p->euid == 0)
-        return 0;
-
-    if (uid != (uint32_t)-1 && uid != owner)
-        return -E_PERM; /* giving it away: root only */
-    if (p->euid != owner)
-        return -E_PERM; /* not yours to re-group     */
-    if (gid != (uint32_t)-1 && !proc_in_group(p, gid))
-        return -E_PERM;
-    return 0;
-}
-
-static int64_t sys_chown(const char *abs, uint32_t uid, uint32_t gid, int follow)
-{
-    uint32_t owner, group, mode;
-    int      is_dir;
-    int      r = vfs_owner(abs, &owner, &group, &mode, &is_dir, follow);
-    if (r < 0)
-        return r;
-    (void)group;
-    (void)mode;
-    (void)is_dir;
-
-    r = chown_allowed(owner, uid, gid);
-    if (r < 0)
-        return r;
-    return vfs_chown(abs, uid, gid, follow);
-}
-
-static int64_t sys_fchown(int fd, uint32_t uid, uint32_t gid)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_INVAL;
-
-    (void)p;
-    int h = fd_handle(fd);
-    if (h < 0)
-        return -E_BADF;
-
-    lstat_t st;
-    int     r = vfs_fstat(h, &st);
-    if (r < 0)
-        return r;
-
-    r = chown_allowed(st.st_uid, uid, gid);
-    if (r < 0)
-        return r;
-    return vfs_fchown(h, uid, gid);
-}
-
-/*
- * access(21) / faccessat(269).  F_OK (0) asks only whether the name resolves;
- * R_OK/W_OK/X_OK are answered against the *real* uid, not the effective one,
- * which is the whole point of the call: a setuid program uses it to ask "may
- * the user who invoked me touch this?".
- */
-static int64_t sys_access(int dfd, uint64_t upath, int at, int amode)
-{
-    char abs[GNUOS_PATH_MAX];
-    int  r = at ? path_at(dfd, upath, abs) : path_abs(upath, abs);
-    if (r < 0)
-        return r;
-
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_INVAL;
-
-    uint32_t uid, gid, mode;
-    int      is_dir;
-    r = vfs_owner(abs, &uid, &gid, &mode, &is_dir, 1);
-    if (r < 0)
-        return r;
-
-    int want = amode & 7;
-    if (!want)
-        return 0; /* F_OK: it exists, we are done */
-
-    /* Swap in the real ids for the duration of the test, per POSIX. */
-    uint32_t save_euid = p->euid, save_egid = p->egid;
-    p->euid = p->uid;
-    p->egid = p->gid;
-    int ok  = proc_permitted(mode, uid, gid, want, is_dir);
-    p->euid = save_euid;
-    p->egid = save_egid;
-
-    return ok ? 0 : -E_ACCES;
-}
-
-/* ---- credentials -------------------------------------------------------
- *
- * The POSIX id model in full: a real id (who you are), an effective id (what
- * the kernel checks against) and a saved set-user-id (what a privileged
- * program may switch back to after dropping privilege).  A process with
- * euid 0 may set any of them to anything; an unprivileged one may only ever
- * move between the three it already holds, which is precisely the rule that
- * lets `su` drop to a user and never lets a user climb back.
- */
-static int64_t sys_getresuid(uint64_t ruid, uint64_t euid, uint64_t suid)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-    if (ruid && user_ptr_ok(ruid, 4))
-        *(uint32_t *)(uintptr_t)ruid = p->uid;
-    if (euid && user_ptr_ok(euid, 4))
-        *(uint32_t *)(uintptr_t)euid = p->euid;
-    if (suid && user_ptr_ok(suid, 4))
-        *(uint32_t *)(uintptr_t)suid = p->suid;
-    return 0;
-}
-
-static int64_t sys_getresgid(uint64_t rgid, uint64_t egid, uint64_t sgid)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-    if (rgid && user_ptr_ok(rgid, 4))
-        *(uint32_t *)(uintptr_t)rgid = p->gid;
-    if (egid && user_ptr_ok(egid, 4))
-        *(uint32_t *)(uintptr_t)egid = p->egid;
-    if (sgid && user_ptr_ok(sgid, 4))
-        *(uint32_t *)(uintptr_t)sgid = p->sgid;
-    return 0;
-}
-
-/* -1 means "leave this one alone", which is how setre*id and setres*id say
- * "change only the other field". */
-#define ID_KEEP 0xFFFFFFFFu
-
-/* May an unprivileged process adopt `id` as one of its user ids?  Only if it
- * already holds it as one of the three. */
-static int uid_allowed(const proc_t *p, uint32_t id)
-{
-    return p->euid == 0 || id == p->uid || id == p->euid || id == p->suid;
-}
-
-static int gid_allowed(const proc_t *p, uint32_t id)
-{
-    return p->euid == 0 || id == p->gid || id == p->egid || id == p->sgid;
-}
-
-static int64_t sys_setresuid(uint32_t r, uint32_t e, uint32_t s)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-
-    if ((r != ID_KEEP && !uid_allowed(p, r)) || (e != ID_KEEP && !uid_allowed(p, e)) ||
-        (s != ID_KEEP && !uid_allowed(p, s)))
-        return -E_PERM;
-
-    if (r != ID_KEEP)
-        p->uid = r;
-    if (e != ID_KEEP)
-        p->euid = e;
-    if (s != ID_KEEP)
-        p->suid = s;
-    return 0;
-}
-
-static int64_t sys_setresgid(uint32_t r, uint32_t e, uint32_t s)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-
-    if ((r != ID_KEEP && !gid_allowed(p, r)) || (e != ID_KEEP && !gid_allowed(p, e)) ||
-        (s != ID_KEEP && !gid_allowed(p, s)))
-        return -E_PERM;
-
-    if (r != ID_KEEP)
-        p->gid = r;
-    if (e != ID_KEEP)
-        p->egid = e;
-    if (s != ID_KEEP)
-        p->sgid = s;
-    return 0;
-}
-
-/*
- * setuid(105).  For root this is the irreversible one: all three ids move, so
- * a program that drops to a user cannot climb back.  For anyone else only the
- * effective id moves, which is how a set-user-ID program toggles its
- * privilege on and off.
- */
-static int64_t sys_setuid(uint32_t uid)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-
-    if (p->euid == 0) {
-        p->uid = p->euid = p->suid = uid;
-        return 0;
-    }
-    if (!uid_allowed(p, uid))
-        return -E_PERM;
-    p->euid = uid;
-    return 0;
-}
-
-static int64_t sys_setgid(uint32_t gid)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-
-    if (p->euid == 0) {
-        p->gid = p->egid = p->sgid = gid;
-        return 0;
-    }
-    if (!gid_allowed(p, gid))
-        return -E_PERM;
-    p->egid = gid;
-    return 0;
-}
-
-static int64_t sys_setreuid(uint32_t r, uint32_t e)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-
-    if ((r != ID_KEEP && !uid_allowed(p, r)) || (e != ID_KEEP && !uid_allowed(p, e)))
-        return -E_PERM;
-
-    uint32_t old_uid = p->uid;
-    if (r != ID_KEEP)
-        p->uid = r;
-    if (e != ID_KEEP)
-        p->euid = e;
-    /* POSIX: if the real uid was changed, or the effective was set to
-     * something other than the old real uid, the saved id follows the new
-     * effective one. */
-    if (r != ID_KEEP || (e != ID_KEEP && e != old_uid))
-        p->suid = p->euid;
-    return 0;
-}
-
-static int64_t sys_setregid(uint32_t r, uint32_t e)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-
-    if ((r != ID_KEEP && !gid_allowed(p, r)) || (e != ID_KEEP && !gid_allowed(p, e)))
-        return -E_PERM;
-
-    uint32_t old_gid = p->gid;
-    if (r != ID_KEEP)
-        p->gid = r;
-    if (e != ID_KEEP)
-        p->egid = e;
-    if (r != ID_KEEP || (e != ID_KEEP && e != old_gid))
-        p->sgid = p->egid;
-    return 0;
-}
-
-/* getgroups(115): size 0 is the "how many are there?" probe. */
-static int64_t sys_getgroups(int size, uint64_t ulist)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-    if (size == 0)
-        return (int64_t)p->ngroups;
-    if (size < 0 || (uint32_t)size < p->ngroups)
-        return -E_INVAL;
-    if (!user_ptr_ok(ulist, p->ngroups * 4))
-        return -E_FAULT;
-
-    uint32_t *out = (uint32_t *)(uintptr_t)ulist;
-    for (uint32_t i = 0; i < p->ngroups; i++)
-        out[i] = p->groups[i];
-    return (int64_t)p->ngroups;
-}
-
-static int64_t sys_setgroups(int size, uint64_t ulist)
-{
-    proc_t *p = proc_current();
-    if (!p)
-        return -E_SRCH;
-    if (p->euid != 0)
-        return -E_PERM;
-    if (size < 0 || size > PROC_NGROUPS)
-        return -E_INVAL;
-    if (size && !buf_ok(ulist, (uint64_t)size * 4, 0))
-        return -E_FAULT;
-
-    const uint32_t *in = (const uint32_t *)(uintptr_t)ulist;
-    for (int i = 0; i < size; i++)
-        p->groups[i] = in[i];
-    p->ngroups = (uint32_t)size;
-    return 0;
 }
 
 /* getdents64(217): fill a musl struct dirent buffer from a directory fd. */
@@ -5102,1418 +4736,4426 @@ static int64_t sys_sendfile(int out_fd, int in_fd, uint64_t uoff, uint64_t count
     return total;
 }
 
-/* ---- dispatch --------------------------------------------------------- */
-/* One bit per syscall number, set the first time that number is refused.  See
- * the default case at the bottom of syscall_handler(). */
-static uint64_t g_nosys_logged[8];
+/* ---- dispatch entry points --------------------------------------------
+ * Generated from the old switch by tools/case2handler.c.  One uniform
+ * entry point per syscall number; see syscall_list.h for the table. */
 
-void syscall_handler(regs_t *r)
+/* Generated by tools/case2handler.c -- append to syscall.c. */
+
+int64_t __x64_sys_read(regs_t *r)
 {
-    uint64_t nr = r->rax;
-    uint64_t a1 = r->rdi;
-    uint64_t a2 = r->rsi;
-    uint64_t a3 = r->rdx;
-
-    proc_t *p = proc_current();
-    int64_t ret;
-
-    /* TEMPORARY Xorg debugging: a syscall must run on its own task's slot. */
-    proc_kstack_audit("SYS");
-
-    /* Remembered for SA_RESTART: by the time signals are looked at, RAX holds
-     * the result rather than the call number. */
-    if (p)
-        p->syscall_nr = (int64_t)nr;
-
-    /* A tracee in PTRACE_SYSCALL mode stops before the call dispatches:
-     * the tracer sees (and may rewrite) the original register image. */
-    if (p) {
-        ptrace_syscall_enter(r, nr);
-        nr = r->rax; /* whatever the tracer left in RAX */
-    }
-
-    /* ---- seccomp-BPF filter check ------------------------------------
-     * If this process has a seccomp filter, run it before dispatching the
-     * syscall.  The filter may deny the call (returning -errno, killing
-     * the process, or delivering SIGSYS). */
-    if (p && p->secc_mode != SECCOMP_MODE_DISABLED) {
-        int sc = seccomp_check(p, (int)nr, a1, a2, a3, r->r10, r->r8, r->r9);
-        if (sc != 0) {
-            if (sc == -E_KILLED) {
-                /* Kill the process.  proc_exit with signal 31 (SIGSYS). */
-                p->term_sig = 31;
-                proc_exit(128 + 31);
-                return;
-            }
-            ret    = sc;
-            r->rax = (uint64_t)ret;
-            goto done;
-        }
-    }
-
-    switch (nr) {
-    case SYS_read:
-        /* the buffer is the destination: the kernel writes into it */
-        if (!buf_ok(a2, a3, 1)) {
-            ret = -E_INVAL;
-            break;
-        }
-        ret = vfs_file_read(fd_handle((int)a1), (void *)(uintptr_t)a2, (uint32_t)a3);
-#ifdef SYSTRACE
-        if (ret == 0 && (int)a1 >= 3) {
-            static unsigned r0n;
-            if (++r0n < 400 || (r0n % 5000) == 0) {
-                dbg_puts("READ0 p=");
-                dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
-                dbg_puts(" fd=");
-                dbg_puts_dec((uint32_t)a1);
-                int               h0 = fd_handle((int)a1);
-                const vfs_node_t *nd = h0 >= 0 ? vfs_file_node(h0) : 0;
-                dbg_puts(" kind=");
-                dbg_puts_dec(nd ? (uint32_t)nd->kind : 99);
-                dbg_puts(" name=");
-                dbg_puts(nd ? nd->name : "?");
-                dbg_puts(" n=");
-                dbg_puts_dec(r0n);
-                dbg_puts("\n");
-            }
-        }
-#endif
-        break;
-
-    case SYS_write:
-        /* the buffer is the source: the kernel reads out of it */
-        if (!buf_ok(a2, a3, 0)) {
-            ret = -E_INVAL;
-            break;
-        }
-        ret = vfs_file_write(fd_handle((int)a1), (const void *)(uintptr_t)a2, (uint32_t)a3);
-        break;
-
-    /* pread64(17)/pwrite64(18): musl's pread/pwrite, and what any program
-     * that does random access without an lseek dance -- an ELF loader, a
-     * framebuffer client, sqlite -- reaches for first. */
-    case SYS_pread64:
-        /* destination buffer: probed as a write target */
-        if (!buf_ok(a2, a3, 1)) {
-            ret = -E_INVAL;
-            break;
-        }
-        if ((int64_t)r->r10 < 0) {
-            ret = -E_INVAL;
-            break;
-        }
-        ret = vfs_file_pread(fd_handle((int)a1), (void *)(uintptr_t)a2, (uint32_t)a3, r->r10);
-        break;
-
-    case SYS_pwrite64:
-        /* source buffer: probed as a read source */
-        if (!buf_ok(a2, a3, 0)) {
-            ret = -E_INVAL;
-            break;
-        }
-        if ((int64_t)r->r10 < 0) {
-            ret = -E_INVAL;
-            break;
-        }
-        ret =
-            vfs_file_pwrite(fd_handle((int)a1), (const void *)(uintptr_t)a2, (uint32_t)a3, r->r10);
-        break;
-
-    case SYS_readv:
-        ret = sys_rw_vec((int)a1, a2, a3, 0);
-        break;
-
-    /* sendfile(40): out_fd, in_fd, offset*, count.  musl exposes it as
-     * sendfile(); nginx/ffmpeg-style programs use it to shunt file bytes
-     * into a socket without sitting in userspace between the two. */
-    case SYS_sendfile:
-        ret = sys_sendfile((int)a1, (int)a2, a3, r->r10);
-        break;
-
-    case SYS_writev:
-        ret = sys_rw_vec((int)a1, a2, a3, 1);
-        break;
-
-    case SYS_preadv2:
-        ret = sys_rw_vec2((int)a1, a2, a3, (int64_t)r->r10, r->r8, 0);
-        break;
-
-    case SYS_pwritev2:
-        ret = sys_rw_vec2((int)a1, a2, a3, (int64_t)r->r10, r->r8, 1);
-        break;
-
-    case SYS_memfd_secret:
-        ret = sys_memfd_secret(a1);
-        break;
-
-    case SYS_quotactl_fd:
-        ret = sys_quotactl_fd(a1, (uint32_t)a2, a3, r->r10);
-        break;
-
-    case SYS_futex_waitv:
-        ret = sys_futex_waitv(a1, a2, a3, r->r10, r->r8);
-        break;
-
-    case SYS_landlock_create_ruleset:
-        ret = sys_landlock_create_ruleset(a1, a2, a3);
-        break;
-
-    case SYS_landlock_add_rule:
-        ret = sys_landlock_add_rule(a1, a2, a3, r->r10);
-        break;
-
-    case SYS_landlock_restrict_self:
-        ret = sys_landlock_restrict_self(a1, a2);
-        break;
-
-    case SYS_process_mrelease:
-        ret = sys_process_mrelease(a1, a2);
-        break;
-
-    case SYS_mount_setattr:
-        ret = sys_mount_setattr(a1, a2, a3, r->r10, r->r8);
-        break;
-
-    case SYS_open:
-        ret = sys_open(a1, (int)a2);
-        break;
-
-    case SYS_openat:
-        ret = sys_openat((int)a1, a2, (int)a3);
-        break;
-
-    case SYS_close_range:
-        ret = sys_close_range(a1, a2, a3);
-        break;
-
-    case SYS_membarrier:
-        ret = sys_membarrier(a1, a2, a3);
-        break;
-
-    case SYS_copy_file_range:
-        ret = sys_copy_file_range(a1, a2, a3, r->r10, r->r8, r->r9);
-        break;
-
-    case SYS_openat2:
-        ret = sys_openat2(a1, a2, a3, r->r10);
-        break;
-
-    case SYS_sched_setaffinity:
-        ret = sys_sched_setaffinity(a1, a2, a3);
-        break;
-
-    case SYS_sched_getaffinity:
-        ret = sys_sched_getaffinity(a1, a2, a3);
-        break;
-
-    case SYS_sync: /* 162: flush every dirty page */
-        ret = pagecache_flush_all();
-        break;
-
-    case SYS_fallocate:
-        ret = sys_fallocate(a1, a2, a3, r->r10);
-        break;
-
-    case SYS_syslog:
-        ret = sys_syslog(a1, a2, a3);
-        break;
-
-    case SYS_rseq:
-        ret = sys_rseq(a1, a2, a3, r->r10);
-        break;
-
-    case SYS_pidfd_open:
-        ret = sys_pidfd_open(a1, a2);
-        break;
-
-    case SYS_pidfd_send_signal:
-        ret = sys_pidfd_send_signal(a1, a2, a3, r->r10);
-        break;
-
-    case SYS_pidfd_getfd:
-        ret = sys_pidfd_getfd(a1, a2, a3);
-        break;
-
-    case SYS_process_vm_readv:
-        ret = sys_process_vm_readv(a1, a2, a3, r->r10, r->r8, r->r9);
-        break;
-
-    case SYS_process_vm_writev:
-        ret = sys_process_vm_writev(a1, a2, a3, r->r10, r->r8, r->r9);
-        break;
-
-    case SYS_process_madvise:
-        ret = sys_process_madvise(a1, a2, a3, r->r10, r->r8);
-        break;
-
-    case SYS_fcntl:
-        ret = sys_fcntl((int)a1, (int)a2, a3);
-        break;
-
-    case SYS_close:
-        ret = sys_close((int)a1);
-        break;
-
-    case SYS_dup:
-        ret = sys_dup((int)a1);
-        break;
-
-    case SYS_dup2:
-        ret = sys_dup2((int)a1, (int)a2);
-        break;
-
-    case SYS_stat:
-        ret = sys_stat(a1, a2, 1);
-        break;
-
-    case SYS_lstat:
-        ret = sys_stat(a1, a2, 0);
-        break;
-
-    case SYS_fstat:
-        ret = sys_fstat((int)a1, a2);
-        break;
-
-    case SYS_newfstatat:
-        ret = sys_newfstatat((int)a1, a2, a3, r->r10);
-        break;
-
-    case SYS_statx:
-        /* arg order: dirfd, pathname, flags, mask(r10), statxbuf(r8) */
-        ret = sys_statx((int)a1, a2, a3, r->r10, r->r8);
-        break;
-
-    case SYS_fadvise64:
-        /* arg order: fd, offset, len, advice(r10) */
-        ret = sys_fadvise64((int)a1, a2, a3, r->r10);
-        break;
-
-    case SYS_getdents64:
-        ret = sys_getdents64((int)a1, a2, a3);
-        break;
-
-    case SYS_gstat:
-        ret = sys_gstat(a1, a2);
-        break;
-
-    case SYS_pipe:
-        ret = sys_pipe(a1);
-        break;
-
-    case SYS_mkdir: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_abs(a1, abs);
-        if (ret < 0)
-            break;
-        ret = vfs_mkdir(abs);
-        break;
-    }
-
-    case SYS_unlink: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_abs(a1, abs);
-        if (ret < 0)
-            break;
-        ret = vfs_unlink(abs);
-        break;
-    }
-
-    case SYS_rmdir: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_abs(a1, abs);
-        if (ret < 0)
-            break;
-        ret = vfs_rmdir(abs);
-        break;
-    }
-
-    case SYS_chdir:
-        ret = sys_chdir(a1);
-        break;
-
-    case SYS_fchdir:
-        ret = sys_fchdir((int)a1);
-        break;
-
-    case SYS_getcwd:
-        ret = sys_getcwd(a1, a2);
-        break;
-
-    case SYS_rename:
-        ret = vfs_rename((const char *)a1, (const char *)a2);
-        break;
-
-    case SYS_link: {
-        char oabs[GNUOS_PATH_MAX], nabs[GNUOS_PATH_MAX];
-        ret = path_abs(a1, oabs);
-        if (ret < 0)
-            break;
-        ret = path_abs(a2, nabs);
-        if (ret < 0)
-            break;
-        ret = vfs_link(oabs, nabs);
-        break;
-    }
-
-    case SYS_statfs: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_abs(a1, abs);
-        if (ret < 0)
-            break;
-        if (!user_ptr_ok(a2, sizeof(kstatfs_t))) {
-            ret = -E_FAULT;
-            break;
-        }
-        ret = vfs_statfs(abs, (void *)(uintptr_t)a2);
-        break;
-    }
-
-    case SYS_fstatfs: {
-        if (!user_ptr_ok(a2, sizeof(kstatfs_t))) {
-            ret = -E_FAULT;
-            break;
-        }
-        ret = vfs_statfs(NULL, (void *)(uintptr_t)a2);
-        break;
-    }
-
-    case SYS_truncate: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_abs(a1, abs);
-        if (ret < 0)
-            break;
-        ret = (int64_t)a2 < 0 ? -E_INVAL : vfs_truncate(abs, a2);
-        break;
-    }
-
-    case SYS_ftruncate: {
-        /* A device with a truncate op resizes itself (the memfd backing
-         * store); anything else goes back through the VFS by path, which is
-         * what keeps the open file's cached size and the inode honest. */
-        int         h  = fd_handle((int)a1);
-        vfs_node_t *tn = vfs_file_node(h);
-        const char *fp = (h >= 0) ? vfs_file_path(h) : NULL;
-        if (tn && tn->ops && tn->ops->truncate) {
-            ret = (int64_t)a2 < 0 ? -E_INVAL : tn->ops->truncate(tn, a2);
-            /* Keep the open file's cached size honest: mmap of the fd (e.g.
-             * a wl_shm keymap, which is unlinked right after the truncate)
-             * sizes its mapping from this field, and a by-path stat cannot
-             * see an unlinked file any more. */
-            if (ret >= 0)
-                tn->size = (uint64_t)a2;
-            break;
-        }
-        if (!fp) {
-            ret = -E_BADF;
-            break;
-        }
-        ret = (int64_t)a2 < 0 ? -E_INVAL : vfs_truncate(fp, a2);
-        break;
-    }
-
-    case SYS_fsync:
-    case SYS_fdatasync: {
-        /* Every filesystem here lives entirely in RAM: writes hit the
-         * buffers immediately, so there is nothing to flush.  Return
-         * success rather than ENOSYS -- editors (nano) call fsync after
-         * every save and would report "Function not implemented". */
-        ret = fd_handle((int)a1) >= 0 ? 0 : -E_BADF;
-        break;
-    }
-
-    case SYS_flock: {
-        /* Advisory locks only: there is exactly one compositor on this
-         * machine, and no other process takes a real lock on anything.
-         * wlroots' wayland socket uses flock(LOCK_EX|LOCK_NB) on its
-         * lockfile; making that succeed is what lets the display socket be
-         * created instead of retrying "wayland-N" forever. */
-        ret = fd_handle((int)a1) >= 0 ? 0 : -E_BADF;
-        break;
-    }
-
-    case SYS_uname:
-        ret = sys_uname(a1);
-        break;
-
-    case SYS_gethostname:
-        ret = sys_gethostname(a1, a2);
-        break;
-
-    case SYS_sethostname:
-        ret = sys_sethostname(a1, a2);
-        break;
-
-    case SYS_setitimer:
-        ret = sys_setitimer(a1, a2, a3);
-        break;
-
-    case SYS_getitimer:
-        ret = sys_getitimer(a1, a2);
-        break;
-
-    case SYS_alarm:
-        ret = sys_alarm(a1);
-        break;
-
-    case SYS_umask:
-        ret = sys_umask((uint32_t)a1);
-        break;
-
-    case SYS_getrandom:
-        ret = sys_getrandom(a1, a2, a3);
-        break;
-
-    case SYS_mount:
-        ret = sys_mount(a1, a2, a3, r->r10, r->r8);
-        break;
-
-    case SYS_umount2:
-        ret = sys_umount2(a1, a2);
-        break;
-
-    /* ---- System V IPC --------------------------------------------------
-     * sem/msg/shm; argument orders are the raw Linux x86-64 syscall
-     * orders (the 4th/5th args arrive in r10/r8). */
-    case SYS_semget:
-        ret = sysv_semget((int32_t)a1, (int)a2, (int)a3);
-        break;
-    case SYS_semop:
-        ret = sysv_semop((int)a1, a2, (size_t)a3);
-        break;
-    case SYS_semtimedop:
-        ret = sysv_semtimedop((int)a1, a2, (size_t)a3, r->r10);
-        break;
-    case SYS_semctl:
-        ret = sysv_semctl((int)a1, (int)a2, (int)a3, r->r10);
-        break;
-    case SYS_msgget:
-        ret = sysv_msgget((int32_t)a1, (int)a2);
-        break;
-    case SYS_msgsnd:
-        ret = sysv_msgsnd((int)a1, a2, (size_t)a3, (int)r->r10);
-        break;
-    case SYS_msgrcv:
-        ret = sysv_msgrcv((int)a1, a2, (size_t)a3, (long)r->r10, (int)r->r8);
-        break;
-    case SYS_msgctl:
-        ret = sysv_msgctl((int)a1, (int)a2, r->r10);
-        break;
-    case SYS_shmget:
-        ret = sysv_shmget((int32_t)a1, (size_t)a2, (int)a3);
-        break;
-    case SYS_shmat:
-        ret = sysv_shmat((int)a1, a2, (int)a3);
-        break;
-    case SYS_shmdt:
-        ret = sysv_shmdt(a1);
-        break;
-    case SYS_shmctl:
-        ret = sysv_shmctl((int)a1, (int)a2, r->r10);
-        break;
-
-    /* reboot(169): the Linux reboot(2) ABI, used verbatim by musl's
-     * reboot().  MAGIC1/MAGIC2 keep an accidental write from powering the
-     * machine off; cmd is what makes it a shutdown, a restart or a no-op.
-     * A poweroff is handed to ACPI and never returns; a restart pokes the
-     * 8042 keyboard controller, which is the PC's oldest warm reset. */
-    case SYS_reboot:
-        if (a1 != 0xfee1dead || a2 != 0x28121969) {
-            ret = -E_INVAL;
-            break;
-        }
-        switch ((int)a3) {
-        case LINUX_REBOOT_CMD_POWER_OFF:
-            acpi_poweroff(); /* parks in a halt unless it fails */
-            ret = 0;         /* no PM1a block: nothing to write */
-            break;
-        case LINUX_REBOOT_CMD_RESTART:
-            outb(0x64, 0xFE); /* 8042 CPU reset */
-            for (;;)
-                asm volatile("cli; hlt");
-            break;
-        default:
-            ret = -E_INVAL;
-            break;
-        }
-        break;
-
-    case SYS_chmod:
-        ret = sys_chmod(a1, (uint32_t)a2);
-        break;
-
-    case SYS_access:
-        ret = sys_access(AT_FDCWD, a1, 0, (int)a2);
-        break;
-
-    case SYS_faccessat:
-        ret = sys_access((int)a1, a2, 1, (int)a3);
-        break;
-
-    /* faccessat2(439): musl's faccessat() on a kernel that advertises it. */
-    case SYS_faccessat2:
-        ret = sys_access((int)a1, a2, 1, (int)a3);
-        break;
-
-    case SYS_chown:
-    case SYS_lchown: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_abs(a1, abs);
-        if (ret < 0)
-            break;
-        ret = sys_chown(abs, (uint32_t)a2, (uint32_t)a3, nr == SYS_chown);
-        break;
-    }
-
-    case SYS_fchown:
-        ret = sys_fchown((int)a1, (uint32_t)a2, (uint32_t)a3);
-        break;
-
-    /* readlink(89): fill the caller's buffer with the link target.  POSIX
-     * says the target is NOT nul-terminated and the result is its length. */
-    case SYS_readlink:
-        ret = sys_readlink((const char *)a1, a2, a3);
-        break;
-
-    /* ---- *at() namespace ops (the path the musl libc actually uses) ---- */
-    /*
-     * musl routes unlink/rmdir/mkdir/rename/symlink/readlink through their
-     * *at() forms, so these are not optional extras -- without them nothing
-     * can create or delete a file.  dirfd is AT_FDCWD for the cases we hit.
-     */
-    case SYS_unlinkat: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_at((int)a1, a2, abs);
-        if (ret < 0)
-            break;
-        /* AT_REMOVEDIR (0x200) turns unlinkat into rmdir. */
-        if (a3 & 0x200)
-            ret = vfs_rmdir(abs);
-        else
-            ret = vfs_unlink(abs);
-        break;
-    }
-
-    case SYS_mkdirat: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_at((int)a1, a2, abs);
-        if (ret < 0)
-            break;
-        ret = vfs_mkdir(abs);
-        break;
-    }
-
-    case SYS_renameat:
-    case SYS_renameat2: {
-        /* renameat(olddirfd, oldpath, newdirfd, newpath[, flags]):
-         * newdirfd is the *third* argument (rdx = a3) and newpath the
-         * fourth (r10) -- the same shape as readlinkat below.  Reading the
-         * pair one slot along instead used newpath as a descriptor and the
-         * flags word as a pointer, which page-faulted the kernel the first
-         * time anything called renameat with a non-zero flags register.
-         * musl's renameat() is a 4-argument syscall, so r8 is whatever the
-         * caller happened to leave there: `mv` was enough to trip it. */
-        char old[GNUOS_PATH_MAX], newp[GNUOS_PATH_MAX];
-        ret = path_at((int)a1, a2, old);
-        if (ret < 0)
-            break;
-        ret = path_at((int)a3, r->r10, newp);
-        if (ret < 0)
-            break;
-        if (nr == SYS_renameat2) {
-            uint32_t flags = (uint32_t)r->r8;
-            /* RENAME_NOREPLACE is the one flag worth honouring: gnulib asks
-             * for it whenever it must not clobber the destination, and
-             * quietly ignoring it turns `mv -n` into `mv -f`.  EXCHANGE and
-             * WHITEOUT need atomicity the ext2 driver cannot offer, so they
-             * are refused rather than approximated. */
-            if (flags & ~RENAME_NOREPLACE) {
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* the buffer is the destination: the kernel writes into it */
+            if (!buf_ok(a2, a3, 1)) {
                 ret = -E_INVAL;
                 break;
             }
-            uint64_t sz;
-            int      kind;
-            if ((flags & RENAME_NOREPLACE) && vfs_stat(newp, &sz, &kind) == 0) {
-                ret = -E_EXIST;
+            ret = vfs_file_read(fd_handle((int)a1), (void *)(uintptr_t)a2, (uint32_t)a3);
+    #ifdef SYSTRACE
+            if (ret == 0 && (int)a1 >= 3) {
+                static unsigned r0n;
+                if (++r0n < 400 || (r0n % 5000) == 0) {
+                    dbg_puts("READ0 p=");
+                    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
+                    dbg_puts(" fd=");
+                    dbg_puts_dec((uint32_t)a1);
+                    int               h0 = fd_handle((int)a1);
+                    const vfs_node_t *nd = h0 >= 0 ? vfs_file_node(h0) : 0;
+                    dbg_puts(" kind=");
+                    dbg_puts_dec(nd ? (uint32_t)nd->kind : 99);
+                    dbg_puts(" name=");
+                    dbg_puts(nd ? nd->name : "?");
+                    dbg_puts(" n=");
+                    dbg_puts_dec(r0n);
+                    dbg_puts("\n");
+                }
+            }
+    #endif
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_write(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* the buffer is the source: the kernel reads out of it */
+            if (!buf_ok(a2, a3, 0)) {
+                ret = -E_INVAL;
                 break;
             }
+            ret = vfs_file_write(fd_handle((int)a1), (const void *)(uintptr_t)a2, (uint32_t)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* pread64(17)/pwrite64(18): musl's pread/pwrite, and what any program
+ * that does random access without an lseek dance -- an ELF loader, a
+ * framebuffer client, sqlite -- reaches for first. */
+int64_t __x64_sys_pread64(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* destination buffer: probed as a write target */
+            if (!buf_ok(a2, a3, 1)) {
+                ret = -E_INVAL;
+                break;
+            }
+            if ((int64_t)r->r10 < 0) {
+                ret = -E_INVAL;
+                break;
+            }
+            ret = vfs_file_pread(fd_handle((int)a1), (void *)(uintptr_t)a2, (uint32_t)a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_pwrite64(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* source buffer: probed as a read source */
+            if (!buf_ok(a2, a3, 0)) {
+                ret = -E_INVAL;
+                break;
+            }
+            if ((int64_t)r->r10 < 0) {
+                ret = -E_INVAL;
+                break;
+            }
+            ret =
+                vfs_file_pwrite(fd_handle((int)a1), (const void *)(uintptr_t)a2, (uint32_t)a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_readv(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rw_vec((int)a1, a2, a3, 0);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* sendfile(40): out_fd, in_fd, offset*, count.  musl exposes it as
+ * sendfile(); nginx/ffmpeg-style programs use it to shunt file bytes
+ * into a socket without sitting in userspace between the two. */
+int64_t __x64_sys_sendfile(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_sendfile((int)a1, (int)a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_writev(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rw_vec((int)a1, a2, a3, 1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_preadv2(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rw_vec2((int)a1, a2, a3, (int64_t)r->r10, r->r8, 0);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_pwritev2(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rw_vec2((int)a1, a2, a3, (int64_t)r->r10, r->r8, 1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_memfd_secret(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_memfd_secret(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_quotactl_fd(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_quotactl_fd(a1, (uint32_t)a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_futex_waitv(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_futex_waitv(a1, a2, a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_landlock_create_ruleset(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_landlock_create_ruleset(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_landlock_add_rule(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_landlock_add_rule(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_landlock_restrict_self(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_landlock_restrict_self(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_process_mrelease(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_process_mrelease(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mount_setattr(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mount_setattr(a1, a2, a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_open(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_open(a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_openat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_openat((int)a1, a2, (int)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_close_range(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_close_range(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_membarrier(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_membarrier(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_copy_file_range(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_copy_file_range(a1, a2, a3, r->r10, r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_openat2(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_openat2(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sched_setaffinity(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_sched_setaffinity(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sched_getaffinity(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_sched_getaffinity(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sync(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        /* 162: flush every dirty page */
+            ret = pagecache_flush_all();
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_fallocate(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_fallocate(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_syslog(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_syslog(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_rseq(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rseq(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_pidfd_open(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_pidfd_open(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_pidfd_send_signal(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_pidfd_send_signal(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_pidfd_getfd(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_pidfd_getfd(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_process_vm_readv(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_process_vm_readv(a1, a2, a3, r->r10, r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_process_vm_writev(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_process_vm_writev(a1, a2, a3, r->r10, r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_process_madvise(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_process_madvise(a1, a2, a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_fcntl(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_fcntl((int)a1, (int)a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_close(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_close((int)a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_dup(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_dup((int)a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_dup2(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_dup2((int)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_stat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_stat(a1, a2, 1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_lstat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_stat(a1, a2, 0);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_fstat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_fstat((int)a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_newfstatat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_newfstatat((int)a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_statx(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* arg order: dirfd, pathname, flags, mask(r10), statxbuf(r8) */
+            ret = sys_statx((int)a1, a2, a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_fadvise64(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* arg order: fd, offset, len, advice(r10) */
+            ret = sys_fadvise64((int)a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getdents64(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getdents64((int)a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_gstat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_gstat(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_pipe(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_pipe(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mkdir(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_abs(a1, abs);
+            if (ret < 0)
+                break;
+            ret = vfs_mkdir(abs);
+            break;
         }
-        ret = vfs_rename(old, newp);
-        break;
-    }
+    } while (0);
+    return ret;
+}
 
-    case SYS_symlink:
-        ret = vfs_symlink((const char *)a1, (const char *)a2);
-        break;
-
-    case SYS_symlinkat: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_at((int)a2, a3, abs);
-        if (ret < 0)
-            break;
-        ret = vfs_symlink((const char *)a1, abs);
-        break;
-    }
-
-    case SYS_readlinkat: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_at((int)a1, a2, abs);
-        if (ret < 0)
-            break;
-        /* readlinkat(dirfd, path, buf, bufsize): buf is a3 (RDX), bufsize
-         * is the 4th argument r10 -- not r8. */
-        ret = do_readlink(abs, a3, r->r10);
-        break;
-    }
-
-    case SYS_fchmod: {
-        /* fchmod(fd, mode): wlroots' shm files go through this with mode 0
-         * to lock a shared-memory file down before use. */
-        int         h  = fd_handle((int)a1);
-        vfs_node_t *tn = (h >= 0) ? vfs_file_node(h) : NULL;
-        const char *fp = (h >= 0) ? vfs_file_path(h) : NULL;
-        if (!fp) {
-            ret = -E_BADF;
+int64_t __x64_sys_unlink(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_abs(a1, abs);
+            if (ret < 0)
+                break;
+            ret = vfs_unlink(abs);
             break;
         }
-        /* tmpfs files are world-writable scratch (/tmp, /run, /dev/shm):
-         * the mode is meaningless, and resolving by path fails for an
-         * object that was unlinked while still open.  Report success. */
-        if (tmpfs_is_file_node(tn)) {
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_rmdir(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_abs(a1, abs);
+            if (ret < 0)
+                break;
+            ret = vfs_rmdir(abs);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_chdir(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_chdir(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_fchdir(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_fchdir((int)a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getcwd(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getcwd(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_rename(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = vfs_rename((const char *)a1, (const char *)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_link(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char oabs[GNUOS_PATH_MAX], nabs[GNUOS_PATH_MAX];
+            ret = path_abs(a1, oabs);
+            if (ret < 0)
+                break;
+            ret = path_abs(a2, nabs);
+            if (ret < 0)
+                break;
+            ret = vfs_link(oabs, nabs);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_statfs(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_abs(a1, abs);
+            if (ret < 0)
+                break;
+            if (!user_ptr_ok(a2, sizeof(kstatfs_t))) {
+                ret = -E_FAULT;
+                break;
+            }
+            ret = vfs_statfs(abs, (void *)(uintptr_t)a2);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_fstatfs(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            if (!user_ptr_ok(a2, sizeof(kstatfs_t))) {
+                ret = -E_FAULT;
+                break;
+            }
+            ret = vfs_statfs(NULL, (void *)(uintptr_t)a2);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_truncate(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_abs(a1, abs);
+            if (ret < 0)
+                break;
+            ret = (int64_t)a2 < 0 ? -E_INVAL : vfs_truncate(abs, a2);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_ftruncate(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            /* A device with a truncate op resizes itself (the memfd backing
+             * store); anything else goes back through the VFS by path, which is
+             * what keeps the open file's cached size and the inode honest. */
+            int         h  = fd_handle((int)a1);
+            vfs_node_t *tn = vfs_file_node(h);
+            const char *fp = (h >= 0) ? vfs_file_path(h) : NULL;
+            if (tn && tn->ops && tn->ops->truncate) {
+                ret = (int64_t)a2 < 0 ? -E_INVAL : tn->ops->truncate(tn, a2);
+                /* Keep the open file's cached size honest: mmap of the fd (e.g.
+                 * a wl_shm keymap, which is unlinked right after the truncate)
+                 * sizes its mapping from this field, and a by-path stat cannot
+                 * see an unlinked file any more. */
+                if (ret >= 0)
+                    tn->size = (uint64_t)a2;
+                break;
+            }
+            if (!fp) {
+                ret = -E_BADF;
+                break;
+            }
+            ret = (int64_t)a2 < 0 ? -E_INVAL : vfs_truncate(fp, a2);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_fsync(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            /* Every filesystem here lives entirely in RAM: writes hit the
+             * buffers immediately, so there is nothing to flush.  Return
+             * success rather than ENOSYS -- editors (nano) call fsync after
+             * every save and would report "Function not implemented". */
+            ret = fd_handle((int)a1) >= 0 ? 0 : -E_BADF;
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_flock(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            /* Advisory locks only: there is exactly one compositor on this
+             * machine, and no other process takes a real lock on anything.
+             * wlroots' wayland socket uses flock(LOCK_EX|LOCK_NB) on its
+             * lockfile; making that succeed is what lets the display socket be
+             * created instead of retrying "wayland-N" forever. */
+            ret = fd_handle((int)a1) >= 0 ? 0 : -E_BADF;
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_uname(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_uname(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_gethostname(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_gethostname(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sethostname(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_sethostname(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_setitimer(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_setitimer(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getitimer(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getitimer(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_alarm(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_alarm(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getrandom(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getrandom(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mount(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mount(a1, a2, a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_umount2(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_umount2(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* ---- System V IPC --------------------------------------------------
+ * sem/msg/shm; argument orders are the raw Linux x86-64 syscall
+ * orders (the 4th/5th args arrive in r10/r8). */
+int64_t __x64_sys_semget(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_semget((int32_t)a1, (int)a2, (int)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_semop(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_semop((int)a1, a2, (size_t)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_semtimedop(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_semtimedop((int)a1, a2, (size_t)a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_semctl(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_semctl((int)a1, (int)a2, (int)a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_msgget(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_msgget((int32_t)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_msgsnd(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_msgsnd((int)a1, a2, (size_t)a3, (int)r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_msgrcv(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_msgrcv((int)a1, a2, (size_t)a3, (long)r->r10, (int)r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_msgctl(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_msgctl((int)a1, (int)a2, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_shmget(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_shmget((int32_t)a1, (size_t)a2, (int)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_shmat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_shmat((int)a1, a2, (int)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_shmdt(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_shmdt(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_shmctl(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sysv_shmctl((int)a1, (int)a2, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* reboot(169): the Linux reboot(2) ABI, used verbatim by musl's
+ * reboot().  MAGIC1/MAGIC2 keep an accidental write from powering the
+ * machine off; cmd is what makes it a shutdown, a restart or a no-op.
+ * A poweroff is handed to ACPI and never returns; a restart pokes the
+ * 8042 keyboard controller, which is the PC's oldest warm reset. */
+int64_t __x64_sys_reboot(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            if (a1 != 0xfee1dead || a2 != 0x28121969) {
+                ret = -E_INVAL;
+                break;
+            }
+            switch ((int)a3) {
+            case LINUX_REBOOT_CMD_POWER_OFF:
+                acpi_poweroff(); /* parks in a halt unless it fails */
+                ret = 0;         /* no PM1a block: nothing to write */
+                break;
+            case LINUX_REBOOT_CMD_RESTART:
+                outb(0x64, 0xFE); /* 8042 CPU reset */
+                for (;;)
+                    asm volatile("cli; hlt");
+                break;
+            default:
+                ret = -E_INVAL;
+                break;
+            }
+            break;
+    } while (0);
+    return ret;
+}
+
+/* readlink(89): fill the caller's buffer with the link target.  POSIX
+ * says the target is NOT nul-terminated and the result is its length. */
+int64_t __x64_sys_readlink(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_readlink((const char *)a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* ---- *at() namespace ops (the path the musl libc actually uses) ---- */
+/*
+ * musl routes unlink/rmdir/mkdir/rename/symlink/readlink through their
+ * *at() forms, so these are not optional extras -- without them nothing
+ * can create or delete a file.  dirfd is AT_FDCWD for the cases we hit.
+ */
+int64_t __x64_sys_unlinkat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_at((int)a1, a2, abs);
+            if (ret < 0)
+                break;
+            /* AT_REMOVEDIR (0x200) turns unlinkat into rmdir. */
+            if (a3 & 0x200)
+                ret = vfs_rmdir(abs);
+            else
+                ret = vfs_unlink(abs);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mkdirat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_at((int)a1, a2, abs);
+            if (ret < 0)
+                break;
+            ret = vfs_mkdir(abs);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_renameat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            /* renameat(olddirfd, oldpath, newdirfd, newpath[, flags]):
+             * newdirfd is the *third* argument (rdx = a3) and newpath the
+             * fourth (r10) -- the same shape as readlinkat below.  Reading the
+             * pair one slot along instead used newpath as a descriptor and the
+             * flags word as a pointer, which page-faulted the kernel the first
+             * time anything called renameat with a non-zero flags register.
+             * musl's renameat() is a 4-argument syscall, so r8 is whatever the
+             * caller happened to leave there: `mv` was enough to trip it. */
+            char old[GNUOS_PATH_MAX], newp[GNUOS_PATH_MAX];
+            ret = path_at((int)a1, a2, old);
+            if (ret < 0)
+                break;
+            ret = path_at((int)a3, r->r10, newp);
+            if (ret < 0)
+                break;
+            if (nr == SYS_renameat2) {
+                uint32_t flags = (uint32_t)r->r8;
+                /* RENAME_NOREPLACE is the one flag worth honouring: gnulib asks
+                 * for it whenever it must not clobber the destination, and
+                 * quietly ignoring it turns `mv -n` into `mv -f`.  EXCHANGE and
+                 * WHITEOUT need atomicity the ext2 driver cannot offer, so they
+                 * are refused rather than approximated. */
+                if (flags & ~RENAME_NOREPLACE) {
+                    ret = -E_INVAL;
+                    break;
+                }
+                uint64_t sz;
+                int      kind;
+                if ((flags & RENAME_NOREPLACE) && vfs_stat(newp, &sz, &kind) == 0) {
+                    ret = -E_EXIST;
+                    break;
+                }
+            }
+            ret = vfs_rename(old, newp);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_symlink(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = vfs_symlink((const char *)a1, (const char *)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_symlinkat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_at((int)a2, a3, abs);
+            if (ret < 0)
+                break;
+            ret = vfs_symlink((const char *)a1, abs);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_readlinkat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_at((int)a1, a2, abs);
+            if (ret < 0)
+                break;
+            /* readlinkat(dirfd, path, buf, bufsize): buf is a3 (RDX), bufsize
+             * is the 4th argument r10 -- not r8. */
+            ret = do_readlink(abs, a3, r->r10);
+            break;
+        }
+    } while (0);
+    return ret;
+}
+
+/* utimensat(280): we keep no timestamps, so there is nothing to set.
+ * Report success rather than ENOSYS -- `cp -p` treats a failure here as
+ * a warning worth printing, and a warning about a clock we do not have
+ * is noise, not information. */
+int64_t __x64_sys_utimensat(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
             ret = 0;
             break;
-        }
-        ret = chmod_allowed(fp);
-        if (ret < 0)
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_lseek(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = vfs_file_seek(fd_handle((int)a1), (int64_t)a2, (int)a3);
             break;
-        ret = vfs_chmod(fp, (uint32_t)a2);
-        break;
-    }
+    } while (0);
+    return ret;
+}
 
-    case SYS_fchmodat: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_at((int)a1, a2, abs);
-        if (ret < 0)
-            break;
-        /* AT_SYMLINK_NOFOLLOW (0x100) would mean chmod the link itself, which
-         * we cannot do; we always operate on the resolved target. */
-        ret = chmod_allowed(abs);
-        if (ret < 0)
-            break;
-        ret = vfs_chmod(abs, (uint32_t)a3);
-        break;
-    }
-
-    case SYS_fchownat: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_at((int)a1, a2, abs);
-        if (ret < 0)
-            break;
-        /* AT_SYMLINK_NOFOLLOW (0x100) picks the link itself. */
-        ret = sys_chown(abs, (uint32_t)a3, (uint32_t)r->r10, !(r->r8 & 0x100));
-        break;
-    }
-
-    /* utimensat(280): we keep no timestamps, so there is nothing to set.
-     * Report success rather than ENOSYS -- `cp -p` treats a failure here as
-     * a warning worth printing, and a warning about a clock we do not have
-     * is noise, not information. */
-    case SYS_utimensat:
-        ret = 0;
-        break;
-
-    case SYS_lseek:
-        ret = vfs_file_seek(fd_handle((int)a1), (int64_t)a2, (int)a3);
-        break;
-
-    case SYS_ioctl:
-#ifdef SYSTRACE
-        if (proc_current()) {
-            static unsigned ie;
-            dbg_puts("IOCTL-E p=");
-            dbg_puts_dec((uint32_t)proc_current()->pid);
-            dbg_puts(" fd=");
-            dbg_puts_dec((uint32_t)(int)a1);
-            dbg_puts(" cmd=");
-            dbg_puts_hex(a2);
-            dbg_puts("\n");
-        }
-#endif
-        ret = sys_ioctl((int)a1, a2, a3);
-        break;
-
-    /* ttyinject(404): feed a buffer into the line discipline.  A debugging
-     * back door for headless tests (see readlinetest.c); not POSIX. */
-    case SYS_ttyinject:
-        ret = sys_ttyinject(a1, a2);
-        break;
-
-    /* inputinject(405): push one synthetic evdev event into /dev/input/
-     * event0 (see evtest.c).  Not POSIX. */
-    case SYS_inputinject:
-        ret = sys_inputinject(a1, a2, a3);
-        break;
-
-    /* dbgputs(441): copy a user string to the debug console, so headless
-     * tests can leave greppable marks in build/dbg.log.  Not POSIX. */
-    case SYS_dbgputs:
-        ret = sys_dbgputs(a1);
-        break;
-
-    /* klog(443): dmesg-style kernel log ring access. */
-    case SYS_klog:
-        ret = klog_syscall(a1, a2, a3);
-        break;
-
-    /* cpuid(444): CPUID(leaf, subleaf) with NULL-skippable out registers. */
-    case SYS_cpuid:
-        ret = cpuid_syscall(a1, a2, a3, r->r10, r->r8, r->r9);
-        break;
-
-    case SYS_sched_yield:
-        sched_yield();
-        ret = 0;
-        break;
-
-    case SYS_getpid:
-        /* The thread-group leader's pid: every thread reports the same
-         * process id, while gettid() (below) still tells them apart. */
-        ret = p ? p->tgid : 0;
-        break;
-
-    case SYS_getppid:
-        ret = p ? p->ppid : 0;
-        break;
-
-    case SYS_fork:
-        ret = proc_fork(r);
-        if (ret < 0) {
-            dbg_puts("FORK-FAIL p=");
-            dbg_puts_dec((uint32_t)(p ? p->pid : 0));
-            dbg_puts(" errno=");
-            dbg_puts_dec((uint32_t)-ret);
-            dbg_puts("\n");
-        }
-        break;
-
-    case SYS_vfork:
-        /* vfork behaves like fork: the child gets a copy-on-write view of the
-         * parent's address space (vmm_clone marks the pages PTE_COW) and is
-         * expected to execve() or _exit() immediately.  That is what busybox
-         * ash needs vfork for (running external commands). */
-        ret = proc_fork(r);
-        break;
-
-    case SYS_clone:
-        /* musl routes both fork() and pthread_create through clone, so a
-         * musl-linked userland (OpenRC, bash, ...) needs it even for a fork. */
-        ret = proc_clone(r);
-        break;
-
-    case SYS_unshare:
-        /* Unshare the namespaces named in the flag set (namespace.h). */
-        ret = namespace_unshare(a1);
-        break;
-
-    case SYS_setns:
-        /* Rebind the calling process to a namespace named by an fd. */
-        ret = namespace_setns((int)a1, (int)a2);
-        break;
-
-    case SYS_ppoll:
-        ret = sys_ppoll(a1, a2, a3, r->r10);
-        break;
-
-    case SYS_poll:
-        ret = sys_poll(a1, a2, (int64_t)a3);
-        break;
-
-    /* ---- anonymous fds for the Wayland plumbing ------------------------ */
-    case SYS_memfd_create:
-        ret = sys_memfd_create(a1, a2);
-        break;
-    case SYS_eventfd:
-        ret = sys_eventfd(a1);
-        break;
-    case SYS_eventfd2:
-        ret = sys_eventfd2(a1, a2);
-        break;
-    case SYS_epoll_create:
-        ret = sys_epoll_create(a1);
-        break;
-    case SYS_epoll_create1:
-        ret = sys_epoll_create1(a1);
-        break;
-    case SYS_inotify_init:
-        ret = sys_inotify_init();
-        break;
-    case SYS_inotify_init1:
-        ret = sys_inotify_init1(a1);
-        break;
-    case SYS_inotify_add_watch:
-        ret = sys_inotify_add_watch((int)a1, a2, (uint32_t)a3);
-        break;
-    case SYS_inotify_rm_watch:
-        ret = sys_inotify_rm_watch((int)a1, (uint32_t)a2);
-        break;
-    case SYS_epoll_ctl:
-        ret = sys_epoll_ctl((int)a1, (int)a2, (int)a3, r->r10);
-        break;
-
-    /* POSIX message queues (240-245): mq_open/unlink/timedsend/
-     * timedreceive/notify/getsetattr, same numbers as Linux x86-64. */
-    case SYS_mq_open:
-        ret = sys_mq_open(a1, a2, (uint32_t)a3, r->r10);
-        break;
-    case SYS_mq_unlink:
-        ret = sys_mq_unlink(a1);
-        break;
-    case SYS_mq_timedsend:
-        ret = sys_mq_timedsend((int)a1, a2, (uint64_t)(size_t)a3, (unsigned)r->r10, r->r8);
-        break;
-    case SYS_mq_timedreceive:
-        ret = sys_mq_timedreceive((int)a1, a2, (uint64_t)(size_t)a3, r->r10, r->r8);
-        break;
-    case SYS_mq_notify:
-        ret = sys_mq_notify((int)a1, a2);
-        break;
-    case SYS_mq_getsetattr:
-        ret = sys_mq_getsetattr((int)a1, a2, a3);
-        break;
-    case SYS_epoll_wait:
-        ret = sys_epoll_wait((int)a1, a2, (int)a3, (int)r->r10);
-        break;
-    case SYS_epoll_pwait:
-        ret = sys_epoll_pwait((int)a1, a2, (int)a3, (int)r->r10, r->r8);
-        break;
-
-    case SYS_epoll_pwait2:
-        ret = sys_epoll_pwait2((int)a1, a2, (int)a3, r->r10, r->r8);
-        break;
-
-    case SYS_timerfd_create:
-        ret = sys_timerfd_create(a1, a2);
-        break;
-    case SYS_timerfd_settime:
-        ret = sys_timerfd_settime(a1, a2, a3, r->r10);
-        break;
-    case SYS_timerfd_gettime:
-        ret = sys_timerfd_gettime(a1, a2);
-        break;
-    case SYS_signalfd4:
-        ret = sys_signalfd4(a1, a2, a3, r->r10);
-        break;
-
-    /* ---- BSD socket API (x86-64: one syscall per call, no socketcall) ---- */
-    case SYS_socket:
-        ret = sys_socket((int)a1, (int)a2, (int)a3);
-        break;
-    case SYS_bind:
-        ret = sys_bind((int)a1, a2, a3);
-        break;
-    case SYS_connect:
-        ret = sys_connect((int)a1, a2, a3);
-        break;
-    case SYS_listen:
-        ret = sys_listen((int)a1, (int)a2);
-        break;
-    case SYS_accept:
-        ret = sys_accept((int)a1, a2, a3, 0);
-        break;
-    case SYS_accept4:
-        ret = sys_accept((int)a1, a2, a3, (int)r->r10);
-        break;
-    case SYS_sendto:
-        /* arg order: fd, buf, len, flags, addr, addrlen */
-        ret = sys_sendto((int)a1, a2, a3, (int)r->r10, r->r8, r->r9);
-        break;
-    case SYS_sendmsg:
-        /* arg order: fd, msghdr, flags */
-        ret = sys_sendmsg((int)a1, a2, (int)r->r10);
-        break;
-    case SYS_recvfrom:
-        /* arg order: fd, buf, len, flags, addr, addrlen */
-        ret = sys_recvfrom((int)a1, a2, a3, (int)r->r10, r->r8, r->r9);
-        break;
-    case SYS_recvmsg:
-        /* arg order: fd, msghdr, flags */
-        ret = sys_recvmsg((int)a1, a2, (int)r->r10);
-        break;
-    case SYS_socketpair:
-        /* arg order: domain, type, protocol, sv */
-        ret = sys_socketpair((int)a1, (int)a2, (int)a3, r->r10);
-        break;
-    case SYS_shutdown:
-        ret = sys_shutdown((int)a1, (int)a2);
-        break;
-    case SYS_getsockname:
-        ret = sys_getsockname((int)a1, a2, a3, 0);
-        break;
-    case SYS_getpeername:
-        ret = sys_getsockname((int)a1, a2, a3, 1);
-        break;
-    case SYS_setsockopt:
-        ret = sys_setsockopt((int)a1, (int)a2, (int)a3, r->r10, r->r8);
-        break;
-    case SYS_getsockopt:
-        ret = sys_getsockopt((int)a1, (int)a2, (int)a3, r->r10, r->r8);
-        break;
-    case SYS_select:
-        /* int select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *xfds,
-         *            struct timeval *tv);  args in RDI/RSI/RDX/R10/R8. */
-        ret = sys_select((int)a1, a2, a3, r->r10, r->r8);
-        break;
-
-    case SYS_pselect6:
-        /* pselect6 has the same fd_set layout; timeout is timespec and the
-         * 6th arg (sigmask) is ignored -- see sys_pselect6(). */
-        ret = sys_pselect6((int)a1, a2, a3, r->r10, r->r8, r->r9);
-        break;
-
-    case SYS_execve: {
-        char abs[GNUOS_PATH_MAX];
-        ret = path_abs(a1, abs);
-        if (ret < 0)
-            break;
-        /* /proc/self/exe: apk.static re-execs itself through this magic
-         * symlink -- the kernel knows the answer. */
-        if (strcmp(abs, "/proc/self/exe") == 0) {
-            proc_t *cp = proc_current();
-            if (!cp || !cp->exe_path[0]) {
-                ret = -E_NOENT;
-                break;
-            }
-            strncpy(abs, cp->exe_path, sizeof(abs) - 1);
-            abs[sizeof(abs) - 1] = '\0';
-        }
-#ifdef SYSTRACE
-        { /* remember what each exec tried, so ENOENT loops name their
-           * missing binary instead of hiding behind a bare return code */
-        }
-#endif
-        int n = collect_vec(a2, g_argv);
-        if (n < 0) {
-            ret = n;
-            break;
-        }
-        n = collect_vec(a3, g_envp);
-        if (n < 0) {
-            ret = n;
-            break;
-        }
-        ret = proc_execve(abs, g_argv, g_envp, r);
-#ifdef SYSTRACE
-        /* One line per successful image swap, naming what actually ran.
-         * The generic SY trace prints a bare number for nr=59; the boot
-         * self-test asserts on these instead -- "openrc started" and
-         * "agetty started" are only observable from the kernel side,
-         * since the framebuffer console never reaches dbg.log. */
-        if (ret >= 0 && proc_current()) {
-            dbg_puts("EXEC p=");
-            dbg_puts_dec((uint32_t)proc_current()->pid);
-            dbg_puts(" path=");
-            dbg_puts(abs);
-            dbg_puts("\r\n");
-        }
-        if (ret == -E_NOENT) {
-            static unsigned en;
-            if (++en < 30 || (en % 500) == 0) {
-                dbg_puts("EXEC-ENOENT p=");
-                dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
-                dbg_puts(" path=");
-                dbg_puts(abs);
+int64_t __x64_sys_ioctl(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+    #ifdef SYSTRACE
+            if (proc_current()) {
+                static unsigned ie;
+                dbg_puts("IOCTL-E p=");
+                dbg_puts_dec((uint32_t)proc_current()->pid);
+                dbg_puts(" fd=");
+                dbg_puts_dec((uint32_t)(int)a1);
+                dbg_puts(" cmd=");
+                dbg_puts_hex(a2);
                 dbg_puts("\n");
             }
-        }
-        /* Any other failure (EACCES/E2BIG/ENOEXEC/ENOMEM/...): the generic
-         * SY trace shows a bare number, and the musl-side error message
-         * dies in the parent's pipe -- e.g. Xorg's xkbcomp fork.  Name the
-         * binary and the errno so the failing exec is locatable. */
-        else if (ret < 0 && ret != -E_NOENT) {
-            static unsigned ef;
-            if (++ef < 64) {
-                dbg_puts("EXEC-FAIL p=");
-                dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
-                dbg_puts(" path=");
-                dbg_puts(abs);
-                dbg_puts(" errno=");
-                dbg_puts_dec((uint32_t)(-ret));
-                dbg_puts("\r\n");
-            }
-        }
-#endif
-        if (ret == 0)
-            return; /* the frame now belongs to the new image */
-        break;
-    }
+    #endif
+            ret = sys_ioctl((int)a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
 
-    case SYS_wait4: {
-        int status = 0;
-        ret        = proc_waitpid((int)a1, &status, (int)a3);
-        if (ret > 0 && a2) {
-            if (!user_ptr_ok(a2, sizeof(int))) {
-                ret = -E_INVAL;
+/* ttyinject(404): feed a buffer into the line discipline.  A debugging
+ * back door for headless tests (see readlinetest.c); not POSIX. */
+int64_t __x64_sys_ttyinject(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_ttyinject(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* inputinject(405): push one synthetic evdev event into /dev/input/
+ * event0 (see evtest.c).  Not POSIX. */
+int64_t __x64_sys_inputinject(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_inputinject(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* dbgputs(441): copy a user string to the debug console, so headless
+ * tests can leave greppable marks in build/dbg.log.  Not POSIX. */
+int64_t __x64_sys_dbgputs(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_dbgputs(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* klog(443): dmesg-style kernel log ring access. */
+int64_t __x64_sys_klog(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = klog_syscall(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* cpuid(444): CPUID(leaf, subleaf) with NULL-skippable out registers. */
+int64_t __x64_sys_cpuid(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = cpuid_syscall(a1, a2, a3, r->r10, r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sched_yield(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            sched_yield();
+            ret = 0;
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getpid(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* The thread-group leader's pid: every thread reports the same
+             * process id, while gettid() (below) still tells them apart. */
+            ret = p ? p->tgid : 0;
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getppid(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = p ? p->ppid : 0;
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_fork(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = proc_fork(r);
+            if (ret < 0) {
+                dbg_puts("FORK-FAIL p=");
+                dbg_puts_dec((uint32_t)(p ? p->pid : 0));
+                dbg_puts(" errno=");
+                dbg_puts_dec((uint32_t)-ret);
+                dbg_puts("\n");
+            }
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_vfork(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* vfork behaves like fork: the child gets a copy-on-write view of the
+             * parent's address space (vmm_clone marks the pages PTE_COW) and is
+             * expected to execve() or _exit() immediately.  That is what busybox
+             * ash needs vfork for (running external commands). */
+            ret = proc_fork(r);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_clone(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* musl routes both fork() and pthread_create through clone, so a
+             * musl-linked userland (OpenRC, bash, ...) needs it even for a fork. */
+            ret = proc_clone(r);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_unshare(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* Unshare the namespaces named in the flag set (namespace.h). */
+            ret = namespace_unshare(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_setns(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* Rebind the calling process to a namespace named by an fd. */
+            ret = namespace_setns((int)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_ppoll(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_ppoll(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_poll(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_poll(a1, a2, (int64_t)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* ---- anonymous fds for the Wayland plumbing ------------------------ */
+int64_t __x64_sys_memfd_create(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_memfd_create(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_eventfd(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_eventfd(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_eventfd2(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_eventfd2(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_epoll_create(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_epoll_create(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_epoll_create1(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_epoll_create1(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_inotify_init(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_inotify_init();
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_inotify_init1(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_inotify_init1(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_inotify_add_watch(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_inotify_add_watch((int)a1, a2, (uint32_t)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_inotify_rm_watch(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_inotify_rm_watch((int)a1, (uint32_t)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_epoll_ctl(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_epoll_ctl((int)a1, (int)a2, (int)a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* POSIX message queues (240-245): mq_open/unlink/timedsend/
+ * timedreceive/notify/getsetattr, same numbers as Linux x86-64. */
+int64_t __x64_sys_mq_open(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mq_open(a1, a2, (uint32_t)a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mq_unlink(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mq_unlink(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mq_timedsend(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mq_timedsend((int)a1, a2, (uint64_t)(size_t)a3, (unsigned)r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mq_timedreceive(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mq_timedreceive((int)a1, a2, (uint64_t)(size_t)a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mq_notify(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mq_notify((int)a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mq_getsetattr(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mq_getsetattr((int)a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_epoll_wait(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_epoll_wait((int)a1, a2, (int)a3, (int)r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_epoll_pwait(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_epoll_pwait((int)a1, a2, (int)a3, (int)r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_epoll_pwait2(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_epoll_pwait2((int)a1, a2, (int)a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_timerfd_create(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_timerfd_create(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_timerfd_settime(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_timerfd_settime(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_timerfd_gettime(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_timerfd_gettime(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_signalfd4(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_signalfd4(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* ---- BSD socket API (x86-64: one syscall per call, no socketcall) ---- */
+int64_t __x64_sys_socket(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_socket((int)a1, (int)a2, (int)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_bind(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_bind((int)a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_connect(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_connect((int)a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_listen(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_listen((int)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_accept(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_accept((int)a1, a2, a3, 0);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_accept4(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_accept((int)a1, a2, a3, (int)r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sendto(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* arg order: fd, buf, len, flags, addr, addrlen */
+            ret = sys_sendto((int)a1, a2, a3, (int)r->r10, r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sendmsg(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* arg order: fd, msghdr, flags */
+            ret = sys_sendmsg((int)a1, a2, (int)r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_recvfrom(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* arg order: fd, buf, len, flags, addr, addrlen */
+            ret = sys_recvfrom((int)a1, a2, a3, (int)r->r10, r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_recvmsg(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* arg order: fd, msghdr, flags */
+            ret = sys_recvmsg((int)a1, a2, (int)r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_socketpair(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* arg order: domain, type, protocol, sv */
+            ret = sys_socketpair((int)a1, (int)a2, (int)a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_shutdown(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_shutdown((int)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getsockname(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getsockname((int)a1, a2, a3, 0);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getpeername(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getsockname((int)a1, a2, a3, 1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_setsockopt(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_setsockopt((int)a1, (int)a2, (int)a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getsockopt(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getsockopt((int)a1, (int)a2, (int)a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_select(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* int select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *xfds,
+             *            struct timeval *tv);  args in RDI/RSI/RDX/R10/R8. */
+            ret = sys_select((int)a1, a2, a3, r->r10, r->r8);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_pselect6(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* pselect6 has the same fd_set layout; timeout is timespec and the
+             * 6th arg (sigmask) is ignored -- see sys_pselect6(). */
+            ret = sys_pselect6((int)a1, a2, a3, r->r10, r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_execve(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            char abs[GNUOS_PATH_MAX];
+            ret = path_abs(a1, abs);
+            if (ret < 0)
+                break;
+            /* /proc/self/exe: apk.static re-execs itself through this magic
+             * symlink -- the kernel knows the answer. */
+            if (strcmp(abs, "/proc/self/exe") == 0) {
+                proc_t *cp = proc_current();
+                if (!cp || !cp->exe_path[0]) {
+                    ret = -E_NOENT;
+                    break;
+                }
+                strncpy(abs, cp->exe_path, sizeof(abs) - 1);
+                abs[sizeof(abs) - 1] = '\0';
+            }
+    #ifdef SYSTRACE
+            { /* remember what each exec tried, so ENOENT loops name their
+               * missing binary instead of hiding behind a bare return code */
+            }
+    #endif
+            int n = collect_vec(a2, g_argv);
+            if (n < 0) {
+                ret = n;
                 break;
             }
-            *(int *)(uintptr_t)a2 = status;
-        }
-        break;
-    }
-
-    case SYS_kill:
-        ret = sys_kill((int)a1, (int)a2);
-        break;
-
-    case SYS_tkill:
-        ret = sys_tkill((int)a1, (int)a2);
-        break;
-
-    case SYS_tgkill:
-        ret = sys_tgkill((int)a1, (int)a2, (int)a3);
-        break;
-
-    case SYS_ptrace:
-        ret = sys_ptrace((int)a1, (int64_t)a2, a3, r->r10);
-        break;
-
-    case SYS_init_module:
-        ret = sys_init_module(a1, a2, a3);
-        break;
-    case SYS_finit_module:
-        ret = sys_finit_module((int)a1, a2, a3);
-        break;
-    case SYS_delete_module:
-        ret = sys_delete_module(a1, a2);
-        break;
-
-    case SYS_signal:
-        ret = sys_signal((int)a1, (int)a2);
-        break;
-
-    case SYS_setpgid:
-        ret = sys_setpgid((int)a1, (int)a2);
-        break;
-
-    case SYS_getpgid:
-        ret = sys_getpgid((int)a1);
-        break;
-
-    case SYS_setsid:
-        ret = sys_setsid();
-        break;
-
-    case SYS_getsid:
-        ret = sys_getsid((int)a1);
-        break;
-
-    /* ---- musl libc support -------------------------------------------- */
-    case SYS_mmap:
-        ret = sys_mmap(a1, a2, a3, r->r10, (int64_t)(int32_t)r->r8, r->r9);
-        break;
-
-    case SYS_munmap:
-        ret = sys_munmap(a1, a2);
-        break;
-
-    case SYS_mremap:
-        ret = sys_mremap(a1, a2, a3, r->r10);
-        break;
-
-    case SYS_brk:
-        ret = sys_brk(a1);
-        break;
-
-    case SYS_mprotect:
-        /* musl's pthread_create maps the thread stack PROT_NONE and then
-         * mprotect()s everything above the guard page read-write -- a no-op
-         * here leaves every thread's stack unwritable and the first TLS
-         * write faults.  The permissions are rewritten for real in vmm.c. */
-        ret = sys_mprotect(a1, a2, a3);
-        break;
-
-    case SYS_madvise:
-        ret = sys_madvise(a1, a2, a3);
-        break;
-
-    case SYS_sysinfo:
-        ret = sys_sysinfo(a1);
-        break;
-
-    case SYS_sigaltstack:
-        ret = sys_sigaltstack(a1, a2);
-        break;
-
-    case SYS_rt_sigaction:
-        ret = sys_rt_sigaction((int)a1, a2, a3, r->r10);
-        break;
-
-    case SYS_rt_sigprocmask:
-        ret = sys_rt_sigprocmask((int)a1, a2, a3, r->r10);
-        break;
-
-    case SYS_rt_sigpending:
-        ret = sys_rt_sigpending(a1, r->r10);
-        break;
-
-    case SYS_sigsuspend:
-        ret = sys_rt_sigsuspend(a1, a2);
-        break;
-
-    case SYS_rt_sigreturn:
-        /* Returns nothing: every register, RAX included, comes back from the
-         * signal frame, so this must not fall through to the assignment at
-         * the bottom of the function. */
-        signal_return(r);
-        return;
-
-    case SYS_futex:
-        ret = sys_futex(a1, a2, a3, r->r10, r->r8, r->r9);
-        break;
-
-    case SYS_arch_prctl:
-        ret = sys_arch_prctl(a1, a2);
-        break;
-
-    case SYS_prctl:
-        /* Linux prctl(2) numbers: a1 = option, a2 = arg2, a3 = arg3,
-         * a4 = arg4, a5 = arg5.  We handle the seccomp-related options
-         * here; everything else returns -ENOSYS. */
-        switch ((int)a1) {
-        case PR_SET_NO_NEW_PRIVS:
-        case PR_GET_NO_NEW_PRIVS:
-        case PR_SET_SECCOMP:
-        case PR_GET_SECCOMP:
-            ret = seccomp_prctl(p, (int)a1, a2);
-            break;
-        default:
-            ret = -E_NOSYS;
+            n = collect_vec(a3, g_envp);
+            if (n < 0) {
+                ret = n;
+                break;
+            }
+            ret = proc_execve(abs, g_argv, g_envp, r);
+    #ifdef SYSTRACE
+            /* One line per successful image swap, naming what actually ran.
+             * The generic SY trace prints a bare number for nr=59; the boot
+             * self-test asserts on these instead -- "openrc started" and
+             * "agetty started" are only observable from the kernel side,
+             * since the framebuffer console never reaches dbg.log. */
+            if (ret >= 0 && proc_current()) {
+                dbg_puts("EXEC p=");
+                dbg_puts_dec((uint32_t)proc_current()->pid);
+                dbg_puts(" path=");
+                dbg_puts(abs);
+                dbg_puts("\r\n");
+            }
+            if (ret == -E_NOENT) {
+                static unsigned en;
+                if (++en < 30 || (en % 500) == 0) {
+                    dbg_puts("EXEC-ENOENT p=");
+                    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
+                    dbg_puts(" path=");
+                    dbg_puts(abs);
+                    dbg_puts("\n");
+                }
+            }
+            /* Any other failure (EACCES/E2BIG/ENOEXEC/ENOMEM/...): the generic
+             * SY trace shows a bare number, and the musl-side error message
+             * dies in the parent's pipe -- e.g. Xorg's xkbcomp fork.  Name the
+             * binary and the errno so the failing exec is locatable. */
+            else if (ret < 0 && ret != -E_NOENT) {
+                static unsigned ef;
+                if (++ef < 64) {
+                    dbg_puts("EXEC-FAIL p=");
+                    dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
+                    dbg_puts(" path=");
+                    dbg_puts(abs);
+                    dbg_puts(" errno=");
+                    dbg_puts_dec((uint32_t)(-ret));
+                    dbg_puts("\r\n");
+                }
+            }
+    #endif
+            if (ret == 0)
+                return SYS_FRAME_REPLACED; /* the frame now belongs to the new image */
             break;
         }
-        break;
+    } while (0);
+    return ret;
+}
 
-    case SYS_seccomp:
-        ret = sys_seccomp(a1, a2, a3);
-        break;
-
-    case SYS_set_tid_address:
-        ret = sys_set_tid_address(a1);
-        break;
-
-    case SYS_gettid:
-        ret = p ? p->pid : 0;
-        break;
-
-    case SYS_clock_gettime:
-        ret = sys_clock_gettime(a1, a2);
-        break;
-
-    case SYS_clock_getres:
-        ret = sys_clock_getres(a1, a2);
-        break;
-
-    case SYS_gettimeofday:
-        ret = sys_gettimeofday(a1, a2);
-        break;
-
-    case SYS_time:
-        ret = sys_time(a1);
-        break;
-
-    case SYS_times:
-        ret = sys_times(a1);
-        break;
-
-    case SYS_getrusage:
-        ret = sys_getrusage((int)a1, a2);
-        break;
-
-    case SYS_getrlimit:
-        ret = sys_getrlimit((int)a1, a2);
-        break;
-
-    case SYS_setrlimit:
-        /* The limits are structural, so there is nothing to set; a shell
-         * that cannot lower one is better off than one that cannot start. */
-        ret = 0;
-        break;
-
-    case SYS_prlimit64:
-        ret = sys_prlimit64((int)a1, (int)a2, a3, r->r10);
-        break;
-
-    case SYS_nanosleep:
-        ret = sys_nanosleep(a1, a2);
-        break;
-
-    case SYS_clock_nanosleep:
-        ret = sys_clock_nanosleep(a1, (int)a2, a3, r->r10);
-        break;
-
-    case SYS_dup3:
-        ret = sys_dup3((int)a1, (int)a2, (int)a3);
-        break;
-
-    case SYS_pipe2:
-        ret = sys_pipe2(a1, (int)a2);
-        break;
-
-    /* ---- credentials --------------------------------------------------- */
-    case SYS_getuid:
-        ret = proc_current() ? (int64_t)proc_current()->uid : 0;
-        break;
-    case SYS_geteuid:
-        ret = proc_current() ? (int64_t)proc_current()->euid : 0;
-        break;
-    case SYS_getgid:
-        ret = proc_current() ? (int64_t)proc_current()->gid : 0;
-        break;
-    case SYS_getegid:
-        ret = proc_current() ? (int64_t)proc_current()->egid : 0;
-        break;
-
-    case SYS_setuid:
-        ret = sys_setuid((uint32_t)a1);
-        break;
-    case SYS_setgid:
-        ret = sys_setgid((uint32_t)a1);
-        break;
-    case SYS_setreuid:
-        ret = sys_setreuid((uint32_t)a1, (uint32_t)a2);
-        break;
-    case SYS_setregid:
-        ret = sys_setregid((uint32_t)a1, (uint32_t)a2);
-        break;
-    case SYS_setresuid:
-        ret = sys_setresuid((uint32_t)a1, (uint32_t)a2, (uint32_t)a3);
-        break;
-    case SYS_setresgid:
-        ret = sys_setresgid((uint32_t)a1, (uint32_t)a2, (uint32_t)a3);
-        break;
-    case SYS_getgroups:
-        ret = sys_getgroups((int)a1, a2);
-        break;
-    case SYS_setgroups:
-        ret = sys_setgroups((int)a1, a2);
-        break;
-
-    /* Each argument may be NULL, which we must not write through. */
-    case SYS_getresuid:
-        ret = sys_getresuid(a1, a2, a3);
-        break;
-    case SYS_getresgid:
-        ret = sys_getresgid(a1, a2, a3);
-        break;
-
-    case SYS_exit_group:
-        proc_exit_group((int)a1);
-        ret = 0; /* not reached */
-        break;
-
-    case SYS_exit:
-        /* proc_exit funnels the group leader into proc_exit_group, so a
-         * libc that calls plain exit() from main() still takes the whole
-         * process down with it. */
-        proc_exit((int)a1);
-        ret = 0; /* not reached */
-        break;
-
-    case SYS_smp_count:
-        ret = (int32_t)smp_online_count();
-        break;
-
-    default:
-        /* Once per syscall number, not once per call.  A libc that retries in
-         * a loop on ENOSYS -- which is exactly what happens when a wait
-         * primitive is missing -- otherwise turns the debug console into the
-         * slowest part of the system: one boot with rt_sigsuspend missing
-         * wrote six megabytes of this single line. */
-        if (nr < 512 && !(g_nosys_logged[nr >> 6] & (1ULL << (nr & 63)))) {
-            g_nosys_logged[nr >> 6] |= 1ULL << (nr & 63);
-            dbg_puts("GNOS: unimplemented syscall ");
-            dbg_puts_dec((uint32_t)nr);
-            dbg_puts("\r\n");
+int64_t __x64_sys_wait4(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+        {
+            int status = 0;
+            ret        = proc_waitpid((int)a1, &status, (int)a3);
+            if (ret > 0 && a2) {
+                if (!user_ptr_ok(a2, sizeof(int))) {
+                    ret = -E_INVAL;
+                    break;
+                }
+                *(int *)(uintptr_t)a2 = status;
+            }
+            break;
         }
-        ret = -E_NOSYS;
-        break;
-    }
+    } while (0);
+    return ret;
+}
 
-#ifdef SYSTRACE
-    if (nr == 9 || nr == 10 || nr == 12 || nr == 158 || nr == 218 || nr == 0 || nr == 1 ||
-        nr == 19 || nr == 20 || nr == 7 || nr == 29 || nr == 43 || nr == 202 || nr == 232 ||
-        nr == 257 || nr == 57 || nr == 217 || nr == 16 || nr == 8 || nr == 59 || nr == 61 ||
-        nr == 270 || nr == 23 || nr == 281 || nr == 35 || nr == 230 || nr == 2 || nr == 3 ||
-        nr == 5 || nr == 11 || nr == 13 || nr == 14 || nr == 6 || nr == 4 || nr == 89 || nr == 90 ||
-        nr == 41 || nr == 42 || nr == 45 || nr == 46 || nr == 47) {
-        dbg_puts("SY p=");
-        dbg_puts_dec((uint32_t)(proc_current() ? proc_current()->pid : 0));
-        dbg_puts(" nr=");
-        dbg_puts_dec((uint32_t)nr);
-        dbg_puts(" a1=");
-        dbg_puts_hex(a1);
-        dbg_puts(" a2=");
-        dbg_puts_hex(a2);
-        dbg_puts(" a3=");
-        dbg_puts_hex(a3);
-        dbg_puts(" ret=");
-        dbg_puts_hex((uint64_t)(int64_t)ret);
-        dbg_puts("\n");
-    }
+int64_t __x64_sys_kill(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_kill((int)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_tkill(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_tkill((int)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_tgkill(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_tgkill((int)a1, (int)a2, (int)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_ptrace(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_ptrace((int)a1, (int64_t)a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_init_module(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_init_module(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_finit_module(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_finit_module((int)a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_delete_module(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_delete_module(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_signal(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_signal((int)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_setpgid(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_setpgid((int)a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getpgid(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getpgid((int)a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_setsid(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_setsid();
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getsid(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getsid((int)a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+/* ---- musl libc support -------------------------------------------- */
+int64_t __x64_sys_mmap(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mmap(a1, a2, a3, r->r10, (int64_t)(int32_t)r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_munmap(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_munmap(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mremap(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_mremap(a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_brk(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_brk(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_mprotect(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* musl's pthread_create maps the thread stack PROT_NONE and then
+             * mprotect()s everything above the guard page read-write -- a no-op
+             * here leaves every thread's stack unwritable and the first TLS
+             * write faults.  The permissions are rewritten for real in vmm.c. */
+            ret = sys_mprotect(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_madvise(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_madvise(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sysinfo(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_sysinfo(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sigaltstack(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_sigaltstack(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_rt_sigaction(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rt_sigaction((int)a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_rt_sigprocmask(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rt_sigprocmask((int)a1, a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_rt_sigpending(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rt_sigpending(a1, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_sigsuspend(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_rt_sigsuspend(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_rt_sigreturn(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* Returns nothing: every register, RAX included, comes back from the
+             * signal frame, so this must not fall through to the assignment at
+             * the bottom of the function. */
+            signal_return(r);
+            return SYS_FRAME_REPLACED;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_futex(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_futex(a1, a2, a3, r->r10, r->r8, r->r9);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_arch_prctl(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_arch_prctl(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_prctl(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* Linux prctl(2) numbers: a1 = option, a2 = arg2, a3 = arg3,
+             * a4 = arg4, a5 = arg5.  We handle the seccomp-related options
+             * here; everything else returns -ENOSYS. */
+            switch ((int)a1) {
+            case PR_SET_NO_NEW_PRIVS:
+            case PR_GET_NO_NEW_PRIVS:
+            case PR_SET_SECCOMP:
+            case PR_GET_SECCOMP:
+                ret = seccomp_prctl(p, (int)a1, a2);
+                break;
+            default:
+                ret = -E_NOSYS;
+                break;
+            }
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_seccomp(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_seccomp(a1, a2, a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_set_tid_address(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_set_tid_address(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_gettid(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = p ? p->pid : 0;
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_clock_gettime(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_clock_gettime(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_clock_getres(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_clock_getres(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_gettimeofday(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_gettimeofday(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_time(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_time(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_times(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_times(a1);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getrusage(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getrusage((int)a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_getrlimit(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_getrlimit((int)a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_setrlimit(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* The limits are structural, so there is nothing to set; a shell
+             * that cannot lower one is better off than one that cannot start. */
+            ret = 0;
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_prlimit64(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_prlimit64((int)a1, (int)a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_nanosleep(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_nanosleep(a1, a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_clock_nanosleep(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_clock_nanosleep(a1, (int)a2, a3, r->r10);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_dup3(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_dup3((int)a1, (int)a2, (int)a3);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_pipe2(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = sys_pipe2(a1, (int)a2);
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_exit_group(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            proc_exit_group((int)a1);
+            ret = 0; /* not reached */
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_exit(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            /* proc_exit funnels the group leader into proc_exit_group, so a
+             * libc that calls plain exit() from main() still takes the whole
+             * process down with it. */
+            proc_exit((int)a1);
+            ret = 0; /* not reached */
+            break;
+    } while (0);
+    return ret;
+}
+
+int64_t __x64_sys_smp_count(regs_t *r)
+{
+    uint64_t nr  __attribute__((unused)) = r->rax;
+    uint64_t a1  __attribute__((unused)) = r->rdi;
+    uint64_t a2  __attribute__((unused)) = r->rsi;
+    uint64_t a3  __attribute__((unused)) = r->rdx;
+    proc_t  *p   __attribute__((unused)) = proc_current();
+    int64_t  ret = 0;
+    do {
+            ret = (int32_t)smp_online_count();
+            break;
+    } while (0);
+    return ret;
+}
+
+/* ==== VibeOS merge, batch 1: process/scheduling identity =================
+ * Ported per SYSCALL-MERGE-PLAN.md Phase 1.  VibeOS is the semantic
+ * reference; everything here is written against this kernel's own proc
+ * table and wait machinery.  The stored knobs (nice, ioprio, policy,
+ * persona, fsuid) are kept and reported per the plan's same-caliber rule:
+ * the runqueue stays EEVDF and permission checks read euid/egid, so the
+ * plan documents which calls report more than they enforce. */
+
+#ifndef PRIO_PROCESS
+#define PRIO_PROCESS 0
+#define PRIO_PGRP    1
+#define PRIO_USER    2
 #endif
-done:
-    r->rax = (uint64_t)ret;
 
-    /* Ring buffer of the last few syscalls, for the fault dumper: when a
-     * user process dies on a NULL deref we want to see what it just did. */
-    {
-        proc_t *sp = proc_current();
-        if (sp) {
-            uint8_t i           = sp->sys_hist_idx & 7;
-            sp->sys_hist_nr[i]  = (uint16_t)nr;
-            sp->sys_hist_ret[i] = (int32_t)ret;
-            sp->sys_hist_idx++;
+#ifndef SCHED_OTHER
+#define SCHED_OTHER    0
+#define SCHED_FIFO     1
+#define SCHED_RR       2
+#define SCHED_BATCH    3
+#define SCHED_IDLE     5
+#define SCHED_DEADLINE 6
+#endif
+
+/* IOPRIO_PRIO_VALUE(class, data): class in the top 3 bits. */
+#define IOPRIO_CLASS_RT   1
+#define IOPRIO_CLASS_BE   2
+#define IOPRIO_CLASS_IDLE 3
+#define IOPRIO_CLASS_SHIFT 13
+#define IOPRIO_CLASS(v)    ((v) >> IOPRIO_CLASS_SHIFT)
+#define IOPRIO_DATA(v)     ((v) & 0x1fff)
+
+/* Linux struct sched_attr, 48 bytes as of the current ABI. */
+typedef struct {
+    uint32_t size;
+    uint32_t sched_policy;
+    uint64_t sched_flags;
+    int32_t  sched_nice;
+    uint32_t sched_priority;
+    uint64_t sched_runtime;
+    uint64_t sched_deadline;
+    uint64_t sched_period;
+} sched_attr_t;
+
+static proc_t *prio_target(int which, int who)
+{
+    proc_t *me = proc_current();
+    if (!me)
+        return 0;
+    if (which == PRIO_PROCESS)
+        return who == 0 ? me : proc_by_pid(who);
+    if (which == PRIO_PGRP) {
+        int pgid = who ? who : me->pgid;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            proc_t *t = proc_by_pid(i);
+            if (t && t->pgid == pgid)
+                return t;
+        }
+        return 0;
+    }
+    if (which == PRIO_USER) {
+        uint32_t uid = who ? (uint32_t)who : me->euid;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            proc_t *t = proc_by_pid(i);
+            if (t && t->euid == uid)
+                return t;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static int64_t sys_getpgrp(void)
+{
+    proc_t *p = proc_current();
+    if (!p)
+        return -E_SRCH;
+    return p->pgid;
+}
+
+/* pause(34): block until any signal arrives, then let the delivery path
+ * run.  Same parking discipline as sigsuspend with an empty mask: the
+ * saved-mask machinery restores the caller's own mask once the handler
+ * returns, and the syscall reports EINTR. */
+static int64_t sys_pause(void)
+{
+    proc_t *p = proc_current();
+    if (!p)
+        return -E_INVAL;
+
+    p->sig_saved_mask   = p->sig_mask;
+    p->sig_restore_mask = 1;
+    p->sig_mask         = 0;
+
+    while (!proc_pending_signals(p))
+        sched_block_timeout(WAIT_SLEEP, 1);
+
+    return -E_INTR;
+}
+
+/* getcpu(309): the core running this task now; one NUMA node. */
+static int64_t sys_getcpu(uint64_t ucpu, uint64_t unode, uint64_t tcache)
+{
+    (void)tcache;
+    int cpu = cpu_self()->id;
+    if (ucpu) {
+        if (!user_ptr_ok(ucpu, sizeof(int)))
+            return -E_FAULT;
+        *(int *)(uintptr_t)ucpu = cpu;
+    }
+    if (unode) {
+        if (!user_ptr_ok(unode, sizeof(int)))
+            return -E_FAULT;
+        *(int *)(uintptr_t)unode = 0;
+    }
+    return 0;
+}
+
+/* setfsuid(122)/setfsgid(123): return the old id; an unprivileged caller
+ * may only move the fs id to one of its own r/e/s values, and an invalid
+ * request is silently ignored -- the old id comes back either way, which
+ * is what libcap's probes expect.  The fs id is stored state for now: the
+ * permission checks still read euid/egid (a documented plan gap). */
+static int id_in_triple(uint32_t v, uint32_t r, uint32_t e, uint32_t s)
+{
+    return v == r || v == e || v == s;
+}
+
+static int64_t sys_setfsuid(uint32_t uid)
+{
+    proc_t  *p   = proc_current();
+    uint32_t old = p->fsuid;
+    if (id_in_triple(uid, p->uid, p->euid, p->suid))
+        p->fsuid = uid;
+    return old;
+}
+
+static int64_t sys_setfsgid(uint32_t gid)
+{
+    proc_t  *p   = proc_current();
+    uint32_t old = p->fsgid;
+    if (id_in_triple(gid, p->gid, p->egid, p->sgid))
+        p->fsgid = gid;
+    return old;
+}
+
+/* personality(135): kept and reported.  0xffffffff queries only. */
+static int64_t sys_personality(uint64_t persona)
+{
+    proc_t  *p   = proc_current();
+    uint32_t old = p->persona;
+    if (persona != 0xffffffffULL)
+        p->persona = (uint32_t)persona;
+    return old;
+}
+
+static int64_t sys_getpriority(int which, int who)
+{
+    proc_t *t = prio_target(which, who);
+    if (!t)
+        return -E_SRCH;
+    /* Linux reports the *nicest* value among group/user members; with the
+     * first match we stay honest for the single-process case that every
+     * libc actually exercises. */
+    return 20 - t->nice;
+}
+
+static int64_t sys_setpriority(int which, int who, int nicev)
+{
+    proc_t *me = proc_current();
+    proc_t *t  = prio_target(which, who);
+    if (!t)
+        return -E_SRCH;
+    /* Only root (or the caller's own credentials) may lower someone else's
+     * priority; the stored value is reported back by getpriority. */
+    if (me->euid != 0 && me->euid != t->euid && me->uid != t->uid)
+        return -E_PERM;
+    if (nicev < -20)
+        nicev = -20;
+    if (nicev > 19)
+        nicev = 19;
+    t->nice = nicev;
+    return 0;
+}
+
+/* The policy calls validate the Linux matrix and store the choice; the
+ * EEVDF runqueue does not act on it (documented plan gap). */
+static int policy_valid(uint32_t pol)
+{
+    return pol == SCHED_OTHER || pol == SCHED_FIFO || pol == SCHED_RR ||
+           pol == SCHED_BATCH || pol == SCHED_IDLE;
+}
+
+static int prio_ok(uint32_t pol, uint32_t prio)
+{
+    if (pol == SCHED_FIFO || pol == SCHED_RR)
+        return prio >= 1 && prio <= 99;
+    return prio == 0;
+}
+
+static int64_t sys_sched_setscheduler(int pid, uint32_t pol, uint64_t uprio)
+{
+    proc_t *me = proc_current();
+    proc_t *t  = pid ? proc_by_pid(pid) : me;
+    if (!t)
+        return -E_SRCH;
+    if (pol == SCHED_DEADLINE || !policy_valid(pol))
+        return -E_INVAL;
+    uint32_t prio = 0;
+    if (uprio) {
+        if (!user_ptr_ok(uprio, sizeof(int)))
+            return -E_FAULT;
+        prio = (uint32_t)*(int *)(uintptr_t)uprio;
+    }
+    if (!prio_ok(pol, prio))
+        return -E_INVAL;
+    if (me->euid != 0 && me->euid != t->euid && me->uid != t->uid)
+        return -E_PERM;
+    t->sched_policy   = pol;
+    t->sched_priority = prio;
+    return 0;
+}
+
+static int64_t sys_sched_getscheduler(int pid)
+{
+    proc_t *t = pid ? proc_by_pid(pid) : proc_current();
+    if (!t)
+        return -E_SRCH;
+    return t->sched_policy;
+}
+
+static int64_t sys_sched_setparam(int pid, uint64_t uprio)
+{
+    proc_t *me = proc_current();
+    proc_t *t  = pid ? proc_by_pid(pid) : me;
+    if (!t)
+        return -E_SRCH;
+    if (!uprio)
+        return -E_INVAL;
+    if (!user_ptr_ok(uprio, sizeof(int)))
+        return -E_FAULT;
+    uint32_t prio = (uint32_t)*(int *)(uintptr_t)uprio;
+    if (!prio_ok(t->sched_policy, prio))
+        return -E_INVAL;
+    if (me->euid != 0 && me->euid != t->euid && me->uid != t->uid)
+        return -E_PERM;
+    t->sched_priority = prio;
+    return 0;
+}
+
+static int64_t sys_sched_getparam(int pid, uint64_t uprio)
+{
+    proc_t *t = pid ? proc_by_pid(pid) : proc_current();
+    if (!t)
+        return -E_SRCH;
+    if (!uprio)
+        return -E_INVAL;
+    if (!user_ptr_ok(uprio, sizeof(int)))
+        return -E_FAULT;
+    *(int *)(uintptr_t)uprio = (int)t->sched_priority;
+    return 0;
+}
+
+static int64_t sys_sched_get_priority_max(uint32_t pol)
+{
+    if (pol == SCHED_FIFO || pol == SCHED_RR)
+        return 99;
+    if (policy_valid(pol))
+        return 0;
+    return -E_INVAL;
+}
+
+static int64_t sys_sched_get_priority_min(uint32_t pol)
+{
+    if (pol == SCHED_FIFO || pol == SCHED_RR)
+        return 1;
+    if (policy_valid(pol))
+        return 0;
+    return -E_INVAL;
+}
+
+/* The granted slice, converted to ticks -> timespec. */
+static int64_t sys_sched_rr_get_interval(int pid, uint64_t utv)
+{
+    proc_t *t = pid ? proc_by_pid(pid) : proc_current();
+    if (!t)
+        return -E_SRCH;
+    if (!utv)
+        return -E_INVAL;
+    if (!user_ptr_ok(utv, 2 * sizeof(int64_t)))
+        return -E_FAULT;
+    ktimeval_t tv;
+    ticks_to_tv(t->slice ? t->slice : 1, &tv);
+    ((int64_t *)(uintptr_t)utv)[0] = (int64_t)tv.tv_sec;
+    ((int64_t *)(uintptr_t)utv)[1] = (int64_t)tv.tv_usec * 1000;
+    return 0;
+}
+
+static int64_t sys_sched_setattr(int pid, uint64_t uattr, uint64_t flags)
+{
+    (void)flags;
+    proc_t *me = proc_current();
+    proc_t *t  = pid ? proc_by_pid(pid) : me;
+    if (!t)
+        return -E_SRCH;
+    if (!uattr || !user_ptr_ok(uattr, sizeof(sched_attr_t)))
+        return -E_FAULT;
+    sched_attr_t *sa = (sched_attr_t *)(uintptr_t)uattr;
+    if (sa->size > sizeof(sched_attr_t) || sa->size < 8)
+        return -E_INVAL;
+    if (sa->sched_policy == SCHED_DEADLINE || !policy_valid(sa->sched_policy))
+        return -E_INVAL;
+    if (!prio_ok(sa->sched_policy, sa->sched_priority))
+        return -E_INVAL;
+    if (sa->sched_nice < -20 || sa->sched_nice > 19)
+        return -E_INVAL;
+    if (me->euid != 0 && me->euid != t->euid && me->uid != t->uid)
+        return -E_PERM;
+    t->sched_policy   = sa->sched_policy;
+    t->sched_priority = sa->sched_priority;
+    t->nice           = sa->sched_nice;
+    return 0;
+}
+
+static int64_t sys_sched_getattr(int pid, uint64_t uattr, uint64_t flags)
+{
+    (void)flags;
+    proc_t *t = pid ? proc_by_pid(pid) : proc_current();
+    if (!t)
+        return -E_SRCH;
+    if (!uattr || !user_ptr_ok(uattr, sizeof(sched_attr_t)))
+        return -E_FAULT;
+    sched_attr_t *sa = (sched_attr_t *)(uintptr_t)uattr;
+    if (sa->size > sizeof(sched_attr_t) || sa->size < 8)
+        return -E_INVAL;
+    uint32_t size = sa->size;
+    memset(sa, 0, sizeof(*sa));
+    sa->size          = size;
+    sa->sched_policy  = t->sched_policy;
+    sa->sched_nice    = t->nice;
+    sa->sched_priority = t->sched_priority;
+    return 0;
+}
+
+static int ioprio_ok(uint32_t v)
+{
+    switch (IOPRIO_CLASS(v)) {
+    case IOPRIO_CLASS_RT:   return IOPRIO_DATA(v) <= 99;
+    case IOPRIO_CLASS_BE:   return IOPRIO_DATA(v) <= 7;
+    case IOPRIO_CLASS_IDLE: return IOPRIO_DATA(v) == 0;
+    default:                return 0;
+    }
+}
+
+static int64_t sys_ioprio_set(int which, int who, uint32_t ioprio)
+{
+    proc_t *me = proc_current();
+    proc_t *t  = prio_target(which, who);
+    if (!t)
+        return -E_SRCH;
+    if (!ioprio_ok(ioprio))
+        return -E_INVAL;
+    if (me->euid != 0 && me->euid != t->euid && me->uid != t->uid)
+        return -E_PERM;
+    t->ioprio = ioprio;
+    return 0;
+}
+
+static int64_t sys_ioprio_get(int which, int who)
+{
+    proc_t *t = prio_target(which, who);
+    if (!t)
+        return -E_SRCH;
+    return t->ioprio;
+}
+
+/* restart_syscall(219): the kernel restart machinery behind SA_RESTART is
+ * not built yet, so a caller reaching this gets the EINTR of the call it
+ * was resuming rather than a silent re-execution (documented plan gap). */
+static int64_t sys_restart_syscall(void)
+{
+    return -E_INTR;
+}
+
+int64_t __x64_sys_getpgrp(regs_t *r)
+{
+    (void)r;
+    return sys_getpgrp();
+}
+
+int64_t __x64_sys_pause(regs_t *r)
+{
+    (void)r;
+    return sys_pause();
+}
+
+int64_t __x64_sys_getcpu(regs_t *r)
+{
+    return sys_getcpu(r->rdi, r->rsi, r->rdx);
+}
+
+int64_t __x64_sys_setfsuid(regs_t *r)
+{
+    return sys_setfsuid((uint32_t)r->rdi);
+}
+
+int64_t __x64_sys_setfsgid(regs_t *r)
+{
+    return sys_setfsgid((uint32_t)r->rdi);
+}
+
+int64_t __x64_sys_personality(regs_t *r)
+{
+    return sys_personality(r->rdi);
+}
+
+int64_t __x64_sys_getpriority(regs_t *r)
+{
+    return sys_getpriority((int)r->rdi, (int)r->rsi);
+}
+
+int64_t __x64_sys_setpriority(regs_t *r)
+{
+    return sys_setpriority((int)r->rdi, (int)r->rsi, (int)r->rdx);
+}
+
+int64_t __x64_sys_sched_setscheduler(regs_t *r)
+{
+    return sys_sched_setscheduler((int)r->rdi, (uint32_t)r->rsi, r->rdx);
+}
+
+int64_t __x64_sys_sched_getscheduler(regs_t *r)
+{
+    return sys_sched_getscheduler((int)r->rdi);
+}
+
+int64_t __x64_sys_sched_setparam(regs_t *r)
+{
+    return sys_sched_setparam((int)r->rdi, r->rsi);
+}
+
+int64_t __x64_sys_sched_getparam(regs_t *r)
+{
+    return sys_sched_getparam((int)r->rdi, r->rsi);
+}
+
+int64_t __x64_sys_sched_get_priority_max(regs_t *r)
+{
+    return sys_sched_get_priority_max((uint32_t)r->rdi);
+}
+
+int64_t __x64_sys_sched_get_priority_min(regs_t *r)
+{
+    return sys_sched_get_priority_min((uint32_t)r->rdi);
+}
+
+int64_t __x64_sys_sched_rr_get_interval(regs_t *r)
+{
+    return sys_sched_rr_get_interval((int)r->rdi, r->rsi);
+}
+
+int64_t __x64_sys_sched_setattr(regs_t *r)
+{
+    return sys_sched_setattr((int)r->rdi, r->rsi, r->rdx);
+}
+
+int64_t __x64_sys_sched_getattr(regs_t *r)
+{
+    return sys_sched_getattr((int)r->rdi, r->rsi, r->rdx);
+}
+
+int64_t __x64_sys_ioprio_set(regs_t *r)
+{
+    return sys_ioprio_set((int)r->rdi, (int)r->rsi, (uint32_t)r->rdx);
+}
+
+int64_t __x64_sys_ioprio_get(regs_t *r)
+{
+    return sys_ioprio_get((int)r->rdi, (int)r->rsi);
+}
+
+int64_t __x64_sys_restart_syscall(regs_t *r)
+{
+    (void)r;
+    return sys_restart_syscall();
+}
+
+/* ==== VibeOS merge, batch 2: signals / waiting =========================== */
+
+#define WNOWAIT_WD   0x1000000u /* waitid option: leave the child reaped-state alone */
+#define WEXITED_WD   4u
+#define WSTOPPED_WD  2u
+#define WCONTINUED_WD 8u
+#define P_ALL_WD  0
+#define P_PID_WD  1
+#define P_PGID_WD 2
+
+/* siginfo_t as x86-64 lays it out: 128 bytes, the _sigchld fields at the
+ * fixed offsets the ABI guarantees.  This kernel queues signals as a plain
+ * bitmask, so a delivered info record is synthesized (SI_USER) rather than
+ * replayed from a queue -- same caliber as the VibeOS row. */
+#define SI_CODE_CLD_EXITED 1
+
+static void siginfo_fill_chld(uint64_t ubuf, int pid, int status)
+{
+    int32_t *si = (int32_t *)(uintptr_t)ubuf;
+    memset(si, 0, 128);
+    si[0] = SIGCHLD;          /* si_signo */
+    si[1] = 0;                /* si_errno */
+    si[2] = SI_CODE_CLD_EXITED; /* si_code */
+    si[3] = pid;              /* _sifields._sigchld.si_pid */
+    si[4] = 0;                /* si_uid */
+    si[5] = (status & 0xff00) >> 8; /* si_status (WEXITSTATUS) */
+}
+
+/* rt_sigtimedwait(128): wait until a signal in `set` becomes pending and
+ * consume it, reporting its number (and a synthesized siginfo).  Signals
+ * outside the set stay deliverable through the normal path; this call only
+ * intercepts the ones the caller named. */
+static int64_t sys_rt_sigtimedwait(uint64_t uset, uint64_t uinfo, uint64_t uts,
+                                   uint64_t sigsetsize)
+{
+    proc_t *p = proc_current();
+    if (!p)
+        return -E_INVAL;
+    if (sigsetsize != sizeof(uint64_t))
+        return -E_INVAL;
+    if (!user_ptr_ok(uset, sizeof(uint64_t)))
+        return -E_FAULT;
+
+    uint64_t set = *(const uint64_t *)(uintptr_t)uset;
+    set &= ~SIG_UNCATCHABLE;
+
+    uint64_t deadline      = 0;
+    int      have_deadline = 0;
+    if (uts) {
+        if (!user_ptr_ok(uts, 2 * sizeof(int64_t)))
+            return -E_FAULT;
+        int64_t sec  = ((const int64_t *)(uintptr_t)uts)[0];
+        int64_t nsec = ((const int64_t *)(uintptr_t)uts)[1];
+        if (sec < 0 || nsec < 0 || nsec >= 1000000000L)
+            return -E_INVAL;
+        deadline      = timer_ticks() + (uint64_t)sec * SCHED_HZ +
+                        (uint64_t)nsec / (1000000000ULL / SCHED_HZ);
+        have_deadline = 1;
+    }
+
+    for (;;) {
+        uint64_t hit = p->sig_pending & set;
+        if (hit) {
+            int sig = 0;
+            while (!(hit & (1ULL << sig)))
+                sig++;
+            p->sig_pending &= ~(1ULL << sig); /* consumed, not delivered */
+            if (uinfo) {
+                if (!user_ptr_ok(uinfo, 128))
+                    return -E_FAULT;
+                int32_t *si = (int32_t *)(uintptr_t)uinfo;
+                memset(si, 0, 128);
+                si[0] = sig;      /* si_signo */
+                si[2] = SI_USER;  /* si_code */
+            }
+            return sig;
+        }
+        if (have_deadline && timer_ticks() >= deadline)
+            return -E_AGAIN;
+        sched_block_timeout(WAIT_SLEEP, 1);
+    }
+}
+
+/* rt_sigqueueinfo(129) / rt_tgsigqueueinfo(297): a directed signal whose
+ * si_code must be a kill-family value.  The payload is not queued (the
+ * kernel keeps one pending bit per signal), so the info record arrives as
+ * SI_USER at the handler -- the documented same-caliber gap. */
+static int64_t sigqueueinfo_check(uint64_t uinfo)
+{
+    if (!user_ptr_ok(uinfo, 128))
+        return -E_FAULT;
+    int32_t si_code = ((const int32_t *)(uintptr_t)uinfo)[2];
+    if (si_code > 0)
+        return -E_PERM; /* positive si_code is kernel-only */
+    return 0;
+}
+
+static int64_t sys_rt_sigqueueinfo(int tgid, int sig, uint64_t uinfo)
+{
+    proc_t *t = proc_by_pid(tgid);
+    if (!t)
+        return -E_SRCH;
+    int64_t chk = sigqueueinfo_check(uinfo);
+    if (chk != 0)
+        return chk;
+    return proc_signal(t, sig);
+}
+
+static int64_t sys_rt_tgsigqueueinfo(int tgid, int tid, int sig, uint64_t uinfo)
+{
+    proc_t *t = proc_by_pid(tid);
+    if (!t || t->tgid != tgid)
+        return -E_SRCH;
+    int64_t chk = sigqueueinfo_check(uinfo);
+    if (chk != 0)
+        return chk;
+    return proc_signal(t, sig);
+}
+
+/* set_robust_list(273): length must be exactly sizeof(struct
+ * robust_list_head) = 24, as Linux checks.  The head is stored for
+ * get_robust_list to read back; the exit-time sweep is a plan gap. */
+static int64_t sys_set_robust_list(uint64_t head, uint64_t len)
+{
+    proc_t *p = proc_current();
+    if (!p)
+        return -E_INVAL;
+    if (len != 24)
+        return -E_INVAL;
+    p->robust_head = head;
+    p->robust_len  = (uint32_t)len;
+    return 0;
+}
+
+static int64_t sys_get_robust_list(int pid, uint64_t uhead, uint64_t ulen)
+{
+    proc_t *t = pid ? proc_by_pid(pid) : proc_current();
+    if (!t)
+        return -E_SRCH;
+    if (!ulen || !user_ptr_ok(ulen, sizeof(uint64_t)))
+        return -E_FAULT;
+    *(uint64_t *)(uintptr_t)ulen = t->robust_len;
+    if (uhead) {
+        if (!user_ptr_ok(uhead, sizeof(uint64_t)))
+            return -E_FAULT;
+        *(uint64_t *)(uintptr_t)uhead = t->robust_head;
+    }
+    return 0;
+}
+
+/* waitid(247): exits are reported through the same waitpid machinery as
+ * wait4, re-encoded into a siginfo record.  WSTOPPED/WCONTINUED are never
+ * reported and WNOWAIT is not honored -- the documented plan gap, shared
+ * with the VibeOS row. */
+static int64_t sys_waitid(int idtype, int id, uint64_t uinfop, int options)
+{
+    proc_t *me = proc_current();
+    if (!me)
+        return -E_INVAL;
+    if (!(options & (WEXITED_WD | WSTOPPED_WD | WCONTINUED_WD)))
+        return -E_INVAL;
+
+    int pid;
+    switch (idtype) {
+    case P_PID_WD:  pid = id; break;
+    case P_PGID_WD: pid = -id; break;
+    case P_ALL_WD:  pid = -1; break;
+    default:        return -E_INVAL;
+    }
+
+    int status = 0;
+    int64_t got = proc_waitpid(pid, &status, options & WNOHANG);
+    if (got < 0)
+        return got;
+    if (got == 0) {
+        /* WNOHANG with no child ready: zeroed si_pid is the "none" marker. */
+        if (uinfop) {
+            if (!user_ptr_ok(uinfop, 128))
+                return -E_FAULT;
+            memset((void *)(uintptr_t)uinfop, 0, 128);
+        }
+        return 0;
+    }
+    if (uinfop) {
+        if (!user_ptr_ok(uinfop, 128))
+            return -E_FAULT;
+        siginfo_fill_chld(uinfop, (int)got, status);
+    }
+    return 0;
+}
+
+int64_t __x64_sys_rt_sigtimedwait(regs_t *r)
+{
+    return sys_rt_sigtimedwait(r->rdi, r->rsi, r->rdx, r->r10);
+}
+
+int64_t __x64_sys_rt_sigqueueinfo(regs_t *r)
+{
+    return sys_rt_sigqueueinfo((int)r->rdi, (int)r->rsi, r->rdx);
+}
+
+int64_t __x64_sys_rt_tgsigqueueinfo(regs_t *r)
+{
+    return sys_rt_tgsigqueueinfo((int)r->rdi, (int)r->rsi, (int)r->rdx, r->r10);
+}
+
+int64_t __x64_sys_set_robust_list(regs_t *r)
+{
+    return sys_set_robust_list(r->rdi, r->rsi);
+}
+
+int64_t __x64_sys_get_robust_list(regs_t *r)
+{
+    return sys_get_robust_list((int)r->rdi, r->rsi, r->rdx);
+}
+
+int64_t __x64_sys_waitid(regs_t *r)
+{
+    return sys_waitid((int)r->rdi, (int)r->rsi, r->rdx, (int)r->r10);
+}
+
+/* ==== VibeOS merge, batch 3: clock / POSIX timers ======================== */
+
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+#endif
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID  3
+#define CLOCK_MONOTONIC_RAW      4
+#define CLOCK_REALTIME_COARSE    5
+#define CLOCK_MONOTONIC_COARSE   6
+#define CLOCK_BOOTTIME           7
+
+#define SIGEV_NONE   0
+#define SIGEV_SIGNAL 1
+
+#define TIMER_ABSTIME 1
+
+/* A POSIX interval timer.  Ids are indices into this table; the owner pid
+ * guards every later operation the way Linux guards timer_t ownership. */
+#define POSIX_TIMERS_MAX 16
+typedef struct {
+    int      in_use;
+    int      owner_pid;
+    int      sigev_notify;
+    int      signo;
+    uint64_t expire_tick; /* 0 = disarmed                */
+    uint64_t interval;    /* re-arm period in ticks      */
+    uint32_t overrun;     /* fires swallowed by pending  */
+} posix_timer_t;
+
+static posix_timer_t g_ptimers[POSIX_TIMERS_MAX];
+
+static int clockid_ok(int clockid)
+{
+    switch (clockid) {
+    case CLOCK_REALTIME:
+    case CLOCK_MONOTONIC:
+    case CLOCK_PROCESS_CPUTIME_ID:
+    case CLOCK_THREAD_CPUTIME_ID:
+    case CLOCK_MONOTONIC_RAW:
+    case CLOCK_REALTIME_COARSE:
+    case CLOCK_MONOTONIC_COARSE:
+    case CLOCK_BOOTTIME:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Per-tick sweep, called from the same pass that drives ITIMER_REAL: a
+ * periodic timer re-arms from `now` so a starved owner does not get a
+ * catch-up burst, and a fire that lands while its signal is still pending
+ * counts as an overrun instead of a second delivery. */
+void posix_timers_sweep(uint64_t now)
+{
+    for (int i = 0; i < POSIX_TIMERS_MAX; i++) {
+        posix_timer_t *t = &g_ptimers[i];
+        if (!t->in_use || !t->expire_tick || now < t->expire_tick)
+            continue;
+        proc_t *p = proc_by_pid(t->owner_pid);
+        if (p && t->sigev_notify == SIGEV_SIGNAL) {
+            uint64_t bit = 1ULL << t->signo;
+            if (p->sig_pending & bit)
+                t->overrun++;
+            else
+                proc_signal(p, t->signo);
+        }
+        t->expire_tick = t->interval ? now + t->interval : 0;
+    }
+}
+
+static int64_t sys_timer_create(int clockid, uint64_t usevp, uint64_t utid)
+{
+    proc_t *p = proc_current();
+    if (!p)
+        return -E_INVAL;
+    if (!clockid_ok(clockid))
+        return -E_INVAL;
+    if (!utid || !user_ptr_ok(utid, sizeof(int)))
+        return -E_FAULT;
+
+    int notify = SIGEV_NONE;
+    int signo  = 0;
+    if (usevp) {
+        /* struct sigevent: sigev_value(8) sigev_signo(4) sigev_notify(4). */
+        if (!user_ptr_ok(usevp, 32))
+            return -E_FAULT;
+        const int32_t *se = (const int32_t *)(uintptr_t)usevp;
+        signo  = se[3];
+        notify = se[4];
+        if (notify != SIGEV_NONE && notify != SIGEV_SIGNAL)
+            return -E_INVAL; /* SIGEV_THREAD / _THREAD_ID need threads */
+        if (notify == SIGEV_SIGNAL && (signo <= 0 || signo >= NSIG))
+            return -E_INVAL;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < POSIX_TIMERS_MAX; i++) {
+        if (!g_ptimers[i].in_use) {
+            slot = i;
+            break;
         }
     }
+    if (slot < 0)
+        return -E_AGAIN; /* EAGAIN is what Linux reports at its own cap */
 
-    /* ... and once after it returns, where the exit stop's register image
-     * shows the result in RAX. */
-    ptrace_syscall_exit(r);
+    posix_timer_t *t = &g_ptimers[slot];
+    memset(t, 0, sizeof(*t));
+    t->in_use       = 1;
+    t->owner_pid    = p->pid;
+    t->sigev_notify = notify;
+    t->signo        = signo;
+    *(int *)(uintptr_t)utid = slot;
+    return 0;
 }
 
-void syscall_init_cpu(void)
+static posix_timer_t *timer_owned(int timerid)
 {
-    /* Enable the `syscall` instruction.  These MSRs are per-core: an AP that
-     * skips this takes #UD on the first user `syscall`.  We return to user
-     * mode with iretq, so only the SYSCALL half of IA32_STAR matters: it
-     * supplies the kernel code selector the CPU switches into on entry. */
-    wrmsr(0xC0000081,                 /* IA32_STAR: syscall CS = kernel,  */
-          ((uint64_t)SEL_KCODE << 32) /* sysret CS field (unused here)    */
-              | ((uint64_t)SEL_UCODE << 48));
-    wrmsr(0xC0000082, (uint64_t)syscall_entry); /* IA32_LSTAR */
-    /* EFER must be a READ-MODIFY-WRITE: under KVM-SVM with NPT the
-     * hypervisor owns EFER.SVME (bit 12) and rejects a write that clears
-     * it -- a blind 0x801 store #GPs on KVM (TCG, where EFER reads as 0,
-     * never noticed).  Set SCE, add NXE when the CPU reports NX. */
-    {
-        uint64_t efer;
-        uint32_t a = 0, d = 0;
-        uint32_t maxext = 0;
-        asm volatile("cpuid" : "=a"(maxext) : "a"(0x80000000) : "ebx", "ecx", "edx");
-        if (maxext >= 0x80000001u)
-            asm volatile("cpuid" : "=a"(a), "=d"(d) : "a"(0x80000001), "c"(0u) : "ebx");
-        asm volatile("rdmsr" : "=A"(efer) : "c"(0xC0000080u));
-        efer |= 0x1; /* SCE: enable syscall */
-        if ((d & (1u << 20)) && maxext >= 0x80000001u)
-            efer |= 0x800; /* NXE when NX exists */
-        wrmsr(0xC0000080, efer);
+    proc_t *p = proc_current();
+    if (!p || timerid < 0 || timerid >= POSIX_TIMERS_MAX)
+        return 0;
+    posix_timer_t *t = &g_ptimers[timerid];
+    if (!t->in_use || t->owner_pid != p->pid)
+        return 0;
+    return t;
+}
+
+/* itimerspec: two {int64 sec, int64 nsec} pairs (interval, value), 32 bytes. */
+static uint64_t ts_pair_to_ticks(int64_t sec, int64_t nsec)
+{
+    if (sec < 0 || nsec < 0 || nsec >= 1000000000L)
+        return (uint64_t)-1;
+    return (uint64_t)sec * SCHED_HZ + (uint64_t)nsec / (1000000000ULL / SCHED_HZ);
+}
+
+static void ticks_to_ts_pair(uint64_t ticks, int64_t *out)
+{
+    out[0] = (int64_t)(ticks / SCHED_HZ);
+    out[1] = (int64_t)((ticks % SCHED_HZ) * (1000000000ULL / SCHED_HZ));
+}
+
+static int64_t sys_timer_settime(int timerid, int flags, uint64_t unew, uint64_t uold)
+{
+    posix_timer_t *t = timer_owned(timerid);
+    if (!t)
+        return -E_INVAL;
+    if (!unew || !user_ptr_ok(unew, 32))
+        return -E_FAULT;
+
+    const int64_t *ts = (const int64_t *)(uintptr_t)unew;
+    uint64_t interval = ts_pair_to_ticks(ts[0], ts[1]);
+    uint64_t value    = ts_pair_to_ticks(ts[2], ts[3]);
+    if (interval == (uint64_t)-1 || value == (uint64_t)-1)
+        return -E_INVAL;
+
+    if (uold) {
+        if (!user_ptr_ok(uold, 32))
+            return -E_FAULT;
+        uint64_t now   = timer_ticks();
+        uint64_t remain = t->expire_tick && t->expire_tick > now
+                              ? t->expire_tick - now
+                              : 0;
+        int64_t out[4];
+        ticks_to_ts_pair(t->interval, out);
+        ticks_to_ts_pair(remain, out + 2);
+        memcpy((void *)(uintptr_t)uold, out, sizeof(out));
     }
-    /* IA32_FMASK left at 0: the stub clears IF itself, and leaving RFLAGS
-     * untouched means the saved R11 still carries the user's IF for iretq. */
+
+    uint64_t now = timer_ticks();
+    if (value == 0) {
+        t->expire_tick = 0;
+        t->interval    = 0;
+    } else if (flags & TIMER_ABSTIME) {
+        t->expire_tick = value;
+        t->interval    = interval;
+    } else {
+        t->expire_tick = now + value;
+        t->interval    = interval;
+    }
+    return 0;
 }
 
-void syscall_init(void)
+static int64_t sys_timer_gettime(int timerid, uint64_t uspec)
 {
-    syscall_install(syscall_handler);
-    syscall_init_cpu();
+    posix_timer_t *t = timer_owned(timerid);
+    if (!t)
+        return -E_INVAL;
+    if (!uspec || !user_ptr_ok(uspec, 32))
+        return -E_FAULT;
+    uint64_t now    = timer_ticks();
+    uint64_t remain = t->expire_tick && t->expire_tick > now
+                          ? t->expire_tick - now
+                          : 0;
+    int64_t out[4];
+    ticks_to_ts_pair(t->interval, out);
+    ticks_to_ts_pair(remain, out + 2);
+    memcpy((void *)(uintptr_t)uspec, out, sizeof(out));
+    return 0;
+}
 
-    dbg_puts("GNOS: syscall gate installed (int 0x80 + syscall)\r\n");
+static int64_t sys_timer_getoverrun(int timerid)
+{
+    posix_timer_t *t = timer_owned(timerid);
+    if (!t)
+        return -E_INVAL;
+    uint32_t ov  = t->overrun;
+    t->overrun   = 0;
+    return ov;
+}
+
+static int64_t sys_timer_delete(int timerid)
+{
+    posix_timer_t *t = timer_owned(timerid);
+    if (!t)
+        return -E_INVAL;
+    memset(t, 0, sizeof(*t));
+    return 0;
+}
+
+/* struct timex as x86-64 lays it out (208 bytes).  The clock here is the
+ * timer's uptime: there is nothing to adjust it from, so a nonzero modes
+ * is EPERM and a query reports the honest zeros of an undisciplined clock. */
+typedef struct {
+    uint32_t modes;
+    uint32_t pad0;
+    int64_t  offset, freq, maxerror, esterror;
+    int32_t  status;
+    uint32_t pad1;
+    int64_t  constant, precision, tolerance;
+    int64_t  time_sec, time_usec;
+    int64_t  tick, ppsfreq, jitter;
+    int32_t  shift;
+    uint32_t pad2;
+    int64_t  stabil, jitcnt, calcnt, errcnt, stbcnt;
+    int32_t  tai;
+    uint32_t pad3;
+} timex_t;
+
+static void timex_fill(timex_t *tx, uint64_t now)
+{
+    memset(tx, 0, sizeof(*tx));
+    tx->modes     = 0;
+    tx->status    = 0; /* TIME_OK */
+    tx->precision = 1;
+    tx->tolerance = 500000;
+    tx->time_sec  = (int64_t)(now / SCHED_HZ + timer_boot_epoch());
+    tx->time_usec = (int64_t)((now % SCHED_HZ) * USEC_PER_TICK);
+    tx->tick      = 10000000 / SCHED_HZ;
+}
+
+static int64_t sys_adjtimex(uint64_t utx)
+{
+    if (!utx || !user_ptr_ok(utx, sizeof(timex_t)))
+        return -E_FAULT;
+    timex_t *tx = (timex_t *)(uintptr_t)utx;
+    if (tx->modes != 0)
+        return -E_PERM; /* the clock is the timer's uptime; nothing to set */
+    timex_fill(tx, timer_ticks());
+    return 0; /* TIME_OK */
+}
+
+static int64_t sys_clock_adjtime(int clockid, uint64_t utx)
+{
+    if (!clockid_ok(clockid))
+        return -E_INVAL;
+    return sys_adjtimex(utx);
+}
+
+/* settimeofday(164): arguments are judged, the clock is not set. */
+static int64_t sys_settimeofday(uint64_t utv, uint64_t utz)
+{
+    if (utv && !user_ptr_ok(utv, 2 * sizeof(int64_t)))
+        return -E_FAULT;
+    if (utz && !user_ptr_ok(utz, 16))
+        return -E_FAULT;
+    return -E_PERM;
+}
+
+int64_t __x64_sys_timer_create(regs_t *r)
+{
+    return sys_timer_create((int)r->rdi, r->rsi, r->rdx);
+}
+
+int64_t __x64_sys_timer_settime(regs_t *r)
+{
+    return sys_timer_settime((int)r->rdi, (int)r->rsi, r->rdx, r->r10);
+}
+
+int64_t __x64_sys_timer_gettime(regs_t *r)
+{
+    return sys_timer_gettime((int)r->rdi, r->rsi);
+}
+
+int64_t __x64_sys_timer_getoverrun(regs_t *r)
+{
+    return sys_timer_getoverrun((int)r->rdi);
+}
+
+int64_t __x64_sys_timer_delete(regs_t *r)
+{
+    return sys_timer_delete((int)r->rdi);
+}
+
+int64_t __x64_sys_adjtimex(regs_t *r)
+{
+    return sys_adjtimex(r->rdi);
+}
+
+int64_t __x64_sys_clock_adjtime(regs_t *r)
+{
+    return sys_clock_adjtime((int)r->rdi, r->rsi);
+}
+
+int64_t __x64_sys_settimeofday(regs_t *r)
+{
+    return sys_settimeofday(r->rdi, r->rsi);
 }

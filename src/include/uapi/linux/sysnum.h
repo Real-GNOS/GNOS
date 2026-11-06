@@ -1115,3 +1115,42 @@ struct sock_filter {
 /* Namespace isolation (Linux numbers, wired to namespace.h). */
 #define SYS_unshare 272
 #define SYS_setns   308
+
+/* ---- VibeOS merge batch 1: process/scheduling identity ----------------- */
+#define SYS_pause                  34
+#define SYS_getpgrp               111
+#define SYS_setfsuid              122
+#define SYS_setfsgid              123
+#define SYS_getpriority           140
+#define SYS_setpriority           141
+#define SYS_sched_setparam        142
+#define SYS_sched_getparam        143
+#define SYS_sched_setscheduler    144
+#define SYS_sched_getscheduler    145
+#define SYS_sched_get_priority_max 146
+#define SYS_sched_get_priority_min 147
+#define SYS_sched_rr_get_interval 148
+#define SYS_restart_syscall       219
+#define SYS_ioprio_set            251
+#define SYS_ioprio_get            252
+#define SYS_getcpu                309
+#define SYS_sched_setattr         314
+#define SYS_sched_getattr         315
+
+/* ---- VibeOS merge batch 2: signals / waiting --------------------------- */
+#define SYS_rt_sigtimedwait       128
+#define SYS_rt_sigqueueinfo       129
+#define SYS_waitid                247
+#define SYS_set_robust_list       273
+#define SYS_get_robust_list       274
+#define SYS_rt_tgsigqueueinfo     297
+
+/* ---- VibeOS merge batch 3: clock / POSIX timers ------------------------ */
+#define SYS_adjtimex              159
+#define SYS_settimeofday          164
+#define SYS_timer_create          222
+#define SYS_timer_settime         223
+#define SYS_timer_gettime         224
+#define SYS_timer_getoverrun      225
+#define SYS_timer_delete          226
+#define SYS_clock_adjtime         305

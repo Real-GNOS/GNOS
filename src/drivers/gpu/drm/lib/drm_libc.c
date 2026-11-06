@@ -100,10 +100,10 @@ void *aligned_alloc(size_t align, size_t size)
         phys = pmm_alloc_contiguous(nframes);
     if (!phys)
         return NULL;
+    /* When the buddy supplied the frames, `order` records the span for the
+     * matching free; the bitmap fallback has no order to record. */
     if (nframes > 1 && phys && !buddy_owns(phys))
-        order = 0; /* came from the bitmap fallback */
-    else if (nframes > 1)
-        ; /* order records the buddy span for the matching free */
+        order = 0;
 
     void *v = pmm_virt(phys);
     for (int i = 0; i < ALIGN_SLOTS; i++) {

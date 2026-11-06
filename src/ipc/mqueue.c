@@ -25,6 +25,7 @@
 #include "kstring.h"
 #include "timer.h"
 #include "syscall.h"
+#include "anonfd.h" /* anon_bind */
 
 /* ---- pool --------------------------------------------------------------- */
 

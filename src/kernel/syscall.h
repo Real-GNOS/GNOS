@@ -25,6 +25,10 @@ void syscall_init_cpu(void);
  * with a nonzero revents, or a negative errno. */
 int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks);
 
+/* POSIX interval timers (timer_create family): fired from the same per-tick
+ * pass that drives ITIMER_REAL. */
+void posix_timers_sweep(uint64_t now);
+
 /* Per-process descriptor table access, shared with the anonymous-fd
  * creators (memfd/eventfd/epoll).  fd_handle returns the open-file handle
  * behind a descriptor, or -1; fd_alloc binds a handle to the lowest free
