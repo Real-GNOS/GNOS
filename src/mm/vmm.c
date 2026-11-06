@@ -295,9 +295,9 @@ void vmm_init(void)
  * already relocated to their runtime (higher-half) values by the loader, so no
  * load-bias arithmetic is needed here.
  */
-static uint64_t *walk(addrspace_t *as, uint64_t vaddr, int create, unsigned flags);
+static uint64_t    *walk(addrspace_t *as, uint64_t vaddr, int create, unsigned flags);
 static addrspace_t *kernel_space(void); /* defined with the module-loader helpers */
-void             vmm_map_kernel_bss(void)
+void                vmm_map_kernel_bss(void)
 {
     extern char _bss_start[];
     extern char _kernel_end[];
@@ -315,7 +315,7 @@ void             vmm_map_kernel_bss(void)
      * new PTEs are live immediately.  The anchor is the shared static (see
      * kernel_space below): a stack copy of addrspace_t is ~16 KiB. */
     addrspace_t *k    = kernel_space();
-    uint64_t    base = start & ~0xFFFULL;
+    uint64_t     base = start & ~0xFFFULL;
     for (uint64_t va = base; va < end; va += PAGE_SIZE) {
         uint64_t *pte      = walk(k, va, 0, 0); /* no allocate, just inspect */
         int       present  = pte && (*pte & PTE_P);

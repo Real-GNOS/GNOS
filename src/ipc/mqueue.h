@@ -23,8 +23,8 @@ typedef struct {
 } mq_attr_t;
 
 /* oflag bits beyond the O_* the caller already passes. */
-#define MQ_O_CREAT  0100
-#define MQ_O_EXCL   0200
+#define MQ_O_CREAT 0100
+#define MQ_O_EXCL  0200
 
 /* sigev_notify values (musl bits/signal.h). */
 #define SIGEV_NONE      0
@@ -47,7 +47,8 @@ typedef struct {
 int64_t sys_mq_open(uint64_t name, uint64_t oflag, uint64_t mode, uint64_t attr);
 int64_t sys_mq_unlink(uint64_t name);
 int64_t sys_mq_timedsend(uint64_t mqd, uint64_t msg, uint64_t len, uint64_t prio, uint64_t timeout);
-int64_t sys_mq_timedreceive(uint64_t mqd, uint64_t msg, uint64_t len, uint64_t prio, uint64_t timeout);
+int64_t sys_mq_timedreceive(uint64_t mqd, uint64_t msg, uint64_t len, uint64_t prio,
+                            uint64_t timeout);
 int64_t sys_mq_notify(uint64_t mqd, uint64_t sevp);
 int64_t sys_mq_getsetattr(uint64_t mqd, uint64_t newattr, uint64_t oldattr);
 

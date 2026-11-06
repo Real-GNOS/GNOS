@@ -41,6 +41,9 @@ jobs:
       - name: header-name uniqueness
         run: make check-hdrs
 
+      - name: syscall header/dispatcher consistency
+        run: make check-syscalls
+
       - name: kernel build (GNOSKr.elf)
         run: make build/GNOSKr.elf CC=gcc-13
 

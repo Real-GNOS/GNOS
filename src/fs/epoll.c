@@ -29,6 +29,7 @@
 
 #define EPOLLIN      0x00000001
 #define EPOLLOUT     0x00000004
+#define EPOLLPRI     0x00000002
 #define EPOLLERR     0x00000008
 #define EPOLLHUP     0x00000010
 #define EPOLLRDHUP   0x00002000
@@ -191,6 +192,8 @@ static uint32_t epoll_bit(int16_t rev)
         r |= EPOLLIN;
     if (rev & POLLOUT)
         r |= EPOLLOUT;
+    if (rev & POLLPRI)
+        r |= EPOLLPRI;
     if (rev & POLLERR)
         r |= EPOLLERR;
     if (rev & POLLHUP)

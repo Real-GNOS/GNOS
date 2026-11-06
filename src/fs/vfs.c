@@ -411,8 +411,8 @@ int g_mount_count = 0;
  * device's own vfs_ops, so the fs rides on whichever driver published
  * the node (ATA, NVMe, USB mass storage).
  */
-static ext2_fs_t  g_bfs;
-static int        g_bfs_ok;
+static ext2_fs_t g_bfs;
+static int       g_bfs_ok;
 
 /* Block I/O shims for a disk-mounted volume.  The device node travels in the
  * blkio ctx (a vfs_node_t *), so the same pair serves the root volume (g_fs,
@@ -997,7 +997,9 @@ static int resolve(const char *path, vfs_node_t *out, int follow)
                 memset(out, 0, sizeof(*out));
                 strncpy(out->name, ent.name, VFS_NAME_MAX - 1);
                 uint16_t m = (uint16_t)(ent.mode & 0xF000);
-                out->kind  = (m == EXT2_S_IFDIR) ? VFS_DIR : (m == EXT2_S_IFLNK) ? VFS_SYMLINK : VFS_FILE;
+                out->kind  = (m == EXT2_S_IFDIR)   ? VFS_DIR
+                             : (m == EXT2_S_IFLNK) ? VFS_SYMLINK
+                                                   : VFS_FILE;
                 out->size  = ent.size;
                 out->ops   = (out->kind == VFS_DIR) ? &g_bfs_dir_ops : &g_bfs_file_ops;
                 out->e2    = ent;

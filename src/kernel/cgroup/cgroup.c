@@ -96,6 +96,80 @@ int cg_subtree_tasks_locked(int cg)
     return n;
 }
 
+/* Effective freeze state: cgroup.freeze applies to the whole subtree, so a
+ * child is frozen when it or any ancestor has frozen=1.  Caller holds the
+ * sched lock. */
+int cg_frozen_effective(int cg)
+{
+    for (int c = cg; c != -1; c = g_cgs[c].parent) {
+        if (!cg_live(c))
+            return 0;
+        if (g_cgs[c].frozen)
+            return 1;
+        if (c == CG_ROOT)
+            break;
+    }
+    return 0;
+}
+
+/* Whether p's cgroup chain is frozen (scheduler hook, lock held). */
+int cg_chain_frozen(proc_t *p)
+{
+    if (!p || p->cg < 0)
+        return 0;
+    return cg_frozen_effective(p->cg);
+}
+
+/* Mark cgroup.events changed on cg and every descendant; a freeze/thaw
+ * changes the effective frozen value seen by the whole subtree.  Caller
+ * holds the sched lock and is responsible for one poller wake. */
+static void cg_event_subtree(int cg)
+{
+    g_cgs[cg].events_pending = 1;
+    for (int c = g_cgs[cg].first_child; c != -1; c = g_cgs[c].next_sibling)
+        if (g_cgs[c].live)
+            cg_event_subtree(c);
+}
+
+/* Update the cached populated bit on cg's ancestor chain after membership
+ * changed, marking cgroup.events and waking pollers if it flipped.  Caller
+ * holds the sched lock. */
+static void cg_update_populated(int cg)
+{
+    int changed = 0;
+    for (int c = cg; c != -1; c = g_cgs[c].parent) {
+        if (!cg_live(c))
+            break;
+        int populated = cg_subtree_tasks_locked(c) > 0;
+        if (g_cgs[c].populated != populated) {
+            g_cgs[c].populated      = populated;
+            g_cgs[c].events_pending = 1;
+            changed                 = 1;
+        }
+        if (c == CG_ROOT)
+            break;
+    }
+    if (changed)
+        sched_wake_poll_channels_locked();
+}
+
+/* Apply cgroup.freeze.  Freezing parks tasks at their next scheduling point;
+ * thawing releases everything parked on this node.  Caller holds the sched
+ * lock. */
+void cg_set_frozen(int cg, int frozen)
+{
+    if (!cg_live(cg))
+        return;
+    frozen = !!frozen;
+    if (g_cgs[cg].frozen == frozen)
+        return;
+    g_cgs[cg].frozen = frozen;
+    cg_event_subtree(cg);
+    if (!frozen)
+        cg_release_parked(cg);
+    sched_wake_poll_channels_locked();
+}
+
 /* Full path of cg ("/", "/a", "/a/b") into buf.  Caller holds the lock. */
 static int render_path(int cg, char *buf, int cap)
 {
@@ -288,6 +362,7 @@ int cg_attach_new(proc_t *p, int cg)
         p->cg           = cg;
         p->sched_weight = eff_weight(cg);
         g_cgs[cg].nprocs++;
+        cg_update_populated(cg);
         /* Propagate the cgroup to the address space so the VMM memory
          * controller can charge page allocations against the right tree. */
         if (p->as)
@@ -306,6 +381,7 @@ void cg_detach(proc_t *p)
     if (p->cg >= 0 && p->cg < MAX_CGS && g_cgs[p->cg].live) {
         if (g_cgs[p->cg].nprocs > 0)
             g_cgs[p->cg].nprocs--;
+        cg_update_populated(p->cg);
     }
     p->cg           = -1;
     p->cg_park_next = -1;
@@ -358,9 +434,12 @@ int cg_move_tgid_locked(int pid, int cg)
         if (q->state == PROC_UNUSED || q->tgid != tgid)
             continue;
         if (q->cg >= 0 && q->cg != cg) {
-            g_cgs[q->cg].nprocs--;
+            int old_cg = q->cg;
+            g_cgs[old_cg].nprocs--;
+            cg_update_populated(old_cg);
             q->cg = cg;
             g_cgs[cg].nprocs++;
+            cg_update_populated(cg);
         }
         q->sched_weight = eff_weight(cg);
         /* Propagate the new cgroup to shared address spaces. */

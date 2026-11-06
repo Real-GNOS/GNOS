@@ -25,6 +25,7 @@
 #include "kstring.h"
 #include "timer.h"
 #include "syscall.h"
+#include "anonfd.h"
 
 /* ---- pool --------------------------------------------------------------- */
 
@@ -35,22 +36,22 @@
 #define MQ_PRIO_MAX    32768
 
 typedef struct mq {
-    int      used;
-    int      unlinked; /* unlinked: no new open(), die on last close */
-    int      refs;     /* open file descriptors onto this queue */
-    char     name[MQ_NAME_MAX];
-    long     maxmsg;
-    long     msgsize;
-    long     curmsgs;
-    long     head;      /* ring index of the oldest message */
-    int      nonblock; /* the queue-level O_NONBLOCK (mq_getsetattr) */
-    uint8_t *msgs;     /* maxmsg * msgsize ring of message slots */
-    unsigned *lens;    /* per-slot length */
-    unsigned *prios;   /* per-slot priority */
+    int       used;
+    int       unlinked; /* unlinked: no new open(), die on last close */
+    int       refs;     /* open file descriptors onto this queue */
+    char      name[MQ_NAME_MAX];
+    long      maxmsg;
+    long      msgsize;
+    long      curmsgs;
+    long      head;     /* ring index of the oldest message */
+    int       nonblock; /* the queue-level O_NONBLOCK (mq_getsetattr) */
+    uint8_t  *msgs;     /* maxmsg * msgsize ring of message slots */
+    unsigned *lens;     /* per-slot length */
+    unsigned *prios;    /* per-slot priority */
 
     /* Wake channels: receivers parked when empty, senders when full. */
-    proc_t  *rwait;
-    proc_t  *wwait;
+    proc_t *rwait;
+    proc_t *wwait;
 
     /* mq_notify registration (one per queue, like Linux) and the pid it
      * signals (SIGEV_SIGNAL is delivered to the registering process). */
@@ -61,8 +62,8 @@ typedef struct mq {
 
 static mq_t g_mqs[MQ_MAX];
 
-static int  mq_poll(vfs_node_t *n, int16_t events, int16_t *revents);
-static void mq_release(vfs_node_t *n);
+static int             mq_poll(vfs_node_t *n, int16_t events, int16_t *revents);
+static void            mq_release(vfs_node_t *n);
 static const vfs_ops_t g_mq_ops;
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -95,7 +96,7 @@ static mq_t *mq_by_fd(int64_t mqd)
     int h = fd_handle((int)mqd);
     if (h < 0)
         return NULL;
-    vfs_node_t *n = vfs_file_node(h);
+    const vfs_node_t *n = vfs_file_node(h);
     if (!n || n->kind != VFS_ANON || n->ops != &g_mq_ops)
         return NULL;
     mq_t *q = (mq_t *)n->priv;
@@ -179,7 +180,7 @@ static void mq_maybe_notify(mq_t *q)
 
 static int mq_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
-    mq_t *q = (mq_t *)n->priv;
+    mq_t   *q = (mq_t *)n->priv;
     int16_t r = 0;
     if (q && q->used && !q->unlinked) {
         if (events & POLLIN)
@@ -227,8 +228,7 @@ int64_t sys_mq_open(uint64_t uname, uint64_t oflag, uint64_t mode, uint64_t uatt
 
     mq_t *q = NULL;
     for (int i = 0; i < MQ_MAX; i++) {
-        if (g_mqs[i].used && !g_mqs[i].unlinked &&
-            strcmp(g_mqs[i].name, name) == 0) {
+        if (g_mqs[i].used && !g_mqs[i].unlinked && strcmp(g_mqs[i].name, name) == 0) {
             q = &g_mqs[i];
             break;
         }
@@ -244,8 +244,8 @@ int64_t sys_mq_open(uint64_t uname, uint64_t oflag, uint64_t mode, uint64_t uatt
         if (!uattr || !user_ptr_ok(uattr, sizeof a))
             return -E_INVAL;
         memcpy(&a, (void *)(uintptr_t)uattr, sizeof a);
-        if (a.mq_maxmsg <= 0 || a.mq_msgsize <= 0 ||
-            a.mq_maxmsg > MQ_MAXMSG_MAX || a.mq_msgsize > MQ_MSGSIZE_MAX)
+        if (a.mq_maxmsg <= 0 || a.mq_msgsize <= 0 || a.mq_maxmsg > MQ_MAXMSG_MAX ||
+            a.mq_msgsize > MQ_MSGSIZE_MAX)
             return -E_INVAL;
 
         for (int i = 0; i < MQ_MAX; i++) {
@@ -265,9 +265,12 @@ int64_t sys_mq_open(uint64_t uname, uint64_t oflag, uint64_t mode, uint64_t uatt
         q->lens  = kmalloc((uint32_t)q->maxmsg * sizeof(unsigned));
         q->prios = kmalloc((uint32_t)q->maxmsg * sizeof(unsigned));
         if (!q->msgs || !q->lens || !q->prios) {
-            if (q->msgs) kfree(q->msgs);
-            if (q->lens) kfree(q->lens);
-            if (q->prios) kfree(q->prios);
+            if (q->msgs)
+                kfree(q->msgs);
+            if (q->lens)
+                kfree(q->lens);
+            if (q->prios)
+                kfree(q->prios);
             return -E_NOMEM;
         }
         q->used = 1;
@@ -313,9 +316,12 @@ int64_t sys_mq_unlink(uint64_t uname)
             mq_wake(q, 1);
             mq_wake(q, 0);
             if (q->refs <= 0) {
-                if (q->msgs) kfree(q->msgs);
-                if (q->lens) kfree(q->lens);
-                if (q->prios) kfree(q->prios);
+                if (q->msgs)
+                    kfree(q->msgs);
+                if (q->lens)
+                    kfree(q->lens);
+                if (q->prios)
+                    kfree(q->prios);
                 q->used = 0;
             }
             return 0;
@@ -324,8 +330,7 @@ int64_t sys_mq_unlink(uint64_t uname)
     return -E_NOENT;
 }
 
-int64_t sys_mq_timedsend(uint64_t mqd, uint64_t umsg, uint64_t len,
-                         uint64_t prio, uint64_t timeout)
+int64_t sys_mq_timedsend(uint64_t mqd, uint64_t umsg, uint64_t len, uint64_t prio, uint64_t timeout)
 {
     mq_t *q = mq_by_fd((int64_t)(int)mqd);
     if (!q)
@@ -337,7 +342,7 @@ int64_t sys_mq_timedsend(uint64_t mqd, uint64_t umsg, uint64_t len,
     if (len && !user_ptr_ok(umsg, (uint32_t)len))
         return -E_FAULT;
 
-    uint64_t deadline = mq_deadline_ticks(timeout);
+    uint64_t deadline      = mq_deadline_ticks(timeout);
     uint64_t spin_deadline = 0;
     if (deadline != (uint64_t)-1)
         spin_deadline = timer_ticks() + deadline;
@@ -365,15 +370,14 @@ int64_t sys_mq_timedsend(uint64_t mqd, uint64_t umsg, uint64_t len,
                 long dst = (q->head + i) % q->maxmsg;
                 long src = (q->head + i - 1) % q->maxmsg;
                 memcpy(q->msgs + (uint32_t)dst * (uint32_t)q->msgsize,
-                       q->msgs + (uint32_t)src * (uint32_t)q->msgsize,
-                       (uint32_t)q->msgsize);
+                       q->msgs + (uint32_t)src * (uint32_t)q->msgsize, (uint32_t)q->msgsize);
                 q->lens[(q->head + i) % q->maxmsg]  = q->lens[(q->head + i - 1) % q->maxmsg];
                 q->prios[(q->head + i) % q->maxmsg] = q->prios[(q->head + i - 1) % q->maxmsg];
             }
             long slot = (q->head + pos) % q->maxmsg;
             if (len)
-                memcpy(q->msgs + (uint32_t)slot * (uint32_t)q->msgsize,
-                       (void *)(uintptr_t)umsg, (uint32_t)len);
+                memcpy(q->msgs + (uint32_t)slot * (uint32_t)q->msgsize, (void *)(uintptr_t)umsg,
+                       (uint32_t)len);
             q->lens[slot]  = (unsigned)len;
             q->prios[slot] = (unsigned)prio;
             q->curmsgs++;
@@ -400,8 +404,8 @@ int64_t sys_mq_timedsend(uint64_t mqd, uint64_t umsg, uint64_t len,
     }
 }
 
-int64_t sys_mq_timedreceive(uint64_t mqd, uint64_t umsg, uint64_t len,
-                            uint64_t uprio, uint64_t timeout)
+int64_t sys_mq_timedreceive(uint64_t mqd, uint64_t umsg, uint64_t len, uint64_t uprio,
+                            uint64_t timeout)
 {
     mq_t *q = mq_by_fd((int64_t)(int)mqd);
     if (!q)
@@ -413,7 +417,7 @@ int64_t sys_mq_timedreceive(uint64_t mqd, uint64_t umsg, uint64_t len,
     if (uprio && !user_ptr_ok(uprio, sizeof(unsigned)))
         return -E_FAULT;
 
-    uint64_t deadline = mq_deadline_ticks(timeout);
+    uint64_t deadline      = mq_deadline_ticks(timeout);
     uint64_t spin_deadline = 0;
     if (deadline != (uint64_t)-1)
         spin_deadline = timer_ticks() + deadline;
@@ -429,11 +433,11 @@ int64_t sys_mq_timedreceive(uint64_t mqd, uint64_t umsg, uint64_t len,
         if (q->unlinked)
             return -E_BADF;
         if (q->curmsgs > 0) {
-            long slot = q->head;
+            long     slot = q->head;
             unsigned mlen = q->lens[slot];
             if (mlen)
-                memcpy((void *)(uintptr_t)umsg,
-                       q->msgs + (uint32_t)slot * (uint32_t)q->msgsize, mlen);
+                memcpy((void *)(uintptr_t)umsg, q->msgs + (uint32_t)slot * (uint32_t)q->msgsize,
+                       mlen);
             if (uprio)
                 *(unsigned *)(uintptr_t)uprio = q->prios[slot];
             q->head = (q->head + 1) % q->maxmsg;
@@ -482,13 +486,12 @@ int64_t sys_mq_notify(uint64_t mqd, uint64_t usevp)
     /* musl's struct sigevent (x86-64, 32 bytes):
      * int sigev_notify; int sigev_signo; union sigval value; then the
      * SIGEV_THREAD fields, which the kernel never touches. */
-    int  notify = *(int *)(uintptr_t)usevp;
-    int  signo  = *(int *)(uintptr_t)(usevp + 4);
-    uint64_t value = *(uint64_t *)(uintptr_t)(usevp + 8);
+    int      notify = *(int *)(uintptr_t)usevp;
+    int      signo  = *(int *)(uintptr_t)(usevp + 4);
+    uint64_t value  = *(uint64_t *)(uintptr_t)(usevp + 8);
     if (notify == SIGEV_THREAD)
         return -E_INVAL; /* musl implements THREAD in user space */
-    if (notify != SIGEV_NONE && notify != SIGEV_SIGNAL &&
-        notify != SIGEV_THREAD_ID)
+    if (notify != SIGEV_NONE && notify != SIGEV_SIGNAL && notify != SIGEV_THREAD_ID)
         return -E_INVAL;
     if (notify == SIGEV_SIGNAL || notify == SIGEV_THREAD_ID) {
         if (signo <= 0 || signo >= 64)

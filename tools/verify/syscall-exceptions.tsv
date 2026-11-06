@@ -1,0 +1,5 @@
+# name	state	reason
+SYS_chroot	MISSING	number defined in sysnum.h, no dispatcher case in syscall.c
+SYS_getpgrp	MISSING	number defined in sysnum.h, no dispatcher case in syscall.c
+SYS_linkat	MISSING	number defined in sysnum.h, no dispatcher case in syscall.c
+SYS_personality	MISSING	number defined in sysnum.h, no dispatcher case in syscall.c

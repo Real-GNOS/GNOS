@@ -263,4 +263,3 @@ void ap_main(int cpu)
     sched_start();
     __builtin_unreachable();
 }
-

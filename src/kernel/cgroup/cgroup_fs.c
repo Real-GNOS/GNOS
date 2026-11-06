@@ -7,6 +7,7 @@
  * duration of the operation; the internal walkers below expect it held.
  */
 #include "cgroup_internal.h"
+#include "debugcon.h"
 #include "kstring.h"
 
 /* ------------------------------------------------------------------ */
@@ -60,6 +61,7 @@ enum {
     F_CONTROLLERS,
     F_SUBTREE,
     F_EVENTS,
+    F_FREEZE,
     F_STAT,
     F_CPU_WEIGHT,
     F_CPU_MAX,
@@ -83,6 +85,7 @@ static const cgfile_t g_files[] = {
     {"cgroup.controllers", F_CONTROLLERS, CG_NCTRLS},
     {"cgroup.subtree_control", F_SUBTREE, CG_NCTRLS},
     {"cgroup.events", F_EVENTS, CG_NCTRLS},
+    {"cgroup.freeze", F_FREEZE, CG_NCTRLS},
     {"cgroup.stat", F_STAT, CG_NCTRLS},
     {"cpu.weight", F_CPU_WEIGHT, CG_CTRL_CPU},
     {"cpu.max", F_CPU_MAX, CG_CTRL_CPU},
@@ -157,8 +160,14 @@ static void render_file(int cg, int f, cgbuf_t *b)
         break;
     case F_EVENTS:
         cg_str(b, "populated ");
-        cg_u64(b, cg_subtree_tasks_locked(cg) > 0 ? 1 : 0);
-        cg_str(b, "\nfrozen 0\n");
+        cg_u64(b, g->populated ? 1 : 0);
+        cg_str(b, "\nfrozen ");
+        cg_u64(b, cg_frozen_effective(cg));
+        cg_char(b, '\n');
+        break;
+    case F_FREEZE:
+        cg_u64(b, g->frozen ? 1 : 0);
+        cg_char(b, '\n');
         break;
     case F_STAT:
         cg_str(b, "nr_descendants ");
@@ -251,6 +260,10 @@ static int32_t cgfile_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
         memcpy(buf, scratch + off, len);
         copied = len;
     }
+    /* Reading cgroup.events consumes the pending notification, so a poller
+     * that comes back after the read only sees the next state transition. */
+    if (f == F_EVENTS && off == 0 && copied > 0)
+        g_cgs[cg].events_pending = 0;
     sched_unlock();
     return (int32_t)copied;
 }
@@ -401,6 +414,15 @@ static int apply_write(int cg, int f, const char *data, uint32_t len)
         g->mem_max = v; /* stored; no enforcement */
         return (int)len;
     }
+    case F_FREEZE: {
+        int v;
+        if (parse_s32(&p, &v) < 0)
+            return -E_INVAL;
+        if (v != 0 && v != 1)
+            return -E_INVAL;
+        cg_set_frozen(cg, v);
+        return (int)len;
+    }
     default:
         return -E_ROFS;
     }
@@ -427,6 +449,28 @@ static int32_t cgfile_write(vfs_node_t *n, uint64_t off, const void *buf, uint32
     int r = apply_write(cg, f, tmp, len);
     sched_unlock();
     return (r < 0) ? r : (int32_t)len;
+}
+
+/* ---- poll --------------------------------------------------------------- */
+
+/* cgroup.events reports POLLPRI while a state change is pending.  The core
+ * clears events_pending when the file is read. */
+static int cgfile_poll(vfs_node_t *n, int16_t events, int16_t *revents)
+{
+    int cg = PRIV_CG(n->priv);
+    int f  = PRIV_FILE(n->priv);
+
+    int16_t r = 0;
+    sched_lock();
+    if (!cg_live(cg)) {
+        sched_unlock();
+        return -E_NOENT;
+    }
+    if (f == F_EVENTS && g_cgs[cg].events_pending)
+        r = (int16_t)(events & POLLPRI);
+    *revents = r;
+    sched_unlock();
+    return 0;
 }
 
 /* ---- lookup ------------------------------------------------------------- */
@@ -487,7 +531,8 @@ static int walk_rel(const char *rel, char *leaf, int leaf_cap, int *file_out)
             continue;
         }
 
-        /* Last component: a control file of cg, or nothing. */
+        /* Last component: a control file of cg, a child cgroup, or
+         * nothing.  Control files win if a cgroup name collides with one. */
         char tmp[CG_NAME_MAX + 1];
         memcpy(tmp, start, (size_t)n);
         tmp[n] = 0;
@@ -499,6 +544,14 @@ static int walk_rel(const char *rel, char *leaf, int leaf_cap, int *file_out)
             if (file_out)
                 *file_out = idx;
             return cg;
+        }
+        for (int c = g_cgs[cg].first_child; c != -1; c = g_cgs[c].next_sibling) {
+            if (g_cgs[c].live && (int)strlen(g_cgs[c].name) == n &&
+                memcmp(g_cgs[c].name, start, (size_t)n) == 0) {
+                if (leaf && leaf_cap > 0)
+                    memcpy(leaf, tmp, (size_t)n + 1);
+                return c;
+            }
         }
         return -1;
     }
@@ -602,6 +655,8 @@ int cgfs_mkdir(const char *rel)
 {
     if (!rel || rel[0] != '/')
         return -E_INVAL;
+    if (rel[1] == 0)
+        return -E_EXIST; /* "mkdir /" */
 
     /* Split off the final component: the parent directory must exist and
      * the child name must be a fresh one. */
@@ -609,8 +664,6 @@ int cgfs_mkdir(const char *rel)
     for (const char *p = rel; *p; p++)
         if (*p == '/')
             slash = p;
-    if (slash == rel)
-        return -E_EXIST; /* "mkdir /" */
 
     char parent_rel[GNUOS_PATH_MAX];
     int  plen = (int)(slash - rel);
@@ -710,4 +763,77 @@ int cgfs_rmdir(const char *rel)
 /* init and procfs helpers                                            */
 /* ------------------------------------------------------------------ */
 
-static const vfs_ops_t g_cgfile_ops = {.read = cgfile_read, .write = cgfile_write};
+static const vfs_ops_t g_cgfile_ops = {
+    .read = cgfile_read, .write = cgfile_write, .poll = cgfile_poll};
+
+#ifdef SYSTRACE
+/* Boot-time smoke test for the core event/freeze files.  This exercises the
+ * same node ops user space uses: read cgroup.events, write cgroup.freeze,
+ * poll for POLLPRI, read again, thaw and remove the test cgroup. */
+void cgfs_selftest(void)
+{
+    char       buf[64];
+    vfs_node_t ev;
+    vfs_node_t fr;
+
+    if (cgfs_mkdir("/selftest") < 0) {
+        dbg_puts("CGROUP: selftest mkdir failed\r\n");
+        return;
+    }
+    if (cgfs_resolve("/selftest/cgroup.events", &ev) < 0 ||
+        cgfs_resolve("/selftest/cgroup.freeze", &fr) < 0) {
+        dbg_puts("CGROUP: selftest resolve failed\r\n");
+        cgfs_rmdir("/selftest");
+        return;
+    }
+
+    int32_t n = ev.ops->read(&ev, 0, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        dbg_puts("CGROUP: selftest events read failed\r\n");
+        cgfs_rmdir("/selftest");
+        return;
+    }
+    buf[n] = 0;
+    if (strcmp(buf, "populated 0\nfrozen 0\n") != 0) {
+        dbg_puts("CGROUP: selftest bad initial events\r\n");
+        cgfs_rmdir("/selftest");
+        return;
+    }
+
+    if (fr.ops->write(&fr, 0, "1\n", 2) != 2) {
+        dbg_puts("CGROUP: selftest freeze write failed\r\n");
+        cgfs_rmdir("/selftest");
+        return;
+    }
+    int16_t revents = 0;
+    if (!ev.ops->poll || ev.ops->poll(&ev, POLLPRI, &revents) < 0 || !(revents & POLLPRI)) {
+        dbg_puts("CGROUP: selftest poll failed\r\n");
+        cgfs_rmdir("/selftest");
+        return;
+    }
+    n = ev.ops->read(&ev, 0, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        dbg_puts("CGROUP: selftest events reread failed\r\n");
+        cgfs_rmdir("/selftest");
+        return;
+    }
+    buf[n] = 0;
+    if (strcmp(buf, "populated 0\nfrozen 1\n") != 0) {
+        dbg_puts("CGROUP: selftest bad frozen events\r\n");
+        cgfs_rmdir("/selftest");
+        return;
+    }
+
+    int32_t wr = fr.ops->write(&fr, 0, "0\n", 2);
+    int32_t rr = cgfs_rmdir("/selftest");
+    if (wr != 2 || rr < 0) {
+        dbg_puts("CGROUP: selftest thaw/rmdir failed wr=");
+        dbg_puts_hex((uint64_t)(int64_t)wr);
+        dbg_puts(" rmdir=");
+        dbg_puts_hex((uint64_t)(int64_t)rr);
+        dbg_puts("\r\n");
+        return;
+    }
+    dbg_puts("CGROUP: selftest ok\r\n");
+}
+#endif

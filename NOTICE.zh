@@ -63,6 +63,9 @@ GNOS — 一个兼容 Linux ABI 的 x86_64 教学型操作系统。
   * build/desk/ 下的交叉编译 clang/llvm（如存在）：Apache-2.0 WITH
     LLVM-exception；仅用于编译本树，不作为 ISO 的一部分重新分发
   * boot/limine/ 下的 Limine 阶段文件：BSD-2-Clause（见上文）
+  * scripts/kconfig/、scripts/Kconfig.include 及 scripts/include/ 下的
+    Linux Kconfig 主机工具与辅助头文件（取自 Linux v6.12）：GPL-2.0-only。
+    主机二进制生成于 build/，不随 ISO 分发。
 
 源码获取说明
 -----------------------

@@ -42,6 +42,9 @@ void buddy_free(uint64_t phys, unsigned order);
  * yet requested from the PMM). */
 uint64_t buddy_free_frames(void);
 
+/* Is this physical address inside a chunk managed by the buddy allocator? */
+int buddy_owns(uint64_t phys);
+
 /* Boot-time self-test: alloc/free/split/merge round trip.  Prints
  * "BUDDY: self-test ... PASS/FAIL" on the debug console. */
 void buddy_selftest(void);

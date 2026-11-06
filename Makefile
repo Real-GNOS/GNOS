@@ -44,10 +44,6 @@ USERLAND ?= minirootfs
 # libcpp/lex.cc:1163) that randomly kills preprocessing of perfectly
 # ordinary files (getty.c, ncurses's make_hash.c, ...).
 CC      := gcc-13
-# C++ compiler for the host-side config tool (gnoscfg).  Override on the
-# command line, e.g. `make CXX=g++ ...`, since these lines used a literal
-# g++-13 before and ignored CXX=.
-CXX     ?= g++-13
 AS      := nasm
 LD      := ld
 OBJCOPY := objcopy
@@ -117,7 +113,7 @@ BASEFLAGS := -m64 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
 # We convert them to -D flags: CONFIG_FOO=y -> -DCONFIG_FOO=1, CONFIG_FOO="bar" -> -DCONFIG_FOO='"bar"'
 KCFLAGS := $(BASEFLAGS) -fpie -DSYSTRACE \
             $(shell if [ -f build/.config ]; then \
-              sed -n 's/^CONFIG_\(.*\)=y/-DCONFIG_\1=1/p; s/^CONFIG_\(.*\)="\([^"]*\)"/-DCONFIG_\1=\"\2\"/p; s/^CONFIG_\(.*\)=\([0-9][0-9]*\)/-DCONFIG_\1=\2/p' build/.config; \
+              sed -n 's/^CONFIG_\(.*\)=y/-DCONFIG_\1=1/p; s/^CONFIG_\(.*\)="\([^"]*\)"/-DCONFIG_\1=\x27"\2"\x27/p; s/^CONFIG_\(.*\)=\([0-9][0-9]*\)/-DCONFIG_\1=\2/p' build/.config; \
             fi) $(KCFLAGS_EXTRA)
 # user programs: linked at a fixed address by $(USER_DIR)/user.ld
 UCFLAGS := $(BASEFLAGS) -I$(USER_DIR) -fno-pie -fno-pic
@@ -642,36 +638,57 @@ GUI_AUDIO := -audiodev $(AUDIO_BACKEND),id=snd0 \
              -device AC97,audiodev=snd0 \
              -device intel-hda -device hda-duplex,audiodev=snd0
 
-.PHONY: all run run-uefi guistart headless clean distclean autoinstall alpine alpine-base config menuconfig
+.PHONY: all run run-uefi guistart headless clean distclean autoinstall alpine alpine-base config menuconfig nconfig oldconfig olddefconfig syncconfig allnoconfig allyesconfig alldefconfig randconfig listnewconfig helpnewconfig savedefconfig
 all: $(ISO)
 
-# ---------- gnoscfg: C++20 Kconfig configuration tool (host native) -----
-# The gnoscfg binary is a *host* tool (runs on the build machine, not inside
-# the guest) that parses src/Kconfig and drives a menuconfig TUI
-# using ncursesw.  It produces build/.config which `make` sources to set
-# KCFLAGS for the kernel build.
-GNOSCFG_SRC  := src/scripts/kconfig
-GNOSCFG_BIN  := $(BUILD)/gnoscfg
-GNOSCFG_OBJS := $(BUILD)/gnoscfg_kconfig.o $(BUILD)/gnoscfg_menu.o \
-                $(BUILD)/gnoscfg_main.o
-NC_INC       := $(NC_STAGE)/include/ncursesw
-NC_LIBS      := $(NC_STAGE)/lib/libncursesw.a $(NC_STAGE)/lib/libtinfow.a
+# ---------- Kconfig: Linux v6.12 scripts/kconfig (host native) ----------
+# The parser and frontends are vendored from Linux v6.12.  Their upstream
+# kbuild Makefile needs the full kbuild macro set, so Makefile.gnos supplies
+# the host-tool rules.  All generated files stay under build/ so the source
+# tree remains clean; KCONFIG_CONFIG is build/.config, which the KCFLAGS rule
+# above converts to -DCONFIG_* for the kernel build.
+HOSTCC       ?= cc
+HOSTCFLAGS   ?= -O2 -g
+KCONFIG_SRC  := scripts/kconfig
+KCONFIG_OUT  := $(BUILD)/kconfig
+KCONFIG_CONF := $(KCONFIG_OUT)/conf
+KCONFIG_MCONF := $(KCONFIG_OUT)/mconf
+KCONFIG_NCONF := $(KCONFIG_OUT)/nconf
+KCONFIG_STAMP := $(KCONFIG_OUT)/.built
+KCONFIG_DEPS := $(KCONFIG_SRC)/Makefile.gnos \
+                $(wildcard $(KCONFIG_SRC)/*.c $(KCONFIG_SRC)/*.h \
+                           $(KCONFIG_SRC)/*.y $(KCONFIG_SRC)/*.l \
+                           $(KCONFIG_SRC)/lxdialog/*.c \
+                           $(KCONFIG_SRC)/lxdialog/*.h scripts/include/*.h)
+KCONFIG_ENV  := KCONFIG_CONFIG=$(abspath $(BUILD)/.config) \
+                KCONFIG_AUTOCONFIG=$(abspath $(KCONFIG_OUT)/auto.conf) \
+                KCONFIG_AUTOHEADER=$(abspath $(KCONFIG_OUT)/autoconf.h) \
+                KCONFIG_RUSTCCFG=$(abspath $(KCONFIG_OUT)/rustc_cfg)
 
-$(BUILD)/gnoscfg_kconfig.o: $(GNOSCFG_SRC)/kconfig.cpp $(GNOSCFG_SRC)/kconfig.h | $(BUILD)
-	$(CXX) -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
+$(KCONFIG_STAMP): $(KCONFIG_DEPS)
+	@mkdir -p $(KCONFIG_OUT)
+	$(MAKE) -f $(KCONFIG_SRC)/Makefile.gnos OUT=$(abspath $(KCONFIG_OUT)) \
+	  HOSTCC="$(HOSTCC)" HOSTCFLAGS="$(HOSTCFLAGS)"
+	@touch $@
 
-$(BUILD)/gnoscfg_menu.o: $(GNOSCFG_SRC)/menu.cpp $(GNOSCFG_SRC)/kconfig.h | $(BUILD)
-	$(CXX) -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
+$(KCONFIG_CONF) $(KCONFIG_MCONF) $(KCONFIG_NCONF): $(KCONFIG_STAMP)
+	@:
 
-$(BUILD)/gnoscfg_main.o: $(GNOSCFG_SRC)/main.cpp $(GNOSCFG_SRC)/kconfig.h | $(BUILD)
-	$(CXX) -std=c++20 -O2 -g -I$(NC_INC) -I$(GNOSCFG_SRC) -c -o $@ $<
+config: $(KCONFIG_CONF) src/Kconfig
+	$(KCONFIG_ENV) $(KCONFIG_CONF) src/Kconfig
 
-$(GNOSCFG_BIN): $(GNOSCFG_OBJS) $(NC_LIBS) | $(BUILD)
-	$(CXX) -std=c++20 -static -no-pie -L$(NC_STAGE)/lib -o $@ $(GNOSCFG_OBJS) \
-	  $(NC_LIBS) -ltinfow -lm
+menuconfig: $(KCONFIG_MCONF) src/Kconfig
+	$(KCONFIG_ENV) $(KCONFIG_MCONF) src/Kconfig
 
-config menuconfig: $(GNOSCFG_BIN) src/Kconfig
-	$(GNOSCFG_BIN)
+nconfig: $(KCONFIG_NCONF) src/Kconfig
+	$(KCONFIG_ENV) $(KCONFIG_NCONF) src/Kconfig
+
+oldconfig olddefconfig syncconfig allnoconfig allyesconfig alldefconfig \
+randconfig listnewconfig helpnewconfig: $(KCONFIG_CONF) src/Kconfig
+	$(KCONFIG_ENV) $(KCONFIG_CONF) --$@ src/Kconfig
+
+savedefconfig: $(KCONFIG_CONF) src/Kconfig
+	$(KCONFIG_ENV) $(KCONFIG_CONF) --savedefconfig=$(BUILD)/defconfig src/Kconfig
 # ---------- Alpine software autoinstall -----------------------------------------
 # This is where the userland comes from by default (see USERLAND at the top).
 # `make autoinstall ALPINE_PKGS="htop curl"` pulls the named Alpine musl
@@ -910,12 +927,14 @@ DEPS := $(KOBJS:.o=.d) $(UOBJS:.o=.d) $(MUSL_OBJS:.o=.d) $(UCRT:.o=.d) \
 # sees x86 sources.
 #
 # Excluded on purpose: the userland (its init.c would otherwise compete with
-# init/init.c for the bare name), the bootloader, the config tool and the
-# sample modules, all of which are built by their own explicit rules.  init/
-# itself stays in: kernel_entry (main.c) and the Limine request block live
-# there and are ordinary kernel objects.
+# init/init.c for the bare name), the bootloader and the sample modules, all
+# of which are built by their own explicit rules.  init/ itself stays in:
+# kernel_entry (main.c) and the Limine request block live there and are
+# ordinary kernel objects.
 VPATH_SRC := $(filter-out src/usr/% src/bootloader/% \
-                          src/scripts/kconfig/% src/samples/modules/%,$(KERNEL_DIRS))
+                          src/samples/modules/%,$(KERNEL_DIRS))
+VPATH_SRC := $(filter-out src/usr/% src/bootloader/% \
+                          src/samples/modules/%,$(KERNEL_DIRS))
 vpath %.c   $(VPATH_SRC)
 vpath %.asm $(VPATH_SRC)
 vpath %.S   $(VPATH_SRC)
@@ -1931,6 +1950,10 @@ check-format:
 	  xargs $(CLANG_FORMAT) --dry-run -Werror --style=file
 	@echo "check-format: clang-format clean"
 
+.PHONY: check-syscalls
+check-syscalls:
+	@python3 tools/verify/check_syscalls.py
+
 # `make test` — the headless self-test: run qemu until the debug console has
 # had time to say anything (the 1G ISO over the CD path needs ~60-90s before
 # the first byte lands in dbg.log), then hunt PASS/FAIL and fault markers.
@@ -1942,41 +1965,15 @@ test: $(ISO) $(DISK)
 	@echo "GNOS: headless self-test (400 s window)..."
 	@rm -f $(BUILD)/dbg.log
 	@timeout 400 $(MAKE) headless || true
-	@grep -E 'PASS|FAIL' $(BUILD)/dbg.log >/dev/null || \
-	  { echo "test: no PASS/FAIL lines in $(BUILD)/dbg.log"; exit 1; }
-	@grep 'FAIL' $(BUILD)/dbg.log && { echo "test: FAIL present"; exit 1; } || true
-	@echo "test: PASS lines present, no FAIL"
-	@# NOTICE: GNOS must boot the REAL Alpine init, not a stand-in.  Three
-	@# markers, all from the guest's own debug console:
-	@#   init is pid 1   busybox init got the first slot, not kthreadd
-	@#   name=inittab    pid 1 opened and read the real /etc/inittab
-	@#   NEW pid=3       init acted on it and forked its first child
-	@# (the openrc sysinit process).  The count is reported for the record.
-	@grep -q 'init is pid 1' $(BUILD)/dbg.log || \
-	  { echo "test: real init never became pid 1"; exit 1; }
-	@grep -q 'p=1 .*name=inittab' $(BUILD)/dbg.log || \
-	  { echo "test: pid 1 never read /etc/inittab"; exit 1; }
-	@grep -q 'NEW pid=3' $(BUILD)/dbg.log || \
-	  { echo "test: init never forked its first child"; exit 1; }
-	@n=$$(grep -cE 'init is pid 1|name=inittab|NEW pid=3' $(BUILD)/dbg.log); \
-	  echo "NOTICE: real Alpine init started correctly (pid 1 + inittab + child), $$n/3 markers"
-	@# NOTICE: the two markers that make the boot *real* rather than merely
-	@# alive.  Busybox init runs inittab's blocking actions sequentially, so
-	@# three `path=/sbin/openrc` execs mean sysinit and boot completed and
-	@# default started; the getty lines are ::wait: behind `openrc default`,
-	@# so a single `path=/sbin/agetty` exec means the whole runlevel chain
-	@# finished.  Both come from the kernel's exec trace (the framebuffer
-	@# console never reaches dbg.log).
-	@o=$$(grep -c '^EXEC p=[0-9]* path=/sbin/openrc' $(BUILD)/dbg.log); \
-	  a=$$(grep -c '^EXEC p=[0-9]* path=/sbin/agetty' $(BUILD)/dbg.log); \
-	  { [ $$o -ge 3 ] && [ $$a -ge 1 ]; } || \
-	  { echo "test: boot incomplete: openrc runlevels $$o/3, agetty spawns $$a (need 3 and 1)"; \
-	    exit 1; }; \
-	  echo "NOTICE: OpenRC + real AGeTTy started correctly, openrc=$$o/3 runlevels, agetty=$$a gettys"
+	@python3 tools/verify/boot_assert.py $(BUILD)/dbg.log
+
+.PHONY: repeat-test
+repeat-test:
+	@tools/verify/repeat_boot.sh $(REPEAT)
 
 # The one-stop "is this commit acceptable?" gate used by CI and by hand.
 .PHONY: check
-check: check-format check-hdrs test
+check: check-format check-syscalls check-hdrs test
 	@echo "check: all gates passed"
 
 # headless — guistart without the window: the headless self-test target.
@@ -2000,7 +1997,7 @@ THIRD_PARTY := $(BUILD)/muslsrc $(BUILD)/bbsrc $(BUILD)/bashsrc \
 clean:
 	rm -rf $(BUILD)/user $(BUILD)/initrd-root $(BUILD)/modules $(ISO_ROOT)
 	rm -f  $(BUILD)/*.o $(BUILD)/*.elf $(BUILD)/*.img $(BUILD)/*.iso \
-	       $(BUILD)/*.log $(BUILD)/gnoscfg build/.config
+	       $(BUILD)/*.log $(BUILD)/kconfig build/.config
 
 # Nuke everything, third-party trees included.  Only useful if you are prepared
 # to re-fetch musl by hand -- see THIRD_PARTY above.

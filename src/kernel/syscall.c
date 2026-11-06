@@ -49,6 +49,7 @@
 #include "input.h"
 #include "unix.h"
 #include "sysvipc.h"
+#include "mqueue.h"
 #include "seccomp.h"
 #include "pidfd.h"
 #include "pagecache.h"
@@ -341,7 +342,7 @@ static int64_t open_resolved(const char *abs, int flags)
      * pair -- the master rides on this descriptor, the slave registers
      * as /dev/pts/N for the emulator's child to open. */
     if (pty_is_ptmx(vfs_file_node(h))) {
-        if (pty_reattach_master(vfs_file_node(h)) != 0) {
+        if (pty_reattach_master((vfs_node_t *)vfs_file_node(h)) != 0) {
             vfs_file_unref(h);
             return -E_NOMEM;
         }
@@ -349,7 +350,7 @@ static int64_t open_resolved(const char *abs, int flags)
     /* /dev/pts/N: another handle on an existing pair, but it has to be
      * counted -- the master reads EOF while no slave is open. */
     if (pty_is_pts(vfs_file_node(h)))
-        pty_reattach_slave(vfs_file_node(h));
+        pty_reattach_slave((vfs_node_t *)vfs_file_node(h));
 
     int fd = fd_alloc(p, h);
     if (fd < 0) {
@@ -363,7 +364,7 @@ static int64_t open_resolved(const char *abs, int flags)
      * read that blocks would hang the whole compositor waiting for the
      * first keypress). */
     if (flags & O_NONBLOCK)
-        input_set_nonblock(vfs_file_node(h), 1);
+        input_set_nonblock((vfs_node_t *)vfs_file_node(h), 1);
     return fd;
 }
 
@@ -747,7 +748,7 @@ static int64_t sys_fcntl(int fd, int cmd, uint64_t arg)
         /* Devices that keep their own nonblock state mirror it here: an
          * eventfd created without EFD_NONBLOCK and an evdev node both
          * change behaviour on fcntl(F_SETFL), exactly as on Linux. */
-        vfs_node_t *fln = vfs_file_node(h);
+        vfs_node_t *fln = (vfs_node_t *)vfs_file_node(h);
         if (anonfd_is_eventfd(fln))
             anonfd_set_nonblock(fln, (arg & O_NONBLOCK) != 0);
         timerfd_set_nonblock(fln, (arg & O_NONBLOCK) != 0);
@@ -3002,7 +3003,7 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
                          * probe decides what ready means and which channel
                          * a sleeper must ride on. */
                         if (ops && ops->poll) {
-                            int pe = ops->poll(vfs_file_node(h), ev, &r);
+                            int pe = ops->poll((vfs_node_t *)vfs_file_node(h), ev, &r);
                             if (pe < 0)
                                 r = POLLNVAL;
                             wait_pipe = 1;
@@ -3020,7 +3021,7 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
                          * decides readiness (and which sleep channel). */
                         const vfs_ops_t *ops = vfs_file_ops(h);
                         if (ops && ops->poll) {
-                            int pe = ops->poll(vfs_file_node(h), ev, &r);
+                            int pe = ops->poll((vfs_node_t *)vfs_file_node(h), ev, &r);
                             if (pe < 0)
                                 r = POLLNVAL;
                             wait_pipe = 1;
@@ -3048,8 +3049,18 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
                             wait_pipe = 1;
                         }
                     } else {
-                        /* regular files are always readable/writable */
-                        r = (int16_t)(ev & (POLLIN | POLLOUT));
+                        /* A regular file normally answers readable/writable
+                         * immediately, but cgroup.events installs a poll op
+                         * that reports POLLPRI on a pending transition. */
+                        const vfs_ops_t *ops = vfs_file_ops(h);
+                        if (ops && ops->poll) {
+                            int pe = ops->poll((vfs_node_t *)vfs_file_node(h), ev, &r);
+                            if (pe < 0)
+                                r = POLLNVAL;
+                            wait_pipe = 1;
+                        } else {
+                            r = (int16_t)(ev & (POLLIN | POLLOUT));
+                        }
                     }
                 }
             }
@@ -3057,7 +3068,6 @@ int64_t do_ppoll(uint8_t *p, uint64_t nfds, int64_t ticks)
             if (r)
                 ready++;
         }
-
 
         if (ready > 0 || ticks == 0)
             break;
@@ -3808,7 +3818,7 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t fla
              * wl_shm keymap dance), a by-path stat cannot see the file any
              * more.  A tmpfs file's real size lives in the node (an fd's
              * vfs_node copy is frozen at open time, before ftruncate). */
-            vfs_node_t *mn = vfs_file_node(h);
+            const vfs_node_t *mn = vfs_file_node(h);
             if (mn) {
                 fsize = tmpfs_is_file_node(mn) ? tmpfs_file_size(mn) : mn->size;
                 fk    = mn->kind;
@@ -5492,7 +5502,7 @@ void syscall_handler(regs_t *r)
          * store); anything else goes back through the VFS by path, which is
          * what keeps the open file's cached size and the inode honest. */
         int         h  = fd_handle((int)a1);
-        vfs_node_t *tn = vfs_file_node(h);
+        vfs_node_t *tn = (vfs_node_t *)vfs_file_node(h);
         const char *fp = (h >= 0) ? vfs_file_path(h) : NULL;
         if (tn && tn->ops && tn->ops->truncate) {
             ret = (int64_t)a2 < 0 ? -E_INVAL : tn->ops->truncate(tn, a2);
@@ -5769,9 +5779,9 @@ void syscall_handler(regs_t *r)
     case SYS_fchmod: {
         /* fchmod(fd, mode): wlroots' shm files go through this with mode 0
          * to lock a shared-memory file down before use. */
-        int         h  = fd_handle((int)a1);
-        vfs_node_t *tn = (h >= 0) ? vfs_file_node(h) : NULL;
-        const char *fp = (h >= 0) ? vfs_file_path(h) : NULL;
+        int               h  = fd_handle((int)a1);
+        const vfs_node_t *tn = (h >= 0) ? vfs_file_node(h) : NULL;
+        const char       *fp = (h >= 0) ? vfs_file_path(h) : NULL;
         if (!fp) {
             ret = -E_BADF;
             break;

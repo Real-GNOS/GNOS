@@ -67,6 +67,10 @@ Toolchains / adjacent artifacts that are *not* shipped in the image
     LLVM-exception; only used to compile this tree, not redistributed as
     part of the ISO
   * Limine stage files in boot/limine/: BSD-2-Clause (see above)
+  * Linux Kconfig host tools in scripts/kconfig/, scripts/Kconfig.include and
+    the helper headers in scripts/include/ (vendored from Linux v6.12):
+    GPL-2.0-only.  The host binaries are generated under build/ and are not
+    shipped in the ISO.
 
 How to source a tarball
 -----------------------

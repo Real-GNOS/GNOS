@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: GPL-2.0
+# GNOS wrapper around the Linux Kconfig frontends.  The parser and frontend
+# sources are taken verbatim from Linux v6.12; this file only supplies the
+# host-tool build rules (the kernel kbuild Makefile needs the full kbuild
+# macro set).
+
+KCONFIG_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+ROOT        := $(abspath $(KCONFIG_DIR)/../..)
+OUT         ?= $(ROOT)/build/kconfig
+
+HOSTCC      ?= cc
+HOSTCFLAGS  ?= -O2 -g
+HOSTLDLIBS  ?=
+KC_CFLAGS   := $(HOSTCFLAGS) -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -Dbcmp=memcmp -DYYDEBUG=1 \
+               -I$(OUT) -I$(KCONFIG_DIR) -I$(ROOT)/scripts/include \
+               -I$(KCONFIG_DIR)/lxdialog
+KC_LDLIBS   := -lncursesw
+
+COMMON_OBJS := confdata.o expr.o lexer.lex.o menu.o parser.tab.o \
+               preprocess.o symbol.o util.o
+CONF_OBJS   := conf.o $(COMMON_OBJS)
+MCONF_OBJS  := mconf.o mnconf-common.o \
+               lxdialog/checklist.o lxdialog/inputbox.o lxdialog/menubox.o \
+               lxdialog/textbox.o lxdialog/util.o lxdialog/yesno.o \
+               $(COMMON_OBJS)
+NCONF_OBJS  := nconf.o nconf.gui.o mnconf-common.o $(COMMON_OBJS)
+
+.PHONY: all clean
+all: $(OUT)/conf $(OUT)/mconf $(OUT)/nconf
+
+$(OUT)/conf: $(addprefix $(OUT)/,$(CONF_OBJS))
+	$(HOSTCC) -o $@ $^ $(KC_LDLIBS) $(HOSTLDLIBS)
+
+$(OUT)/mconf: $(addprefix $(OUT)/,$(MCONF_OBJS))
+	$(HOSTCC) -o $@ $^ $(KC_LDLIBS) -ltinfo $(HOSTLDLIBS)
+
+$(OUT)/nconf: $(addprefix $(OUT)/,$(NCONF_OBJS))
+	$(HOSTCC) -o $@ $^ $(KC_LDLIBS) -lmenu -lpanel -lform -ltinfo $(HOSTLDLIBS)
+
+$(OUT)/%.o: $(KCONFIG_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(KC_CFLAGS) -c -o $@ $<
+
+$(OUT)/lxdialog/%.o: $(KCONFIG_DIR)/lxdialog/%.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(KC_CFLAGS) -c -o $@ $<
+
+$(OUT)/lexer.lex.c: $(KCONFIG_DIR)/lexer.l
+	@mkdir -p $(OUT)
+	flex -L -o$@ $<
+
+$(OUT)/parser.tab.c $(OUT)/parser.tab.h &: $(KCONFIG_DIR)/parser.y
+	@mkdir -p $(OUT)
+	bison -t -l -d -o $(OUT)/parser.tab.c $<
+
+$(OUT)/lexer.lex.o: $(OUT)/lexer.lex.c $(OUT)/parser.tab.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(KC_CFLAGS) -c -o $@ $<
+
+$(OUT)/parser.tab.o: $(OUT)/parser.tab.c $(OUT)/parser.tab.h
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(KC_CFLAGS) -c -o $@ $<
+
+$(addprefix $(OUT)/,$(COMMON_OBJS)): $(OUT)/parser.tab.h
+
+clean:
+	rm -rf $(OUT)

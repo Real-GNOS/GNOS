@@ -10,7 +10,8 @@
  *     cgroup.procs            rw   move a thread group here by PID
  *     cgroup.controllers      ro   controllers usable on this cgroup
  *     cgroup.subtree_control  rw   +cpu / -pids ... for this cgroup's children
- *     cgroup.events           ro   populated/frozen
+ *     cgroup.events           ro   populated/frozen; poll for changes
+ *     cgroup.freeze           rw   1 freezes the subtree, 0 thaws it
  *     cgroup.stat             ro   nr_descendants / nr_dying_descendants
  *     cpu.weight              rw   hierarchical share weight (1..10000)
  *     cpu.max                 rw   quota/period bandwidth cap in usec
@@ -138,9 +139,13 @@ int cg_charge_runtime(proc_t *p, uint64_t used);
 /* Whether p's cgroup chain is currently throttled. */
 int cg_chain_throttled(proc_t *p);
 
-/* Park a runnable-but-throttled task: mark it BLOCKED (WAIT_CGROUP) and
- * link it on its throttled cgroup's parked list so the period rollover can
- * release it.  Caller holds the sched lock. */
+/* Whether p's cgroup chain is currently frozen by cgroup.freeze. */
+int cg_chain_frozen(proc_t *p);
+
+/* Park a runnable-but-throttled-or-frozen task: mark it BLOCKED
+ * (WAIT_CGROUP) and link it on the root-most throttled/frozen cgroup's
+ * parked list so the period rollover or thaw can release it.  Caller holds
+ * the sched lock. */
 void cg_park(proc_t *p);
 
 /* Roll over exhausted periods and release anything parked on them.  Called
@@ -167,6 +172,9 @@ int cgfs_resolve(const char *rel, vfs_node_t *out);
 int cgfs_readdir(const char *rel, uint32_t index, char *name, uint8_t *type);
 int cgfs_mkdir(const char *rel);
 int cgfs_rmdir(const char *rel);
+#ifdef SYSTRACE
+void cgfs_selftest(void);
+#endif
 
 /* ---- per-process queries (procfs) ---------------------------------------- */
 /* cgroup path of process `p`, e.g. "0::/a/b" (the v2 unified layout of
