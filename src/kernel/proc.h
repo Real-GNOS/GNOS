@@ -308,7 +308,7 @@ typedef struct proc {
                                  * has on_cpu == -1; a task that is running
                                  * has on_cpu == the core and is NOT on any
                                  * queue.  See schedule_locked().          */
-    int          ever_saved;    /* has been saved as a ctx-switch prev at
+    int ever_saved;             /* has been saved as a ctx-switch prev at
                                  * least once (so its resume frame returns
                                  * into schedule(), not ret_to_user)       */
 
@@ -502,7 +502,11 @@ void sched_block_timeout(wait_reason_t why, uint64_t ticks);
 void sched_wake(proc_t *p);
 /* Wake everybody sleeping for the same reason (a driver got some data). */
 void sched_wake_reason(wait_reason_t why);
+/* As above, but the caller already holds g_proc_lock. */
+void sched_wake_reason_locked(wait_reason_t why);
 void sched_wake_poll_channels(void);
+/* As above, but the caller already holds g_proc_lock (cgroup events). */
+void sched_wake_poll_channels_locked(void);
 /* Wake every process blocked on the given DRM wait_queue. */
 void sched_wake_queue(void *q);
 /* Wake anyone whose deadline has passed.  Called from the timer interrupt. */

@@ -182,7 +182,7 @@ static void parse_boot_cmdline(void)
 {
     if (cmdline_request.response && cmdline_request.response->cmdline) {
         const char *src = (const char *)cmdline_request.response->cmdline;
-        int i = 0;
+        int         i   = 0;
         while (src[i] && i < (int)sizeof(g_boot_cmdline) - 1) {
             g_boot_cmdline[i] = src[i];
             i++;
@@ -210,7 +210,7 @@ static void parse_boot_cmdline(void)
         while (*p && *p != ' ' && *p != '\t')
             p++;
         char saved = *p;
-        *p = 0;
+        *p         = 0;
         if (!strncmp(tok, "init=", 5)) {
             strncpy(g_init_path, tok + 5, sizeof(g_init_path) - 1);
             g_init_path[sizeof(g_init_path) - 1] = 0;
@@ -657,6 +657,9 @@ void kernel_main(void)
      * a controller merely writes its control files instead of mounting. */
     cgroup_init();
     vfs_mount_cgroupfs("/sys/fs/cgroup");
+#ifdef SYSTRACE
+    cgfs_selftest();
+#endif
 
     crypto_selftest();
     slab_init();
@@ -682,7 +685,6 @@ void kernel_main(void)
 
     subsys_dump();
 
- 
     /* The boot command line (an initrd-root /cmdline file, written by make
      * from KCMD=...) is spliced into PID 1's argv inside proc_spawn_init();
      * g_boot_cmdline is kept here for /proc/cmdline. */

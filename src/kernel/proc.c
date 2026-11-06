@@ -903,12 +903,11 @@ int proc_spawn_init(const char *path)
      * initrd /cmdline file written by make from KCMD=... */
     if (g_boot_cmdline[0] == 0) {
         uint32_t clen = 0;
-        if (vfs_read_all("/cmdline", g_boot_cmdline,
-                         (uint32_t)sizeof(g_boot_cmdline) - 1, &clen)) {
+        if (vfs_read_all("/cmdline", g_boot_cmdline, (uint32_t)sizeof(g_boot_cmdline) - 1, &clen)) {
             g_boot_cmdline[clen] = 0;
-            while (clen > 0 && (g_boot_cmdline[clen - 1] == '\n' ||
-                                g_boot_cmdline[clen - 1] == '\r' ||
-                                g_boot_cmdline[clen - 1] == ' '))
+            while (clen > 0 &&
+                   (g_boot_cmdline[clen - 1] == '\n' || g_boot_cmdline[clen - 1] == '\r' ||
+                    g_boot_cmdline[clen - 1] == ' '))
                 g_boot_cmdline[--clen] = 0;
         }
     }
@@ -2614,10 +2613,24 @@ static proc_t *rq_pick_best(rq_t *q)
     return pick;
 }
 
+/* Pick the next dispatchable task, parking any frozen task that is still
+ * sitting on the run queue.  Freezing does not synchronously dequeue every
+ * member, so the picker is the second half of the freezer's guarantee.
+ * Caller holds g_proc_lock. */
+static proc_t *rq_pick_dispatch(rq_t *q)
+{
+    for (;;) {
+        proc_t *p = rq_pick_best(q);
+        if (!p || !cg_chain_frozen(p))
+            return p;
+        cg_park(p);
+    }
+}
+
 /* Put a process on its run queue with a fresh slice.  Caller holds
- * g_proc_lock.  A task whose cgroup is throttled is parked instead
- * (WAIT_CGROUP); the cpu.max period rollover releases it.  This is the
- * single choke point every wake/enqueue path funnels through. */
+ * g_proc_lock.  A task whose cgroup is throttled or frozen is parked instead
+ * (WAIT_CGROUP); the period rollover or cgroup.freeze thaw releases it.
+ * This is the single choke point every wake/enqueue path funnels through. */
 static void enqueue_fresh(proc_t *p)
 {
 #ifdef SYSTRACE
@@ -2637,7 +2650,7 @@ static void enqueue_fresh(proc_t *p)
      * tasks, so this guard never swallows a legitimate first enqueue. */
     if (p->state == PROC_READY)
         return;
-    if (cg_chain_throttled(p)) {
+    if (cg_chain_frozen(p) || cg_chain_throttled(p)) {
         cg_park(p);
         return;
     }
@@ -2692,7 +2705,7 @@ void sched_unlock(void)
 
 void sched_enqueue(proc_t *p)
 {
-    if (cg_chain_throttled(p)) {
+    if (cg_chain_frozen(p) || cg_chain_throttled(p)) {
         cg_park(p);
         return;
     }
@@ -2733,9 +2746,9 @@ static int schedule_locked(void)
         uint64_t used = now - prev->last_run_tick;
         /* prev is cpu_self()->current, so it ran on THIS core; charge its
          * time to that core's queue (not to a stale on_cpu label). */
-        int      pc   = (int)cpu_self()->id % NR_RQ;
-        rq_t    *pq   = &g_rqs[pc];
-        uint64_t dv   = virt_delta(used, proc_eff_weight(prev));
+        int      pc = (int)cpu_self()->id % NR_RQ;
+        rq_t    *pq = &g_rqs[pc];
+        uint64_t dv = virt_delta(used, proc_eff_weight(prev));
         prev->vruntime += dv;
         pq->vtime += used * VIRT_UNIT;
         prev->vlag          = (int64_t)pq->vtime - (int64_t)prev->vruntime;
@@ -2749,7 +2762,7 @@ static int schedule_locked(void)
                 prev->deadline = prev->vruntime + prev->slice;
             /* Quota exhausted?  Park the task instead of returning it to
              * the queue; the cpu.max period rollover releases it. */
-            if (cg_charge_runtime(prev, used) || cg_chain_throttled(prev))
+            if (cg_charge_runtime(prev, used) || cg_chain_frozen(prev) || cg_chain_throttled(prev))
                 cg_park(prev);
             else {
                 /* Queued ⟺ not running: drop the "on a cpu" label so the
@@ -2768,7 +2781,7 @@ static int schedule_locked(void)
     /* Pick from this core's queue; an idle queue steals from the fullest
      * other one (per-CPU queues, work-stealing fallback). */
     int     mycpu = (int)cpu_self()->id % NR_RQ;
-    proc_t *next  = rq_pick_best(&g_rqs[mycpu]);
+    proc_t *next  = rq_pick_dispatch(&g_rqs[mycpu]);
     if (next) {
         next->rq_cpu = mycpu;
     } else {
@@ -2780,7 +2793,7 @@ static int schedule_locked(void)
                 best = &g_rqs[i];
         }
         if (best) {
-            next = rq_pick_best(best);
+            next = rq_pick_dispatch(best);
             if (next) {
                 /* Re-base the stolen task onto this queue's clock: its
                  * vlag was finalised against the source queue's clock. */
@@ -2985,8 +2998,8 @@ void sched_tick(void)
     uint64_t used = now - cur->last_run_tick;
     /* cur is cpu_self()->current, so it ran on THIS core; charge its queue
      * directly rather than trusting a possibly-stale on_cpu label. */
-    int      tc   = (int)cpu_self()->id % NR_RQ;
-    rq_t    *tq   = &g_rqs[tc];
+    int   tc = (int)cpu_self()->id % NR_RQ;
+    rq_t *tq = &g_rqs[tc];
     cur->vruntime += virt_delta(used, proc_eff_weight(cur));
     tq->vtime += used * VIRT_UNIT;
     cur->vlag          = (int64_t)tq->vtime - (int64_t)cur->vruntime;
@@ -2995,14 +3008,16 @@ void sched_tick(void)
      * the quota runs out the running task must give the CPU back so it can
      * be parked. */
     int throttled = cg_charge_runtime(cur, used);
+    int frozen    = cg_chain_frozen(cur);
     /* Preempt on quota/slice exhaustion, or when an eligible task owes
      * the CPU (deadline earlier than ours) -- eligibility first, exactly
      * as EEVDF picks. */
-    proc_t *owed = rq_pick_best(tq);
+    proc_t *owed = rq_pick_dispatch(tq);
     if (owed) {
         rq_enqueue(tq, owed);
     }
     int preempt =
+        frozen ||                                                    /* cgroup frozen */
         throttled ||                                                 /* quota gone */
         (cur->vruntime >= cur->deadline) ||                          /* slice gone */
         (owed && owed->vlag <= 0 && owed->deadline < cur->deadline); /* eligible owed task */
@@ -3066,16 +3081,24 @@ void sched_block_timeout(wait_reason_t why, uint64_t ticks)
     p->wake_tick = 0;
 }
 
-void sched_wake(proc_t *p)
+/* Wake one task; caller holds g_proc_lock. */
+static void sched_wake_locked(proc_t *p)
 {
     if (!p)
         return;
-    spin_lock_irq(&g_proc_lock);
     if (p->state == PROC_BLOCKED) {
         p->wait_reason = WAIT_NONE;
         p->wake_tick   = 0;
         enqueue_fresh(p);
     }
+}
+
+void sched_wake(proc_t *p)
+{
+    if (!p)
+        return;
+    spin_lock_irq(&g_proc_lock);
+    sched_wake_locked(p);
     spin_unlock_irq(&g_proc_lock);
 }
 
@@ -3140,25 +3163,41 @@ void sched_expire_timeouts(void)
  * devices and its wayland client socket together, slept on WAIT_TTY, and the
  * client's write -- which only woke WAIT_PIPE -- sat unanswered forever.
  * Waking all three turns the extra passes into harmless rescans. */
+void sched_wake_poll_channels_locked(void)
+{
+    sched_wake_reason_locked(WAIT_PIPE);
+    sched_wake_reason_locked(WAIT_NET);
+    sched_wake_reason_locked(WAIT_TTY);
+}
+
 void sched_wake_poll_channels(void)
 {
-    sched_wake_reason(WAIT_PIPE);
-    sched_wake_reason(WAIT_NET);
-    sched_wake_reason(WAIT_TTY);
+    spin_lock_irq(&g_proc_lock);
+    sched_wake_poll_channels_locked();
+    spin_unlock_irq(&g_proc_lock);
+}
+
+void sched_wake_reason_locked(wait_reason_t why)
+{
+    for (int i = 0; i < MAX_PROCS; i++)
+        if (g_procs[i].state == PROC_BLOCKED && g_procs[i].wait_reason == why)
+            sched_wake_locked(&g_procs[i]);
 }
 
 void sched_wake_reason(wait_reason_t why)
 {
-    for (int i = 0; i < MAX_PROCS; i++)
-        if (g_procs[i].state == PROC_BLOCKED && g_procs[i].wait_reason == why)
-            sched_wake(&g_procs[i]);
+    spin_lock_irq(&g_proc_lock);
+    sched_wake_reason_locked(why);
+    spin_unlock_irq(&g_proc_lock);
 }
 
 void sched_wake_queue(void *q)
 {
+    spin_lock_irq(&g_proc_lock);
     for (int i = 0; i < MAX_PROCS; i++)
         if (g_procs[i].state == PROC_BLOCKED && g_procs[i].wait_q == q)
-            sched_wake(&g_procs[i]);
+            sched_wake_locked(&g_procs[i]);
+    spin_unlock_irq(&g_proc_lock);
 }
 
 /*

@@ -31,8 +31,8 @@ static void period_rollover(cgroup_t *g, uint64_t now)
     }
 }
 
-/* Release (or re-park, if an ancestor is still throttled) every task parked
- * on cg's list.  Caller holds the sched lock. */
+/* Release (or re-park, if an ancestor is still throttled/frozen) every
+ * task parked on cg's list.  Caller holds the sched lock. */
 static void release_parked(int cg)
 {
     int pid             = g_cgs[cg].park_head;
@@ -42,10 +42,11 @@ static void release_parked(int cg)
         int     next = p ? p->cg_park_next : -1;
         if (p && p->state == PROC_BLOCKED && p->wait_reason == WAIT_CGROUP) {
             p->cg_park_next = -1;
-            /* Any ancestor still throttled?  Park one level higher. */
+            /* Any ancestor still throttled or frozen?  Park one level
+             * higher on the root-most blocking cgroup. */
             int anchor = -1;
             for (int c = p->cg; c != -1; c = g_cgs[c].parent) {
-                if (g_cgs[c].throttled)
+                if (g_cgs[c].throttled || g_cgs[c].frozen)
                     anchor = c; /* keep the root-most one */
                 if (c == CG_ROOT)
                     break;
@@ -99,11 +100,11 @@ void cg_park(proc_t *p)
     p->wait_reason  = WAIT_CGROUP;
     p->cg_park_next = -1;
 
-    /* Anchor on the root-most throttled ancestor: that is the last one to
-     * un-throttle, so it is the single list we must be released from. */
+    /* Anchor on the root-most throttled/frozen ancestor: that is the last
+     * one to clear, so it is the single list we must be released from. */
     int anchor = -1;
     for (int c = p->cg; c != -1; c = g_cgs[c].parent) {
-        if (g_cgs[c].throttled)
+        if (g_cgs[c].throttled || g_cgs[c].frozen)
             anchor = c;
         if (c == CG_ROOT)
             break;
@@ -116,6 +117,14 @@ void cg_park(proc_t *p)
     }
     p->cg_park_next         = g_cgs[anchor].park_head;
     g_cgs[anchor].park_head = p->pid;
+}
+
+/* cgroup.freeze thaw path: the core owns the state transition, this wrapper
+ * exposes the private park-list release.  Caller holds the sched lock. */
+void cg_release_parked(int cg)
+{
+    if (cg_live(cg))
+        release_parked(cg);
 }
 
 /*

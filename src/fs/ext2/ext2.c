@@ -1358,11 +1358,10 @@ static uint32_t path_walk(ext2_fs_t *fs, char *path, int follow, uint32_t *paren
                 return 0;
             }
             char *target = tgt_scratch;
-            char (*tcomp)[EXT2_NAME_MAX] =
-                (char (*)[EXT2_NAME_MAX])(void *)(tgt_scratch + SYMLINK_MAX);
-            char (*save)[EXT2_NAME_MAX] =
-                (char (*)[EXT2_NAME_MAX])(void *)(tgt_scratch + SYMLINK_MAX +
-                                                  PW_MAXCOMP * EXT2_NAME_MAX);
+            char(*tcomp)[EXT2_NAME_MAX] =
+                (char(*)[EXT2_NAME_MAX])(void *)(tgt_scratch + SYMLINK_MAX);
+            char(*save)[EXT2_NAME_MAX] = (char(*)[EXT2_NAME_MAX])(
+                void *)(tgt_scratch + SYMLINK_MAX + PW_MAXCOMP * EXT2_NAME_MAX);
             int tlen = read_symlink_target(fs, ino, target, SYMLINK_MAX);
             blk_put(fs, ip);
             if (tlen < 0) {

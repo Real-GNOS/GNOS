@@ -32,7 +32,7 @@
 #define BUDDY_MAX_CHUNKS   16
 
 typedef struct {
-    uint64_t base; /* physical address of frame 0; 0 = slot unused */
+    uint64_t base;                         /* physical address of frame 0; 0 = slot unused */
     uint8_t  used[BUDDY_CHUNK_FRAMES / 8]; /* bit i: frame i allocated */
 } buddy_chunk_t;
 
@@ -108,11 +108,13 @@ uint64_t buddy_alloc(unsigned order)
     if (!g_inited || order > BUDDY_MAX_ORDER)
         return 0;
 
-    uint64_t flags; (void)flags; spin_lock_irq(&g_buddy_lock);
-    uint64_t phys  = 0;
+    uint64_t flags;
+    (void)flags;
+    spin_lock_irq(&g_buddy_lock);
+    uint64_t phys = 0;
     for (;;) {
         if (g_free_list[order]) {
-            phys = list_pop(order);
+            phys             = list_pop(order);
             buddy_chunk_t *c = chunk_of(phys);
             if (!c) /* cannot happen: every list block lives in a chunk */
                 panic("buddy: list block outside pool");
@@ -123,7 +125,7 @@ uint64_t buddy_alloc(unsigned order)
         if (order == BUDDY_MAX_ORDER) {
             if (chunk_new() < 0)
                 break; /* pool full or PMM exhausted */
-            continue; /* chunk_new seeded every order's list */
+            continue;  /* chunk_new seeded every order's list */
         }
         /* Split: take a block of the next order up, serve its upper half,
          * keep its lower half on this order's list.  (Parking the upper
@@ -135,8 +137,8 @@ uint64_t buddy_alloc(unsigned order)
             continue;
         }
         uint64_t big = list_pop((unsigned)(order + 1));
-        list_push(order, big); /* lower half stays free */
-        phys = big + frame_bytes(order); /* upper half is the answer */
+        list_push(order, big);                       /* lower half stays free */
+        phys             = big + frame_bytes(order); /* upper half is the answer */
         buddy_chunk_t *c = chunk_of(phys);
         if (!c)
             panic("buddy: split block outside pool");
@@ -153,17 +155,19 @@ void buddy_free(uint64_t phys, unsigned order)
     if (!g_inited || order > BUDDY_MAX_ORDER || !phys)
         return;
 
-    uint64_t flags; (void)flags; spin_lock_irq(&g_buddy_lock);
+    uint64_t flags;
+    (void)flags;
+    spin_lock_irq(&g_buddy_lock);
     buddy_chunk_t *c = chunk_of(phys);
     if (!c) {
         spin_unlock_irq(&g_buddy_lock);
         panic("buddy: free of foreign span");
     }
-    uint64_t idx  = (phys - c->base) >> 12;
-    uint64_t rel  = idx; /* frame index inside the chunk */
+    uint64_t idx = (phys - c->base) >> 12;
+    uint64_t rel = idx; /* frame index inside the chunk */
 
     for (;;) {
-        c->used[rel >> 3] &= (uint8_t)~(1u << (rel & 7));
+        c->used[rel >> 3] &= (uint8_t) ~(1u << (rel & 7));
 
         if (order == BUDDY_MAX_ORDER)
             break; /* chunk-sized blocks stay pooled, never returned */
@@ -216,7 +220,7 @@ void buddy_selftest(void)
 
     /* Round trip: take a span, give it back, the pool must be untouched. */
     uint64_t before = g_free_count;
-    uint64_t a = buddy_alloc(3); /* 8 frames */
+    uint64_t a      = buddy_alloc(3); /* 8 frames */
     if (!a) {
         dbg_puts("BUDDY: self-test FAIL (alloc)\r\n");
         return;

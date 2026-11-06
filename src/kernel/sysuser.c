@@ -506,9 +506,9 @@ int64_t __x64_sys_fchmod(regs_t *r)
         {
             /* fchmod(fd, mode): wlroots' shm files go through this with mode 0
              * to lock a shared-memory file down before use. */
-            int         h  = fd_handle((int)a1);
-            vfs_node_t *tn = (h >= 0) ? vfs_file_node(h) : NULL;
-            const char *fp = (h >= 0) ? vfs_file_path(h) : NULL;
+            int               h  = fd_handle((int)a1);
+            const vfs_node_t *tn = (h >= 0) ? vfs_file_node(h) : NULL;
+            const char       *fp = (h >= 0) ? vfs_file_path(h) : NULL;
             if (!fp) {
                 ret = -E_BADF;
                 break;

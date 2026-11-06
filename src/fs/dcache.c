@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "dcache.h"
+#include "debugcon.h"
 #include "heap.h"
 #include "kstring.h"
 #include "smp.h"
@@ -33,10 +34,10 @@ typedef struct dentry {
     char           path[]; /* NUL-terminated, flexible array */
 } dentry_t;
 
-static dentry_t     *g_buckets[DC_BUCKETS];
-static uint64_t      g_generation = 1; /* 0 means "no entry is valid" */
-static uint32_t      g_count;
-static spinlock_t    g_dcache_lock;
+static dentry_t  *g_buckets[DC_BUCKETS];
+static uint64_t   g_generation = 1; /* 0 means "no entry is valid" */
+static uint32_t   g_count;
+static spinlock_t g_dcache_lock;
 
 static uint32_t path_hash(const char *path, int follow)
 {
@@ -73,16 +74,16 @@ int dcache_lookup(const char *path, int follow, vfs_node_t *out)
     if (!dcache_cacheable(path))
         return 0;
 
-    uint32_t h    = path_hash(path, follow);
-    uint32_t b    = h & (DC_BUCKETS - 1);
-    int      hit  = 0;
+    uint32_t h   = path_hash(path, follow);
+    uint32_t b   = h & (DC_BUCKETS - 1);
+    int      hit = 0;
 
     spin_lock_irq(&g_dcache_lock);
     dentry_t **pp = &g_buckets[b];
     while (*pp) {
         dentry_t *d = *pp;
-        if (d->hash == h && d->follow == (uint8_t)follow &&
-            d->gen == g_generation && strcmp(d->path, path) == 0) {
+        if (d->hash == h && d->follow == (uint8_t)follow && d->gen == g_generation &&
+            strcmp(d->path, path) == 0) {
             *out = d->node;
             hit  = 1;
             break;
@@ -107,8 +108,8 @@ void dcache_fill(const char *path, int follow, const vfs_node_t *out)
     if (g_count >= DC_MAX)
         dcache_flush(); /* cheaper than tracking an LRU order */
 
-    size_t   len = strlen(path) + 1;
-    dentry_t *d  = kmalloc(sizeof(*d) + len);
+    size_t    len = strlen(path) + 1;
+    dentry_t *d   = kmalloc(sizeof(*d) + len);
     if (!d)
         return;
 
@@ -120,10 +121,10 @@ void dcache_fill(const char *path, int follow, const vfs_node_t *out)
     memcpy(d->path, path, len);
 
     spin_lock_irq(&g_dcache_lock);
-    uint32_t    b  = h & (DC_BUCKETS - 1);
+    uint32_t b = h & (DC_BUCKETS - 1);
     /* Replace the chain head: buckets hold at most a handful of entries in
      * practice, and head replacement needs no traversal. */
-    dentry_t   *old = g_buckets[b];
+    dentry_t *old = g_buckets[b];
     if (old)
         g_count--;
     d->next      = old ? old->next : NULL;

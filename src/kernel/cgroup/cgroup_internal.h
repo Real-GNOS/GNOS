@@ -31,9 +31,12 @@ typedef struct cgroup {
     uint64_t throttled_total; /* ticks spent throttled, for cpu.stat */
     uint32_t nr_throttled;    /* times the quota has been exhausted */
 
-    /* ---- pids --------------------------------------------------------- */
-    int nprocs;   /* direct member tasks */
-    int pids_max; /* subtree task cap; -1 = unlimited */
+    /* ---- pids / freezer / events -------------------------------------- */
+    int nprocs;         /* direct member tasks */
+    int pids_max;       /* subtree task cap; -1 = unlimited */
+    int frozen;         /* cgroup.freeze state for this node */
+    int populated;      /* cached: subtree has at least one task */
+    int events_pending; /* cgroup.events changed since last read */
 
     /* ---- memory (real accounting with hierarchical charging) ---------- */
     uint64_t mem_max;   /* bytes; ~0ULL = unlimited */
@@ -61,5 +64,17 @@ int  cg_move_tgid_locked(int pid, int cg);
 
 /* cpu controller helper for a cpu.max write; caller holds the lock. */
 void cg_cpu_set_max(cgroup_t *g, uint64_t quota_ticks, uint32_t period_ticks);
+
+/* Release tasks parked on a cgroup (cpu.max period rollover or thaw).
+ * Caller holds the sched lock. */
+void cg_release_parked(int cg);
+
+/* Effective freeze state (this cgroup or any ancestor).  Caller holds the
+ * sched lock. */
+int cg_frozen_effective(int cg);
+
+/* Set this cgroup's freezer state and notify cgroup.events readers.  Caller
+ * holds the sched lock. */
+void cg_set_frozen(int cg, int frozen);
 
 #endif /* GNOS_CGROUP_INTERNAL_H */

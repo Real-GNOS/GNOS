@@ -48,8 +48,8 @@ static void timer_irq(regs_t *r)
        * preemption, timeouts, the DRM refresh thread -- dies silently. */
         static unsigned long tk;
         if ((++tk & 1023) == 0) {
-            extern void  dbg_puts(const char *);
-            extern void  dbg_puts_hex(uint64_t);
+            extern void          dbg_puts(const char *);
+            extern void          dbg_puts_hex(uint64_t);
             extern unsigned long pmm_free_frames(void);
             dbg_puts("TICK ");
             dbg_puts_hex((uint64_t)tk);
@@ -65,8 +65,8 @@ static void timer_irq(regs_t *r)
      * under the low-water mark.  Checked every 64 ticks (~0.6 s), well off
      * the fast path; vmm_swap_scan() itself no-ops when swap is disabled. */
     if ((g_ticks & 63) == 0) {
-        extern int  vmm_swap_scan(void);
-        extern int  swap_ready(void);
+        extern int           vmm_swap_scan(void);
+        extern int           swap_ready(void);
         extern unsigned long pmm_free_frames(void);
         if (swap_ready() && (unsigned long)pmm_free_frames() < SWAP_LOWMARK_FRAMES)
             vmm_swap_scan();

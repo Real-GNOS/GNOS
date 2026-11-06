@@ -21,10 +21,10 @@
 /* The root image hosts the backing file; vfs.c owns the instance. */
 void *vfs_root_image(void);
 
-#define SWAP_PATH    "/swapfile"
+#define SWAP_PATH      "/swapfile"
 #define SWAP_MAX_SLOTS 16384 /* 64 MiB at 4 KiB slots */
 
-static ext2_dirent_t g_swap_ent;    /* the backing file's dirent (ino, size) */
+static ext2_dirent_t g_swap_ent; /* the backing file's dirent (ino, size) */
 static uint8_t       g_slot_used[SWAP_MAX_SLOTS / 8];
 static uint32_t      g_nslots;
 static int           g_ready;
@@ -36,9 +36,9 @@ void swap_init(void)
         dbg_puts("SWAP: disabled (no " SWAP_PATH " in the root image)\r\n");
         return;
     }
-    g_swap_ent = n.e2;
+    g_swap_ent     = n.e2;
     uint64_t bytes = g_swap_ent.size & ~(uint64_t)0xFFF;
-    g_nslots = (uint32_t)(bytes >> 12);
+    g_nslots       = (uint32_t)(bytes >> 12);
     if (g_nslots > SWAP_MAX_SLOTS)
         g_nslots = SWAP_MAX_SLOTS;
     if (!g_nslots) {
@@ -80,7 +80,7 @@ void swap_free_slot(uint32_t slot)
 {
     if (!g_ready || slot >= g_nslots)
         return;
-    g_slot_used[slot >> 3] &= (uint8_t)~(1u << (slot & 7));
+    g_slot_used[slot >> 3] &= (uint8_t) ~(1u << (slot & 7));
 }
 
 int swap_write_frame(uint64_t frame_phys, uint32_t slot)
@@ -88,8 +88,8 @@ int swap_write_frame(uint64_t frame_phys, uint32_t slot)
     if (!g_ready || slot >= g_nslots)
         return -1;
     extern void *pmm_virt(uint64_t);
-    uint32_t done = ext2_write((ext2_fs_t *)vfs_root_image(), &g_swap_ent, slot << 12,
-                               pmm_virt(frame_phys), 4096);
+    uint32_t     done = ext2_write((ext2_fs_t *)vfs_root_image(), &g_swap_ent, slot << 12,
+                                   pmm_virt(frame_phys), 4096);
     return done == 4096 ? 0 : -2;
 }
 
@@ -98,8 +98,8 @@ int swap_read_frame(uint32_t slot, uint64_t frame_phys)
     if (!g_ready || slot >= g_nslots)
         return -1;
     extern void *pmm_virt(uint64_t);
-    uint32_t done = ext2_read((ext2_fs_t *)vfs_root_image(), &g_swap_ent, slot << 12,
-                              pmm_virt(frame_phys), 4096);
+    uint32_t     done = ext2_read((ext2_fs_t *)vfs_root_image(), &g_swap_ent, slot << 12,
+                                  pmm_virt(frame_phys), 4096);
     return done == 4096 ? 0 : -2;
 }
 
@@ -115,7 +115,7 @@ void swap_selftest(void)
         return;
     }
     extern void *pmm_virt(uint64_t);
-    uint8_t *p = pmm_virt(frame);
+    uint8_t     *p = pmm_virt(frame);
     for (int i = 0; i < 4096; i++)
         p[i] = (uint8_t)(i * 31 + 7);
 

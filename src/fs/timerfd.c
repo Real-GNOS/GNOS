@@ -187,7 +187,7 @@ static timerfd_t *fd_timerfd(int fd)
     int h = fd_handle(fd);
     if (h < 0)
         return NULL;
-    vfs_node_t *n = vfs_file_node(h);
+    const vfs_node_t *n = vfs_file_node(h);
     if (!n || n->kind != VFS_ANON || n->ops != &g_timerfd_ops)
         return NULL;
     return (timerfd_t *)n->priv;

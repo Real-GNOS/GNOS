@@ -90,7 +90,7 @@ void *aligned_alloc(size_t align, size_t size)
     /* Multi-frame spans go through the buddy allocator (O(log) split/merge
      * instead of the bitmap's O(total frames) first-fit scan); single frames
      * and buddy-pool exhaustion fall back to the bitmap path. */
-    uint64_t phys = 0;
+    uint64_t phys  = 0;
     unsigned order = 0;
     while ((1u << order) < nframes)
         order++;
