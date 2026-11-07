@@ -594,6 +594,118 @@ struct drm_prime_handle {
 #define DRM_IOCTL_PRIME_HANDLE_TO_FD DRM_IOWR(0x2d, struct drm_prime_handle)
 #define DRM_IOCTL_PRIME_FD_TO_HANDLE DRM_IOWR(0x2e, struct drm_prime_handle)
 
+/* --- syncobj (DRM_CAP_SYNCOBJ) -----------------------------------------
+ * Software-only fence objects.  GNOS has no asynchronous GPU work, so a
+ * syncobj is "signalled" the moment it exists (or, for a timeline, the
+ * moment its point is reached); the ioctls exist so that Linux clients --
+ * Mesa's kopper/DRISWRAST GLX path in particular -- can drive buffer
+ * presentation fencing against an unmodified libdrm. */
+#define DRM_SYNCOBJ_CREATE_SIGNALED 0x00000001u
+
+struct drm_syncobj_create {
+    __u32 handle;
+    __u32 flags;
+};
+
+struct drm_syncobj_destroy {
+    __u32 handle;
+    __u32 pad;
+};
+
+struct drm_syncobj_handle_to_fd {
+    __u32 handle;
+    __u32 flags;
+    __s32 fd;
+    __u32 pad;
+};
+
+struct drm_syncobj_fd_to_handle {
+    __u32 handle;
+    __u32 flags;
+    __s32 fd;
+    __u32 pad;
+};
+
+struct drm_syncobj_wait {
+    __u64 handles;
+    __u64 timeout_nsec;
+    __u32 count_handles;
+    __u32 flags;
+    __u32 first_signaled;
+    __u32 pad;
+};
+
+struct drm_syncobj_reset {
+    __u64 handles;
+    __u32 count_handles;
+    __u32 pad;
+};
+
+struct drm_syncobj_signal {
+    __u64 handles;
+    __u32 count_handles;
+    __u32 pad;
+};
+
+struct drm_syncobj_timeline_wait {
+    __u64 handles;
+    __u64 points;
+    __u64 timeout_nsec;
+    __u32 count_handles;
+    __u32 flags;
+    __u32 first_signaled;
+    __u32 pad;
+};
+
+struct drm_syncobj_timeline_signal {
+    __u64 handles;
+    __u64 points;
+    __u32 count_handles;
+    __u32 pad;
+};
+
+struct drm_syncobj_query {
+    __u64 handles;
+    __u64 points;
+    __u32 count_handles;
+    __u32 pad;
+};
+
+struct drm_syncobj_export_sync_file {
+    __u32 handle;
+    __s32 fd;
+    __u32 flags;
+    __u32 pad;
+};
+
+struct drm_syncobj_import_sync_file {
+    __u32 handle;
+    __s32 fd;
+    __u32 flags;
+    __u32 pad;
+};
+
+struct drm_syncobj_transfer {
+    __u32 src_handle;
+    __u32 dst_handle;
+    __u64 src_point;
+    __u64 dst_point;
+};
+
+#define DRM_IOCTL_SYNCOBJ_CREATE           DRM_IOWR(0xcb, struct drm_syncobj_create)
+#define DRM_IOCTL_SYNCOBJ_DESTROY          DRM_IOWR(0xcc, struct drm_syncobj_destroy)
+#define DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD      DRM_IOWR(0xcd, struct drm_syncobj_handle_to_fd)
+#define DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE      DRM_IOWR(0xce, struct drm_syncobj_fd_to_handle)
+#define DRM_IOCTL_SYNCOBJ_WAIT              DRM_IOWR(0xcf, struct drm_syncobj_wait)
+#define DRM_IOCTL_SYNCOBJ_RESET             DRM_IOWR(0xd0, struct drm_syncobj_reset)
+#define DRM_IOCTL_SYNCOBJ_SIGNAL            DRM_IOWR(0xd1, struct drm_syncobj_signal)
+#define DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT     DRM_IOWR(0xd2, struct drm_syncobj_timeline_wait)
+#define DRM_IOCTL_SYNCOBJ_QUERY             DRM_IOWR(0xd3, struct drm_syncobj_query)
+#define DRM_IOCTL_SYNCOBJ_TRANSFER          DRM_IOWR(0xd4, struct drm_syncobj_transfer)
+#define DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL   DRM_IOWR(0xd5, struct drm_syncobj_timeline_signal)
+#define DRM_IOCTL_SYNCOBJ_EXPORT_SYNC_FILE  DRM_IOWR(0xd6, struct drm_syncobj_export_sync_file)
+#define DRM_IOCTL_SYNCOBJ_IMPORT_SYNC_FILE  DRM_IOWR(0xd7, struct drm_syncobj_import_sync_file)
+
 #define DRM_IOCTL_AGP_ACQUIRE DRM_IO(0x30)
 #define DRM_IOCTL_AGP_RELEASE DRM_IO(0x31)
 #define DRM_IOCTL_AGP_ENABLE  DRM_IOW(0x32, struct drm_agp_mode)

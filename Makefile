@@ -111,7 +111,7 @@ BASEFLAGS := -m64 -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
 # kernel: PIE so Limine can relocate it into the higher half
 # build/.config (produced by `make config`) defines CONFIG_* macros.
 # We convert them to -D flags: CONFIG_FOO=y -> -DCONFIG_FOO=1, CONFIG_FOO="bar" -> -DCONFIG_FOO='"bar"'
-KCFLAGS := $(BASEFLAGS) -fpie -DSYSTRACE \
+KCFLAGS := $(BASEFLAGS) -fpie $(if $(filter 0,$(SYSTRACE)),,-DSYSTRACE) \
             $(shell if [ -f build/.config ]; then \
               sed -n 's/^CONFIG_\(.*\)=y/-DCONFIG_\1=1/p; s/^CONFIG_\(.*\)="\([^"]*\)"/-DCONFIG_\1=\x27"\2"\x27/p; s/^CONFIG_\(.*\)=\([0-9][0-9]*\)/-DCONFIG_\1=\2/p' build/.config; \
             fi) $(KCFLAGS_EXTRA)
@@ -131,7 +131,7 @@ ISO_ROOT := $(BUILD)/iso
 KOBJS := $(BUILD)/main.o $(BUILD)/loader.o $(BUILD)/fbcon.o $(BUILD)/gfx.o \
          $(BUILD)/fbdev.o \
          $(BUILD)/drm_drv.o $(BUILD)/drm_file.o $(BUILD)/drm_auth.o \
-         $(BUILD)/drm_ioctl.o $(BUILD)/drm_init.o $(BUILD)/drm_devtmpfs.o \
+         $(BUILD)/drm_ioctl.o $(BUILD)/drm_syncobj.o $(BUILD)/drm_init.o $(BUILD)/drm_devtmpfs.o \
          $(BUILD)/chrdev.o $(BUILD)/mem.o $(BUILD)/kmsg.o \
          $(BUILD)/drm_vfs.o \
          $(BUILD)/intrusive_list.o $(BUILD)/rbtree.o \

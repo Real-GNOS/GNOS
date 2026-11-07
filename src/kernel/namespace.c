@@ -1,9 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * namespace.c — namespace architecture implementation. (GPLv2)
- *
- * Ported from the Uinxed process stack (kernel/process/namespace.c): the
- * seven initial namespaces, nsproxy reference handling, per-namespace
+ * the seven initial namespaces, nsproxy reference handling, per-namespace
  * cloning on the CLONE_NEW* / unshare(2) flags, and the setns(2) entry
  * point.  Errnos are the GNOS names and the allocator is the kernel heap;
  * the cgroup namespace holds no root handle because GNOS tracks cgroup

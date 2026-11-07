@@ -17,14 +17,18 @@
 #include "panic.h"
 
 /*
- * 64 rather than 16.  A single OpenRC runlevel forks openrc, openrc-run, a
- * shell per service and start-stop-daemon for each backgrounded one, and an
- * interactive bash pipeline adds a process per stage on top -- 16 was being
- * exhausted before the runlevel finished.  The cost is linear and paid in
- * BSS: KSTACK_SIZE * MAX_PROCS (1 MiB) plus sizeof(proc_t) * MAX_PROCS
- * (~340 KiB), which is why the QEMU line went from -m 256M to -m 512M.
+ * 256 rather than 16/64.  A single OpenRC runlevel forks openrc, openrc-run,
+ * a shell per service and start-stop-daemon for each backgrounded one, and an
+ * interactive bash pipeline adds a process per stage on top.  A full Xfce
+ * session adds Xorg, the session bus, xfconfd, six GTK clients and each
+ * client's GLib worker threads (gmain/gdbus) -- all of which are real tasks
+ * here, since a CLONE_THREAD child owns a slot just like a forked process.
+ * 64 was being exhausted at exactly the point GLib tried to create 'gmain',
+ * which surfaced as pthread_create(EAGAIN).  The cost is linear and paid in
+ * BSS: KSTACK_SIZE * MAX_PROCS (8 MiB) plus sizeof(proc_t) * MAX_PROCS
+ * (~1.3 MiB).
  */
-#define MAX_PROCS 64
+#define MAX_PROCS 256
 #define KSTACK_SIZE                                         \
     0x8000 /* 32 KiB -- 16 KiB overflowed: an execve's deep \
             * call chain spilled past its slot base and     \
@@ -547,6 +551,8 @@ void    kthread_wakeup(void);
 int  proc_signal(proc_t *p, int sig);
 int  proc_signal_group(int pgid, int sig);
 void proc_check_signals(regs_t *r);
+/* Force-deliver a CPU-generated fault signal (force_sig semantics). */
+void proc_force_fault_signal(proc_t *p, int sig, regs_t *r);
 
 /*
  * The pending signals that should break a process out of a blocking call.

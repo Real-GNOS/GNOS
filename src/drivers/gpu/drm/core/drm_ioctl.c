@@ -40,6 +40,19 @@ extern int drm_dropmaster(struct drm_device *dev, void *data, struct drm_file *f
 
 /* GEM (drm_gem.c) */
 extern int drm_gem_open_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_create_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_destroy_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_handle_to_fd_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_fd_to_handle_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_wait_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_reset_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_signal_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_query_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_transfer_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_timeline_signal_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_export_sync_file_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+extern int drm_syncobj_import_sync_file_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_gem_close_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_gem_flink_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 extern int drm_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,
@@ -291,10 +304,10 @@ int drm_get_cap(struct drm_device *dev, void *data, struct drm_file *file_priv)
         cap->value = 1;
         break;
     case DRM_CAP_SYNCOBJ:
-        cap->value = 0;
+        cap->value = 1;
         break;
     case DRM_CAP_SYNCOBJ_TIMELINE:
-        cap->value = 0;
+        cap->value = 1;
         break;
     case DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP:
         cap->value = 0;
@@ -385,6 +398,21 @@ static const struct drm_ioctl_desc drm_core_ioctls[] = {
     /* 0x2d - 0x2e: PRIME, reached through the fallback below */
     {DRM_IOCTL_PRIME_HANDLE_TO_FD, NULL, DRM_AUTH},
     {DRM_IOCTL_PRIME_FD_TO_HANDLE, NULL, DRM_AUTH},
+
+    /* 0xcb - 0xd7: syncobj (DRM_CAP_SYNCOBJ) */
+    {DRM_IOCTL_SYNCOBJ_CREATE, drm_syncobj_create_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_DESTROY, drm_syncobj_destroy_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, drm_syncobj_handle_to_fd_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, drm_syncobj_fd_to_handle_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_WAIT, drm_syncobj_wait_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_RESET, drm_syncobj_reset_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_SIGNAL, drm_syncobj_signal_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, drm_syncobj_timeline_wait_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_QUERY, drm_syncobj_query_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_TRANSFER, drm_syncobj_transfer_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, drm_syncobj_timeline_signal_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_EXPORT_SYNC_FILE, drm_syncobj_export_sync_file_ioctl, DRM_AUTH},
+    {DRM_IOCTL_SYNCOBJ_IMPORT_SYNC_FILE, drm_syncobj_import_sync_file_ioctl, DRM_AUTH},
 
     /* 0x3a: vblank */
     {DRM_IOCTL_WAIT_VBLANK, drm_wait_vblank_ioctl, 0},

@@ -3350,18 +3350,32 @@ static void mmap_forget(proc_t *p, int idx)
  * caller; this only serves the "let the kernel pick" case. */
 static uint64_t mmap_pick_base(proc_t *p, uint64_t size)
 {
-    uint64_t     base = MMAP_BASE;
     addrspace_t *as   = p->as;
-    for (int i = 0; i < as->nmmaps; i++) {
-        if (as->mmaps[i].base < MMAP_BASE || as->mmaps[i].base >= MMAP_TOP)
-            continue;
-        uint64_t top = as->mmaps[i].base + as->mmaps[i].size;
-        if (top > base)
-            base = top;
+    uint64_t     base = MMAP_BASE;
+
+    /* First-fit over the tracked spans.  The old "max of every record's
+     * end" walked the arena monotonically upwards: a hole freed in the
+     * middle was never reused, so after a few hundred mmap/munmap cycles
+     * even a 28 KiB thread-stack allocation ran past MMAP_TOP and failed
+     * with ENOMEM (which musl's pthread_create reports as EAGAIN, and GLib
+     * as "creating thread 'gmain': Resource temporarily unavailable").
+     * Walk past only the spans that actually overlap the candidate window. */
+    for (;;) {
+        if (base + size > MMAP_TOP)
+            return 0;
+        uint64_t bump = 0;
+        for (int i = 0; i < as->nmmaps; i++) {
+            uint64_t b = as->mmaps[i].base;
+            uint64_t e = b + as->mmaps[i].size;
+            if (e <= base || b >= base + size)
+                continue;
+            if (e > bump)
+                bump = e; /* resume the search just past this span */
+        }
+        if (!bump)
+            return base;
+        base = (bump + 0xFFF) & ~0xFFFULL;
     }
-    if (base + size > MMAP_TOP)
-        return 0;
-    return base;
 }
 
 static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, int64_t fd,
@@ -3732,8 +3746,14 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len)
 
     uint64_t base, size;
     int      idx = mmap_find(p, addr, &base, &size);
-    if (idx < 0)
-        return -EINVAL; /* not one of ours; Linux would EINVAL too */
+    if (idx < 0) {
+        /* Linux: munmap() over an already-unmapped range is a successful
+         * no-op.  musl's allocator trims regions that were never recorded
+         * here (the brk heap, or a span whose record was coalesced away);
+         * answering EINVAL makes it retry forever and leaves the record
+         * table permanently full. */
+        return 0;
+    }
 
     uint64_t ulen = (len + 0xFFF) & ~0xFFFULL;
     if (ulen > size)

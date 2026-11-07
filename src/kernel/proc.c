@@ -77,8 +77,19 @@ static uint8_t g_kstacks[MAX_PROCS][KSTACK_SIZE] __attribute__((aligned(16)));
  * (invisible by design), so the state cannot tell two cores apart: on SMP
  * both could claim the same 16 KiB kernel stack and overwrite each other's
  * saved frames -- the ppoll frame corruption behind the Xorg/openrc hangs.
- * The busy bit is the slot's true ownership flag. */
-static volatile uint64_t g_slot_busy;
+ * The busy bit is the slot's true ownership flag.  MAX_PROCS is 256, so a
+ * single 64-bit word cannot hold it; index by slot/64. */
+#define SLOT_BUSY_WORDS ((MAX_PROCS + 63) / 64)
+static volatile uint64_t g_slot_busy[SLOT_BUSY_WORDS];
+
+static inline uint64_t slot_bit(int idx)
+{
+    return 1ull << (idx & 63);
+}
+static inline int slot_word(int idx)
+{
+    return idx >> 6;
+}
 
 /* Hand a kernel-stack slot back to proc_alloc.  Clears the busy bit with
  * release ordering so anyone who sees the bit clear also sees the slot's
@@ -100,7 +111,8 @@ static void slot_release(proc_t *p)
         dbg_puts("\r\n");
         return;
     }
-    __atomic_fetch_and(&g_slot_busy, ~(1ull << (p - g_procs)), __ATOMIC_RELEASE);
+    int idx = (int)(p - g_procs);
+    __atomic_fetch_and(&g_slot_busy[slot_word(idx)], ~slot_bit(idx), __ATOMIC_RELEASE);
     p->state = PROC_UNUSED;
 }
 
@@ -343,14 +355,14 @@ static uint8_t g_fpu_init[512] __attribute__((aligned(16)));
 static proc_t *proc_alloc(void)
 {
     for (int i = 0; i < MAX_PROCS; i++) {
-        uint64_t bit = 1ull << i;
+        uint64_t bit = slot_bit(i);
         if (g_procs[i].state != PROC_UNUSED)
             continue;
         /* Atomic claim: two cores can fork at once, and between the scan
          * and fork setting a real state the slot reads PROC_UNUSED (the
          * invisible-by-design window) -- the busy bit is what keeps both
          * cores out of one 16 KiB stack. */
-        if (__atomic_fetch_or(&g_slot_busy, bit, __ATOMIC_ACQ_REL) & bit)
+        if (__atomic_fetch_or(&g_slot_busy[slot_word(i)], bit, __ATOMIC_ACQ_REL) & bit)
             continue;
 
         proc_t *p = &g_procs[i];
@@ -419,6 +431,7 @@ static proc_t *proc_alloc(void)
         p->cg_park_next = -1;
         return p;
     }
+    dbg_puts("PROC: proc_alloc: all slots busy\r\n");
     return NULL;
 }
 
@@ -2330,6 +2343,31 @@ int proc_signal(proc_t *p, int sig)
     }
 
     return 0;
+}
+
+/* Force-deliver a synchronous fault signal (Linux force_sig semantics).
+ * A CPU exception in ring 3 cannot be retried: if SIGSEGV is ignored or
+ * blocked, or a caught handler itself faults, the plain signal path returns
+ * to the same instruction and the CPU faults again forever.  Reset the
+ * disposition to default, unblock it, queue it, and deliver it right here. */
+void proc_force_fault_signal(proc_t *p, int sig, regs_t *r)
+{
+    if (!p || sig <= 0 || sig >= NSIG)
+        return;
+
+    p->sig_ignored &= ~SIGMASK(sig);
+    p->sig_mask &= ~SIGMASK(sig);
+    p->sigact[sig].handler  = SIG_DFL;
+    p->sigact[sig].flags    = 0;
+    p->sigact[sig].restorer = 0;
+    p->sigact[sig].mask     = 0;
+
+    /* Bypass proc_signal()'s "ignored -> discard" short circuit and put the
+     * bit straight into the pending set so the check below cannot miss it. */
+    p->sig_pending |= SIGMASK(sig);
+    if (p->state == PROC_BLOCKED)
+        sched_wake(p);
+    proc_check_signals(r);
 }
 
 int proc_signal_group(int pgid, int sig)

@@ -747,6 +747,9 @@ struct drm_file {
     spinlock_t     table_lock; /* protects object_idr / GEM handle table */
     struct drm_idr object_idr; /* per-file object handles */
 
+    spinlock_t      syncobj_lock; /* protects syncobj_idr */
+    struct drm_idr  syncobj_idr;  /* per-file syncobj handles */
+
     struct drm_master *master; /* current master */
     struct drm_master *is_current_unmatched_unused;
     struct drm_master *render_master_unused;

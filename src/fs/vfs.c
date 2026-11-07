@@ -2220,7 +2220,10 @@ void vfs_file_ref(int h)
     f->refs++;
     if (f->node.kind == VFS_PIPE) {
         pipe_t *p = (pipe_t *)f->node.priv;
-        if (f->flags == O_WRONLY)
+        /* fcntl(F_SETFL, O_NONBLOCK) folds O_NONBLOCK into f->flags, so a
+         * plain "== O_WRONLY" would classify a NONBLOCK writer as a reader.
+         * Compare only the access-mode bits, exactly like vfs_file_read(). */
+        if ((f->flags & 3) == O_WRONLY)
             p->writers++;
         else
             p->readers++;
@@ -2253,26 +2256,27 @@ void vfs_file_unref(int h)
     if (f->node.kind == VFS_PIPE) {
         pipe_t *p = (pipe_t *)f->node.priv;
 
-        if (f->flags == O_WRONLY) {
+        /* Same access-mode mask as vfs_file_ref(): O_NONBLOCK may be set on
+         * this descriptor, so a strict "== O_WRONLY" would miscount the
+         * writer as a reader and the read end would never see EOF. */
+        if ((f->flags & 3) == O_WRONLY) {
             if (p->writers > 0)
                 p->writers--;
         } else if (p->readers > 0) {
             p->readers--;
         }
 
-        /* Somebody may be asleep waiting for exactly this. */
+        /* Somebody may be asleep waiting for exactly this.  A writer closing
+         * is precisely the EOF wakeup that g_spawn()/dbus wait for on their
+         * close-on-exec error pipe after a successful execve(). */
         sched_wake_reason(WAIT_PIPE);
 
         if (--f->refs <= 0) {
             f->refs = 0;
-            /* The descriptor table is the authority on who is still
-             * attached.  A fork/exec cycle can miscount one side's ref
-             * (the spawn machinery saw a live reader fd with readers == 0
-             * and a writer fd with writers == 1, so the EOF condition
-             * never fired and the blocking read hung forever); when the
-             * last descriptor onto THIS end closes, force the counter to
-             * agree with reality. */
-            if (f->flags == O_WRONLY)
+            /* This open-file description has lost its last descriptor, so
+             * its end of the pipe is definitively gone.  Force the counter
+             * to zero as a backstop against any other miscount. */
+            if ((f->flags & 3) == O_WRONLY)
                 p->writers = 0;
             else
                 p->readers = 0;

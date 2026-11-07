@@ -13,6 +13,62 @@ if [ -z "$DISPLAY" ]; then
     exit 1
 fi
 
+# --- accessibility -------------------------------------------------------
+# Every GTK/Xfce component loads at-spi2-atk's atk-bridge as a GTK module at
+# gtk_init() time, in the main thread.  atk-bridge blocks there in
+# g_bus_get_sync() waiting for the org.a11y.Bus name to appear on the session
+# bus; on this kernel at-spi-bus-launcher dies with SIGSEGV, so activation
+# never completes and the app never gets as far as creating a window (the
+# screen stays the empty xsetroot root window).  NO_AT_BRIDGE=1 makes
+# atk-bridge skip the bus entirely; clearing GTK_MODULES stops any other
+# module from pulling the same bridge back in.
+export NO_AT_BRIDGE=1
+export GTK_MODULES=""
+export QT_ACCESSIBILITY=0
+
+# --- GLX / drisw ----------------------------------------------------------
+# The X server provides the software GLX provider (DRISWRAST / swrast); there
+# is no hardware DRI driver and glamor (hence the kopper / drisw-over-DRI3
+# direct path) is unavailable on this stack.  Forcing indirect GLX routes
+# every client's GLX call through that server-side software provider, which
+# is exactly the drisw software-GLX path we want and avoids the dead direct
+# path.  libGL picks the loader on its own, so leave the override empty.
+export LIBGL_ALWAYS_INDIRECT=1
+export MESA_LOADER_DRIVER_OVERRIDE=""
+
+# --- GSettings -----------------------------------------------------------
+# The initrd ships libxfconfgsettingsbackend.so in usr/lib/gio/modules, so
+# every g_settings_new() (GTK3 does several inside gtk_init()) becomes a
+# synchronous D-Bus round-trip to xfconfd.  A backend that never answers
+# wedges gtk_init() before any window is mapped -- xeyes (plain Xlib) still
+# draws, all GTK/Xfce clients stay an empty root window.  Use the in-memory
+# backend for the session so those lookups are local.
+export GSETTINGS_BACKEND=memory
+export GIO_USE_VFS=local
+
+# --- the environment the rest of the session assumes ---------------------
+# startxfce (the post-login launcher) sets all of these.  xfconfd, the panel
+# and xfce4-session write under XDG_CONFIG_HOME/XDG_CACHE_HOME on first run,
+# and a missing parent turns those writes into silent failures.  fontconfig
+# and libxkbcommon also need their data paths pinned to what the initrd
+# carries.  Without this the inittab path behaves differently from startxfce.
+export HOME=/root
+export XDG_RUNTIME_DIR=/tmp/run
+export XDG_CONFIG_HOME=/root/.config
+export XDG_DATA_HOME=/root/.local/share
+export XDG_CACHE_HOME=/root/.cache
+export FONTCONFIG_FILE=/etc/fonts/fonts.conf
+export XKB_CONFIG_ROOT=/usr/share/X11/xkb
+mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+
+# dbus-uuidgen segfaults on this kernel; a fixed 32-hex-char id is exactly
+# as good for a session bus.
+mkdir -p /var/lib/dbus
+if [ ! -f /var/lib/dbus/machine-id ]; then
+    echo 00000000000000000000000000000000 > /var/lib/dbus/machine-id
+fi
+
 mkdir -p $X11RUN
 
 # Root window paint, before any client: a client-free X screen is just the
@@ -70,6 +126,8 @@ SESS_PID=$!
 # session manager keeps running for session/dbus housekeeping.
 sleep 3
 /usr/bin/xfsettingsd >/tmp/xfsettingsd.out 2>&1 &
+# The compositor uses the working indirect GLX (DRISWRAST) path above; it is
+# left enabled so window buffering/compositing is available.
 /usr/bin/xfwm4 >/tmp/xfwm4.out 2>&1 &
 /usr/bin/xfdesktop >/tmp/xfdesktop.out 2>&1 &
 /usr/bin/xfce4-panel >/tmp/xfce4-panel.out 2>&1 &

@@ -142,31 +142,56 @@ if [ -d "$ROOTFS/usr/share/fonts" ]; then
     done
 fi
 
-# gdk-pixbuf 2.42 picks a loader by mime type BEFORE magic sniffing, and
-# without shared-mime-info's database every decode fails ("Unrecognized
-# image file format"), which aborts xfce4-session at startup.  The package
-# lives on the same CDN; unpack it directly when apk's trigger did not run.
-if [ ! -f "$ROOTFS/usr/share/mime/globs" ] && [ -x "$ROOTFS/usr/bin/gdk-pixbuf-query-loaders" ]; then
-    if [ -f "$ROOTFS/tmp/APKINDEX-main.txt" ]; then
-        V=$(grep -A2 '^P:shared-mime-info$' "$ROOTFS/tmp/APKINDEX-main.txt" | grep '^V:' | cut -d: -f2)
-        curl -s "https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/shared-mime-info-$V.apk" \
-            | tar xz -C "$ROOTFS" usr 2>/dev/null
+# apk --root skips package triggers, so three data files the GTK stack needs
+# are missing from a fresh tree:
+#   shared-mime-info globs/globs2  (gdk-pixbuf picks a loader by mime type)
+#   gdk-pixbuf loaders.cache       (maps a mime type to the loader .so)
+#   GSettings gschemas.compiled    (compiled schema defaults)
+# Without them every image decode fails ("Unrecognized image file format"),
+# xfce4-session aborts at startup and all Xfce clients stall before mapping
+# a window.  chroot needs root; bwrap runs the tree's own musl binaries
+# unprivileged.  A writable --bind on the target directory is needed because
+# the read-only root is mounted on top of it.
+if command -v bwrap >/dev/null 2>&1; then
+    HAVE_BWRAP=1
+else
+    HAVE_BWRAP=0
+fi
+
+MIME_DIR="$ROOTFS/usr/share/mime"
+if [ -d "$MIME_DIR/packages" ] && [ ! -f "$MIME_DIR/globs" ]; then
+    if [ "$HAVE_BWRAP" = 1 ]; then
+        bwrap --ro-bind "$ROOTFS" / --dev /dev \
+              --bind "$MIME_DIR" /usr/share/mime \
+              /usr/bin/update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+    elif [ "$(id -u)" = 0 ]; then
         chroot "$ROOTFS" /usr/bin/update-mime-database /usr/share/mime >/dev/null 2>&1 || true
     fi
 fi
 
-# gdk-pixbuf reads a loaders.cache index; apk --root cannot run the package
-# trigger that generates it, and without the index PNG decoding fails
-# ("Unrecognized image file format") and xfce4-session aborts at startup.
-# Generate it inside the finished tree when the host can chroot.
-if [ -x "$ROOTFS/usr/bin/gdk-pixbuf-query-loaders" ] && [ ! -f "$ROOTFS/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" ]; then
-    chroot "$ROOTFS" /usr/bin/gdk-pixbuf-query-loaders --update-cache 2>/dev/null \
-        || echo "=== warning: loaders.cache not generated (no root?); xfce will abort on icons" >&2
+LOADER_DIR="$ROOTFS/usr/lib/gdk-pixbuf-2.0/2.10.0"
+if [ -x "$ROOTFS/usr/bin/gdk-pixbuf-query-loaders" ] && [ ! -f "$LOADER_DIR/loaders.cache" ]; then
+    mkdir -p "$LOADER_DIR"
+    if [ "$HAVE_BWRAP" = 1 ]; then
+        bwrap --ro-bind "$ROOTFS" / --dev /dev --bind /tmp /tmp \
+              /usr/bin/gdk-pixbuf-query-loaders > "$WORK/loaders.cache" 2>/dev/null &&
+            cp "$WORK/loaders.cache" "$LOADER_DIR/loaders.cache" || true
+    elif [ "$(id -u)" = 0 ]; then
+        chroot "$ROOTFS" /usr/bin/gdk-pixbuf-query-loaders --update-cache 2>/dev/null || true
+    fi
+    [ -f "$LOADER_DIR/loaders.cache" ] ||
+        echo "=== warning: loaders.cache not generated; xfce will abort on icons" >&2
 fi
 
-# GTK reads compiled GSettings schemas; apk --root skips the compile trigger.
-if [ -d "$ROOTFS/usr/share/glib-2.0/schemas" ] && [ ! -f "$ROOTFS/usr/share/glib-2.0/schemas/gschemas.compiled" ]; then
-    chroot "$ROOTFS" /usr/bin/glib-compile-schemas /usr/share/glib-2.0/schemas/ >/dev/null 2>&1 || true
+SCHEMA_DIR="$ROOTFS/usr/share/glib-2.0/schemas"
+if [ -d "$SCHEMA_DIR" ] && [ ! -f "$SCHEMA_DIR/gschemas.compiled" ]; then
+    if [ "$HAVE_BWRAP" = 1 ]; then
+        bwrap --ro-bind "$ROOTFS" / --dev /dev \
+              --bind "$SCHEMA_DIR" /usr/share/glib-2.0/schemas \
+              /usr/bin/glib-compile-schemas /usr/share/glib-2.0/schemas >/dev/null 2>&1 || true
+    elif [ "$(id -u)" = 0 ]; then
+        chroot "$ROOTFS" /usr/bin/glib-compile-schemas /usr/share/glib-2.0/schemas/ >/dev/null 2>&1 || true
+    fi
 fi
 
 # ---- xkbcomp diagnostic wrapper (TEMPORARY) ----------------------------

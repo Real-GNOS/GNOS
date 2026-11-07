@@ -109,6 +109,16 @@ static inline void spin_unlock_irq(spinlock_t *l)
         asm volatile("sti" ::: "memory");
 }
 
+/* Initialise a spinlock to the unlocked state.  spinlock_t is fully
+ * described by {v, saved_flags}, both zero when free, so this is a plain
+ * zeroing.  Provided for the DRM port (and other Linux-derived code) that
+ * calls spin_lock_init() inline. */
+static inline void spin_lock_init(spinlock_t *l)
+{
+    l->v = 0;
+    l->saved_flags = 0;
+}
+
 /* The big kernel lock.  Taken on every trap/syscall entry from ring 3 and
  * released on the way back; a process that blocks drops it before parking
  * so it never rides a parked context switch (see sched_block in proc.c). */

@@ -145,6 +145,47 @@ static int32_t evdev_read(vfs_node_t *n, uint64_t off, void *buf, uint32_t len)
     return (int32_t)(nout * sizeof(input_event_t));
 }
 
+/* ---- write: synthetic events -----------------------------------------
+ * Xorg's evdev driver writes a batch of EV_LED records from its KeybdCtrl
+ * callback to set the keyboard indicators.  Linux's evdev_write takes whole
+ * struct input_event records and hands them to the input core; without this
+ * op vfs_file_write() rejects the entire batch with -EINVAL and the server
+ * logs "Failed to set keyboard controls: Invalid argument".  LED writes are
+ * commands (update the bitmap, do not echo them back to the reader); every
+ * other type is injected into the device's own stream. */
+static int32_t evdev_write(vfs_node_t *n, uint64_t off, const void *buf, uint32_t len)
+{
+    (void)off;
+    evdev_dev_t        *d = (evdev_dev_t *)n->priv;
+    const input_event_t *evs;
+    uint32_t            count;
+
+    if (d == NULL || len == 0 || len % sizeof(input_event_t) != 0)
+        return -E_INVAL;
+
+    evs   = (const input_event_t *)buf;
+    count = len / sizeof(input_event_t);
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint16_t type = evs[i].type;
+        uint16_t code = evs[i].code;
+        int32_t  val  = evs[i].value;
+
+        if (type == EV_LED) {
+            if (code < 16) {
+                if (val)
+                    d->led_bits |= (uint16_t)(1u << code);
+                else
+                    d->led_bits &= (uint16_t) ~(1u << code);
+            }
+            continue;
+        }
+        evdev_push_event(d, type, code, val);
+    }
+    evdev_signal();
+    return (int32_t)len;
+}
+
 static int evdev_poll(vfs_node_t *n, int16_t events, int16_t *revents)
 {
     evdev_dev_t *d = (evdev_dev_t *)n->priv;
@@ -322,6 +363,7 @@ static int32_t evdev_ioctl(vfs_node_t *n, uint64_t cmd, uint64_t arg)
 
 static const vfs_ops_t g_evdev_ops = {
     .read  = evdev_read,
+    .write = evdev_write,
     .ioctl = evdev_ioctl,
     .poll  = evdev_poll,
 };

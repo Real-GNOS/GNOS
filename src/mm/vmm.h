@@ -115,12 +115,14 @@ typedef struct addrspace {
     /* mmap records back the lazy-fault path (idt.c fault_back_lazy).  A
      * dynamically linked program with dozens of shared libraries easily
      * makes more mappings than you would guess -- Xorg plus its libraries
-     * overflowed 128 -- so keep real headroom here. */
+     * overflowed 128, and a GTK client mmaps over a thousand times before
+     * its first window.  first-fit allocation now reuses freed holes, but a
+     * process that keeps many small live spans still needs real headroom. */
     struct {
         uint64_t base;
         uint64_t size;
         unsigned flags;
-    } mmaps[512];
+    } mmaps[2048];
     int nmmaps;
 
     /*

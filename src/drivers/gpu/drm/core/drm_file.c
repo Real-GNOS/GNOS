@@ -50,6 +50,8 @@ struct drm_file *drm_file_alloc(struct drm_device *dev)
     memset(file, 0, sizeof(*file));
 
     drm_idr_init(&file->object_idr);
+    drm_idr_init(&file->syncobj_idr);
+    spin_lock_init(&file->syncobj_lock);
     ilist_init(&file->fbs_head);
     ilist_init(&file->object_list);
 
@@ -105,6 +107,7 @@ void drm_file_free(struct drm_file *file)
 
     drm_ht_destroy(&file->magiclist);
     drm_idr_destroy(&file->object_idr);
+    drm_idr_destroy(&file->syncobj_idr);
     free(file);
 }
 
